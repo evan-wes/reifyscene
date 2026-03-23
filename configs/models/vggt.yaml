@@ -1,0 +1,8 @@
+name: vggt
+enabled: true
+backend_mode: auto
+hf_model_id: facebook/VGGT-1B
+checkpoint_path: null
+device: cuda
+use_autocast: true
+frame_cache_dir: null

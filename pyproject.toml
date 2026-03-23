@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "room4d"
+version = "0.1.0"
+description = "Prototype room-scale 4D reconstruction pipeline scaffold."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+  { name = "evan-wes" }
+]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "typer>=0.12",
+  "rich>=13.7",
+  "plotly>=5.22",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+vision = [
+  "opencv-python>=4.10",
+  "torch>=2.2",
+  "torchvision>=0.17",
+  "Pillow>=10.0",
+  "huggingface_hub>=0.23",
+]
+geometry = [
+  "scipy>=1.13",
+]
+
+[project.scripts]
+room4d = "room4d.cli.main:app"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["room4d*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true

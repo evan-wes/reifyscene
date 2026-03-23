@@ -1,0 +1,3 @@
+name: densepose
+enabled: true
+checkpoint: null

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Data / outputs
+artifacts/
+data/
+datasets/
+*.zip
+
+# Third-party source checkouts
+third_party/
+
+# IDE
+.vscode/
+.idea/
+
+# Internal cache
+.room4d_cache

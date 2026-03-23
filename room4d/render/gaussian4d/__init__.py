@@ -1,0 +1,1 @@
+"""Dynamic Gaussian splatting scaffold."""

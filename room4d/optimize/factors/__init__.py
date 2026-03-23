@@ -1,0 +1,1 @@
+"""Factor definitions for optimization."""

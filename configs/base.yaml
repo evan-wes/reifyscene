@@ -1,0 +1,19 @@
+run:
+  name: room4d_dev
+  output_dir: artifacts/runs/room4d_dev
+
+dataset:
+  input_dir: data/raw
+  cache_dir: artifacts/cache
+  keyframe_stride: 15
+
+models:
+  geometry_backend: vggt
+  tracker_backend: cotracker
+  use_densepose: true
+  use_smpl: true
+  detect_objects: true
+
+optimization:
+  schedule: stage1_sync_pose
+  max_iterations: 100

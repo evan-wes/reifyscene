@@ -1,0 +1,3 @@
+name: detector
+enabled: true
+checkpoint: null

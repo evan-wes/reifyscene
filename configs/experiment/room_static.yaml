@@ -1,0 +1,2 @@
+inherits: ../base.yaml
+scenario: room_static
