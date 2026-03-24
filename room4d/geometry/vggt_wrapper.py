@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 from PIL import Image
+from rich.progress import track
 
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from room4d.geometry.base import GeometryInitializer
@@ -155,7 +156,10 @@ class VGGTInitializer(GeometryInitializer):
         notes: list[str] = []
 
         target_root.mkdir(parents=True, exist_ok=True)
-        for idx, frame in enumerate(frames):
+        frame_iter = enumerate(frames)
+        if self.debug_shapes:
+            frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing keyframes")
+        for idx, frame in frame_iter:
             stream = stream_lookup[frame.stream_id]
             image = self.decoder.get_frame(stream, frame.frame_idx)
             out_path = target_root / f"{idx:04d}_{frame.stream_id}_{frame.frame_idx:06d}.png"

@@ -9,6 +9,7 @@ import shutil
 
 import numpy as np
 from PIL import Image
+from rich.progress import track
 
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
@@ -47,6 +48,12 @@ class GeometryArtifact(BaseArtifact):
     def num_selected_frames(self) -> int:
         """Return the number of frames selected for initialization."""
         return len(self.selected_frames)
+
+    def _progress_iter(self, iterable, *, total: int | None = None, description: str = ""):
+        enabled = bool(self.metadata.get('save_depth_pngs', False) or self.metadata.get('save_debug_assets', False) or self.metadata.get('save_debug_html', False))
+        if not enabled:
+            return iterable
+        return track(iterable, total=total, description=description)
 
     def _sanitize_key(self, key: str) -> str:
         return key.replace(':', '__').replace('/', '_')
@@ -260,7 +267,7 @@ class GeometryArtifact(BaseArtifact):
         if not source_map:
             return copied
         ensure_dir(image_dir)
-        for frame_key, source in source_map.items():
+        for frame_key, source in self._progress_iter(source_map.items(), total=len(source_map), description="[cyan]Geometry · copying debug RGB"):
             src = Path(source)
             if not src.exists():
                 continue
@@ -286,7 +293,7 @@ class GeometryArtifact(BaseArtifact):
     def _build_camera_records(self) -> list[dict[str, Any]]:
         """Create per-frame camera records for JSON export."""
         records: list[dict[str, Any]] = []
-        for frame in self.selected_frames:
+        for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting cameras"):
             state = self._find_state_for_frame(frame)
             if state is None:
                 continue
@@ -322,7 +329,7 @@ class GeometryArtifact(BaseArtifact):
         if self.metadata.get('save_pointcloud_plys', False):
             pointcloud_dir = ensure_dir(self.save_dir / 'pointclouds')
             max_points = int(self.metadata.get('debug_max_points', 5000))
-            for frame in self.selected_frames:
+            for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting point clouds"):
                 frame_key = f"{frame.stream_id}:{frame.frame_idx}"
                 payload = self.pointmaps_by_frame.get(frame_key)
                 if not payload:
@@ -361,7 +368,7 @@ class GeometryArtifact(BaseArtifact):
 
         frame_specs: list[dict[str, Any]] = []
         max_points = int(self.metadata.get('debug_max_points', 5000))
-        for frame in self.selected_frames:
+        for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · building debug viewer"):
             frame_key = f"{frame.stream_id}:{frame.frame_idx}"
             image_name = image_index.get(frame_key)
             depth_payload = self.depthmaps_by_frame.get(frame_key)

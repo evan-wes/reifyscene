@@ -13,6 +13,8 @@ from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
 from room4d.ingest.quality import ClipQualityAssessor
+from room4d.lifting.backproject import TrackLifter3D
+from room4d.lifting.static_dynamic import StaticDynamicPartitioner
 from room4d.optimize.solver import JointSpatiotemporalSolver
 from room4d.query.parser import PromptParser
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
@@ -47,6 +49,12 @@ class Room4DPipeline:
         self.sync_solver = GlobalTimeAlignmentSolver()
         self.geometry_init = VGGTInitializer(self.cfg.get('geometry', {}))
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
+        lifting_cfg = self.cfg.get('lifting', {})
+        self.track_lifter = TrackLifter3D(point_conf_threshold=float(lifting_cfg.get('point_conf_threshold', 0.0)))
+        self.static_dynamic_partitioner = StaticDynamicPartitioner(
+            static_threshold_world=float(lifting_cfg.get('static_threshold_world', 0.05)),
+            min_lifted_frames=int(lifting_cfg.get('min_lifted_frames', 2)),
+        )
         self.graph_builder = DynamicSceneGraphBuilder()
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
@@ -116,12 +124,23 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def track(self, ingest_artifact: IngestArtifact):
-        """Run point tracking over the selected keyframes of each stream."""
+    def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
+        """Run point tracking, 3D lifting, and static/dynamic partitioning."""
         frame_refs_by_stream: dict[str, list] = {stream_id: [] for stream_id in ingest_artifact.stream_ids()}
         for frame_ref in ingest_artifact.keyframes:
             frame_refs_by_stream.setdefault(frame_ref.stream_id, []).append(frame_ref)
         artifact = self.tracker.track_many(ingest_artifact.streams, frame_refs_by_stream=frame_refs_by_stream)
+        artifact.run_id = ingest_artifact.run_id
+        if geometry_artifact is not None:
+            artifact = self.track_lifter.lift(artifact, geometry_artifact, ingest_artifact)
+            self.static_dynamic_partitioner.partition(artifact, geometry_artifact)
+            tracking_cfg = self.cfg.get('tracking', {})
+            artifact.metadata.update({
+                'save_debug_assets': bool(tracking_cfg.get('debug', False)),
+                'save_debug_html': bool(tracking_cfg.get('debug', False)),
+                'debug_max_points': int(tracking_cfg.get('debug_max_points', 5000)),
+                'debug_image_paths': dict(geometry_artifact.metadata.get('debug_image_paths', {})),
+            })
         artifact.save_dir = self._stage_dir('tracking')
         artifact.save()
         return artifact
@@ -170,7 +189,7 @@ class Room4DPipeline:
         ingest_artifact = self.preprocess(video_paths)
         sync_artifact = self.synchronize(ingest_artifact)
         geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
-        track_artifact = self.track(ingest_artifact)
+        track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
         graph_artifact = self.build_graph(geometry_artifact, track_artifact)
         optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, graph_artifact=graph_artifact)
         render_artifact = self.fit_renderer(optimization_artifact)

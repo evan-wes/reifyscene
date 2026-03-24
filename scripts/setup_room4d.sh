@@ -6,9 +6,11 @@ set -euo pipefail
 # What this installs today:
 # - the local room4d package in editable mode
 # - Python dependencies declared in pyproject.toml
-# - optional detectron2 from official tag v0.6
+# - optional detectron2 from its official v0.6 release tag
 # - optional VGGT from the official repo at a pinned commit, cloned into
 #   third_party/vggt and installed into the active environment
+# - optional CoTracker from the official repo at a pinned commit, cloned into
+#   third_party/co-tracker and installed into the active environment
 #
 # What this intentionally does NOT auto-install:
 # - RealSense SDK. Use scripts/setup_realsense_sdk.sh if you want the optional
@@ -24,6 +26,9 @@ DETECTRON2_TAG="v0.6"
 VGGT_REPO="https://github.com/facebookresearch/vggt.git"
 VGGT_COMMIT="44b3afbd1869d8bde4894dd8ea1e293112dd5eba"
 
+COTRACKER_REPO="https://github.com/facebookresearch/co-tracker.git"
+COTRACKER_COMMIT="82e02e8029753ad4ef13cf06be7f4fc5facdda4d"
+
 # ------------------------------------------------------------------------------
 # Config
 # ------------------------------------------------------------------------------
@@ -32,6 +37,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
+INSTALL_COTRACKER=0
 INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
@@ -39,6 +45,7 @@ INSTALL_GEOMETRY=1
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 VGGT_DIR="${THIRD_PARTY_DIR}/vggt"
+COTRACKER_DIR="${THIRD_PARTY_DIR}/co-tracker"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,6 +57,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_DETECTRON2=1; shift ;;
     --with-vggt)
       INSTALL_VGGT=1; shift ;;
+    --with-cotracker)
+      INSTALL_COTRACKER=1; shift ;;
     --with-dev)
       INSTALL_DEV=1; shift ;;
     --no-vision)
@@ -65,6 +74,7 @@ Options:
   --venv PATH             Virtualenv path (default: .venv)
   --with-detectron2       Install detectron2 from official tag v0.6
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
+  --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-dev              Install dev tools (pytest, ruff, mypy)
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
@@ -80,6 +90,25 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "Python executable not found: $PYTHON_BIN" >&2
   exit 1
 fi
+
+clone_or_update_checkout() {
+  local repo_url="$1"
+  local dest_dir="$2"
+  local ref="$3"
+
+  mkdir -p "$(dirname "$dest_dir")"
+
+  if [[ ! -d "${dest_dir}/.git" ]]; then
+    echo "Cloning ${repo_url} into ${dest_dir}..."
+    git clone "${repo_url}" "${dest_dir}"
+  fi
+
+  echo "Fetching updates in ${dest_dir}..."
+  git -C "${dest_dir}" fetch origin
+
+  echo "Checking out ${ref} in ${dest_dir}..."
+  git -C "${dest_dir}" checkout "${ref}"
+}
 
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 # shellcheck disable=SC1090
@@ -108,19 +137,15 @@ if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
 fi
 
 if [[ $INSTALL_VGGT -eq 1 ]]; then
-  mkdir -p "${THIRD_PARTY_DIR}"
-
-  if [[ ! -d "${VGGT_DIR}/.git" ]]; then
-    echo "Cloning VGGT into ${VGGT_DIR}..."
-    git clone "${VGGT_REPO}" "${VGGT_DIR}"
-  fi
-
-  echo "Checking out VGGT commit ${VGGT_COMMIT}..."
-  git -C "${VGGT_DIR}" fetch origin
-  git -C "${VGGT_DIR}" checkout "${VGGT_COMMIT}"
-
+  clone_or_update_checkout "${VGGT_REPO}" "${VGGT_DIR}" "${VGGT_COMMIT}"
   echo "Installing VGGT from ${VGGT_DIR}..."
   python -m pip install -e "${VGGT_DIR}"
+fi
+
+if [[ $INSTALL_COTRACKER -eq 1 ]]; then
+  clone_or_update_checkout "${COTRACKER_REPO}" "${COTRACKER_DIR}" "${COTRACKER_COMMIT}"
+  echo "Installing CoTracker from ${COTRACKER_DIR}..."
+  python -m pip install -e "${COTRACKER_DIR}"
 fi
 
 cat <<EOF
@@ -133,6 +158,7 @@ Installed:
 - Python dependencies from pyproject.toml
 $( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}" )
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
+$( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
 
 Notes:
 - third_party/ should be gitignored so external source checkouts are never tracked.

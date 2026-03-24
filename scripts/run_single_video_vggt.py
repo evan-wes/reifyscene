@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from time import perf_counter
 
+from rich.console import Console
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
 
@@ -35,6 +37,22 @@ def build_config(args: argparse.Namespace) -> dict:
     return cfg
 
 
+def _debug_stage(console: Console, enabled: bool, label: str) -> float:
+    if enabled:
+        console.rule(f"[bold cyan]{label}")
+    return perf_counter()
+
+
+def _debug_stage_done(console: Console, enabled: bool, label: str, started_at: float, *, save_dir: str | None = None) -> None:
+    if not enabled:
+        return
+    elapsed = perf_counter() - started_at
+    if save_dir is not None:
+        console.print(f"[green]✓[/green] {label} complete in {elapsed:.2f}s → {save_dir}")
+    else:
+        console.print(f"[green]✓[/green] {label} complete in {elapsed:.2f}s")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
@@ -49,10 +67,27 @@ def main() -> None:
     parser.add_argument('--debug-max-points', type=int, default=5000, help='Maximum point-cloud samples per keyframe in debug exports.')
     args = parser.parse_args()
 
+    console = Console()
+    if args.debug:
+        console.print('[bold]room4d single-video VGGT debug run[/bold]')
+        console.print(f'video: {args.video}')
+        console.print(f'run_dir: {args.run_dir}')
+        console.print(f'backend: {args.backend_mode}  device: {args.device or "auto"}')
+        console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}')
+
     pipeline = Room4DPipeline(build_config(args))
+
+    started = _debug_stage(console, args.debug, 'Stage 1/3 · Ingest / preprocess')
     ingest = pipeline.preprocess([args.video])
+    _debug_stage_done(console, args.debug, 'Ingest / preprocess', started, save_dir=str(ingest.save_dir))
+
+    started = _debug_stage(console, args.debug, 'Stage 2/3 · Temporal sync')
     sync = pipeline.synchronize(ingest)
+    _debug_stage_done(console, args.debug, 'Temporal sync', started, save_dir=str(sync.save_dir))
+
+    started = _debug_stage(console, args.debug, 'Stage 3/3 · VGGT geometry')
     geometry = pipeline.initialize_geometry(ingest, sync)
+    _debug_stage_done(console, args.debug, 'VGGT geometry', started, save_dir=str(geometry.save_dir))
 
     print('Ingest summary:', ingest.summary())
     print('Sync summary:', sync.summary())

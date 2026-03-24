@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from room4d.common.types import GraphEdge, GraphNode
 from room4d.graph.edges import EdgeFactory
 from room4d.graph.graph_artifact import GraphArtifact
@@ -43,18 +45,33 @@ class DynamicSceneGraphBuilder:
 
         for stream_id, observations in track_artifact.per_stream_observations.items():
             grouped_track_ids = sorted({obs.track_id for obs in observations})
+            payload = track_artifact.track_payloads_by_stream.get(stream_id, {})
+            track_ids = list(map(int, np.asarray(payload.get('track_ids', []), dtype=int).tolist())) if payload else []
+            label_map = {}
+            if payload:
+                labels = np.asarray(payload.get('static_labels', np.full((len(track_ids),), -1, dtype=np.int8)), dtype=np.int8)
+                scores = np.asarray(payload.get('static_scores', np.full((len(track_ids),), np.nan, dtype=np.float32)), dtype=np.float32)
+                label_map = {
+                    int(track_id): {
+                        'static_label': int(labels[idx]) if idx < labels.shape[0] else -1,
+                        'static_score': float(scores[idx]) if idx < scores.shape[0] and np.isfinite(scores[idx]) else None,
+                    }
+                    for idx, track_id in enumerate(track_ids)
+                }
             for track_id in grouped_track_ids:
                 node_id = f"track:{stream_id}:{track_id}"
                 track_obs = [obs for obs in observations if obs.track_id == track_id]
+                attrs = {
+                    "stream_id": stream_id,
+                    "track_id": track_id,
+                    "num_observations": len(track_obs),
+                }
+                attrs.update(label_map.get(int(track_id), {}))
                 nodes.append(
                     self.node_factory.object_node(
                         node_id,
                         label="track",
-                        attrs={
-                            "stream_id": stream_id,
-                            "track_id": track_id,
-                            "num_observations": len(track_obs),
-                        },
+                        attrs=attrs,
                     )
                 )
                 edges.append(self.edge_factory.observed_by(node_id, stream_id, conf=1.0))
