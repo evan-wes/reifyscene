@@ -26,9 +26,10 @@ class CoTrackerWrapper(PointTracker):
     Notes
     -----
     Windowed execution is supported to reduce peak memory usage. In windowed
-    mode, each window seeds and tracks its own grid of points. Track IDs are
-    therefore unique across windows but are **not** continuous identities across
-    the full clip.
+    mode, overlapping windows are stitched when possible using trajectory
+    agreement in the overlap region. Unmatched tracks remain separate IDs, so
+    the output may still contain fragmented trajectories, but continuity is
+    substantially better than naive per-window concatenation.
     """
 
     def __init__(self, cfg: dict | None = None) -> None:
@@ -43,6 +44,9 @@ class CoTrackerWrapper(PointTracker):
         self.resize_max_dim = self.cfg.get('resize_max_dim')
         self.window_size = self.cfg.get('window_size')
         self.window_overlap = max(int(self.cfg.get('window_overlap', 0)), 0)
+        self.stitch_windows = bool(self.cfg.get('stitch_windows', True))
+        self.stitch_distance_px = float(self.cfg.get('stitch_distance_px', 8.0))
+        self.stitch_min_overlap_frames = max(int(self.cfg.get('stitch_min_overlap_frames', 2)), 1)
         self.use_autocast = bool(self.cfg.get('use_autocast', False))
         self.visibility_threshold = float(self.cfg.get('visibility_threshold', 0.5))
         self.cpu_threads = self.cfg.get('cpu_threads')
@@ -200,6 +204,155 @@ class CoTrackerWrapper(PointTracker):
             visibility = visibility[..., 0]
         return tracks, visibility
 
+    @staticmethod
+    def _merge_track_observations(
+        global_tracks: np.ndarray,
+        global_conf: np.ndarray,
+        track_idx: int,
+        start: int,
+        end: int,
+        local_track: np.ndarray,
+        local_conf: np.ndarray,
+    ) -> None:
+        """Merge one local track segment into a global track slot."""
+        for rel_t, frame_t in enumerate(range(start, end)):
+            conf = float(local_conf[rel_t])
+            if conf <= 0.0:
+                continue
+            if global_conf[frame_t, track_idx] > 0.0 and np.isfinite(global_tracks[frame_t, track_idx]).all():
+                prev_conf = float(global_conf[frame_t, track_idx])
+                total = prev_conf + conf
+                if total > 0.0:
+                    global_tracks[frame_t, track_idx] = (
+                        global_tracks[frame_t, track_idx] * prev_conf + local_track[rel_t] * conf
+                    ) / total
+                global_conf[frame_t, track_idx] = max(prev_conf, conf)
+            else:
+                global_tracks[frame_t, track_idx] = local_track[rel_t]
+                global_conf[frame_t, track_idx] = conf
+
+    def _stitch_window_blocks(
+        self,
+        blocks: list[dict[str, Any]],
+        total_frames: int,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        """Stitch overlapping window tracks into a shared global ID space.
+
+        Tracks are matched greedily using mean trajectory distance in the
+        overlapping frames. This keeps memory bounded while recovering much of
+        the continuity lost by naive per-window concatenation.
+        """
+        if not blocks:
+            return (
+                np.zeros((total_frames, 0, 2), dtype=np.float32),
+                np.zeros((total_frames, 0), dtype=np.float32),
+                {'windowed': True, 'stitched': True, 'windows': [], 'matched_pairs': 0, 'global_track_count': 0},
+            )
+
+        first = blocks[0]
+        num_tracks0 = int(first['num_tracks'])
+        global_tracks = np.full((total_frames, num_tracks0, 2), np.nan, dtype=np.float32)
+        global_conf = np.zeros((total_frames, num_tracks0), dtype=np.float32)
+        global_tracks[first['start']:first['end'], :num_tracks0] = first['tracks']
+        global_conf[first['start']:first['end'], :num_tracks0] = first['visibility']
+
+        window_infos = [{
+            'start': int(first['start']),
+            'end': int(first['end']),
+            'track_offset': 0,
+            'num_tracks': num_tracks0,
+            'matched_tracks': 0,
+            'new_tracks': num_tracks0,
+        }]
+        matched_pairs_total = 0
+        covered_until = int(first['end'])
+
+        for block in blocks[1:]:
+            start = int(block['start'])
+            end = int(block['end'])
+            local_tracks = np.asarray(block['tracks'], dtype=np.float32)
+            local_conf = np.asarray(block['visibility'], dtype=np.float32)
+            local_n = int(block['num_tracks'])
+
+            overlap_len = max(0, min(end, covered_until) - start)
+            matches: dict[int, int] = {}
+
+            if self.stitch_windows and overlap_len > 0 and local_n > 0 and global_tracks.shape[1] > 0:
+                candidate_pairs: list[tuple[float, float, int, int]] = []
+                min_shared = min(self.stitch_min_overlap_frames, overlap_len)
+                global_overlap_conf = global_conf[start:start + overlap_len]
+                global_overlap_tracks = global_tracks[start:start + overlap_len]
+
+                for local_idx in range(local_n):
+                    local_overlap_conf = local_conf[:overlap_len, local_idx]
+                    if np.count_nonzero(local_overlap_conf > 0.0) < min_shared:
+                        continue
+                    local_overlap_track = local_tracks[:overlap_len, local_idx]
+                    for global_idx in range(global_tracks.shape[1]):
+                        shared = (local_overlap_conf > 0.0) & (global_overlap_conf[:, global_idx] > 0.0)
+                        shared_count = int(np.count_nonzero(shared))
+                        if shared_count < min_shared:
+                            continue
+                        diffs = local_overlap_track[shared] - global_overlap_tracks[shared, global_idx]
+                        dists = np.linalg.norm(diffs, axis=1)
+                        mean_dist = float(np.mean(dists))
+                        first_dist = float(dists[0])
+                        if mean_dist <= self.stitch_distance_px and first_dist <= (self.stitch_distance_px * 1.5):
+                            candidate_pairs.append((mean_dist, first_dist, global_idx, local_idx))
+
+                used_global: set[int] = set()
+                used_local: set[int] = set()
+                for mean_dist, first_dist, global_idx, local_idx in sorted(candidate_pairs, key=lambda x: (x[0], x[1])):
+                    if global_idx in used_global or local_idx in used_local:
+                        continue
+                    matches[local_idx] = global_idx
+                    used_global.add(global_idx)
+                    used_local.add(local_idx)
+
+            matched_this_window = 0
+            unmatched_local = [idx for idx in range(local_n) if idx not in matches]
+            append_count = len(unmatched_local)
+            track_offset = int(global_tracks.shape[1])
+            if append_count > 0:
+                global_tracks = np.concatenate(
+                    [global_tracks, np.full((total_frames, append_count, 2), np.nan, dtype=np.float32)],
+                    axis=1,
+                )
+                global_conf = np.concatenate(
+                    [global_conf, np.zeros((total_frames, append_count), dtype=np.float32)],
+                    axis=1,
+                )
+
+            for local_idx, global_idx in matches.items():
+                self._merge_track_observations(global_tracks, global_conf, global_idx, start, end, local_tracks[:, local_idx], local_conf[:, local_idx])
+                matched_this_window += 1
+
+            for append_idx, local_idx in enumerate(unmatched_local):
+                global_idx = track_offset + append_idx
+                self._merge_track_observations(global_tracks, global_conf, global_idx, start, end, local_tracks[:, local_idx], local_conf[:, local_idx])
+
+            matched_pairs_total += matched_this_window
+            covered_until = max(covered_until, end)
+            window_infos.append({
+                'start': start,
+                'end': end,
+                'track_offset': track_offset,
+                'num_tracks': local_n,
+                'matched_tracks': matched_this_window,
+                'new_tracks': append_count,
+            })
+
+        visibility = np.asarray(global_conf, dtype=np.float32)
+        tracks = np.asarray(global_tracks, dtype=np.float32)
+        tracks[~np.isfinite(tracks)] = 0.0
+        return tracks, visibility, {
+            'windowed': True,
+            'stitched': True,
+            'windows': window_infos,
+            'matched_pairs': int(matched_pairs_total),
+            'global_track_count': int(tracks.shape[1]),
+        }
+
     def _run_real_backend(self, video_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         windows = self._window_slices(video_rgb.shape[0])
         if len(windows) == 1:
@@ -228,6 +381,10 @@ class CoTrackerWrapper(PointTracker):
             total_tracks += int(chunk_tracks.shape[1])
 
         t = int(video_rgb.shape[0])
+        if self.stitch_windows:
+            tracks, visibility, meta = self._stitch_window_blocks(blocks, t)
+            return tracks, visibility, meta
+
         tracks = np.zeros((t, total_tracks, 2), dtype=np.float32)
         visibility = np.zeros((t, total_tracks), dtype=np.float32)
         for block in blocks:
@@ -240,6 +397,7 @@ class CoTrackerWrapper(PointTracker):
 
         return tracks, visibility, {
             'windowed': True,
+            'stitched': False,
             'windows': [
                 {
                     'start': block['start'],
@@ -249,6 +407,8 @@ class CoTrackerWrapper(PointTracker):
                 }
                 for block in blocks
             ],
+            'matched_pairs': 0,
+            'global_track_count': int(total_tracks),
         }
 
     def _run_heuristic_backend(self, video_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -326,14 +486,22 @@ class CoTrackerWrapper(PointTracker):
         ]
         if backend_meta.get('windowed'):
             notes.append(
-                f"Windowed tracking used {len(backend_meta.get('windows', []))} windows; track IDs are unique per window and not continuous across the full clip."
+                f"Windowed tracking used {len(backend_meta.get('windows', []))} windows and produced {int(backend_meta.get('global_track_count', tracks_xy.shape[1]))} global tracks."
             )
+            if backend_meta.get('stitched'):
+                notes.append(
+                    f"Inter-window stitching merged {int(backend_meta.get('matched_pairs', 0))} track pairs across overlaps."
+                )
         if self._backend_error is not None and not backend_used.startswith('cotracker'):
             notes.append(f"Real backend unavailable: {type(self._backend_error).__name__}: {self._backend_error}")
         if self.debug:
             extra = ''
             if backend_meta.get('windowed'):
-                extra = f", windows={len(backend_meta.get('windows', []))}, window_size={self.window_size}, window_overlap={self.window_overlap}"
+                extra = (
+                    f", windows={len(backend_meta.get('windows', []))}, window_size={self.window_size}, "
+                    f"window_overlap={self.window_overlap}, stitched={backend_meta.get('stitched', False)}, "
+                    f"matched_pairs={backend_meta.get('matched_pairs', 0)}, global_tracks={backend_meta.get('global_track_count', tracks_xy.shape[1])}"
+                )
             print(
                 f"[TRACK DEBUG] Backend={backend_used}, track_count={tracks_xy.shape[1]}, "
                 f"frame_count={tracks_xy.shape[0]}, original_wh={original_wh}, model_wh={model_wh}{extra}"

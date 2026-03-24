@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+import colorsys
 import shutil
 
 import numpy as np
@@ -73,6 +74,28 @@ class TrackArtifact(BaseArtifact):
         return '#ff7f0e'      # uncertain = orange
 
     @staticmethod
+    def _label_name(label: int) -> str:
+        if label > 0:
+            return 'static'
+        if label == 0:
+            return 'dynamic'
+        return 'uncertain'
+
+    @staticmethod
+    def _label_symbol(label: int) -> str:
+        if label > 0:
+            return 'circle'
+        if label == 0:
+            return 'x'
+        return 'diamond'
+
+    @staticmethod
+    def _track_color(track_id: int) -> str:
+        hue = ((int(track_id) * 0.6180339887498949) % 1.0)
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
+        return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+    @staticmethod
     def _observations_from_payload(stream_id: str, payload: dict[str, Any]) -> list[TrackObservation]:
         frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
         xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
@@ -111,39 +134,162 @@ class TrackArtifact(BaseArtifact):
             copied[frame_key] = dst.name
         return copied
 
-    def _track_points_for_frame(self, stream_id: str, frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    def _track_state_for_frame(self, stream_id: str, frame_idx: int) -> dict[str, np.ndarray]:
         payload = self.track_payloads_by_stream.get(stream_id, {})
         points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
         visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
+        confidence = np.asarray(payload.get('confidence', np.zeros((0, 0), dtype=np.float32)), dtype=np.float32)
         track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
         labels = np.asarray(payload.get('static_labels', np.full((track_ids.shape[0],), -1, dtype=np.int8)), dtype=np.int8)
+        scores = np.asarray(payload.get('static_scores', np.full((track_ids.shape[0],), np.nan, dtype=np.float32)), dtype=np.float32)
         frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
         if points_xy.ndim != 3 or frame_indices.size == 0:
-            return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.int8)
+            return {
+                'points_xy': np.zeros((0, 2), dtype=np.float32),
+                'track_ids': np.zeros((0,), dtype=int),
+                'labels': np.zeros((0,), dtype=np.int8),
+                'scores': np.zeros((0,), dtype=np.float32),
+                'confidence': np.zeros((0,), dtype=np.float32),
+            }
         matches = np.where(frame_indices == int(frame_idx))[0]
         if matches.size == 0:
-            return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.int8)
+            return {
+                'points_xy': np.zeros((0, 2), dtype=np.float32),
+                'track_ids': np.zeros((0,), dtype=int),
+                'labels': np.zeros((0,), dtype=np.int8),
+                'scores': np.zeros((0,), dtype=np.float32),
+                'confidence': np.zeros((0,), dtype=np.float32),
+            }
         t = int(matches[0])
         visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
-        pts = points_xy[t]
-        return pts[visible], labels[visible] if labels.size else np.full((visible.sum(),), -1, dtype=np.int8)
+        return {
+            'points_xy': points_xy[t][visible],
+            'track_ids': track_ids[visible],
+            'labels': labels[visible] if labels.size else np.full((visible.sum(),), -1, dtype=np.int8),
+            'scores': scores[visible] if scores.size else np.full((visible.sum(),), np.nan, dtype=np.float32),
+            'confidence': confidence[t][visible] if confidence.size else np.ones((visible.sum(),), dtype=np.float32),
+        }
 
-    def _lifted_points_for_frame(self, stream_id: str, frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    def _lifted_state_for_frame(self, stream_id: str, frame_idx: int) -> dict[str, np.ndarray]:
         payload = self.track_payloads_by_stream.get(stream_id, {})
         lifted = np.asarray(payload.get('lifted_xyz', np.zeros((0, 0, 3), dtype=np.float32)), dtype=np.float32)
         lifted_frame_indices = np.asarray(payload.get('lifted_frame_indices', []), dtype=int)
         lifted_valid = np.asarray(payload.get('lifted_valid', np.zeros((0, 0), dtype=bool)))
         track_ids = np.asarray(payload.get('track_ids', np.arange(lifted.shape[1] if lifted.ndim == 3 else 0)), dtype=int)
         labels = np.asarray(payload.get('static_labels', np.full((track_ids.shape[0],), -1, dtype=np.int8)), dtype=np.int8)
+        scores = np.asarray(payload.get('static_scores', np.full((track_ids.shape[0],), np.nan, dtype=np.float32)), dtype=np.float32)
         if lifted.ndim != 3 or lifted_frame_indices.size == 0:
-            return np.zeros((0, 3), dtype=np.float32), np.zeros((0,), dtype=np.int8)
+            return {
+                'points_xyz': np.zeros((0, 3), dtype=np.float32),
+                'track_ids': np.zeros((0,), dtype=int),
+                'labels': np.zeros((0,), dtype=np.int8),
+                'scores': np.zeros((0,), dtype=np.float32),
+            }
         matches = np.where(lifted_frame_indices == int(frame_idx))[0]
         if matches.size == 0:
-            return np.zeros((0, 3), dtype=np.float32), np.zeros((0,), dtype=np.int8)
+            return {
+                'points_xyz': np.zeros((0, 3), dtype=np.float32),
+                'track_ids': np.zeros((0,), dtype=int),
+                'labels': np.zeros((0,), dtype=np.int8),
+                'scores': np.zeros((0,), dtype=np.float32),
+            }
         k = int(matches[0])
         valid = lifted_valid[k].astype(bool) if lifted_valid.size else np.isfinite(lifted[k]).all(axis=1)
         pts = GeometryArtifact._points_to_z_up(lifted[k])
-        return pts[valid], labels[valid] if labels.size else np.full((valid.sum(),), -1, dtype=np.int8)
+        return {
+            'points_xyz': pts[valid],
+            'track_ids': track_ids[valid],
+            'labels': labels[valid] if labels.size else np.full((valid.sum(),), -1, dtype=np.int8),
+            'scores': scores[valid] if scores.size else np.full((valid.sum(),), np.nan, dtype=np.float32),
+        }
+
+    @staticmethod
+    def _sample_track_ids(track_ids: np.ndarray, max_tracks: int) -> np.ndarray:
+        if track_ids.size <= max_tracks:
+            return track_ids.astype(int)
+        if max_tracks <= 0:
+            return np.zeros((0,), dtype=int)
+        idx = np.linspace(0, track_ids.size - 1, max_tracks, dtype=int)
+        return track_ids[idx].astype(int)
+
+    def _trajectory_2d_for_track(self, stream_id: str, track_id: int, frame_idx: int, frame_window: int) -> np.ndarray:
+        payload = self.track_payloads_by_stream.get(stream_id, {})
+        frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
+        points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
+        visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
+        track_ids = np.asarray(payload.get('track_ids', []), dtype=int)
+        if points_xy.ndim != 3 or frame_indices.size == 0 or track_ids.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        matches = np.where(track_ids == int(track_id))[0]
+        if matches.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        tidx = int(matches[0])
+        mask = (frame_indices >= int(frame_idx) - frame_window) & (frame_indices <= int(frame_idx) + frame_window)
+        idxs = np.where(mask)[0]
+        if idxs.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        vis = visibility[idxs, tidx].astype(bool) if visibility.size else np.ones((idxs.size,), dtype=bool)
+        return points_xy[idxs, tidx][vis]
+
+    def _trajectory_3d_for_track(self, stream_id: str, track_id: int, frame_idx: int, frame_window: int) -> np.ndarray:
+        payload = self.track_payloads_by_stream.get(stream_id, {})
+        frame_indices = np.asarray(payload.get('lifted_frame_indices', []), dtype=int)
+        lifted_xyz = np.asarray(payload.get('lifted_xyz', np.zeros((0, 0, 3), dtype=np.float32)), dtype=np.float32)
+        lifted_valid = np.asarray(payload.get('lifted_valid', np.zeros((0, 0), dtype=bool)))
+        track_ids = np.asarray(payload.get('track_ids', []), dtype=int)
+        if lifted_xyz.ndim != 3 or frame_indices.size == 0 or track_ids.size == 0:
+            return np.zeros((0, 3), dtype=np.float32)
+        matches = np.where(track_ids == int(track_id))[0]
+        if matches.size == 0:
+            return np.zeros((0, 3), dtype=np.float32)
+        tidx = int(matches[0])
+        mask = (frame_indices >= int(frame_idx) - frame_window) & (frame_indices <= int(frame_idx) + frame_window)
+        idxs = np.where(mask)[0]
+        if idxs.size == 0:
+            return np.zeros((0, 3), dtype=np.float32)
+        vis = lifted_valid[idxs, tidx].astype(bool) if lifted_valid.size else np.isfinite(lifted_xyz[idxs, tidx]).all(axis=1)
+        pts = GeometryArtifact._points_to_z_up(lifted_xyz[idxs, tidx])
+        return pts[vis]
+
+    def _summary_rows_for_frame(self, stream_id: str, frame_idx: int, track_state: dict[str, np.ndarray], lifted_state: dict[str, np.ndarray]) -> tuple[list[str], list[str]]:
+        payload = self.track_payloads_by_stream.get(stream_id, {})
+        global_track_count = int(np.asarray(payload.get('track_ids', [])).shape[0])
+        labels_all = np.asarray(payload.get('static_labels', np.zeros((0,), dtype=np.int8)), dtype=np.int8)
+        counts_all = {
+            'static': int(np.sum(labels_all > 0)),
+            'dynamic': int(np.sum(labels_all == 0)),
+            'uncertain': int(np.sum(labels_all < 0)),
+        }
+        labels_visible = np.asarray(track_state.get('labels', np.zeros((0,), dtype=np.int8)), dtype=np.int8)
+        counts_visible = {
+            'static': int(np.sum(labels_visible > 0)),
+            'dynamic': int(np.sum(labels_visible == 0)),
+            'uncertain': int(np.sum(labels_visible < 0)),
+        }
+        windowing = payload.get('windowing', {}) or {}
+        metrics = [
+            'Backend',
+            'Global tracks',
+            'Visible 2D tracks',
+            'Visible lifted tracks',
+            'Static / dynamic / uncertain',
+            'Visible static / dynamic / uncertain',
+            'Windowed',
+            'Stitched',
+            'Matched pairs',
+        ]
+        values = [
+            str(payload.get('backend_used', 'unknown')),
+            str(global_track_count),
+            str(int(np.asarray(track_state.get('track_ids', [])).shape[0])),
+            str(int(np.asarray(lifted_state.get('track_ids', [])).shape[0])),
+            f"{counts_all['static']} / {counts_all['dynamic']} / {counts_all['uncertain']}",
+            f"{counts_visible['static']} / {counts_visible['dynamic']} / {counts_visible['uncertain']}",
+            str(bool(windowing.get('windowed', False))),
+            str(bool(windowing.get('stitched', False))),
+            str(int(windowing.get('matched_pairs', 0))),
+        ]
+        return metrics, values
 
     def _write_plotly_debug_html(self, *, image_index: dict[str, str]) -> None:
         import plotly.graph_objects as go
@@ -151,6 +297,8 @@ class TrackArtifact(BaseArtifact):
 
         frame_specs: list[dict[str, Any]] = []
         max_points = int(self.metadata.get('debug_max_points', 5000))
+        max_trails = int(self.metadata.get('debug_max_trails', 12))
+        trail_window = int(self.metadata.get('debug_trail_window', 12))
         for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Tracking · building debug viewer"):
             frame_key = f"{frame.stream_id}:{frame.frame_idx}"
             image_name = image_index.get(frame_key)
@@ -170,8 +318,31 @@ class TrackArtifact(BaseArtifact):
             if bg_pts.size == 0:
                 bg_pts = np.zeros((1, 3), dtype=np.float32)
                 bg_cols = np.array([[128, 128, 128]], dtype=np.uint8)
-            overlay_xy, overlay_labels = self._track_points_for_frame(frame.stream_id, frame.frame_idx)
-            lifted_pts, lifted_labels = self._lifted_points_for_frame(frame.stream_id, frame.frame_idx)
+
+            track_state = self._track_state_for_frame(frame.stream_id, frame.frame_idx)
+            lifted_state = self._lifted_state_for_frame(frame.stream_id, frame.frame_idx)
+            sampled_ids = self._sample_track_ids(np.asarray(track_state['track_ids'], dtype=int), max_trails)
+            trail_specs: list[dict[str, Any]] = []
+            for track_id in sampled_ids.tolist():
+                matches_2d = np.where(track_state['track_ids'] == track_id)[0]
+                current_xy = track_state['points_xy'][matches_2d[0]] if matches_2d.size else np.zeros((0, 2), dtype=np.float32)
+                current_label = int(track_state['labels'][matches_2d[0]]) if matches_2d.size else -1
+                current_score = float(track_state['scores'][matches_2d[0]]) if matches_2d.size else float('nan')
+                traj_2d = self._trajectory_2d_for_track(frame.stream_id, track_id, frame.frame_idx, trail_window)
+                matches_3d = np.where(lifted_state['track_ids'] == track_id)[0]
+                current_xyz = lifted_state['points_xyz'][matches_3d[0]] if matches_3d.size else np.zeros((0, 3), dtype=np.float32)
+                traj_3d = self._trajectory_3d_for_track(frame.stream_id, track_id, frame.frame_idx, trail_window)
+                trail_specs.append({
+                    'track_id': int(track_id),
+                    'color': self._track_color(int(track_id)),
+                    'label': current_label,
+                    'score': current_score,
+                    'current_xy': current_xy,
+                    'traj_2d': traj_2d,
+                    'current_xyz': current_xyz,
+                    'traj_3d': traj_3d,
+                })
+            summary_metrics, summary_values = self._summary_rows_for_frame(frame.stream_id, frame.frame_idx, track_state, lifted_state)
             frame_specs.append(
                 {
                     'frame_ref': frame,
@@ -179,10 +350,11 @@ class TrackArtifact(BaseArtifact):
                     'depth_preview': depth_preview,
                     'background_points': bg_pts,
                     'background_colors': bg_cols,
-                    'overlay_xy': overlay_xy,
-                    'overlay_labels': overlay_labels,
-                    'lifted_points': lifted_pts,
-                    'lifted_labels': lifted_labels,
+                    'track_state': track_state,
+                    'lifted_state': lifted_state,
+                    'trail_specs': trail_specs,
+                    'summary_metrics': summary_metrics,
+                    'summary_values': summary_values,
                 }
             )
 
@@ -191,29 +363,55 @@ class TrackArtifact(BaseArtifact):
 
         fig = make_subplots(
             rows=2,
-            cols=2,
-            specs=[[{'type': 'xy'}, {'type': 'image'}], [{'type': 'scene', 'colspan': 2}, None]],
-            subplot_titles=('RGB + Tracks', 'Depth', 'Point Cloud + Lifted Tracks'),
-            row_heights=[0.42, 0.58],
-            horizontal_spacing=0.03,
+            cols=3,
+            specs=[
+                [{'type': 'xy'}, {'type': 'image'}, {'type': 'table'}],
+                [{'type': 'scene', 'colspan': 3}, None, None],
+            ],
+            subplot_titles=('RGB + Tracks', 'Depth', 'Summary', 'Point Cloud + Trajectories'),
+            row_heights=[0.40, 0.60],
+            column_widths=[0.38, 0.27, 0.35],
+            horizontal_spacing=0.04,
             vertical_spacing=0.08,
         )
 
         slider_steps = []
+        traces_per_frame = 7 + (2 * max_trails)
         total_traces = 0
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
             name = f"{fr.stream_id}:{fr.frame_idx}"
+            track_state = spec['track_state']
+            lifted_state = spec['lifted_state']
+            track_ids = np.asarray(track_state['track_ids'], dtype=int)
+            marker_colors_2d = [self._track_color(int(tid)) for tid in track_ids.tolist()]
+            marker_symbols_2d = [self._label_symbol(int(v)) for v in np.asarray(track_state['labels'], dtype=np.int8).tolist()]
+            hover_text_2d = [
+                f"track_id={int(tid)}<br>motion={self._label_name(int(lbl))}<br>score={float(score):.3f}"
+                for tid, lbl, score in zip(track_ids.tolist(), np.asarray(track_state['labels']).tolist(), np.asarray(track_state['scores']).tolist())
+            ]
+            lifted_ids = np.asarray(lifted_state['track_ids'], dtype=int)
+            lifted_colors = [self._track_color(int(tid)) for tid in lifted_ids.tolist()]
+            hover_text_3d = [
+                f"track_id={int(tid)}<br>motion={self._label_name(int(lbl))}<br>score={float(score):.3f}"
+                for tid, lbl, score in zip(lifted_ids.tolist(), np.asarray(lifted_state['labels']).tolist(), np.asarray(lifted_state['scores']).tolist())
+            ]
 
             fig.add_trace(go.Image(z=spec['rgb'], visible=visible, name=f"rgb:{name}"), row=1, col=1)
-            marker_colors_2d = [self._label_color(int(v)) for v in spec['overlay_labels'].tolist()] if spec['overlay_labels'].size else []
             fig.add_trace(
                 go.Scatter(
-                    x=spec['overlay_xy'][:, 0] if spec['overlay_xy'].size else [],
-                    y=spec['overlay_xy'][:, 1] if spec['overlay_xy'].size else [],
+                    x=track_state['points_xy'][:, 0] if track_state['points_xy'].size else [],
+                    y=track_state['points_xy'][:, 1] if track_state['points_xy'].size else [],
                     mode='markers',
-                    marker={'size': 6, 'color': marker_colors_2d, 'line': {'color': 'white', 'width': 0.5}},
+                    marker={
+                        'size': 7,
+                        'color': marker_colors_2d,
+                        'symbol': marker_symbols_2d,
+                        'line': {'color': 'white', 'width': 0.6},
+                    },
+                    hovertext=hover_text_2d,
+                    hoverinfo='text',
                     name=f"tracks:{name}",
                     visible=visible,
                     showlegend=False,
@@ -222,9 +420,19 @@ class TrackArtifact(BaseArtifact):
                 col=1,
             )
             fig.add_trace(go.Image(z=spec['depth_preview'], visible=visible, name=f"depth:{name}"), row=1, col=2)
+            fig.add_trace(
+                go.Table(
+                    header={'values': ['Metric', 'Value'], 'align': 'left'},
+                    cells={'values': [spec['summary_metrics'], spec['summary_values']], 'align': 'left'},
+                    visible=visible,
+                    name=f"summary:{name}",
+                ),
+                row=1,
+                col=3,
+            )
             marker_bg = {
                 'size': 2,
-                'opacity': 0.25,
+                'opacity': 0.22,
                 'color': [f"rgb({int(c[0])},{int(c[1])},{int(c[2])})" for c in spec['background_colors']],
             }
             fig.add_trace(
@@ -241,19 +449,20 @@ class TrackArtifact(BaseArtifact):
                 row=2,
                 col=1,
             )
-            marker_fg = {
-                'size': 5,
-                'opacity': 0.95,
-                'color': [self._label_color(int(v)) for v in spec['lifted_labels'].tolist()] if spec['lifted_labels'].size else [],
-                'line': {'color': 'white', 'width': 1},
-            }
             fig.add_trace(
                 go.Scatter3d(
-                    x=spec['lifted_points'][:, 0] if spec['lifted_points'].size else [],
-                    y=spec['lifted_points'][:, 1] if spec['lifted_points'].size else [],
-                    z=spec['lifted_points'][:, 2] if spec['lifted_points'].size else [],
+                    x=lifted_state['points_xyz'][:, 0] if lifted_state['points_xyz'].size else [],
+                    y=lifted_state['points_xyz'][:, 1] if lifted_state['points_xyz'].size else [],
+                    z=lifted_state['points_xyz'][:, 2] if lifted_state['points_xyz'].size else [],
                     mode='markers',
-                    marker=marker_fg,
+                    marker={
+                        'size': 5,
+                        'opacity': 0.95,
+                        'color': lifted_colors,
+                        'line': {'color': 'white', 'width': 1},
+                    },
+                    hovertext=hover_text_3d,
+                    hoverinfo='text',
                     name=f"lifted:{name}",
                     visible=visible,
                     showlegend=False,
@@ -261,31 +470,78 @@ class TrackArtifact(BaseArtifact):
                 row=2,
                 col=1,
             )
-            total_traces += 5
+
+            for trail_idx in range(max_trails):
+                if trail_idx < len(spec['trail_specs']):
+                    trail = spec['trail_specs'][trail_idx]
+                    color = trail['color']
+                    label_name = self._label_name(int(trail['label']))
+                    trail2d = trail['traj_2d']
+                    current_xy = np.asarray(trail['current_xy'])
+                    trail3d = trail['traj_3d']
+                    current_xyz = np.asarray(trail['current_xyz'])
+                    hover_name = f"track_id={trail['track_id']}<br>motion={label_name}<br>score={trail['score']:.3f}"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=trail2d[:, 0] if trail2d.size else [],
+                            y=trail2d[:, 1] if trail2d.size else [],
+                            mode='lines',
+                            line={'color': color, 'width': 2},
+                            opacity=0.85,
+                            hoverinfo='skip',
+                            name=f"trail2d:{name}:{trail['track_id']}",
+                            visible=visible,
+                            showlegend=False,
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=trail3d[:, 0] if trail3d.size else [],
+                            y=trail3d[:, 1] if trail3d.size else [],
+                            z=trail3d[:, 2] if trail3d.size else [],
+                            mode='lines+markers',
+                            line={'color': color, 'width': 5},
+                            marker={'size': 3, 'color': color},
+                            opacity=0.9,
+                            hovertext=[hover_name] * max(int(trail3d.shape[0]), 1),
+                            hoverinfo='text',
+                            name=f"trail3d:{name}:{trail['track_id']}",
+                            visible=visible,
+                            showlegend=False,
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                else:
+                    fig.add_trace(go.Scatter(x=[], y=[], mode='lines', visible=visible, showlegend=False, hoverinfo='skip', name=f"trail2d_empty:{name}:{trail_idx}"), row=1, col=1)
+                    fig.add_trace(go.Scatter3d(x=[], y=[], z=[], mode='lines', visible=visible, showlegend=False, hoverinfo='skip', name=f"trail3d_empty:{name}:{trail_idx}"), row=2, col=1)
+            total_traces += traces_per_frame
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
             name = f"{fr.stream_id}:{fr.frame_idx}"
             visible = [False] * total_traces
-            base = 5 * idx
-            visible[base:base + 5] = [True, True, True, True, True]
+            base = traces_per_frame * idx
+            visible[base:base + traces_per_frame] = [True] * traces_per_frame
             slider_steps.append(
                 {
                     'method': 'update',
                     'label': name,
                     'args': [
                         {'visible': visible},
-                        {'title': {'text': f'Tracking debug | keyframe {name} | t={fr.timestamp_sec:.3f}s'}},
+                        {'title': {'text': f"Tracking debug | keyframe {name} | t={fr.timestamp_sec:.3f}s"}},
                     ],
                 }
             )
 
         first = frame_specs[0]['frame_ref']
         fig.update_layout(
-            title={'text': f'Tracking debug | keyframe {first.stream_id}:{first.frame_idx} | t={first.timestamp_sec:.3f}s'},
+            title={'text': f"Tracking debug | keyframe {first.stream_id}:{first.frame_idx} | t={first.timestamp_sec:.3f}s"},
             template='plotly_white',
-            width=1500,
-            height=980,
+            width=1750,
+            height=1050,
             scene={
                 'xaxis_title': 'X',
                 'yaxis_title': 'Y',
