@@ -1,0 +1,161 @@
+"""Lightweight system inspection and resource profile helpers."""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+
+def _read_proc_meminfo() -> dict[str, int]:
+    info: dict[str, int] = {}
+    meminfo_path = Path('/proc/meminfo')
+    if not meminfo_path.exists():
+        return info
+    for line in meminfo_path.read_text(encoding='utf-8').splitlines():
+        if ':' not in line:
+            continue
+        key, value = line.split(':', 1)
+        parts = value.strip().split()
+        if not parts:
+            continue
+        try:
+            info[key] = int(parts[0]) * 1024  # values are in kB on Linux
+        except ValueError:
+            continue
+    return info
+
+
+def _query_nvidia_smi() -> list[dict[str, Any]]:
+    if shutil.which('nvidia-smi') is None:
+        return []
+    cmd = [
+        'nvidia-smi',
+        '--query-gpu=index,name,memory.total,memory.free,driver_version',
+        '--format=csv,noheader,nounits',
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except Exception:
+        return []
+    gpus: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(',')]
+        if len(parts) != 5:
+            continue
+        try:
+            index = int(parts[0])
+            total_mb = int(parts[2])
+            free_mb = int(parts[3])
+        except ValueError:
+            continue
+        gpus.append({
+            'index': index,
+            'name': parts[1],
+            'memory_total_mb': total_mb,
+            'memory_free_mb': free_mb,
+            'driver_version': parts[4],
+        })
+    return gpus
+
+
+def _bytes_to_gib(value: int | float | None) -> float | None:
+    if value is None:
+        return None
+    return float(value) / (1024.0 ** 3)
+
+
+def collect_system_report() -> dict[str, Any]:
+    meminfo = _read_proc_meminfo()
+    total_mem = meminfo.get('MemTotal')
+    avail_mem = meminfo.get('MemAvailable')
+    total_swap = meminfo.get('SwapTotal')
+    free_swap = meminfo.get('SwapFree')
+    report = {
+        'platform': {
+            'system': platform.system(),
+            'release': platform.release(),
+            'version': platform.version(),
+            'machine': platform.machine(),
+            'python': platform.python_version(),
+        },
+        'cpu': {
+            'logical_cores': os.cpu_count(),
+        },
+        'memory': {
+            'total_bytes': total_mem,
+            'available_bytes': avail_mem,
+            'total_gib': _bytes_to_gib(total_mem),
+            'available_gib': _bytes_to_gib(avail_mem),
+            'swap_total_bytes': total_swap,
+            'swap_free_bytes': free_swap,
+            'swap_total_gib': _bytes_to_gib(total_swap),
+            'swap_free_gib': _bytes_to_gib(free_swap),
+        },
+        'gpus': _query_nvidia_smi(),
+    }
+    return report
+
+
+def recommend_tracking_profile(report: dict[str, Any], *, device: str | None = None) -> dict[str, Any]:
+    device = str(device or 'cpu')
+    memory = report.get('memory', {})
+    available_gib = float(memory.get('available_gib') or 0.0)
+    gpus = report.get('gpus', []) or []
+    max_free_gpu_gib = max((gpu.get('memory_free_mb', 0) / 1024.0 for gpu in gpus), default=0.0)
+
+    if device.startswith('cuda'):
+        if max_free_gpu_gib < 5.0:
+            profile = 'lowmem'
+        elif max_free_gpu_gib < 8.0:
+            profile = 'balanced'
+        else:
+            profile = 'full'
+    else:
+        if available_gib < 8.0:
+            profile = 'lowmem'
+        elif available_gib < 16.0:
+            profile = 'balanced'
+        else:
+            profile = 'full'
+
+    presets = {
+        'lowmem': {
+            'resize_max_dim': 256,
+            'frame_stride': 2,
+            'max_frames': 24,
+            'window_size': 12,
+            'window_overlap': 4,
+            'cpu_threads': 4,
+        },
+        'balanced': {
+            'resize_max_dim': 384,
+            'frame_stride': 2,
+            'max_frames': 48,
+            'window_size': 24,
+            'window_overlap': 8,
+            'cpu_threads': 6,
+        },
+        'full': {
+            'resize_max_dim': 512,
+            'frame_stride': 1,
+            'max_frames': 96,
+            'window_size': 48,
+            'window_overlap': 12,
+            'cpu_threads': 8,
+        },
+    }
+    rec = dict(presets[profile])
+    rec['profile'] = profile
+    rec['device'] = device
+    rec['max_free_gpu_gib'] = max_free_gpu_gib
+    rec['available_ram_gib'] = available_gib
+    return rec
+
+
+def save_system_report(path: str | Path, report: dict[str, Any]) -> None:
+    Path(path).write_text(json.dumps(report, indent=2), encoding='utf-8')

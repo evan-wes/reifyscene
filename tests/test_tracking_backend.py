@@ -20,7 +20,7 @@ class _FakeCoTrackerWrapper(CoTrackerWrapper):
     def _load_model(self) -> None:
         self._is_loaded = True
 
-    def _run_real_backend(self, video_rgb: np.ndarray):
+    def _run_real_backend_single(self, video_rgb: np.ndarray):
         t, h, w, _ = video_rgb.shape
         track_static = np.tile(np.array([[w * 0.25, h * 0.5]], dtype=np.float32), (t, 1, 1))
         xs = np.linspace(w * 0.55, w * 0.80, t, dtype=np.float32)
@@ -114,3 +114,27 @@ def test_track_lifting_partition_and_debug_export(tmp_path: Path) -> None:
     reloaded = TrackArtifact.load(tmp_path / 'tracking')
     assert reloaded.track_payloads_by_stream['cam_00']['lifted_xyz'].shape[0] == 2
     assert (tmp_path / 'tracking' / 'tracking_debug_viewer.html').exists()
+
+
+def test_cotracker_windowed_tracking_contract(tmp_path: Path) -> None:
+    video_path = tmp_path / 'clip_windowed.mp4'
+    write_test_video(video_path, width=64, height=48, num_frames=8, fps=10.0)
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id='cam_00')
+
+    tracker = _FakeCoTrackerWrapper({
+        'backend_mode': 'real',
+        'device': 'cpu',
+        'grid_size': 2,
+        'window_size': 4,
+        'window_overlap': 2,
+    })
+    artifact = tracker.track(stream)
+
+    payload = artifact.track_payloads_by_stream['cam_00']
+    windowing = payload['windowing']
+    assert windowing['windowed'] is True
+    assert len(windowing['windows']) >= 2
+    assert payload['backend_used'] == 'cotracker_windowed'
+    assert payload['points_xy'].shape[0] == 8
+    assert payload['points_xy'].shape[1] > 2

@@ -13,11 +13,13 @@ from pathlib import Path
 from time import perf_counter
 
 from rich.console import Console
+from rich.table import Table
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
+from room4d.common.system_report import collect_system_report, save_system_report
 
 
-def build_config(args: argparse.Namespace) -> dict:
+def build_config(args: argparse.Namespace, *, system_report: dict | None = None) -> dict:
     cfg = read_yaml(args.config) if args.config else {}
     cfg.setdefault('run_id', Path(args.video).stem)
     cfg['run_dir'] = str(Path(args.run_dir))
@@ -30,10 +32,14 @@ def build_config(args: argparse.Namespace) -> dict:
     geometry['debug_shapes'] = bool(args.debug)
     geometry['save_depth_pngs'] = bool(args.debug)
     geometry['debug_max_points'] = int(args.debug_max_points)
+    cpu_threads = getattr(args, 'cpu_threads', None)
+    if cpu_threads is not None:
+        geometry['cpu_threads'] = int(cpu_threads)
     if args.max_keyframes is not None:
         cfg['max_keyframes_per_stream'] = args.max_keyframes
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = args.keyframe_stride_sec
+    cfg.setdefault('runtime', {})['system_report'] = system_report or collect_system_report()
     return cfg
 
 
@@ -53,6 +59,24 @@ def _debug_stage_done(console: Console, enabled: bool, label: str, started_at: f
         console.print(f"[green]✓[/green] {label} complete in {elapsed:.2f}s")
 
 
+def _print_system_report(console: Console, report: dict) -> None:
+    table = Table(title='System preflight report')
+    table.add_column('Item')
+    table.add_column('Value')
+    table.add_row('Platform', f"{report['platform']['system']} {report['platform']['release']} ({report['platform']['machine']})")
+    table.add_row('Python', str(report['platform']['python']))
+    table.add_row('Logical CPU cores', str(report['cpu'].get('logical_cores')))
+    memory = report.get('memory', {})
+    table.add_row('RAM total / available', f"{memory.get('total_gib', 0):.1f} GiB / {memory.get('available_gib', 0):.1f} GiB")
+    gpus = report.get('gpus', []) or []
+    if gpus:
+        gpu = max(gpus, key=lambda g: g.get('memory_free_mb', 0))
+        table.add_row('GPU', f"{gpu.get('name')} (free {gpu.get('memory_free_mb', 0)/1024.0:.1f} / {gpu.get('memory_total_mb', 0)/1024.0:.1f} GiB)")
+    else:
+        table.add_row('GPU', 'None detected via nvidia-smi')
+    console.print(table)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
@@ -60,6 +84,8 @@ def main() -> None:
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--device', default=None)
+    parser.add_argument('--cpu-threads', type=int, default=None, help='Limit torch CPU threads when running VGGT on CPU.')
+    parser.add_argument('--preflight-only', action='store_true', help='Print/save the system report and exit.')
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=8)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
@@ -68,14 +94,25 @@ def main() -> None:
     args = parser.parse_args()
 
     console = Console()
+    system_report = collect_system_report()
+    report_path = Path(args.run_dir) / 'preflight_system_report.json'
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    save_system_report(report_path, {'report': system_report})
+    if args.debug or args.preflight_only:
+        _print_system_report(console, system_report)
+        console.print(f'saved preflight report: {report_path}')
+    if args.preflight_only:
+        return
+
     if args.debug:
         console.print('[bold]room4d single-video VGGT debug run[/bold]')
         console.print(f'video: {args.video}')
         console.print(f'run_dir: {args.run_dir}')
         console.print(f'backend: {args.backend_mode}  device: {args.device or "auto"}')
         console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}')
+        console.print(f'cpu_threads: {args.cpu_threads}')
 
-    pipeline = Room4DPipeline(build_config(args))
+    pipeline = Room4DPipeline(build_config(args, system_report=system_report))
 
     started = _debug_stage(console, args.debug, 'Stage 1/3 · Ingest / preprocess')
     ingest = pipeline.preprocess([args.video])

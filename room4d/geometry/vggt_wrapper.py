@@ -62,6 +62,7 @@ class VGGTInitializer(GeometryInitializer):
         self.debug_shapes = bool(self.cfg.get("debug_shapes", False))
         self.save_depth_pngs = bool(self.cfg.get("save_depth_pngs", False))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.cpu_threads = self.cfg.get("cpu_threads")
 
         self._is_loaded = False
         self._model: Any | None = None
@@ -97,6 +98,15 @@ class VGGTInitializer(GeometryInitializer):
             return
 
         try:
+            if self.cpu_threads is not None and not self.device.startswith("cuda"):
+                try:
+                    torch.set_num_threads(max(1, int(self.cpu_threads)))
+                except Exception:
+                    pass
+                try:
+                    torch.set_num_interop_threads(max(1, int(self.cpu_threads) // 2))
+                except Exception:
+                    pass
             self._load_backend_components()
             if self.checkpoint_path:
                 model = self._VGGT()

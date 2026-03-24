@@ -369,6 +369,13 @@ class TrackArtifact(BaseArtifact):
                 self._write_plotly_debug_html(image_index=image_index)
                 debug_exports['debug_html'] = 'tracking_debug_viewer.html'
 
+        track_payload_meta = {
+            stream_id: {
+                'backend_used': payload.get('backend_used'),
+                'windowing': payload.get('windowing'),
+            }
+            for stream_id, payload in self.track_payloads_by_stream.items()
+        }
         serializable = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
@@ -381,6 +388,7 @@ class TrackArtifact(BaseArtifact):
             'selected_frames': [self._frame_ref_to_dict(frame) for frame in self.selected_frames],
             'notes': self.notes,
             'track_index': track_index,
+            'track_payload_meta': track_payload_meta,
             'depth_index': depth_index,
             'point_index': point_index,
             'debug_exports': debug_exports,
@@ -393,8 +401,10 @@ class TrackArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         payloads: dict[str, dict[str, Any]] = {}
         observations: dict[str, list[TrackObservation]] = {}
+        payload_meta = raw.get('track_payload_meta', {})
         for stream_id, filename in raw.get('track_index', {}).items():
             payload = np.load(save_dir / 'tracks' / filename)
+            stream_meta = payload_meta.get(stream_id, {})
             track_payload = {
                 'frame_indices': payload['frame_indices'],
                 'timestamps_sec': payload['timestamps_sec'],
@@ -410,6 +420,8 @@ class TrackArtifact(BaseArtifact):
                 'lifted_valid': payload['lifted_valid'],
                 'static_labels': payload['static_labels'],
                 'static_scores': payload['static_scores'],
+                'backend_used': stream_meta.get('backend_used'),
+                'windowing': stream_meta.get('windowing'),
             }
             payloads[stream_id] = track_payload
             observations[stream_id] = cls._observations_from_payload(stream_id, track_payload)
