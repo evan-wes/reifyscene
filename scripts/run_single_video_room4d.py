@@ -82,6 +82,13 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         tracking['cpu_threads'] = int(cpu_threads)
     elif rec.get('cpu_threads') is not None:
         tracking['cpu_threads'] = int(rec['cpu_threads'])
+    objects = cfg.setdefault('objects', {})
+    objects['backend_mode'] = args.objects_backend_mode
+    objects['device'] = args.objects_device or args.tracking_device or args.geometry_device
+    objects['score_threshold'] = float(args.objects_score_threshold)
+    objects['max_detections'] = int(args.objects_max_detections)
+    objects['debug'] = bool(args.debug)
+    objects['embedder_backend_mode'] = args.objects_embedder_backend_mode
 
     lifting = cfg.setdefault('lifting', {})
     lifting['point_conf_threshold'] = float(args.point_conf_threshold)
@@ -151,6 +158,11 @@ def main() -> None:
     parser.add_argument('--tracking-window-size', type=int, default=None)
     parser.add_argument('--tracking-window-overlap', type=int, default=None)
     parser.add_argument('--tracking-allow-github', action='store_true', help='Allow torch.hub to fetch CoTracker from GitHub when no local checkout is present.')
+    parser.add_argument('--objects-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--objects-device', default=None)
+    parser.add_argument('--objects-score-threshold', type=float, default=0.5)
+    parser.add_argument('--objects-max-detections', type=int, default=12)
+    parser.add_argument('--objects-embedder-backend-mode', default='auto', choices=['real', 'auto', 'histogram'])
     parser.add_argument('--resource-profile', default='auto', choices=['none', 'auto', 'lowmem', 'balanced', 'full'], help='Apply a resource-aware tracking preset. Explicit tracking flags still win.')
     parser.add_argument('--cpu-threads', type=int, default=None, help='Limit CPU threads for torch/cv2 on CPU runs.')
     parser.add_argument('--preflight-only', action='store_true', help='Print/save the system report and exit.')
@@ -197,19 +209,24 @@ def main() -> None:
             f"tracking_window_size: {cfg['tracking']['window_size']}  tracking_window_overlap: {cfg['tracking']['window_overlap']}  "
             f"cpu_threads: {cfg['tracking'].get('cpu_threads')}  resource_profile: {(rec or {}).get('profile', 'none')}"
         )
+        console.print(
+            f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
+            f"max_detections: {cfg['objects']['max_detections']}  embedder: {cfg['objects']['embedder_backend_mode']}"
+        )
 
     pipeline = Room4DPipeline(cfg)
 
     outputs = {}
 
     stages = [
-        ("Stage 1/7 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
-        ("Stage 2/7 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
-        ("Stage 3/7 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
-        ("Stage 4/7 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
-        ("Stage 5/7 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"])),
-        ("Stage 6/7 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], graph_artifact=outputs["graph"])),
-        ("Stage 7/7 · Render scaffold", "render", lambda: pipeline.fit_renderer(outputs["optimization"])),
+        ("Stage 1/8 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
+        ("Stage 2/8 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
+        ("Stage 3/8 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
+        ("Stage 4/8 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
+        ("Stage 5/8 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
+        ("Stage 6/8 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], object_artifact=outputs["objects"])),
+        ("Stage 7/8 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
+        ("Stage 8/8 · Render scaffold", "render", lambda: pipeline.fit_renderer(outputs["optimization"])),
     ]
 
     for label, key, fn in stages:

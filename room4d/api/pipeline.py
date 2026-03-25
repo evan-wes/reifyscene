@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+import numpy as np
 from typing import Any
 
 from room4d.common.io import read_yaml
+from room4d.common.types import ObjectState
 from room4d.common.paths import ensure_dir
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.vggt_wrapper import VGGTInitializer
@@ -16,6 +19,11 @@ from room4d.ingest.quality import ClipQualityAssessor
 from room4d.lifting.backproject import TrackLifter3D
 from room4d.lifting.static_dynamic import StaticDynamicPartitioner
 from room4d.optimize.solver import JointSpatiotemporalSolver
+from room4d.perception.objects.detector import ObjectDetector
+from room4d.perception.objects.embedder import InstanceEmbedder
+from room4d.perception.objects.object_artifact import ObjectArtifact
+from room4d.perception.objects.object_assoc import ObjectAssociator
+from room4d.perception.objects.segmenter import ObjectSegmenter
 from room4d.query.parser import PromptParser
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
@@ -55,6 +63,11 @@ class Room4DPipeline:
             static_threshold_world=float(lifting_cfg.get('static_threshold_world', 0.05)),
             min_lifted_frames=int(lifting_cfg.get('min_lifted_frames', 2)),
         )
+        objects_cfg = self.cfg.get('objects', {})
+        self.object_detector = ObjectDetector(objects_cfg)
+        self.object_segmenter = ObjectSegmenter(objects_cfg)
+        self.object_embedder = InstanceEmbedder(objects_cfg)
+        self.object_associator = ObjectAssociator(objects_cfg)
         self.graph_builder = DynamicSceneGraphBuilder()
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
@@ -153,13 +166,112 @@ class Room4DPipeline:
         """
         return None
 
-    def perceive_objects(self, ingest_artifact):
-        """Run object perception.
+    def perceive_objects(self, ingest_artifact, track_artifact=None):
+        """Run single-video object detection, segmentation, and re-identification."""
+        objects_cfg = self.cfg.get('objects', {})
+        selected_frames = list(ingest_artifact.keyframes)
+        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
+        object_states = []
+        mask_arrays: dict[str, Any] = {}
+        embedding_vectors: dict[str, Any] = {}
+        notes: list[str] = []
 
-        TODO: wire in the generic object branch after the first vertical slice is
-        stable.
-        """
-        return None
+        track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
+
+        def _frame_track_ids(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> list[int]:
+            payload = track_payloads.get(stream_id, {})
+            points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
+            visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
+            track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
+            frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
+            if points_xy.ndim != 3 or frame_indices.size == 0:
+                return []
+            matches = np.where(frame_indices == int(frame_idx))[0]
+            if matches.size == 0:
+                return []
+            t = int(matches[0])
+            visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
+            pts = points_xy[t]
+            bbox = np.asarray(bbox_xyxy, dtype=np.float32)
+            x1, y1, x2, y2 = bbox.tolist()
+            inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
+            keep = visible & inside_bbox
+            if mask is not None:
+                mask_arr = np.asarray(mask, dtype=bool)
+                xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
+                yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
+                keep &= mask_arr[yi, xi]
+            return [int(tid) for tid in track_ids[keep].tolist()]
+
+        for frame_ref in selected_frames:
+            stream = stream_lookup[frame_ref.stream_id]
+            frame = self.decoder.get_frame(stream, frame_ref.frame_idx)
+            detections = self.object_detector.detect(frame)
+            detections = self.object_segmenter.segment(frame, detections)
+            embeddings = self.object_embedder.embed(frame, detections)
+            for det_idx, det in enumerate(detections):
+                detection_id = f"det:{frame_ref.stream_id}:{int(frame_ref.frame_idx)}:{det_idx}"
+                mask = np.asarray(det.get('mask'), dtype=bool) if det.get('mask') is not None else None
+                if mask is not None:
+                    mask_arrays[detection_id] = mask.astype(bool)
+                embedding = embeddings[det_idx] if det_idx < embeddings.shape[0] else None
+                if embedding is not None:
+                    embedding_vectors[detection_id] = np.asarray(embedding, dtype=np.float32)
+                track_ids = _frame_track_ids(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                attrs = {
+                    'detection_id': detection_id,
+                    'label_id': int(det.get('label_id', -1)),
+                    'track_ids': track_ids,
+                    'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
+                    'frame_stride': int(self.cfg.get('tracking', {}).get('frame_stride', 1)),
+                    'detector_backend': self.object_detector.backend_used,
+                    'embedder_backend': self.object_embedder.backend_used,
+                }
+                object_states.append(
+                    ObjectState(
+                        object_id=detection_id,
+                        frame_ref=frame_ref,
+                        category=str(det['category']),
+                        bbox_xyxy=np.asarray(det['bbox_xyxy'], dtype=np.float32),
+                        mask_rle=None if mask is None else {'shape': list(mask.shape), 'sum': int(mask.sum())},
+                        embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),
+                        confidence=float(det['score']),
+                        attributes=attrs,
+                    )
+                )
+
+        artifact = ObjectArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='objects',
+            save_dir=self._stage_dir('objects'),
+            objects=object_states,
+            linked_ids={},
+            frame_index={},
+            mask_arrays=mask_arrays,
+            embedding_vectors=embedding_vectors,
+            notes=notes,
+            metadata={
+                'detector_backend': self.object_detector.backend_used,
+                'embedder_backend': self.object_embedder.backend_used,
+                'save_debug_assets': bool(objects_cfg.get('debug', False)),
+                'save_debug_html': bool(objects_cfg.get('debug', False)),
+                'debug_image_paths': dict(self.cfg.get('geometry', {}).get('debug_image_paths', {})),
+            },
+        )
+        # Prefer geometry debug images from the saved artifact if available.
+        geometry_dir = self._stage_dir('geometry') / 'images'
+        if geometry_dir.exists():
+            debug_image_paths = {}
+            for frame_ref in selected_frames:
+                key = f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+                candidate = geometry_dir / f"{key.replace(':', '__').replace('/', '_')}.png"
+                if candidate.exists():
+                    debug_image_paths[key] = str(candidate)
+            artifact.metadata['debug_image_paths'] = debug_image_paths
+        artifact.frame_index = artifact._build_frame_index(artifact.objects)
+        artifact = self.object_associator.associate(artifact, track_artifact=track_artifact)
+        artifact.save()
+        return artifact
 
     def build_graph(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None):
         """Build the dynamic scene graph."""
@@ -199,14 +311,16 @@ class Room4DPipeline:
         sync_artifact = self.synchronize(ingest_artifact)
         geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
         track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
-        graph_artifact = self.build_graph(geometry_artifact, track_artifact)
-        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, graph_artifact=graph_artifact)
+        object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
+        graph_artifact = self.build_graph(geometry_artifact, track_artifact, object_artifact=object_artifact)
+        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
         render_artifact = self.fit_renderer(optimization_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
             'geometry': geometry_artifact,
             'tracks': track_artifact,
+            'objects': object_artifact,
             'graph': graph_artifact,
             'optimization': optimization_artifact,
             'render': render_artifact,

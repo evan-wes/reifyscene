@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -76,14 +77,32 @@ class DynamicSceneGraphBuilder:
                 )
                 edges.append(self.edge_factory.observed_by(node_id, stream_id, conf=1.0))
 
+        if object_artifact is not None:
+            grouped: dict[str, list[Any]] = {}
+            for obj in object_artifact.objects:
+                grouped.setdefault(obj.object_id, []).append(obj)
+            for object_id, instances in grouped.items():
+                first = instances[0]
+                avg_conf = float(np.mean([obj.confidence for obj in instances]))
+                categories = sorted({obj.category for obj in instances})
+                attrs = {
+                    'stream_id': first.frame_ref.stream_id,
+                    'category': first.category,
+                    'categories': categories,
+                    'num_observations': len(instances),
+                    'frame_indices': sorted({int(obj.frame_ref.frame_idx) for obj in instances}),
+                    'avg_confidence': avg_conf,
+                    'track_ids': sorted({int(t) for obj in instances for t in obj.attributes.get('track_ids', [])}),
+                }
+                node_id = f'object:{first.frame_ref.stream_id}:{object_id}'
+                nodes.append(self.node_factory.object_node(node_id, label=first.category, attrs=attrs))
+                edges.append(self.edge_factory.observed_by(node_id, first.frame_ref.stream_id, conf=min(1.0, avg_conf)))
+
         notes = [
-            "TODO: add human and generic-object nodes when perception branches are wired in.",
             "TODO: replace per-stream track nodes with cross-view associated entities.",
         ]
         if human_artifact is not None:
             notes.append("Human artifact input was provided but is not consumed in the first vertical slice.")
-        if object_artifact is not None:
-            notes.append("Object artifact input was provided but is not consumed in the first vertical slice.")
 
         return GraphArtifact(
             run_id=geometry_artifact.run_id,
