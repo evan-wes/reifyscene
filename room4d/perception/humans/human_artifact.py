@@ -1,4 +1,4 @@
-"""Artifact for human detections and fitted states."""
+"""Artifact for human detections, DensePose, SMPL, and association."""
 
 from __future__ import annotations
 
@@ -16,18 +16,16 @@ from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
 from room4d.common.types import BaseArtifact, FrameRef, HumanState
 
-
 COCO_SKELETON = [
-    (5, 7), (7, 9), (6, 8), (8, 10),
-    (5, 6), (5, 11), (6, 12), (11, 12),
-    (11, 13), (13, 15), (12, 14), (14, 16),
-    (0, 1), (0, 2), (1, 3), (2, 4),
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+    (5, 11), (6, 12), (11, 12), (11, 13), (13, 15),
+    (12, 14), (14, 16),
 ]
 
 
 @dataclass
 class HumanArtifact(BaseArtifact):
-    """Store per-frame and linked human states."""
+    """Store human detections, masks, densepose, and debug exports."""
 
     humans: list[HumanState] = field(default_factory=list)
     raw_humans: list[HumanState] = field(default_factory=list)
@@ -144,29 +142,35 @@ class HumanArtifact(BaseArtifact):
             x, y = float(pt[0]), float(pt[1])
             draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=(*color_rgb, 255), outline=(255, 255, 255, 255))
 
-    def _render_overlay(self, frame_key: str, rgb: np.ndarray, frame_humans: list[HumanState], trail_window: int = 6) -> np.ndarray:
+    def _render_overlay(self, frame_key: str, rgb: np.ndarray, frame_humans: list[HumanState], *, raw_frame_humans: list[HumanState] | None = None, mode: str = 'cleaned', trail_window: int = 6, show_support: bool = False) -> np.ndarray:
         base = Image.fromarray(np.asarray(rgb, dtype=np.uint8)).convert('RGBA')
         overlay = Image.new('RGBA', base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay, 'RGBA')
         width, height = base.size
         centers_by_id: dict[str, list[tuple[float, float, int]]] = {}
-        for h in self.humans:
+        source = self.humans if mode == 'cleaned' else (raw_frame_humans or [])
+        for h in (self.humans if mode == 'cleaned' else self.raw_humans):
             x1, y1, x2, y2 = map(float, h.bbox_xyxy.tolist())
             centers_by_id.setdefault(h.human_id, []).append(((x1 + x2) * 0.5, (y1 + y2) * 0.5, int(h.frame_ref.frame_idx)))
-        current_frame_idx = int(frame_humans[0].frame_ref.frame_idx) if frame_humans else 0
-        for h in frame_humans:
-            color = self._track_color(h.human_id)
+        current_frame_idx = int(frame_humans[0].frame_ref.frame_idx) if frame_humans else (int(raw_frame_humans[0].frame_ref.frame_idx) if raw_frame_humans else 0)
+        active = frame_humans if mode == 'cleaned' else (raw_frame_humans or [])
+        for h in active:
+            color = self._track_color(h.human_id if mode == 'cleaned' else h.attributes.get('detection_id', h.human_id))
             rgb_color = ImageColor.getrgb(color)
             det_id = h.attributes.get('detection_id', h.human_id)
             mask = self.mask_arrays.get(det_id)
             if mask is not None and mask.shape[:2] == (height, width):
-                mask_img = Image.fromarray((mask.astype(np.uint8) * 70), mode='L')
+                alpha = 70 if mode == 'cleaned' else 40
+                mask_img = Image.fromarray((mask.astype(np.uint8) * alpha), mode='L')
                 fill = Image.new('RGBA', base.size, (*rgb_color, 0))
                 fill.putalpha(mask_img)
                 overlay = Image.alpha_composite(overlay, fill)
                 draw = ImageDraw.Draw(overlay, 'RGBA')
             x1, y1, x2, y2 = map(float, h.bbox_xyxy.tolist())
-            draw.rectangle([x1, y1, x2, y2], outline=(*rgb_color, 255), width=3)
+            line_color = (*rgb_color, 255)
+            if mode == 'raw' and h.attributes.get('suppressed'):
+                line_color = (255, 0, 255, 255)
+            draw.rectangle([x1, y1, x2, y2], outline=line_color, width=3)
             if h.keypoints_2d is not None:
                 self._draw_skeleton(draw, np.asarray(h.keypoints_2d, dtype=np.float32), rgb_color)
             dp = h.densepose or {}
@@ -177,11 +181,20 @@ class HumanArtifact(BaseArtifact):
                 for xy in pts[:32]:
                     x, y = float(xy[0]), float(xy[1])
                     draw.point((x, y), fill=(*rgb_color, 180))
+            if show_support:
+                for xy in np.asarray(h.attributes.get('support_points_xy', []), dtype=np.float32)[:96]:
+                    x, y = float(xy[0]), float(xy[1])
+                    draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=(255, 255, 255, 230), outline=(*rgb_color, 255))
             hist = self.linked_ids.get('track_summaries', {}).get(h.human_id, {})
-            support = int(hist.get('support_track_count', len(h.attributes.get('track_ids', []))))
+            support = int(hist.get('support_track_count', h.attributes.get('support_track_count', len(h.attributes.get('track_ids', [])))))
+            density = float(hist.get('mean_support_density', h.attributes.get('support_ratio', 0.0)))
+            quality = float(hist.get('quality_score', h.attributes.get('quality_score', 0.0)))
             life = f"{hist.get('lifespan_start', current_frame_idx)}-{hist.get('lifespan_end', current_frame_idx)}"
             visible = int(np.sum(np.asarray(h.keypoints_2d)[:, 2] > 0.05)) if h.keypoints_2d is not None else 0
-            label = f"{h.human_id} kpt:{visible} trk:{support} life:{life}"
+            label = f"{h.human_id} kpt:{visible} trk:{support} d:{density:.2f} q:{quality:.2f} life:{life}"
+            if mode == 'raw' and h.attributes.get('suppressed'):
+                target = h.attributes.get('suppressed_by_detection_id', 'other')
+                label = f"SUPP -> {target} | {label}"
             draw.text((x1 + 4, max(4.0, y1 - 14.0)), label, fill=(*rgb_color, 255))
             history = [c for c in centers_by_id.get(h.human_id, []) if current_frame_idx - trail_window <= c[2] <= current_frame_idx]
             history = sorted(history, key=lambda item: item[2])
@@ -190,10 +203,12 @@ class HumanArtifact(BaseArtifact):
         composed = Image.alpha_composite(base, overlay).convert('RGB')
         return np.asarray(composed, dtype=np.uint8)
 
-    def _build_summary_rows(self, frame_key: str, frame_humans: list[HumanState]) -> list[list[str]]:
+    def _build_summary_rows(self, frame_key: str, frame_humans: list[HumanState], raw_frame_humans: list[HumanState]) -> list[list[str]]:
         rows = [
             ['Frame', frame_key],
-            ['Visible humans', str(len(frame_humans))],
+            ['Raw detections', str(len(raw_frame_humans))],
+            ['Kept humans', str(len(frame_humans))],
+            ['Suppressed', str(len([h for h in raw_frame_humans if h.attributes.get('suppressed')]))],
             ['Persistent IDs', str(len({h.human_id for h in self.humans}))],
         ]
         track_summaries = self.linked_ids.get('track_summaries', {})
@@ -203,8 +218,10 @@ class HumanArtifact(BaseArtifact):
             dp_count = int(np.asarray((h.densepose or {}).get('samples_xy', np.zeros((0, 2)))).shape[0])
             smpl_valid = bool((h.smpl_params or {}).get('valid', False))
             support = int(summary.get('support_track_count', len(h.attributes.get('track_ids', []))))
+            density = float(summary.get('mean_support_density', h.attributes.get('support_ratio', 0.0)))
+            quality = float(summary.get('quality_score', h.attributes.get('quality_score', 0.0)))
             life = f"{summary.get('lifespan_start', h.frame_ref.frame_idx)}-{summary.get('lifespan_end', h.frame_ref.frame_idx)}"
-            rows.append([h.human_id, f"kpt {visible} · dp {dp_count} · smpl {int(smpl_valid)} · trk {support} · life {life}"])
+            rows.append([h.human_id, f"kpt {visible} · dp {dp_count} · smpl {int(smpl_valid)} · trk {support} · d {density:.2f} · q {quality:.2f} · life {life}"])
         return rows
 
     def _timeline_figure(self):
@@ -227,7 +244,12 @@ class HumanArtifact(BaseArtifact):
                 'line': {'color': color, 'width': 6},
                 'marker': {'color': color, 'size': 8},
                 'name': hid,
-                'hovertemplate': f"{hid}<br>tracks={summary.get('support_track_count', 0)}<extra></extra>",
+                'hovertemplate': (
+                    f"{hid}<br>tracks={summary.get('support_track_count', 0)}<br>"
+                    f"density={summary.get('mean_support_density', 0.0):.2f}<br>"
+                    f"quality={summary.get('quality_score', 0.0):.2f}<br>"
+                    f"lifespan={start}-{end}<extra></extra>"
+                ),
                 'showlegend': False,
             })
         return traces, y_labels
@@ -245,7 +267,7 @@ class HumanArtifact(BaseArtifact):
             rows=2,
             cols=2,
             specs=[[{'type': 'xy'}, {'type': 'table'}], [{'type': 'xy'}, {'type': 'xy'}]],
-            subplot_titles=('RGB overlay', 'Summary', 'DensePose / keypoints snapshot', 'Track timeline'),
+            subplot_titles=('RGB overlay', 'Summary', 'Support / DensePose snapshot', 'Track timeline'),
             row_heights=[0.72, 0.28],
             column_widths=[0.7, 0.3],
         )
@@ -254,17 +276,26 @@ class HumanArtifact(BaseArtifact):
         for trace in timeline_traces:
             fig.add_trace(go.Scatter(**trace, visible=True), row=2, col=2)
             base_trace_count += 1
+        raw_trace_indices: list[int] = []
+        cleaned_trace_indices: list[int] = []
+        support_trace_indices: list[int] = []
+        traces_per_frame = 5
         for idx, frame_key in enumerate(self._progress_iter(frame_keys, total=len(frame_keys), description='[cyan]Humans · building debug viewer')):
             frame_humans = [h for h in self.humans if self._frame_key(h.frame_ref) == frame_key]
+            raw_frame_humans = [h for h in self.raw_humans if self._frame_key(h.frame_ref) == frame_key]
             img_name = copied_images.get(frame_key)
             if img_name is None:
                 continue
             rgb = np.asarray(Image.open(images_dir / img_name).convert('RGB'))
-            overlay = self._render_overlay(frame_key, rgb, frame_humans)
-            summary_rows = self._build_summary_rows(frame_key, frame_humans)
-            dp_preview = overlay  # reuse overlay as densepose/keypoint visual snapshot
+            cleaned_overlay = self._render_overlay(frame_key, rgb, frame_humans, raw_frame_humans=raw_frame_humans, mode='cleaned')
+            raw_overlay = self._render_overlay(frame_key, rgb, frame_humans, raw_frame_humans=raw_frame_humans, mode='raw')
+            support_preview = self._render_overlay(frame_key, rgb, frame_humans, raw_frame_humans=raw_frame_humans, mode='cleaned', show_support=True)
+            summary_rows = self._build_summary_rows(frame_key, frame_humans, raw_frame_humans)
             vis = (idx == 0)
-            fig.add_trace(go.Image(z=overlay, visible=vis), row=1, col=1)
+            fig.add_trace(go.Image(z=raw_overlay, visible=vis, opacity=0.0, name=f'raw:{frame_key}'), row=1, col=1)
+            raw_trace_indices.append(len(fig.data) - 1)
+            fig.add_trace(go.Image(z=cleaned_overlay, visible=vis, opacity=1.0, name=f'cleaned:{frame_key}'), row=1, col=1)
+            cleaned_trace_indices.append(len(fig.data) - 1)
             fig.add_trace(
                 go.Table(
                     header=dict(values=['Field', 'Value']),
@@ -274,9 +305,8 @@ class HumanArtifact(BaseArtifact):
                 row=1,
                 col=2,
             )
-            fig.add_trace(go.Image(z=dp_preview, visible=vis), row=2, col=1)
-            for t_idx, trace in enumerate(timeline_traces):
-                fig.data[t_idx].visible = True
+            fig.add_trace(go.Image(z=support_preview, visible=vis, name=f'support:{frame_key}'), row=2, col=1)
+            support_trace_indices.append(len(fig.data) - 1)
             fig.add_trace(
                 go.Scatter(
                     x=[int(frame_key.split(':')[1])],
@@ -291,7 +321,6 @@ class HumanArtifact(BaseArtifact):
                 col=2,
             )
         image_trace_start = base_trace_count
-        traces_per_frame = 4
         steps = []
         total_traces = len(fig.data)
         num_frames = (total_traces - base_trace_count) // traces_per_frame if total_traces >= base_trace_count else 0
@@ -301,16 +330,40 @@ class HumanArtifact(BaseArtifact):
             for j in range(traces_per_frame):
                 if start + j < total_traces:
                     visible[start + j] = True
-            steps.append({'method': 'update', 'label': frame_key, 'args': [{'visible': visible}]})
+            steps.append({'method': 'update', 'label': frame_key, 'args': [{'visible': visible}, {'title': f'room4d human debug viewer — {frame_key}'}]})
         if steps:
             fig.update_layout(sliders=[{'active': 0, 'steps': steps, 'currentvalue': {'prefix': 'Frame: '}}])
+        raw_opacity = [0.0] * total_traces
+        cleaned_opacity = [1.0] * total_traces
+        both_opacity = [1.0] * total_traces
+        for idx in raw_trace_indices:
+            raw_opacity[idx] = 1.0
+            cleaned_opacity[idx] = 0.0
+            both_opacity[idx] = 0.5
+        for idx in cleaned_trace_indices:
+            raw_opacity[idx] = 0.0
+            cleaned_opacity[idx] = 1.0
+            both_opacity[idx] = 0.85
+        fig.update_layout(
+            updatemenus=[{
+                'type': 'buttons',
+                'buttons': [
+                    {'label': 'Cleaned', 'method': 'restyle', 'args': [{'opacity': cleaned_opacity}]},
+                    {'label': 'Raw', 'method': 'restyle', 'args': [{'opacity': raw_opacity}]},
+                    {'label': 'Both', 'method': 'restyle', 'args': [{'opacity': both_opacity}]},
+                ],
+                'direction': 'right',
+                'x': 0.01,
+                'y': 1.08,
+            }]
+        )
         fig.update_yaxes(autorange='reversed', visible=False, row=1, col=1)
         fig.update_xaxes(visible=False, row=1, col=1)
         fig.update_yaxes(autorange='reversed', visible=False, row=2, col=1)
         fig.update_xaxes(visible=False, row=2, col=1)
         if timeline_labels:
             fig.update_yaxes(tickmode='array', tickvals=list(range(len(timeline_labels))), ticktext=timeline_labels, row=2, col=2)
-        fig.update_layout(title='room4d human debug viewer', height=900, width=1400, margin=dict(l=20, r=20, t=60, b=20))
+        fig.update_layout(title='room4d human debug viewer', height=900, width=1400, margin=dict(l=20, r=20, t=80, b=20))
         fig.write_html(html_path, include_plotlyjs='cdn')
         return {'human_debug_viewer': str(html_path)}
 

@@ -45,6 +45,8 @@ def test_object_association_prefers_shared_tracks_and_consensus() -> None:
     assert all(obj.category == 'dog' for obj in dogish)
     assert any(obj.attributes['current_category'] == 'cat' for obj in dogish)
     assert all(obj.attributes['consensus_category'] == 'dog' for obj in dogish)
+    assert all('category_entropy' in obj.attributes for obj in dogish)
+    assert all('quality_score' in obj.attributes for obj in dogish)
 
 
 def test_per_frame_duplicate_suppression_removes_overlapping_conflicts() -> None:
@@ -122,6 +124,8 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
                 'support_track_count': 2,
                 'lifespan_start': 0,
                 'lifespan_end': 1,
+                'category_entropy': 0.2,
+                'quality_score': 0.8,
             },
         },
         'raw_detection_count': 3,
@@ -134,6 +138,7 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
     html = (artifact.save_dir / 'object_debug_viewer.html').read_text(encoding='utf-8')
     assert 'Raw detections' in html
     assert 'obj_0000' in html
+    assert 'entropy' in html.lower()
     loaded = ObjectArtifact.load(artifact.save_dir)
     assert len(loaded.objects) == 2
     assert len(loaded.raw_objects) == 3

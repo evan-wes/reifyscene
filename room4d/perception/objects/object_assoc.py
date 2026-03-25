@@ -84,9 +84,10 @@ class ObjectAssociator:
         self.min_match_score = float(self.cfg.get('min_match_score', 0.55))
         self.track_weight = float(self.cfg.get('track_weight', 2.0))
         self.embed_weight = float(self.cfg.get('embed_weight', 1.0))
-        self.iou_weight = float(self.cfg.get('iou_weight', 0.6))
+        self.iou_weight = float(self.cfg.get('iou_weight', 0.35))
         self.distance_weight = float(self.cfg.get('distance_weight', 0.35))
         self.class_weight = float(self.cfg.get('class_weight', 0.35))
+        self.support_weight = float(self.cfg.get('support_weight', 0.75))
         self.frame_duplicate_iou = float(self.cfg.get('frame_duplicate_iou', 0.55))
         self.frame_duplicate_mask_iou = float(self.cfg.get('frame_duplicate_mask_iou', 0.35))
         self.frame_duplicate_track_jaccard = float(self.cfg.get('frame_duplicate_track_jaccard', 0.25))
@@ -133,9 +134,12 @@ class ObjectAssociator:
 
     @staticmethod
     def _rank_detection(obj: ObjectState) -> float:
-        support = len({int(t) for t in obj.attributes.get('track_ids', [])})
+        support = int(obj.attributes.get('support_track_count', len({int(t) for t in obj.attributes.get('track_ids', [])})))
+        mask_support = int(obj.attributes.get('mask_support_count', support))
+        visible = max(int(obj.attributes.get('visible_track_count', support)), 1)
+        support_ratio = float(support) / float(visible)
         area = max(0.0, float(obj.bbox_xyxy[2] - obj.bbox_xyxy[0])) * max(0.0, float(obj.bbox_xyxy[3] - obj.bbox_xyxy[1]))
-        return float(obj.confidence) + 0.02 * float(support) + 1e-6 * float(area)
+        return float(obj.confidence) + 0.03 * float(mask_support) + 0.15 * float(support_ratio) + 1e-6 * float(area)
 
     def _frame_duplicate_score(self, a: ObjectState, b: ObjectState, artifact: ObjectArtifact) -> tuple[float, dict[str, float]]:
         tracks_a = {int(t) for t in a.attributes.get('track_ids', [])}
@@ -237,6 +241,41 @@ class ObjectAssociator:
         p = float(class_hist.get(category, 0.0)) / total
         return 2.0 * p - 1.0
 
+    @staticmethod
+    def _category_entropy(class_hist: dict[str, float]) -> float:
+        if not class_hist:
+            return 0.0
+        probs = np.asarray([max(float(v), 0.0) for v in class_hist.values()], dtype=np.float64)
+        total = float(probs.sum())
+        if total <= 1e-8:
+            return 0.0
+        probs = probs / total
+        probs = probs[probs > 1e-12]
+        if probs.size <= 1:
+            return 0.0
+        return float(-(probs * np.log(probs)).sum() / np.log(float(len(class_hist))))
+
+    @staticmethod
+    def _support_quality(attrs: dict[str, Any]) -> tuple[float, dict[str, float]]:
+        support = float(attrs.get('support_track_count', len(attrs.get('track_ids', []))))
+        mask_support = float(attrs.get('mask_support_count', support))
+        bbox_support = float(attrs.get('bbox_support_count', support))
+        visible = max(float(attrs.get('visible_track_count', support)), 1.0)
+        ratio = support / visible
+        mask_ratio = mask_support / max(bbox_support, 1.0)
+        score = 0.6 * min(1.0, ratio * 3.0) + 0.4 * min(1.0, mask_ratio)
+        return float(score), {'support_ratio': float(ratio), 'mask_support_ratio': float(mask_ratio), 'support_count': float(support)}
+
+    @staticmethod
+    def _smooth_boxes(objs: list[ObjectState], window: int = 1) -> list[np.ndarray]:
+        boxes = [np.asarray(obj.bbox_xyxy, dtype=np.float32) for obj in objs]
+        smoothed: list[np.ndarray] = []
+        for idx in range(len(boxes)):
+            lo = max(0, idx - window)
+            hi = min(len(boxes), idx + window + 1)
+            smoothed.append(np.mean(np.stack(boxes[lo:hi], axis=0), axis=0).astype(np.float32))
+        return smoothed
+
     def _score(self, cur: ObjectState, track: _TrackRecord) -> tuple[float, dict[str, float]]:
         prev = track.last
         cur_tracks = {int(t) for t in cur.attributes.get('track_ids', [])}
@@ -245,11 +284,13 @@ class ObjectAssociator:
         iou = _bbox_iou(np.asarray(cur.bbox_xyxy), np.asarray(prev.bbox_xyxy))
         dist = self._center_distance_norm(np.asarray(cur.bbox_xyxy), np.asarray(prev.bbox_xyxy))
         class_score = self._class_compatibility(cur.attributes.get('current_category', cur.category), track.class_hist)
+        support_score, support_parts = self._support_quality(cur.attributes)
         score = (
             self.track_weight * track_score
             + self.embed_weight * embed_score
             + self.iou_weight * iou
             + self.class_weight * class_score
+            + self.support_weight * support_score
             - self.distance_weight * dist
         )
         return score, {
@@ -258,6 +299,8 @@ class ObjectAssociator:
             'iou': iou,
             'distance': dist,
             'class_score': class_score,
+            'support_score': support_score,
+            **support_parts,
         }
 
     @staticmethod
@@ -380,7 +423,6 @@ class ObjectAssociator:
 
         merged_objects: list[ObjectState] = []
         summaries: dict[str, dict[str, Any]] = {}
-        final_id_map: dict[str, str] = {}
         sorted_groups = sorted(groups.values(), key=lambda tids: min(min(tracks[tid].frame_indices) for tid in tids))
         for group_idx, tids in enumerate(sorted_groups):
             final_id = f'obj_{group_idx:04d}'
@@ -388,7 +430,6 @@ class ObjectAssociator:
             class_hist: dict[str, float] = {}
             support_tracks: set[int] = set()
             for tid in tids:
-                final_id_map[tid] = final_id
                 all_dets.extend(tracks[tid].detections)
                 support_tracks.update(tracks[tid].support_track_ids)
                 for cat, weight in tracks[tid].class_hist.items():
@@ -396,27 +437,26 @@ class ObjectAssociator:
             consensus = max(class_hist.items(), key=lambda kv: kv[1])[0] if class_hist else 'unknown'
             total_hist = float(sum(class_hist.values())) if class_hist else 0.0
             consensus_conf = float(class_hist.get(consensus, 0.0) / total_hist) if total_hist > 1e-8 else 0.0
+            entropy = self._category_entropy(class_hist)
             by_frame: dict[int, list[ObjectState]] = {}
             for det in all_dets:
                 by_frame.setdefault(int(det.frame_ref.frame_idx), []).append(det)
+            kept: list[ObjectState] = []
             kept_ids: list[str] = []
+            raw_categories: list[str] = []
+            support_counts: list[int] = []
+            support_density: list[float] = []
+            confidences: list[float] = []
+            frame_items: list[tuple[int, ObjectState]] = []
             for frame_idx, frame_dets in sorted(by_frame.items()):
                 best = max(frame_dets, key=self._rank_detection)
-                best_attrs = dict(best.attributes)
-                best_attrs.update({
-                    'current_category': best.attributes.get('current_category', best.category),
-                    'consensus_category': consensus,
-                    'class_histogram': {k: float(v) for k, v in sorted(class_hist.items())},
-                    'consensus_score': float(consensus_conf),
-                    'support_track_ids': sorted(int(t) for t in support_tracks),
-                    'support_track_count': int(len(support_tracks)),
-                    'lifespan_start': int(min(by_frame.keys())),
-                    'lifespan_end': int(max(by_frame.keys())),
-                    'lifespan_length': int(len(by_frame)),
-                    'merged_from_tracks': list(sorted(tids)),
-                })
-                merged_objects.append(replace(best, object_id=final_id, category=consensus, attributes=best_attrs))
+                frame_items.append((int(frame_idx), best))
                 kept_ids.append(best.attributes.get('detection_id', best.object_id))
+                raw_categories.append(str(best.attributes.get('current_category', best.category)))
+                support_counts.append(int(best.attributes.get('support_track_count', len(best.attributes.get('track_ids', [])))))
+                visible_count = max(int(best.attributes.get('visible_track_count', support_counts[-1])), 1)
+                support_density.append(float(support_counts[-1]) / float(visible_count))
+                confidences.append(float(best.confidence))
                 for loser in frame_dets:
                     if loser is best:
                         continue
@@ -433,13 +473,42 @@ class ObjectAssociator:
                         'target_detection_id': best.attributes.get('detection_id', best.object_id),
                         'global_id': final_id,
                     })
+            smoothed_boxes = self._smooth_boxes([best for _, best in frame_items], window=1)
+            label_switches = int(sum(a != b for a, b in zip(raw_categories[:-1], raw_categories[1:])))
+            quality_score = float(0.35 * consensus_conf + 0.35 * np.clip(np.mean(support_density) if support_density else 0.0, 0.0, 1.0) + 0.15 * np.clip(np.mean(confidences) if confidences else 0.0, 0.0, 1.0) + 0.15 * (1.0 - entropy))
+            for (frame_idx, best), smooth_box in zip(frame_items, smoothed_boxes):
+                best_attrs = dict(best.attributes)
+                best_attrs.update({
+                    'current_category': best.attributes.get('current_category', best.category),
+                    'consensus_category': consensus,
+                    'class_histogram': {k: float(v) for k, v in sorted(class_hist.items())},
+                    'consensus_score': float(consensus_conf),
+                    'category_entropy': float(entropy),
+                    'support_track_ids': sorted(int(t) for t in support_tracks),
+                    'support_track_count': int(len(support_tracks)),
+                    'mean_support_track_count': float(np.mean(support_counts)) if support_counts else 0.0,
+                    'mean_support_density': float(np.mean(support_density)) if support_density else 0.0,
+                    'mean_confidence': float(np.mean(confidences)) if confidences else 0.0,
+                    'lifespan_start': int(min(by_frame.keys())),
+                    'lifespan_end': int(max(by_frame.keys())),
+                    'lifespan_length': int(len(by_frame)),
+                    'merged_from_tracks': list(sorted(tids)),
+                    'label_switch_count': label_switches,
+                    'quality_score': quality_score,
+                    'raw_bbox_xyxy': np.asarray(best.bbox_xyxy, dtype=np.float32).tolist(),
+                    'smoothed_bbox_xyxy': np.asarray(smooth_box, dtype=np.float32).tolist(),
+                })
+                merged_objects.append(replace(best, object_id=final_id, category=consensus, bbox_xyxy=np.asarray(smooth_box, dtype=np.float32), attributes=best_attrs))
             summaries[final_id] = {
                 'global_id': final_id,
                 'consensus_category': consensus,
                 'class_histogram': {k: float(v) for k, v in sorted(class_hist.items())},
                 'consensus_score': float(consensus_conf),
+                'category_entropy': float(entropy),
                 'support_track_ids': sorted(int(t) for t in support_tracks),
                 'support_track_count': int(len(support_tracks)),
+                'mean_support_track_count': float(np.mean(support_counts)) if support_counts else 0.0,
+                'mean_support_density': float(np.mean(support_density)) if support_density else 0.0,
                 'frame_indices': sorted(int(f) for f in by_frame.keys()),
                 'lifespan_start': int(min(by_frame.keys())),
                 'lifespan_end': int(max(by_frame.keys())),
@@ -447,6 +516,9 @@ class ObjectAssociator:
                 'observation_count': int(sum(len(v) for v in by_frame.values())),
                 'kept_detection_ids': kept_ids,
                 'merged_from_tracks': list(sorted(tids)),
+                'mean_confidence': float(np.mean(confidences)) if confidences else 0.0,
+                'label_switch_count': label_switches,
+                'quality_score': quality_score,
             }
         merged_objects = sorted(merged_objects, key=lambda o: (o.frame_ref.stream_id, int(o.frame_ref.frame_idx), o.object_id))
         return merged_objects, merge_events, summaries

@@ -172,12 +172,17 @@ class ObjectArtifact(BaseArtifact):
             consensus = obj.attributes.get('consensus_category', obj.category)
             current = obj.attributes.get('current_category', consensus)
             support_count = int(obj.attributes.get('support_track_count', len(obj.attributes.get('track_ids', []))))
+            entropy = float(obj.attributes.get('category_entropy', 0.0))
+            quality = float(obj.attributes.get('quality_score', 0.0))
             life = f"{obj.attributes.get('lifespan_start', current_frame_idx)}-{obj.attributes.get('lifespan_end', current_frame_idx)}"
             label = f"{gid} {consensus}"
             if current != consensus:
                 label += f" (cur:{current})"
-            label += f" trk:{support_count} life:{life}"
+            label += f" trk:{support_count} H:{entropy:.2f} q:{quality:.2f} life:{life}"
             draw.text((x1 + 4, max(4.0, y1 - 14.0)), label, fill=(*rgb_color, 255))
+            for xy in np.asarray(obj.attributes.get('support_points_xy', []), dtype=np.float32)[:64]:
+                sx, sy = float(xy[0]), float(xy[1])
+                draw.ellipse([sx - 2, sy - 2, sx + 2, sy + 2], fill=(*rgb_color, 220), outline=(255, 255, 255, 255))
             history = [c for c in centers_by_id.get(gid, []) if current_frame_idx - trail_window <= c[2] <= current_frame_idx]
             history = sorted(history, key=lambda item: item[2])
             if len(history) >= 2:
@@ -219,9 +224,11 @@ class ObjectArtifact(BaseArtifact):
                 consensus = obj.attributes.get('consensus_category', obj.category)
                 current = obj.attributes.get('current_category', consensus)
                 support = int(summary.get('support_track_count', obj.attributes.get('support_track_count', 0)))
+                entropy = float(summary.get('category_entropy', obj.attributes.get('category_entropy', 0.0)))
+                quality = float(summary.get('quality_score', obj.attributes.get('quality_score', 0.0)))
                 life = f"{summary.get('lifespan_start', obj.attributes.get('lifespan_start', 0))}-{summary.get('lifespan_end', obj.attributes.get('lifespan_end', obj.frame_ref.frame_idx))}"
                 label = consensus if current == consensus else f"{consensus} / cur:{current}"
-                rows.append([object_id, f"{label} · trk {support} · life {life}"])
+                rows.append([object_id, f"{label} · trk {support} · H {entropy:.2f} · q {quality:.2f} · life {life}"])
         return rows
 
     def _timeline_figure(self, frame_keys: list[str]):
@@ -240,6 +247,8 @@ class ObjectArtifact(BaseArtifact):
             end = summary.get('lifespan_end', start)
             consensus = summary.get('consensus_category', 'unknown')
             support = summary.get('support_track_count', 0)
+            entropy = float(summary.get('category_entropy', 0.0))
+            quality = float(summary.get('quality_score', 0.0))
             traces.append(
                 go.Scatter(
                     x=[start, end],
@@ -250,7 +259,7 @@ class ObjectArtifact(BaseArtifact):
                     name=gid,
                     hovertemplate=(
                         f"{gid}<br>consensus={consensus}<br>support_tracks={support}<br>"
-                        f"lifespan={start}-{end}<extra></extra>"
+                        f"entropy={entropy:.2f}<br>quality={quality:.2f}<br>lifespan={start}-{end}<extra></extra>"
                     ),
                     showlegend=False,
                 )

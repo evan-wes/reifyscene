@@ -183,31 +183,42 @@ class Room4DPipeline:
 
         track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
 
-        def _frame_track_ids(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> list[int]:
+        def _frame_track_support(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> dict[str, Any]:
             payload = track_payloads.get(stream_id, {})
             points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
             visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
             track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
             frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
             if points_xy.ndim != 3 or frame_indices.size == 0:
-                return []
+                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
             matches = np.where(frame_indices == int(frame_idx))[0]
             if matches.size == 0:
-                return []
+                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
             t = int(matches[0])
             visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
             pts = points_xy[t]
             bbox = np.asarray(bbox_xyxy, dtype=np.float32)
             x1, y1, x2, y2 = bbox.tolist()
             inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
-            keep = visible & inside_bbox
+            bbox_keep = visible & inside_bbox
+            mask_keep = bbox_keep.copy()
             if mask is not None:
                 mask_arr = np.asarray(mask, dtype=bool)
                 if mask_arr.ndim == 2 and mask_arr.shape[0] > 0 and mask_arr.shape[1] > 0:
                     xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
                     yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
-                    keep &= mask_arr[yi, xi]
-            return [int(tid) for tid in track_ids[keep].tolist()]
+                    mask_keep &= mask_arr[yi, xi]
+            keep = mask_keep if int(mask_keep.sum()) > 0 else bbox_keep
+            support_points = pts[keep] if np.any(keep) else np.zeros((0, 2), dtype=np.float32)
+            selected_ids = [int(tid) for tid in track_ids[keep].tolist()]
+            return {
+                'track_ids': selected_ids,
+                'support_points_xy': np.asarray(support_points, dtype=np.float32).tolist(),
+                'visible_track_count': int(visible.sum()),
+                'bbox_support_count': int(bbox_keep.sum()),
+                'mask_support_count': int(mask_keep.sum()),
+                'support_track_count': int(len(selected_ids)),
+            }
 
         for frame_ref in selected_frames:
             stream = stream_lookup[frame_ref.stream_id]
@@ -233,16 +244,21 @@ class Room4DPipeline:
                     densepose_payloads[detection_id] = dp
                 smpl = self.human_smpl.fit_frame(frame, kpts, mask=mask, intrinsics=None)
                 smpl_payloads[detection_id] = smpl
-                track_ids = _frame_track_ids(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                support = _frame_track_support(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                track_ids = list(support['track_ids'])
                 attrs = {
                     'detection_id': detection_id,
                     'track_ids': track_ids,
+                    'support_points_xy': list(support['support_points_xy']),
+                    'visible_track_count': int(support['visible_track_count']),
+                    'bbox_support_count': int(support['bbox_support_count']),
+                    'mask_support_count': int(support['mask_support_count']),
                     'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
                     'detector_backend': self.human_detector.backend_used,
                     'pose_backend': self.human_pose.backend_used,
                     'densepose_backend': self.human_densepose.backend_used,
                     'smpl_backend': self.human_smpl.backend_used,
-                    'support_track_count': len(track_ids),
+                    'support_track_count': int(support['support_track_count']),
                 }
                 human_states.append(
                     HumanState(
@@ -317,30 +333,42 @@ class Room4DPipeline:
 
         track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
 
-        def _frame_track_ids(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> list[int]:
+        def _frame_track_support(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> dict[str, Any]:
             payload = track_payloads.get(stream_id, {})
             points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
             visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
             track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
             frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
             if points_xy.ndim != 3 or frame_indices.size == 0:
-                return []
+                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
             matches = np.where(frame_indices == int(frame_idx))[0]
             if matches.size == 0:
-                return []
+                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
             t = int(matches[0])
             visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
             pts = points_xy[t]
             bbox = np.asarray(bbox_xyxy, dtype=np.float32)
             x1, y1, x2, y2 = bbox.tolist()
             inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
-            keep = visible & inside_bbox
+            bbox_keep = visible & inside_bbox
+            mask_keep = bbox_keep.copy()
             if mask is not None:
                 mask_arr = np.asarray(mask, dtype=bool)
-                xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
-                yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
-                keep &= mask_arr[yi, xi]
-            return [int(tid) for tid in track_ids[keep].tolist()]
+                if mask_arr.ndim == 2 and mask_arr.shape[0] > 0 and mask_arr.shape[1] > 0:
+                    xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
+                    yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
+                    mask_keep &= mask_arr[yi, xi]
+            keep = mask_keep if int(mask_keep.sum()) > 0 else bbox_keep
+            support_points = pts[keep] if np.any(keep) else np.zeros((0, 2), dtype=np.float32)
+            selected_ids = [int(tid) for tid in track_ids[keep].tolist()]
+            return {
+                'track_ids': selected_ids,
+                'support_points_xy': np.asarray(support_points, dtype=np.float32).tolist(),
+                'visible_track_count': int(visible.sum()),
+                'bbox_support_count': int(bbox_keep.sum()),
+                'mask_support_count': int(mask_keep.sum()),
+                'support_track_count': int(len(selected_ids)),
+            }
 
         for frame_ref in selected_frames:
             stream = stream_lookup[frame_ref.stream_id]
@@ -356,11 +384,17 @@ class Room4DPipeline:
                 embedding = embeddings[det_idx] if det_idx < embeddings.shape[0] else None
                 if embedding is not None:
                     embedding_vectors[detection_id] = np.asarray(embedding, dtype=np.float32)
-                track_ids = _frame_track_ids(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                support = _frame_track_support(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                track_ids = list(support['track_ids'])
                 attrs = {
                     'detection_id': detection_id,
                     'label_id': int(det.get('label_id', -1)),
                     'track_ids': track_ids,
+                    'support_points_xy': list(support['support_points_xy']),
+                    'visible_track_count': int(support['visible_track_count']),
+                    'bbox_support_count': int(support['bbox_support_count']),
+                    'mask_support_count': int(support['mask_support_count']),
+                    'support_track_count': int(support['support_track_count']),
                     'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
                     'frame_stride': int(self.cfg.get('tracking', {}).get('frame_stride', 1)),
                     'detector_backend': self.object_detector.backend_used,
