@@ -99,6 +99,7 @@ class HumanState:
     densepose: Optional[dict[str, Any]]
     smpl_params: Optional[dict[str, Any]]
     confidence: float
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

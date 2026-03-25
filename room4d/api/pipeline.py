@@ -8,7 +8,7 @@ import numpy as np
 from typing import Any
 
 from room4d.common.io import read_yaml
-from room4d.common.types import ObjectState
+from room4d.common.types import HumanState, ObjectState
 from room4d.common.paths import ensure_dir
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.vggt_wrapper import VGGTInitializer
@@ -19,6 +19,12 @@ from room4d.ingest.quality import ClipQualityAssessor
 from room4d.lifting.backproject import TrackLifter3D
 from room4d.lifting.static_dynamic import StaticDynamicPartitioner
 from room4d.optimize.solver import JointSpatiotemporalSolver
+from room4d.perception.humans.detector import HumanDetector
+from room4d.perception.humans.pose2d import HumanPose2DEstimator
+from room4d.perception.humans.densepose_wrapper import DensePoseEstimator
+from room4d.perception.humans.smpl_fitter import SMPLFitter
+from room4d.perception.humans.human_assoc import HumanAssociator
+from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.objects.detector import ObjectDetector
 from room4d.perception.objects.embedder import InstanceEmbedder
 from room4d.perception.objects.object_artifact import ObjectArtifact
@@ -63,6 +69,12 @@ class Room4DPipeline:
             static_threshold_world=float(lifting_cfg.get('static_threshold_world', 0.05)),
             min_lifted_frames=int(lifting_cfg.get('min_lifted_frames', 2)),
         )
+        humans_cfg = self.cfg.get('humans', {})
+        self.human_detector = HumanDetector(humans_cfg)
+        self.human_pose = HumanPose2DEstimator(humans_cfg)
+        self.human_densepose = DensePoseEstimator(humans_cfg)
+        self.human_smpl = SMPLFitter(humans_cfg)
+        self.human_associator = HumanAssociator(humans_cfg)
         objects_cfg = self.cfg.get('objects', {})
         self.object_detector = ObjectDetector(objects_cfg)
         self.object_segmenter = ObjectSegmenter(objects_cfg)
@@ -158,13 +170,140 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def perceive_humans(self, ingest_artifact):
-        """Run human perception.
+    def perceive_humans(self, ingest_artifact, track_artifact=None):
+        """Run single-video human detection, pose, DensePose, SMPL, and association."""
+        humans_cfg = self.cfg.get('humans', {})
+        selected_frames = list(ingest_artifact.keyframes)
+        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
+        human_states: list[HumanState] = []
+        mask_arrays: dict[str, np.ndarray] = {}
+        densepose_payloads: dict[str, dict[str, Any]] = {}
+        smpl_payloads: dict[str, dict[str, Any]] = {}
+        notes: list[str] = []
 
-        TODO: wire in the human branch after the first geometry-tracking-graph
-        slice is stable.
-        """
-        return None
+        track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
+
+        def _frame_track_ids(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> list[int]:
+            payload = track_payloads.get(stream_id, {})
+            points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
+            visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
+            track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
+            frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
+            if points_xy.ndim != 3 or frame_indices.size == 0:
+                return []
+            matches = np.where(frame_indices == int(frame_idx))[0]
+            if matches.size == 0:
+                return []
+            t = int(matches[0])
+            visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
+            pts = points_xy[t]
+            bbox = np.asarray(bbox_xyxy, dtype=np.float32)
+            x1, y1, x2, y2 = bbox.tolist()
+            inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
+            keep = visible & inside_bbox
+            if mask is not None:
+                mask_arr = np.asarray(mask, dtype=bool)
+                if mask_arr.ndim == 2 and mask_arr.shape[0] > 0 and mask_arr.shape[1] > 0:
+                    xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
+                    yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
+                    keep &= mask_arr[yi, xi]
+            return [int(tid) for tid in track_ids[keep].tolist()]
+
+        for frame_ref in selected_frames:
+            stream = stream_lookup[frame_ref.stream_id]
+            frame = self.decoder.get_frame(stream, frame_ref.frame_idx)
+            detections = self.human_detector.detect(frame)
+            boxes = [np.asarray(det['bbox_xyxy'], dtype=np.float32) for det in detections]
+            masks = []
+            for det_idx, det in enumerate(detections):
+                logits = det.get('mask_logits')
+                mask = None if logits is None else (np.asarray(logits, dtype=np.float32) >= 0.5)
+                det['mask'] = mask
+                masks.append(mask)
+            keypoints = self.human_pose.predict(frame, boxes)
+            denseposes = self.human_densepose.predict(frame, boxes, masks=masks, keypoints=keypoints)
+            for det_idx, det in enumerate(detections):
+                detection_id = f"hum:{frame_ref.stream_id}:{int(frame_ref.frame_idx)}:{det_idx}"
+                mask = masks[det_idx] if det_idx < len(masks) else None
+                if mask is not None:
+                    mask_arrays[detection_id] = np.asarray(mask, dtype=bool)
+                kpts = keypoints[det_idx] if det_idx < len(keypoints) else None
+                dp = denseposes[det_idx] if det_idx < len(denseposes) else None
+                if dp is not None:
+                    densepose_payloads[detection_id] = dp
+                smpl = self.human_smpl.fit_frame(frame, kpts, mask=mask, intrinsics=None)
+                smpl_payloads[detection_id] = smpl
+                track_ids = _frame_track_ids(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
+                attrs = {
+                    'detection_id': detection_id,
+                    'track_ids': track_ids,
+                    'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
+                    'detector_backend': self.human_detector.backend_used,
+                    'pose_backend': self.human_pose.backend_used,
+                    'densepose_backend': self.human_densepose.backend_used,
+                    'smpl_backend': self.human_smpl.backend_used,
+                    'support_track_count': len(track_ids),
+                }
+                human_states.append(
+                    HumanState(
+                        human_id=detection_id,
+                        frame_ref=frame_ref,
+                        bbox_xyxy=np.asarray(det['bbox_xyxy'], dtype=np.float32),
+                        mask_rle=None if mask is None else {'shape': list(mask.shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
+                        keypoints_2d=None if kpts is None else np.asarray(kpts, dtype=np.float32),
+                        densepose=dp,
+                        smpl_params=smpl,
+                        confidence=float(det['score']),
+                        attributes=attrs,
+                    )
+                )
+
+        artifact = HumanArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='humans',
+            save_dir=self._stage_dir('humans'),
+            humans=human_states,
+            raw_humans=[],
+            linked_ids={},
+            frame_index={},
+            mask_arrays=mask_arrays,
+            densepose_payloads=densepose_payloads,
+            smpl_payloads=smpl_payloads,
+            notes=notes,
+            metadata={
+                'detector_backend': self.human_detector.backend_used,
+                'pose_backend': self.human_pose.backend_used,
+                'densepose_backend': self.human_densepose.backend_used,
+                'smpl_backend': self.human_smpl.backend_used,
+                'save_debug_assets': bool(humans_cfg.get('debug', False)),
+                'save_debug_html': bool(humans_cfg.get('debug', False)),
+                'debug_image_paths': {},
+            },
+        )
+        geometry_dir = self._stage_dir('geometry') / 'images'
+        if geometry_dir.exists():
+            debug_image_paths = {}
+            for frame_ref in selected_frames:
+                key = f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+                candidate = geometry_dir / f"{key.replace(':', '__').replace('/', '_')}.png"
+                if candidate.exists():
+                    debug_image_paths[key] = str(candidate)
+            artifact.metadata['debug_image_paths'] = debug_image_paths
+        artifact.raw_humans = [HumanState(
+            human_id=h.human_id,
+            frame_ref=h.frame_ref,
+            bbox_xyxy=np.asarray(h.bbox_xyxy, dtype=np.float32).copy(),
+            mask_rle=h.mask_rle,
+            keypoints_2d=None if h.keypoints_2d is None else np.asarray(h.keypoints_2d, dtype=np.float32).copy(),
+            densepose=h.densepose,
+            smpl_params=h.smpl_params,
+            confidence=float(h.confidence),
+            attributes=dict(h.attributes),
+        ) for h in human_states]
+        artifact.frame_index = artifact._build_frame_index(artifact.humans)
+        artifact = self.human_associator.associate_across_views(artifact)
+        artifact.save()
+        return artifact
 
     def perceive_objects(self, ingest_artifact, track_artifact=None):
         """Run single-video object detection, segmentation, and re-identification."""
@@ -311,15 +450,17 @@ class Room4DPipeline:
         sync_artifact = self.synchronize(ingest_artifact)
         geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
         track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
+        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact)
         object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
-        graph_artifact = self.build_graph(geometry_artifact, track_artifact, object_artifact=object_artifact)
-        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
+        graph_artifact = self.build_graph(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
+        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
         render_artifact = self.fit_renderer(optimization_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
             'geometry': geometry_artifact,
             'tracks': track_artifact,
+            'humans': human_artifact,
             'objects': object_artifact,
             'graph': graph_artifact,
             'optimization': optimization_artifact,

@@ -4,7 +4,7 @@
 This helper exercises the implemented vertical slice:
 
     ingest -> sync -> VGGT geometry -> CoTracker -> 3D lifting ->
-    static/dynamic partition -> graph -> optimization -> render scaffold
+    static/dynamic partition -> humans -> objects -> graph -> optimization -> render scaffold
 """
 
 from __future__ import annotations
@@ -82,6 +82,16 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         tracking['cpu_threads'] = int(cpu_threads)
     elif rec.get('cpu_threads') is not None:
         tracking['cpu_threads'] = int(rec['cpu_threads'])
+    humans = cfg.setdefault('humans', {})
+    humans['backend_mode'] = args.humans_backend_mode
+    humans['device'] = args.humans_device or args.tracking_device or args.geometry_device
+    humans['score_threshold'] = float(args.humans_score_threshold)
+    humans['max_detections'] = int(args.humans_max_detections)
+    humans['debug'] = bool(args.debug)
+    humans['pose_backend_mode'] = args.humans_pose_backend_mode
+    humans['densepose_backend_mode'] = args.humans_densepose_backend_mode
+    humans['smpl_backend_mode'] = args.humans_smpl_backend_mode
+
     objects = cfg.setdefault('objects', {})
     objects['backend_mode'] = args.objects_backend_mode
     objects['device'] = args.objects_device or args.tracking_device or args.geometry_device
@@ -158,6 +168,13 @@ def main() -> None:
     parser.add_argument('--tracking-window-size', type=int, default=None)
     parser.add_argument('--tracking-window-overlap', type=int, default=None)
     parser.add_argument('--tracking-allow-github', action='store_true', help='Allow torch.hub to fetch CoTracker from GitHub when no local checkout is present.')
+    parser.add_argument('--humans-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--humans-device', default=None)
+    parser.add_argument('--humans-score-threshold', type=float, default=0.5)
+    parser.add_argument('--humans-max-detections', type=int, default=6)
+    parser.add_argument('--humans-pose-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--humans-densepose-backend-mode', default='auto', choices=['auto', 'heuristic'])
+    parser.add_argument('--humans-smpl-backend-mode', default='auto', choices=['auto', 'heuristic'])
     parser.add_argument('--objects-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--objects-device', default=None)
     parser.add_argument('--objects-score-threshold', type=float, default=0.5)
@@ -210,6 +227,10 @@ def main() -> None:
             f"cpu_threads: {cfg['tracking'].get('cpu_threads')}  resource_profile: {(rec or {}).get('profile', 'none')}"
         )
         console.print(
+            f"humans: {cfg['humans']['backend_mode']} on {cfg['humans']['device']}  score_threshold: {cfg['humans']['score_threshold']}  "
+            f"max_detections: {cfg['humans']['max_detections']}  pose: {cfg['humans']['pose_backend_mode']}  densepose: {cfg['humans']['densepose_backend_mode']}  smpl: {cfg['humans']['smpl_backend_mode']}"
+        )
+        console.print(
             f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
             f"max_detections: {cfg['objects']['max_detections']}  embedder: {cfg['objects']['embedder_backend_mode']}"
         )
@@ -219,14 +240,15 @@ def main() -> None:
     outputs = {}
 
     stages = [
-        ("Stage 1/8 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
-        ("Stage 2/8 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
-        ("Stage 3/8 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
-        ("Stage 4/8 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
-        ("Stage 5/8 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
-        ("Stage 6/8 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], object_artifact=outputs["objects"])),
-        ("Stage 7/8 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
-        ("Stage 8/8 · Render scaffold", "render", lambda: pipeline.fit_renderer(outputs["optimization"])),
+        ("Stage 1/9 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
+        ("Stage 2/9 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
+        ("Stage 3/9 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
+        ("Stage 4/9 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
+        ("Stage 5/9 · Human perception", "humans", lambda: pipeline.perceive_humans(outputs["ingest"], track_artifact=outputs["tracks"])),
+        ("Stage 6/9 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
+        ("Stage 7/9 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"])),
+        ("Stage 8/9 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
+        ("Stage 9/9 · Render scaffold", "render", lambda: pipeline.fit_renderer(outputs["optimization"])),
     ]
 
     for label, key, fn in stages:

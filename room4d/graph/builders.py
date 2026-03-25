@@ -77,6 +77,27 @@ class DynamicSceneGraphBuilder:
                 )
                 edges.append(self.edge_factory.observed_by(node_id, stream_id, conf=1.0))
 
+        if human_artifact is not None:
+            grouped_h: dict[str, list[Any]] = {}
+            for human in human_artifact.humans:
+                grouped_h.setdefault(human.human_id, []).append(human)
+            for human_id, instances in grouped_h.items():
+                first = instances[0]
+                avg_conf = float(np.mean([h.confidence for h in instances]))
+                attrs = {
+                    'stream_id': first.frame_ref.stream_id,
+                    'num_observations': len(instances),
+                    'frame_indices': sorted({int(h.frame_ref.frame_idx) for h in instances}),
+                    'avg_confidence': avg_conf,
+                    'support_track_ids': sorted({int(t) for h in instances for t in h.attributes.get('track_ids', [])}),
+                    'mean_visible_keypoints': float(np.mean([np.sum(np.asarray(h.keypoints_2d)[:, 2] > 0.05) for h in instances if h.keypoints_2d is not None])) if any(h.keypoints_2d is not None for h in instances) else 0.0,
+                    'has_densepose': any(h.densepose is not None for h in instances),
+                    'has_smpl': any(bool((h.smpl_params or {}).get('valid', False)) for h in instances),
+                }
+                node_id = f'human:{first.frame_ref.stream_id}:{human_id}'
+                nodes.append(self.node_factory.human_node(node_id, attrs))
+                edges.append(self.edge_factory.observed_by(node_id, first.frame_ref.stream_id, conf=min(1.0, avg_conf)))
+
         if object_artifact is not None:
             grouped: dict[str, list[Any]] = {}
             for obj in object_artifact.objects:
@@ -101,8 +122,6 @@ class DynamicSceneGraphBuilder:
         notes = [
             "TODO: replace per-stream track nodes with cross-view associated entities.",
         ]
-        if human_artifact is not None:
-            notes.append("Human artifact input was provided but is not consumed in the first vertical slice.")
 
         return GraphArtifact(
             run_id=geometry_artifact.run_id,
