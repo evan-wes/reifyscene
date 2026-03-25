@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from room4d.lifting.backproject import Backprojector
 from room4d.optimize.factors.priors import PriorFactor
 from room4d.optimize.factors.reprojection import ReprojectionFactor
 from room4d.optimize.factors.time_alignment import TimeAlignmentFactor
@@ -37,7 +38,10 @@ class JointSpatiotemporalSolver:
             "max_rotation_deg": float(self.cfg.get("static_track_max_rotation_deg", 8.0)),
             "max_translation": float(self.cfg.get("static_track_max_translation", 0.10)),
             "accept_improvement_ratio": float(self.cfg.get("static_track_accept_improvement_ratio", 0.98)),
+            "relabel_static_threshold_world": float(self.cfg.get("relabel_static_threshold_world", 0.05)),
+            "relabel_min_lifted_frames": max(int(self.cfg.get("relabel_min_lifted_frames", 2)), 2),
         }
+        self.backprojector = Backprojector(point_conf_threshold=0.0)
 
     @staticmethod
     def _copy_intrinsics(intr: CameraIntrinsics) -> CameraIntrinsics:
@@ -83,6 +87,13 @@ class JointSpatiotemporalSolver:
                 for k, states in geometry_artifact.camera_states_by_stream.items()
             },
             "selected_frames": list(geometry_artifact.selected_frames),
+            "depthmaps_by_frame": {
+                k: {
+                    "depth": np.asarray(v.get("depth")).copy(),
+                    "confidence": None if v.get("confidence") is None else np.asarray(v.get("confidence")).copy(),
+                }
+                for k, v in geometry_artifact.depthmaps_by_frame.items()
+            },
             "track_observations": dict(track_artifact.per_stream_observations),
             "track_payloads": {
                 k: {
@@ -206,6 +217,84 @@ class JointSpatiotemporalSolver:
         err_arr = np.asarray(errors, dtype=np.float64)
         return {"mean": float(np.mean(err_arr)), "median": float(np.median(err_arr))}
 
+    def _relabel_payload(self, payload: dict[str, Any], *, xyz_key: str, valid_key: str, label_key: str, score_key: str) -> dict[str, Any]:
+        xyz = np.asarray(payload.get(xyz_key, np.zeros((0, 0, 3), dtype=np.float32)), dtype=np.float32)
+        valid = np.asarray(payload.get(valid_key, np.zeros((0, 0), dtype=bool)))
+        num_tracks = xyz.shape[1] if xyz.ndim == 3 else 0
+        labels = np.full((num_tracks,), -1, dtype=np.int8)
+        scores = np.full((num_tracks,), np.nan, dtype=np.float32)
+        min_frames = int(self.static_track_cfg["relabel_min_lifted_frames"])
+        thr = float(self.static_track_cfg["relabel_static_threshold_world"])
+        for track_idx in range(num_tracks):
+            track_valid = valid[:, track_idx].astype(bool) if valid.size else np.isfinite(xyz[:, track_idx]).all(axis=1)
+            pts = xyz[track_valid, track_idx]
+            if pts.shape[0] < min_frames:
+                continue
+            center = np.nanmedian(pts, axis=0)
+            spread = np.linalg.norm(pts - center[None, :], axis=1)
+            score = float(np.nanmedian(spread))
+            scores[track_idx] = score
+            labels[track_idx] = 1 if score <= thr else 0
+        payload[label_key] = labels
+        payload[score_key] = scores
+        return {
+            "static_count": int(np.sum(labels > 0)),
+            "dynamic_count": int(np.sum(labels == 0)),
+            "uncertain_count": int(np.sum(labels < 0)),
+            "threshold_world": thr,
+            "min_lifted_frames": min_frames,
+        }
+
+    def _relift_tracks_with_refined_cameras(self, state: dict[str, Any]) -> None:
+        selected_frames = list(state.get("selected_frames", []))
+        depthmaps_by_frame = state.get("depthmaps_by_frame", {})
+        camera_states = state.get("camera_states", {})
+        for stream_id, payload in state.get("track_payloads", {}).items():
+            frame_indices = np.asarray(payload.get("frame_indices", []), dtype=int)
+            points_xy = np.asarray(payload.get("points_xy", np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
+            visibility = np.asarray(payload.get("visibility", np.zeros((0, 0), dtype=bool)))
+            num_tracks = points_xy.shape[1] if points_xy.ndim == 3 else 0
+            stream_frames = [f for f in selected_frames if f.stream_id == stream_id]
+            refined_xyz = np.full((len(stream_frames), num_tracks, 3), np.nan, dtype=np.float32)
+            refined_valid = np.zeros((len(stream_frames), num_tracks), dtype=bool)
+            lifted_frame_indices = np.asarray([f.frame_idx for f in stream_frames], dtype=np.int32)
+            original_wh = tuple(int(v) for v in payload.get("original_size_wh", [0, 0]))
+            for k, frame in enumerate(stream_frames):
+                matches = np.where(frame_indices == int(frame.frame_idx))[0]
+                if matches.size == 0:
+                    continue
+                t = int(matches[0])
+                frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+                depth_payload = depthmaps_by_frame.get(frame_key)
+                state_for_frame = self._find_state_for_frame(camera_states.get(stream_id, []), frame)
+                if depth_payload is None or state_for_frame is None:
+                    continue
+                xy = points_xy[t].copy()
+                vis = visibility[t].astype(bool) if visibility.size else np.ones((num_tracks,), dtype=bool)
+                depth_map = np.asarray(depth_payload.get("depth"), dtype=np.float32)
+                if depth_map.ndim == 3 and depth_map.shape[-1] == 1:
+                    depth_map = depth_map[..., 0]
+                h, w = depth_map.shape[:2]
+                scale_x = float(w) / max(float(original_wh[0]), 1e-6)
+                scale_y = float(h) / max(float(original_wh[1]), 1e-6)
+                xy[:, 0] *= scale_x
+                xy[:, 1] *= scale_y
+                xyz = self.backprojector.backproject(xy, state_for_frame, depth_map)
+                valid = np.isfinite(xyz).all(axis=1) & vis
+                xyz[~valid] = np.nan
+                refined_xyz[k] = xyz.astype(np.float32)
+                refined_valid[k] = valid
+            payload["refined_lifted_frame_indices"] = lifted_frame_indices
+            payload["refined_lifted_xyz"] = refined_xyz
+            payload["refined_lifted_valid"] = refined_valid
+            payload["refined_classification_summary"] = self._relabel_payload(
+                payload,
+                xyz_key="refined_lifted_xyz",
+                valid_key="refined_lifted_valid",
+                label_key="refined_static_labels",
+                score_key="refined_static_scores",
+            )
+
     def _refine_static_track_geometry(self, state: dict[str, Any]) -> dict[str, Any]:
         if not self.static_track_cfg["enabled"]:
             return {"enabled": False, "applied": False}
@@ -314,6 +403,13 @@ class JointSpatiotemporalSolver:
             }
             summary["streams"][stream_id] = payload['refinement_summary']
 
+        self._relift_tracks_with_refined_cameras(state)
+        for stream_id, payload in payloads.items():
+            refined_summary = payload.get("refined_classification_summary", {})
+            if stream_id in summary["streams"]:
+                summary["streams"][stream_id]["refined_static_count"] = int(refined_summary.get("static_count", 0))
+                summary["streams"][stream_id]["refined_dynamic_count"] = int(refined_summary.get("dynamic_count", 0))
+                summary["streams"][stream_id]["refined_uncertain_count"] = int(refined_summary.get("uncertain_count", 0))
         state['track_refinement_summary'] = summary
         return summary
 
@@ -378,6 +474,8 @@ class JointSpatiotemporalSolver:
             refined_cameras=state.get("camera_states", {}),
             refined_offsets=state.get("time_offsets", {}),
             tracks_3d=state.get("track_refinement_summary", {}),
+            refined_track_payloads_by_stream=state.get("track_payloads", {}),
+            selected_frames=list(state.get("selected_frames", [])),
             object_trajectories={},
             human_trajectories={},
             stage_diagnostics=list(state.get("stage_history", [])),

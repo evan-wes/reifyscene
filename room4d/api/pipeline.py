@@ -172,6 +172,15 @@ class Room4DPipeline:
         """Run staged joint optimization."""
         artifact = self.solver.solve_all(sync_artifact, geometry_artifact, track_artifact, human_artifact, object_artifact, graph_artifact)
         artifact.save_dir = self._stage_dir('optimization')
+        tracking_cfg = self.cfg.get('tracking', {})
+        artifact.metadata.update({
+            'save_refinement_viewer': bool(tracking_cfg.get('debug', False)),
+            'debug_max_points': int(tracking_cfg.get('debug_max_points', 5000)),
+            'debug_max_trails': int(tracking_cfg.get('debug_max_trails', 12)),
+            'debug_trail_window': int(tracking_cfg.get('debug_trail_window', 12)),
+        })
+        if artifact.metadata.get('save_refinement_viewer', False):
+            artifact.export_refinement_viewer(track_artifact, geometry_artifact)
         artifact.save()
         return artifact
 

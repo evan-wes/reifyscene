@@ -39,6 +39,22 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         ], dtype=np.float32))),
         TimedCameraState(stream_id=stream_id, time_sec=0.2, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
     ]
+    depthmaps = {}
+    pointmaps = {}
+    image_paths = {}
+    for frame in frames:
+        frame_key = f'{frame.stream_id}:{frame.frame_idx}'
+        depth = np.ones((48, 64), dtype=np.float32)
+        xs, ys = np.meshgrid(np.arange(64, dtype=np.float32), np.arange(48, dtype=np.float32))
+        pts = np.stack([xs / 40.0, ys / 40.0, np.ones_like(xs)], axis=-1).astype(np.float32)
+        depthmaps[frame_key] = {'depth': depth, 'confidence': np.ones_like(depth)}
+        pointmaps[frame_key] = {'points': pts, 'confidence': np.ones((48, 64), dtype=np.float32)}
+        img = np.zeros((48, 64, 3), dtype=np.uint8)
+        img[..., 1] = 120
+        img_path = tmp_path / f'{frame_key.replace(":", "__")}.png'
+        from PIL import Image
+        Image.fromarray(img).save(img_path)
+        image_paths[frame_key] = str(img_path)
     return GeometryArtifact(
         run_id='test',
         stage_name='geometry',
@@ -46,6 +62,9 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         selected_frames=frames,
         intrinsics_by_stream={stream_id: intr},
         camera_states_by_stream={stream_id: states},
+        depthmaps_by_frame=depthmaps,
+        pointmaps_by_frame=pointmaps,
+        metadata={'debug_image_paths': image_paths},
     )
 
 
@@ -121,3 +140,20 @@ def test_static_track_refinement_reduces_camera_error(tmp_path: Path) -> None:
     reloaded = OptimizationArtifact.load(tmp_path / 'optimization')
     assert 'cam_00' in reloaded.refined_cameras
     assert reloaded.tracks_3d['streams']['cam_00']['applied'] is True
+
+
+def test_refinement_viewer_and_relabel_outputs(tmp_path: Path) -> None:
+    geometry = _make_geometry_for_refinement(tmp_path)
+    tracks = _make_track_artifact(tmp_path)
+    sync = SyncArtifact(run_id='test', stage_name='sync', save_dir=tmp_path / 'sync', offsets_by_stream={'cam_00': 0.0})
+    solver = JointSpatiotemporalSolver({'enable_static_track_refinement': True, 'static_track_max_translation': 0.5})
+    artifact = solver.solve_all(sync, geometry, tracks)
+    artifact.save_dir = tmp_path / 'optimization'
+    artifact.metadata.update({'save_refinement_viewer': True, 'debug_max_points': 1000, 'debug_max_trails': 4, 'debug_trail_window': 4})
+    artifact.export_refinement_viewer(tracks, geometry)
+    artifact.save()
+    payload = artifact.refined_track_payloads_by_stream['cam_00']
+    assert 'refined_lifted_xyz' in payload
+    assert payload['refined_lifted_xyz'].shape == payload['lifted_xyz'].shape
+    assert 'refined_static_labels' in payload
+    assert (artifact.save_dir / 'refinement_debug_viewer.html').exists()
