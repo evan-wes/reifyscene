@@ -6,9 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, ObjectState
+from room4d.api.pipeline import Room4DPipeline
+from room4d.common.types import FrameRef, ObjectState, VideoStreamRef
 from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.perception.objects.object_assoc import ObjectAssociator
+from room4d.ingest.ingest_artifact import IngestArtifact
+from room4d.tracking.track_artifact import TrackArtifact
 
 
 def _make_obj(det_id: str, global_id: str, frame_idx: int, bbox, category='dog', embedding=None, track_ids=None, confidence=0.9):
@@ -143,3 +146,29 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
     assert len(loaded.objects) == 2
     assert len(loaded.raw_objects) == 3
     assert 'det:0' in loaded.mask_arrays
+
+
+def test_pipeline_selects_tracked_frames_for_objects() -> None:
+    pipeline = Room4DPipeline({'objects': {'frame_source': 'tracking', 'frame_stride': 2}})
+    ingest = IngestArtifact(
+        run_id='dev',
+        stage_name='ingest',
+        save_dir=Path('.'),
+        streams=[VideoStreamRef(stream_id='cam_00', video_path=Path('video.mp4'), fps=10.0, num_frames=10, width=32, height=24, has_audio=False)],
+        keyframes=[FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0), FrameRef(stream_id='cam_00', frame_idx=5, timestamp_sec=0.5)],
+    )
+    track_artifact = TrackArtifact(
+        run_id='dev',
+        stage_name='tracking',
+        save_dir=Path('.'),
+        track_payloads_by_stream={
+            'cam_00': {
+                'frame_indices': np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int32),
+                'points_xy': np.zeros((6, 1, 2), dtype=np.float32),
+                'visibility': np.ones((6, 1), dtype=bool),
+                'track_ids': np.asarray([0], dtype=np.int32),
+            }
+        },
+    )
+    frames = pipeline._select_perception_frames(ingest, track_artifact, pipeline.cfg['objects'], default_source='tracking')
+    assert [f.frame_idx for f in frames] == [0, 2, 4]

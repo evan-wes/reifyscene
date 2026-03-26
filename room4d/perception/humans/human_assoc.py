@@ -272,14 +272,13 @@ class HumanAssociator:
     @staticmethod
     def _smooth_smpl(seq: list[HumanState], idx: int, window: int = 1) -> dict[str, Any] | None:
         base = seq[idx].smpl_params
-        if base is None:
-            return None
         lo = max(0, idx - window)
         hi = min(len(seq), idx + window + 1)
         vals = [h.smpl_params for h in seq[lo:hi] if h.smpl_params and h.smpl_params.get('valid', False)]
         if not vals:
-            return dict(base)
-        out = dict(base)
+            return None if base is None else dict(base)
+        template = dict(base) if base is not None else dict(vals[min(len(vals) // 2, len(vals) - 1)])
+        out = dict(template)
         for key in ('betas', 'body_pose', 'global_orient', 'transl', 'scale'):
             arrays = [np.asarray(v[key], dtype=np.float32) for v in vals if key in v]
             if arrays:
@@ -287,16 +286,23 @@ class HumanAssociator:
         out['valid'] = True
         out['smoothed'] = True
         out['valid_ratio'] = float(np.mean([1.0 if v.get('valid', False) else 0.0 for v in vals]))
+        out['source_observations'] = int(len(vals))
         return out
 
     @staticmethod
     def _smooth_densepose(seq: list[HumanState], idx: int, smoothed_box: np.ndarray) -> dict[str, Any] | None:
         base = seq[idx].densepose
-        if base is None:
+        template = base
+        if template is None:
+            for neighbor in seq[max(0, idx - 1): min(len(seq), idx + 2)]:
+                if neighbor.densepose is not None:
+                    template = neighbor.densepose
+                    break
+        if template is None:
             return None
-        out = dict(base)
-        uv = np.asarray(base.get('uv', np.zeros((0, 2))), dtype=np.float32)
-        part_ids = np.asarray(base.get('part_ids', np.zeros((uv.shape[0],), dtype=np.int32)), dtype=np.int32)
+        out = dict(template)
+        uv = np.asarray(template.get('uv', np.zeros((0, 2))), dtype=np.float32)
+        part_ids = np.asarray(template.get('part_ids', np.zeros((uv.shape[0],), dtype=np.int32)), dtype=np.int32)
         x1, y1, x2, y2 = smoothed_box.tolist()
         bw = max(x2 - x1, 1.0)
         bh = max(y2 - y1, 1.0)
@@ -308,6 +314,7 @@ class HumanAssociator:
         out['uv'] = uv
         out['part_ids'] = part_ids
         out['smoothed'] = True
+        out['source_observations'] = int(1 if base is not None else 0)
         return out
 
     def _smooth_track(self, human_id: str, seq: list[HumanState]) -> tuple[list[HumanState], dict[str, Any]]:
@@ -387,7 +394,8 @@ class HumanAssociator:
                     last = seq[-1]
                     if last.frame_ref.stream_id != human.frame_ref.stream_id:
                         continue
-                    if int(human.frame_ref.frame_idx) - int(last.frame_ref.frame_idx) > self.max_frame_gap:
+                    frame_gap_limit = self.max_frame_gap * max(1, int(human.attributes.get('frame_stride', 1)))
+                    if int(human.frame_ref.frame_idx) - int(last.frame_ref.frame_idx) > frame_gap_limit:
                         continue
                     score, parts = self._score(human, last)
                     if score > best_score:

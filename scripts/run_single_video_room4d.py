@@ -88,9 +88,13 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     humans['score_threshold'] = float(args.humans_score_threshold)
     humans['max_detections'] = int(args.humans_max_detections)
     humans['debug'] = bool(args.debug)
+    humans['frame_source'] = args.humans_frame_source
+    humans['frame_stride'] = int(args.humans_frame_stride)
     humans['pose_backend_mode'] = args.humans_pose_backend_mode
     humans['densepose_backend_mode'] = args.humans_densepose_backend_mode
+    humans['densepose_frame_stride'] = int(args.humans_densepose_frame_stride)
     humans['smpl_backend_mode'] = args.humans_smpl_backend_mode
+    humans['smpl_frame_stride'] = int(args.humans_smpl_frame_stride)
 
     objects = cfg.setdefault('objects', {})
     objects['backend_mode'] = args.objects_backend_mode
@@ -98,6 +102,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     objects['score_threshold'] = float(args.objects_score_threshold)
     objects['max_detections'] = int(args.objects_max_detections)
     objects['debug'] = bool(args.debug)
+    objects['frame_source'] = args.objects_frame_source
+    objects['frame_stride'] = int(args.objects_frame_stride)
     objects['embedder_backend_mode'] = args.objects_embedder_backend_mode
 
     lifting = cfg.setdefault('lifting', {})
@@ -172,11 +178,17 @@ def main() -> None:
     parser.add_argument('--humans-device', default=None)
     parser.add_argument('--humans-score-threshold', type=float, default=0.5)
     parser.add_argument('--humans-max-detections', type=int, default=6)
+    parser.add_argument('--humans-frame-source', default='tracking', choices=['tracking', 'keyframes'])
+    parser.add_argument('--humans-frame-stride', type=int, default=1)
     parser.add_argument('--humans-pose-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--humans-densepose-backend-mode', default='auto', choices=['auto', 'heuristic'])
+    parser.add_argument('--humans-densepose-frame-stride', type=int, default=1)
     parser.add_argument('--humans-smpl-backend-mode', default='auto', choices=['auto', 'heuristic'])
+    parser.add_argument('--humans-smpl-frame-stride', type=int, default=1)
     parser.add_argument('--objects-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--objects-device', default=None)
+    parser.add_argument('--objects-frame-source', default='tracking', choices=['tracking', 'keyframes'])
+    parser.add_argument('--objects-frame-stride', type=int, default=1)
     parser.add_argument('--objects-score-threshold', type=float, default=0.5)
     parser.add_argument('--objects-max-detections', type=int, default=12)
     parser.add_argument('--objects-embedder-backend-mode', default='auto', choices=['real', 'auto', 'histogram'])
@@ -228,11 +240,12 @@ def main() -> None:
         )
         console.print(
             f"humans: {cfg['humans']['backend_mode']} on {cfg['humans']['device']}  score_threshold: {cfg['humans']['score_threshold']}  "
-            f"max_detections: {cfg['humans']['max_detections']}  pose: {cfg['humans']['pose_backend_mode']}  densepose: {cfg['humans']['densepose_backend_mode']}  smpl: {cfg['humans']['smpl_backend_mode']}"
+            f"max_detections: {cfg['humans']['max_detections']}  frame_source: {cfg['humans']['frame_source']} stride: {cfg['humans']['frame_stride']}  "
+            f"pose: {cfg['humans']['pose_backend_mode']}  densepose: {cfg['humans']['densepose_backend_mode']} stride: {cfg['humans']['densepose_frame_stride']}  smpl: {cfg['humans']['smpl_backend_mode']} stride: {cfg['humans']['smpl_frame_stride']}"
         )
         console.print(
             f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
-            f"max_detections: {cfg['objects']['max_detections']}  embedder: {cfg['objects']['embedder_backend_mode']}"
+            f"max_detections: {cfg['objects']['max_detections']}  frame_source: {cfg['objects']['frame_source']} stride: {cfg['objects']['frame_stride']}  embedder: {cfg['objects']['embedder_backend_mode']}"
         )
 
     pipeline = Room4DPipeline(cfg)

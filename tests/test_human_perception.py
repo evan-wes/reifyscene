@@ -142,3 +142,21 @@ def test_human_artifact_debug_viewer_roundtrip(tmp_path: Path) -> None:
     loaded = HumanArtifact.load(save_dir)
     assert len(loaded.humans) == 2
     assert len(loaded.raw_humans) == 3
+
+
+def test_human_smoothing_fills_missing_densepose_and_smpl() -> None:
+    artifact = HumanArtifact(run_id='dev', stage_name='humans', save_dir=Path('.'))
+    h0 = _make_human('hum:0', 0, [5, 5, 15, 25], track_ids=[1, 2, 3])
+    h1 = _make_human('hum:1', 2, [7, 5, 17, 25], track_ids=[1, 2, 3])
+    h_mid = _make_human('hum:mid', 1, [6, 5, 16, 25], track_ids=[1, 2, 3])
+    h_mid.densepose = None
+    h_mid.smpl_params = None
+    artifact.humans = [h0, h_mid, h1]
+    artifact.mask_arrays = {'hum:0': np.pad(np.ones((20, 10), dtype=bool), ((5, 15), (5, 33))), 'hum:mid': np.pad(np.ones((20, 10), dtype=bool), ((5, 15), (6, 32))), 'hum:1': np.pad(np.ones((20, 10), dtype=bool), ((5, 15), (7, 31)))}
+    artifact.densepose_payloads = {'hum:0': h0.densepose, 'hum:1': h1.densepose}
+    artifact.smpl_payloads = {'hum:0': h0.smpl_params, 'hum:1': h1.smpl_params}
+    out = HumanAssociator({'min_match_score': 0.2}).associate_across_views(artifact)
+    smoothed = sorted(out.humans, key=lambda h: h.frame_ref.frame_idx)
+    middle = smoothed[1]
+    assert middle.densepose is not None and middle.densepose.get('smoothed') is True
+    assert middle.smpl_params is not None and middle.smpl_params.get('smoothed') is True
