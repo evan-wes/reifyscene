@@ -13,6 +13,7 @@ from room4d.common.types import FrameRef, HumanState, ObjectState
 from room4d.common.paths import ensure_dir
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.vggt_wrapper import VGGTInitializer
+from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -62,7 +63,12 @@ class Room4DPipeline:
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
         self.quality = ClipQualityAssessor()
         self.sync_solver = GlobalTimeAlignmentSolver()
-        self.geometry_init = VGGTInitializer(self.cfg.get('geometry', {}))
+        geometry_cfg = self.cfg.get('geometry', {})
+        geometry_backend_name = str(geometry_cfg.get('backend_name', 'vggt')).lower()
+        if geometry_backend_name == 'vggt-long':
+            self.geometry_init = VGGTLongInitializer(geometry_cfg)
+        else:
+            self.geometry_init = VGGTInitializer(geometry_cfg)
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
         lifting_cfg = self.cfg.get('lifting', {})
         self.track_lifter = TrackLifter3D(point_conf_threshold=float(lifting_cfg.get('point_conf_threshold', 0.0)))

@@ -10,6 +10,8 @@ import torch
 
 from room4d.common.types import FrameRef
 from room4d.geometry.vggt_wrapper import VGGTInitializer
+from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
+from room4d.api.pipeline import Room4DPipeline
 from room4d.ingest.ingest_artifact import IngestArtifact
 from room4d.ingest.decoder import VideoDecoder
 
@@ -117,3 +119,64 @@ def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
     assert loaded.selected_frames[0].stream_id == "cam_00"
     assert loaded.depthmaps_by_frame["cam_00:0"]["depth"].shape == (4, 4, 1)
     assert loaded.pointmaps_by_frame["cam_00:0"]["points"].shape == (4, 4, 3)
+
+
+class _FakeVGGTLongInitializer(VGGTLongInitializer):
+    def load_checkpoint(self) -> None:
+        self._VGGT_Long = object()
+        self._is_loaded = True
+
+    def _load_chunk_predictions(self, runner):
+        return [
+            {
+                '_chunk_range': (0, 2),
+                'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3], np.eye(4, dtype=np.float32)[:3]], axis=0),
+                'intrinsic': np.stack([np.eye(3, dtype=np.float32), np.eye(3, dtype=np.float32)], axis=0),
+                'depth': np.ones((2, 4, 4, 1), dtype=np.float32),
+                'depth_conf': np.ones((2, 4, 4), dtype=np.float32),
+                'world_points': np.zeros((2, 4, 4, 3), dtype=np.float32),
+                'world_points_conf': np.ones((2, 4, 4), dtype=np.float32),
+            }
+        ]
+
+    def initialize(self, frames, *, ingest_artifact=None, sync_artifact=None):
+        selected_frames = self._select_frames(frames, ingest_artifact)
+        if not selected_frames:
+            raise ValueError('No frames')
+        notes = ['fake VGGT-Long backend']
+        predictions = self._combined_predictions_from_chunks(selected_frames, self._load_chunk_predictions(None))
+        artifact = self._initialize_from_predictions(selected_frames, predictions, ingest_artifact, notes=notes, image_paths=None)
+        artifact.backend_name = self.backend_name
+        return artifact
+
+
+def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_long.mp4"
+    _write_test_video(video_path, num_frames=2)
+
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    ingest = IngestArtifact(
+        run_id="test_long",
+        stage_name="ingest",
+        save_dir=tmp_path,
+        streams=[stream],
+        keyframes=[
+            FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0),
+            FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=1.0 / 30.0),
+        ],
+    )
+
+    init = _FakeVGGTLongInitializer({"backend_mode": "real", "device": "cpu", "chunk_size": 4, "overlap": 1})
+    artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
+
+    assert artifact.backend_name == "vggt-long"
+    assert artifact.stream_ids() == ["cam_00"]
+    assert len(artifact.camera_states_by_stream["cam_00"]) == 2
+    assert artifact.depthmaps_by_frame["cam_00:0"]["depth"].shape == (4, 4, 1)
+    assert artifact.pointmaps_by_frame["cam_00:1"]["points"].shape == (4, 4, 3)
+
+
+def test_pipeline_selects_vggt_long_initializer(tmp_path: Path) -> None:
+    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
+    assert isinstance(pipe.geometry_init, VGGTLongInitializer)

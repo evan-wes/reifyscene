@@ -38,11 +38,19 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
 
     geometry = cfg.setdefault('geometry', {})
+    geometry['backend_name'] = args.geometry_backend_name
     geometry['backend_mode'] = args.geometry_backend_mode
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
     if args.frame_cache_dir is not None:
         geometry['frame_cache_dir'] = args.frame_cache_dir
+    if args.vggt_long_output_cache_dir is not None:
+        geometry['output_cache_dir'] = args.vggt_long_output_cache_dir
+    geometry['chunk_size'] = int(args.vggt_long_chunk_size)
+    geometry['overlap'] = int(args.vggt_long_overlap)
+    geometry['loop_enable'] = bool(args.vggt_long_loop_enable)
+    geometry['use_dbow'] = bool(args.vggt_long_use_dbow)
+    geometry['delete_temp_files'] = bool(args.vggt_long_delete_temp_files)
     geometry['debug_shapes'] = bool(args.debug)
     geometry['save_depth_pngs'] = bool(args.debug)
     geometry['debug_max_points'] = int(args.debug_max_points)
@@ -163,8 +171,15 @@ def main() -> None:
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
+    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-device', default='cpu')
+    parser.add_argument('--vggt-long-chunk-size', type=int, default=16)
+    parser.add_argument('--vggt-long-overlap', type=int, default=4)
+    parser.add_argument('--vggt-long-loop-enable', action='store_true')
+    parser.add_argument('--vggt-long-use-dbow', action='store_true')
+    parser.add_argument('--vggt-long-delete-temp-files', action='store_true')
+    parser.add_argument('--vggt-long-output-cache-dir', default=None)
     parser.add_argument('--tracking-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--tracking-device', default=None)
     parser.add_argument('--tracking-grid-size', type=int, default=12)
