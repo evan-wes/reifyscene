@@ -340,6 +340,7 @@ setup_python_env
 EXTRAS=()
 [[ $INSTALL_VISION -eq 1 ]] && EXTRAS+=(vision)
 [[ $INSTALL_GEOMETRY -eq 1 ]] && EXTRAS+=(geometry)
+[[ $INSTALL_VGGT_LONG -eq 1 ]] && EXTRAS+=(vggt_long)
 [[ $INSTALL_DEV -eq 1 ]] && EXTRAS+=(dev)
 
 # Install room4d and all Python dependencies from pyproject.toml only.
@@ -373,9 +374,6 @@ if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
   ensure_modern_conda_compilers
   clone_or_update_checkout "${VGGT_LONG_REPO}" "${VGGT_LONG_DIR}" "${VGGT_LONG_COMMIT}"
   install_vggt_long_requirements
-
-  echo "Installing additional VGGT-Long runtime deps..."
-  python -m pip install pypose trimesh matplotlib
 
   if [[ -f "${VGGT_LONG_DIR}/scripts/download_weights.sh" ]]; then
     echo "Patching VGGT-Long download_weights.sh for current Hugging Face CLI..."

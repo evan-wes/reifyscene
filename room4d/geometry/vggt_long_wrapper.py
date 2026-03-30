@@ -7,6 +7,7 @@ initializer.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,45 @@ import torch
 from room4d.common.types import FrameRef
 from room4d.geometry.geometry_artifact import GeometryArtifact
 from room4d.geometry.vggt_wrapper import VGGTInitializer
+
+
+
+
+@contextmanager
+def _torch_cuda_visibility(device: str):
+    """Temporarily shape torch.cuda visibility for backend construction/run.
+
+    VGGT-Long probes CUDA during ``__init__`` and may do so again during ``run``.
+    For CPU execution we need those probes to behave as if CUDA is unavailable,
+    otherwise upstream can crash before our wrapper gets to override the runner
+    device. For CUDA execution this context is a no-op.
+    """
+    normalized = str(device).lower()
+    if normalized != "cpu":
+        yield
+        return
+
+    original = {
+        "is_available": torch.cuda.is_available,
+        "device_count": torch.cuda.device_count,
+        "get_device_capability": torch.cuda.get_device_capability,
+        "current_device": getattr(torch.cuda, "current_device", None),
+    }
+
+    torch.cuda.is_available = lambda: False
+    torch.cuda.device_count = lambda: 0
+    torch.cuda.get_device_capability = lambda *args, **kwargs: (0, 0)
+    if original["current_device"] is not None:
+        torch.cuda.current_device = lambda: 0
+
+    try:
+        yield
+    finally:
+        torch.cuda.is_available = original["is_available"]
+        torch.cuda.device_count = original["device_count"]
+        torch.cuda.get_device_capability = original["get_device_capability"]
+        if original["current_device"] is not None:
+            torch.cuda.current_device = original["current_device"]
 
 
 class VGGTLongInitializer(VGGTInitializer):
@@ -312,6 +352,64 @@ class VGGTLongInitializer(VGGTInitializer):
             preds["point_conf"] = np.stack([np.asarray(v) for v in point_conf], axis=0)
         return preds
 
+    def _requested_device(self) -> str:
+        return str(self.device).lower()
+
+    def _configure_runner_device(self, runner: Any) -> None:
+        requested_device = self._requested_device()
+        if requested_device == "cpu":
+            runner.device = "cpu"
+            runner.dtype = torch.float32
+            if getattr(runner, "model", None) is not None:
+                runner.model.device = "cpu"
+                if hasattr(runner.model, "dtype"):
+                    runner.model.dtype = torch.float32
+        else:
+            runner.device = requested_device
+            if getattr(runner, "model", None) is not None:
+                runner.model.device = requested_device
+
+    @contextmanager
+    def _patched_torch_load_for_device(self):
+        """Temporarily patch torch.load so CPU runs do not try to deserialize to CUDA.
+
+        Upstream VGGT-Long hardcodes `map_location='cuda'` when loading VGGT
+        weights. For CPU runs, rewrite any CUDA map_location to CPU.
+        """
+        requested_device = self._requested_device()
+        if requested_device != "cpu":
+            yield
+            return
+
+        original_torch_load = torch.load
+
+        def _cpu_safe_torch_load(*args, **kwargs):
+            map_location = kwargs.get("map_location", None)
+
+            if map_location == "cuda":
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, str) and map_location.startswith("cuda"):
+                kwargs["map_location"] = torch.device("cpu")
+
+            return original_torch_load(*args, **kwargs)
+
+        torch.load = _cpu_safe_torch_load
+        try:
+            yield
+        finally:
+            torch.load = original_torch_load
+
+    def _create_runner(self, image_dir: Path, output_dir: Path) -> Any:
+        with _torch_cuda_visibility(self._requested_device()):
+            runner = self._VGGT_Long(str(image_dir), str(output_dir), self._default_long_config())
+        self._configure_runner_device(runner)
+        return runner
+
+    def _run_runner(self, runner: Any) -> None:
+        with _torch_cuda_visibility(self._requested_device()):
+            with self._patched_torch_load_for_device():
+                runner.run()
+
     def initialize(
         self,
         frames: list[FrameRef],
@@ -337,26 +435,9 @@ class VGGTLongInitializer(VGGTInitializer):
         backend_output_root = Path(self.output_cache_dir) if self.output_cache_dir else cache_root.parent / "vggt_long_run"
         backend_output_root.mkdir(parents=True, exist_ok=True)
 
-        runner = self._VGGT_Long(str(cache_root), str(backend_output_root), self._default_long_config())
-
-        requested_device = str(self.device).lower()
-        if requested_device == "cpu":
-            import torch
-
-            runner.device = "cpu"
-            runner.dtype = torch.float32
-
-            if getattr(runner, "model", None) is not None:
-                runner.model.device = "cpu"
-                if hasattr(runner.model, "dtype"):
-                    runner.model.dtype = torch.float32
-        else:
-            if getattr(runner, "model", None) is not None:
-                runner.model.device = requested_device
-            runner.device = requested_device
-
+        runner = self._create_runner(cache_root, backend_output_root)
         runner.img_list = [str(path) for path in image_paths]
-        runner.run()
+        self._run_runner(runner)
 
         chunks = self._load_chunk_predictions(runner)
         predictions = self._combined_predictions_from_chunks(selected_frames, chunks)

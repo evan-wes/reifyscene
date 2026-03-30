@@ -180,3 +180,83 @@ def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
 def test_pipeline_selects_vggt_long_initializer(tmp_path: Path) -> None:
     pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
     assert isinstance(pipe.geometry_init, VGGTLongInitializer)
+
+
+class _CpuProbeRunner:
+    def __init__(self, image_dir, save_dir, config):
+        # Constructor should see CUDA as unavailable in CPU mode.
+        self.constructor_cuda_available = torch.cuda.is_available()
+        self.constructor_capability = torch.cuda.get_device_capability()
+        self.image_dir = image_dir
+        self.save_dir = save_dir
+        self.config = config
+        self.device = None
+        self.dtype = None
+        self.model = type("_Model", (), {"device": None, "dtype": None})()
+        self.run_cuda_available = None
+        self.run_capability = None
+
+    def run(self):
+        self.run_cuda_available = torch.cuda.is_available()
+        self.run_capability = torch.cuda.get_device_capability()
+
+
+class _CpuProbeVGGTLong(VGGTLongInitializer):
+    def load_checkpoint(self) -> None:
+        self._VGGT_Long = _CpuProbeRunner
+        self._is_loaded = True
+
+    def _load_chunk_predictions(self, runner):
+        return [
+            {
+                '_chunk_range': (0, 1),
+                'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3]], axis=0),
+                'intrinsic': np.stack([np.eye(3, dtype=np.float32)], axis=0),
+                'depth': np.ones((1, 4, 4, 1), dtype=np.float32),
+                'depth_conf': np.ones((1, 4, 4), dtype=np.float32),
+                'world_points': np.zeros((1, 4, 4, 3), dtype=np.float32),
+                'world_points_conf': np.ones((1, 4, 4), dtype=np.float32),
+            }
+        ]
+
+    def initialize(self, frames, *, ingest_artifact=None, sync_artifact=None):
+        if not self._is_loaded:
+            self.load_checkpoint()
+        selected_frames = self._select_frames(frames, ingest_artifact)
+        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path('.room4d_cache') / 'vggt_long_inputs'
+        image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
+        backend_output_root = cache_root.parent / 'vggt_long_run'
+        backend_output_root.mkdir(parents=True, exist_ok=True)
+        runner = self._create_runner(cache_root, backend_output_root)
+        runner.img_list = [str(path) for path in image_paths]
+        self._run_runner(runner)
+        self._last_probe_runner = runner
+        predictions = self._combined_predictions_from_chunks(selected_frames, self._load_chunk_predictions(runner))
+        artifact = self._initialize_from_predictions(selected_frames, predictions, ingest_artifact, notes=notes, image_paths=image_paths)
+        artifact.backend_name = self.backend_name
+        return artifact
+
+
+def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_cpu_probe.mp4"
+    _write_test_video(video_path, num_frames=1)
+
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    ingest = IngestArtifact(
+        run_id="cpu_probe",
+        stage_name="ingest",
+        save_dir=tmp_path,
+        streams=[stream],
+        keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
+    )
+
+    init = _CpuProbeVGGTLong({"backend_mode": "real", "device": "cpu", "chunk_size": 4, "overlap": 1})
+    artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
+    runner = init._last_probe_runner
+
+    assert artifact.backend_name == "vggt-long"
+    assert runner.constructor_cuda_available is False
+    assert runner.run_cuda_available is False
+    assert runner.device == "cpu"
+    assert runner.model.device == "cpu"
