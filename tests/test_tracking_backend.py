@@ -194,3 +194,27 @@ def test_cotracker_windowed_tracking_without_stitching(tmp_path: Path) -> None:
     assert windowing['windowed'] is True
     assert windowing['stitched'] is False
     assert payload['points_xy'].shape[1] > 2
+
+
+def test_track_lifting_preserves_tracking_timeline(tmp_path: Path) -> None:
+    video_path = tmp_path / "clip_preserve.mp4"
+    write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id='cam_00')
+    ingest = IngestArtifact(
+        run_id='test',
+        stage_name='ingest',
+        save_dir=tmp_path / "ingest",
+        streams=[stream],
+        keyframes=[FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0), FrameRef(stream_id='cam_00', frame_idx=4, timestamp_sec=0.4)],
+    )
+    tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
+    track_artifact = tracker.track(stream)
+    tracking_timeline = list(track_artifact.selected_frames)
+    geometry = _make_geometry_artifact(tmp_path, 'cam_00', width=64, height=48)
+
+    lifted = TrackLifter3D().lift(track_artifact, geometry, ingest)
+
+    assert [fr.frame_idx for fr in lifted.selected_frames] == [fr.frame_idx for fr in tracking_timeline]
+    assert lifted.metadata['geometry_selected_frames'][0]['frame_idx'] == 0
+    assert lifted.metadata['geometry_selected_frames'][1]['frame_idx'] == 4

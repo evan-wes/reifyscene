@@ -104,8 +104,16 @@ class TrackLifter3D:
         downstream stages a world-space handle on each track.
         """
         stream_lookup = self._stream_lookup(ingest_artifact)
-        selected_frames = list(geometry_artifact.selected_frames)
-        track_artifact.selected_frames = selected_frames
+        geometry_selected_frames = list(geometry_artifact.selected_frames)
+        # Preserve the tracking timeline already chosen upstream. Scene/render
+        # uses TrackArtifact.selected_frames when timeline_source=tracking.
+        # Lifting itself still operates on the geometry keyframes below.
+        if not getattr(track_artifact, 'selected_frames', None):
+            track_artifact.selected_frames = list(geometry_selected_frames)
+        track_artifact.metadata['geometry_selected_frames'] = [
+            {'stream_id': frame.stream_id, 'frame_idx': int(frame.frame_idx), 'timestamp_sec': float(frame.timestamp_sec)}
+            for frame in geometry_selected_frames
+        ]
         track_artifact.depthmaps_by_frame = dict(geometry_artifact.depthmaps_by_frame)
         track_artifact.pointmaps_by_frame = dict(geometry_artifact.pointmaps_by_frame)
         track_artifact.metadata.setdefault('debug_image_paths', dict(geometry_artifact.metadata.get('debug_image_paths', {})))
@@ -115,7 +123,7 @@ class TrackLifter3D:
             points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
             visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
             num_tracks = points_xy.shape[1] if points_xy.ndim == 3 else 0
-            stream_frames = [f for f in selected_frames if f.stream_id == stream_id]
+            stream_frames = [f for f in geometry_selected_frames if f.stream_id == stream_id]
             lifted_xyz = np.full((len(stream_frames), num_tracks, 3), np.nan, dtype=np.float32)
             lifted_valid = np.zeros((len(stream_frames), num_tracks), dtype=bool)
             lifted_frame_indices = np.asarray([f.frame_idx for f in stream_frames], dtype=np.int32)
@@ -159,6 +167,6 @@ class TrackLifter3D:
             payload['lifted_xyz'] = lifted_xyz
             payload['lifted_valid'] = lifted_valid
         track_artifact.notes.append(
-            f'Lifted tracks onto {len(selected_frames)} geometry keyframes using VGGT point/depth outputs.'
+            f'Lifted tracks onto {len(geometry_selected_frames)} geometry keyframes using VGGT point/depth outputs.'
         )
         return track_artifact
