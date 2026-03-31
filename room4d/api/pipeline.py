@@ -160,11 +160,29 @@ class Room4DPipeline:
 
     def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
         """Run point tracking, 3D lifting, and static/dynamic partitioning."""
-        frame_refs_by_stream: dict[str, list] = {stream_id: [] for stream_id in ingest_artifact.stream_ids()}
-        for frame_ref in ingest_artifact.keyframes:
-            frame_refs_by_stream.setdefault(frame_ref.stream_id, []).append(frame_ref)
-        artifact = self.tracker.track_many(ingest_artifact.streams, frame_refs_by_stream=frame_refs_by_stream)
+        frame_refs_by_stream: dict[str, list] = {}
+        for stream in ingest_artifact.streams:
+            frame_refs_by_stream[stream.stream_id] = self.tracker.plan_frame_refs(stream)
+
+        artifact = self.tracker.track_many(
+            ingest_artifact.streams,
+            frame_refs_by_stream=frame_refs_by_stream,
+        )
+
+        # Preserve the actual tracking timeline on the artifact so later stages
+        # (scene/render) can use it instead of falling back to geometry frames.
+        selected_frames = []
+        for stream_id in sorted(frame_refs_by_stream):
+            selected_frames.extend(frame_refs_by_stream[stream_id])
+        artifact.selected_frames = sorted(
+            selected_frames,
+            key=lambda fr: (fr.stream_id, int(fr.frame_idx)),
+        )
         artifact.run_id = ingest_artifact.run_id
+        tracked_frame_refs: list[FrameRef] = []
+        for stream in ingest_artifact.streams:
+            tracked_frame_refs.extend(self.tracker.plan_frame_refs(stream))
+        artifact.selected_frames = sorted(tracked_frame_refs, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         if geometry_artifact is not None:
             artifact = self.track_lifter.lift(artifact, geometry_artifact, ingest_artifact)
             self.static_dynamic_partitioner.partition(artifact, geometry_artifact)
@@ -527,6 +545,7 @@ class Room4DPipeline:
             object_artifact=object_artifact,
             metadata={
                 'optimization_available': optimization_artifact is not None,
+                'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
             },
         )
         artifact.save()

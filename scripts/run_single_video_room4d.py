@@ -128,6 +128,12 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     objects.setdefault('embedder_max_inference_side', side_preset['embedder'])
     objects.setdefault('oom_retry_on_cpu', True)
 
+    scene_cfg = cfg.setdefault('scene', {})
+    if args.scene_timeline_source is not None:
+        scene_cfg['timeline_source'] = str(args.scene_timeline_source).lower()
+    else:
+        scene_cfg.setdefault('timeline_source', str(scene_cfg.get('timeline_source', 'geometry')).lower())
+
     lifting = cfg.setdefault('lifting', {})
     lifting['point_conf_threshold'] = float(args.point_conf_threshold)
     lifting['static_threshold_world'] = float(args.static_threshold_world)
@@ -177,6 +183,128 @@ def _print_system_report(console: Console, report: dict, recommendation: dict | 
     console.print(table)
 
 
+def _sorted_unique_frame_refs(frames):
+    unique = {}
+    for fr in frames or []:
+        unique[(fr.stream_id, int(fr.frame_idx))] = fr
+    return [unique[k] for k in sorted(unique)]
+
+
+def _sample_rate_hz(frames) -> str:
+    frames = _sorted_unique_frame_refs(frames)
+    if len(frames) < 2:
+        return "n/a"
+    deltas = []
+    for a, b in zip(frames[:-1], frames[1:]):
+        dt = float(b.timestamp_sec) - float(a.timestamp_sec)
+        if dt > 1e-6:
+            deltas.append(dt)
+    if not deltas:
+        return "n/a"
+    hz = 1.0 / (sum(deltas) / len(deltas))
+    return f"{hz:.2f} Hz"
+
+
+def _frame_set_from_states(states):
+    frames = []
+    for state in states or []:
+        fr = getattr(state, 'frame_ref', None)
+        if fr is not None:
+            frames.append(fr)
+    return _sorted_unique_frame_refs(frames)
+
+
+def _render_frame_count(render_artifact) -> int:
+    path_index = getattr(render_artifact, 'path_index', {}) or {}
+    if not path_index:
+        return 0
+    return max((len(v) for v in path_index.values()), default=0)
+
+
+def _build_frame_summary_rows(outputs: dict, cfg: dict) -> list[dict[str, str]]:
+    geometry_frames = _sorted_unique_frame_refs(getattr(outputs.get('geometry'), 'selected_frames', []))
+    tracking_frames = _sorted_unique_frame_refs(getattr(outputs.get('tracks'), 'selected_frames', []))
+    human_frames = _frame_set_from_states(getattr(outputs.get('humans'), 'humans', []))
+    object_frames = _frame_set_from_states(getattr(outputs.get('objects'), 'objects', []))
+    scene_frames = _sorted_unique_frame_refs(getattr(outputs.get('scene'), 'frame_refs', []))
+    render_count = _render_frame_count(outputs.get('render')) if outputs.get('render') is not None else 0
+
+    frame_sets = {
+        'geometry': geometry_frames,
+        'tracking': tracking_frames,
+        'humans': human_frames,
+        'objects': object_frames,
+        'scene': scene_frames,
+    }
+    normalized = {name: tuple((fr.stream_id, int(fr.frame_idx)) for fr in frames) for name, frames in frame_sets.items()}
+
+    def share_comment(stage_name: str) -> str:
+        current = normalized.get(stage_name, ())
+        if not current:
+            return 'none'
+        shared = [other for other, vals in normalized.items() if other != stage_name and vals == current and vals]
+        return ', '.join(shared) if shared else 'none'
+
+    rows = [
+        {
+            'stage': 'Geometry',
+            'source': 'geometry',
+            'count': str(len(geometry_frames)),
+            'rate': _sample_rate_hz(geometry_frames),
+            'shares': share_comment('geometry'),
+        },
+        {
+            'stage': 'Tracking',
+            'source': 'tracking',
+            'count': str(len(tracking_frames)),
+            'rate': _sample_rate_hz(tracking_frames),
+            'shares': share_comment('tracking'),
+        },
+        {
+            'stage': 'Humans',
+            'source': str(getattr(outputs.get('humans'), 'metadata', {}).get('frame_source', cfg.get('humans', {}).get('frame_source', 'tracking'))),
+            'count': str(len(human_frames)),
+            'rate': _sample_rate_hz(human_frames),
+            'shares': share_comment('humans'),
+        },
+        {
+            'stage': 'Objects',
+            'source': str(getattr(outputs.get('objects'), 'metadata', {}).get('frame_source', cfg.get('objects', {}).get('frame_source', 'tracking'))),
+            'count': str(len(object_frames)),
+            'rate': _sample_rate_hz(object_frames),
+            'shares': share_comment('objects'),
+        },
+        {
+            'stage': 'Scene',
+            'source': str(getattr(outputs.get('scene'), 'timeline', {}).get('source', cfg.get('scene', {}).get('timeline_source', 'geometry'))),
+            'count': str(len(scene_frames)),
+            'rate': _sample_rate_hz(scene_frames),
+            'shares': share_comment('scene'),
+        },
+        {
+            'stage': 'Render',
+            'source': str(getattr(outputs.get('scene'), 'timeline', {}).get('source', cfg.get('scene', {}).get('timeline_source', 'geometry'))),
+            'count': str(render_count),
+            'rate': _sample_rate_hz(scene_frames) if render_count else 'n/a',
+            'shares': 'scene',
+        },
+    ]
+    return rows
+
+
+def _print_frame_summary(console: Console, outputs: dict, cfg: dict) -> None:
+    rows = _build_frame_summary_rows(outputs, cfg)
+    table = Table(title='Frame timeline summary')
+    table.add_column('Stage')
+    table.add_column('Source timeline')
+    table.add_column('Frame count', justify='right')
+    table.add_column('Sample rate')
+    table.add_column('Shares frame set with')
+    for row in rows:
+        table.add_row(row['stage'], row['source'], row['count'], row['rate'], row['shares'])
+    console.print(table)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
@@ -222,6 +350,7 @@ def main() -> None:
     parser.add_argument('--objects-score-threshold', type=float, default=0.5)
     parser.add_argument('--objects-max-detections', type=int, default=12)
     parser.add_argument('--objects-embedder-backend-mode', default='auto', choices=['real', 'auto', 'histogram'])
+    parser.add_argument('--scene-timeline-source', default=None, choices=['geometry', 'tracking'], help='Timeline source for scene assembly and rendering.',)
     parser.add_argument('--resource-profile', default='auto', choices=['none', 'auto', 'lowmem', 'balanced', 'full'], help='Apply a resource-aware tracking preset. Explicit tracking flags still win.')
     parser.add_argument('--cpu-threads', type=int, default=None, help='Limit CPU threads for torch/cv2 on CPU runs.')
     parser.add_argument('--preflight-only', action='store_true', help='Print/save the system report and exit.')
@@ -278,6 +407,7 @@ def main() -> None:
             f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
             f"max_detections: {cfg['objects']['max_detections']}  frame_source: {cfg['objects']['frame_source']} stride: {cfg['objects']['frame_stride']}  embedder: {cfg['objects']['embedder_backend_mode']}"
         )
+        console.print(f"scene timeline source: {cfg.get('scene', {}).get('timeline_source', 'geometry')}")
 
     pipeline = Room4DPipeline(cfg)
 
@@ -301,6 +431,8 @@ def main() -> None:
         artifact = fn()
         outputs[key] = artifact
         _debug_stage_done(console, args.debug, label.split('·', 1)[1].strip(), started, save_dir=str(artifact.save_dir))
+
+    _print_frame_summary(console, outputs, cfg)
 
     for name, artifact in outputs.items():
         print(f'{name}: {artifact.summary()}')

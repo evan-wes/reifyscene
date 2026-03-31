@@ -457,7 +457,7 @@ class CoTrackerWrapper(PointTracker):
         backend tracks the dense clip and later slices whichever frames are
         needed downstream.
         """
-        del frame_refs, seed_points
+        del seed_points
         if self.debug:
             print(f"[TRACK DEBUG] Preparing tracking clip for {stream.stream_id} (fps={stream.fps}, frames={stream.num_frames})")
         video_rgb, frame_indices, original_wh, model_wh = self._read_video_frames(stream)
@@ -526,10 +526,14 @@ class CoTrackerWrapper(PointTracker):
                 f"[TRACK DEBUG] Backend={backend_used}, track_count={tracks_xy.shape[1]}, "
                 f"frame_count={tracks_xy.shape[0]}, original_wh={original_wh}, model_wh={model_wh}{extra}"
             )
+
+        selected_frames = list(frame_refs) if frame_refs is not None else self.plan_frame_refs(stream)
+
         return TrackArtifact(
             run_id='dev',
             stage_name='tracking',
             save_dir=Path('.'),
+            selected_frames=selected_frames,
             per_stream_observations={stream.stream_id: self._payload_to_observations(stream, payload)},
             seed_points_by_stream={stream.stream_id: self._grid_seed_points(model_wh[0], model_wh[1], self.grid_size).tolist()},
             merged_track_groups={},
@@ -538,6 +542,7 @@ class CoTrackerWrapper(PointTracker):
             track_payloads_by_stream={stream.stream_id: payload},
             notes=notes,
         )
+
 
     def track_many(
         self,
@@ -591,10 +596,24 @@ class CoTrackerWrapper(PointTracker):
                     msg += f" windows={len(windowing.get('windows', []))}"
                 print(msg)
 
+        selected_frames: list[FrameRef] = []
+        if frame_refs_by_stream is not None:
+            for stream_id in sorted(frame_refs_by_stream):
+                selected_frames.extend(frame_refs_by_stream[stream_id])
+        else:
+            for stream in streams:
+                selected_frames.extend(self.plan_frame_refs(stream))
+
+        selected_frames = sorted(
+            selected_frames,
+            key=lambda fr: (fr.stream_id, int(fr.frame_idx)),
+        )
+
         return TrackArtifact(
             run_id='dev',
             stage_name='tracking',
             save_dir=Path('.'),
+            selected_frames=selected_frames,
             per_stream_observations=per_stream_observations,
             seed_points_by_stream=seed_points_by_stream,
             merged_track_groups={},

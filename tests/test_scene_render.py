@@ -113,3 +113,46 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
     assert (tmp_path / 'render' / 'novel_view_player.html').exists()
     assert 'orbit' in render_artifact.path_index
     assert render_artifact.coverage['rendered_frames'] > 0
+
+
+def test_scene_timeline_source_tracking(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    frame1 = FrameRef(stream_id='cam_00', frame_idx=1, timestamp_sec=1.0 / 12.0)
+    frame2 = FrameRef(stream_id='cam_00', frame_idx=2, timestamp_sec=2.0 / 12.0)
+    img0 = _make_frame(tmp_path, 'tf0')
+    img2 = _make_frame(tmp_path, 'tf2')
+
+    pts = np.zeros((4, 4, 3), dtype=np.float32)
+    pts[..., 2] = 2.0
+    geometry = GeometryArtifact(
+        run_id='scene2',
+        stage_name='geometry',
+        save_dir=tmp_path / 'geometry2',
+        selected_frames=[frame0, frame2],
+        intrinsics_by_stream={'cam_00': CameraIntrinsics(500, 500, 16, 16)},
+        camera_states_by_stream={'cam_00': [
+            TimedCameraState('cam_00', 0.0, CameraIntrinsics(500, 500, 16, 16), CameraPose(np.eye(4, dtype=np.float32))),
+            TimedCameraState('cam_00', 2.0 / 12.0, CameraIntrinsics(500, 500, 16, 16), CameraPose(np.eye(4, dtype=np.float32))),
+        ]},
+        pointmaps_by_frame={
+            'cam_00:0': {'points': pts, 'confidence': np.ones((4, 4), dtype=np.float32)},
+            'cam_00:2': {'points': pts, 'confidence': np.ones((4, 4), dtype=np.float32)},
+        },
+        depthmaps_by_frame={},
+        metadata={'debug_image_paths': {'cam_00:0': img0, 'cam_00:2': img2}},
+    )
+
+    track_artifact = TrackArtifact(
+        run_id='scene2', stage_name='tracking', save_dir=tmp_path / 'tracking2',
+        selected_frames=[frame0, frame1, frame2],
+        track_payloads_by_stream={'cam_00': {'frame_indices': np.asarray([0, 1, 2], dtype=np.int32), 'points_xy': np.zeros((3, 0, 2), dtype=np.float32), 'visibility': np.zeros((3, 0), dtype=bool)}},
+    )
+
+    assembler = SingleVideoSceneAssembler(max_static_points_per_frame=8, max_static_points_total=16, timeline_source='geometry')
+    scene_artifact = assembler.assemble(
+        run_id='scene2', save_dir=tmp_path / 'scene2', geometry_artifact=geometry,
+        track_artifact=track_artifact, metadata={'timeline_source': 'tracking'}
+    )
+
+    assert [fr.frame_idx for fr in scene_artifact.frame_refs] == [0, 1, 2]
+    assert scene_artifact.timeline['source'] == 'tracking'

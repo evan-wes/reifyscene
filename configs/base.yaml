@@ -17,3 +17,6 @@ models:
 optimization:
   schedule: stage1_sync_pose
   max_iterations: 100
+
+scene:
+  timeline_source: geometry

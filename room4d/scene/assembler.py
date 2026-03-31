@@ -20,6 +20,7 @@ class SingleVideoSceneAssembler:
     max_static_points_per_frame: int = 8000
     max_static_points_total: int = 60000
     dynamic_trail_window: int = 16
+    timeline_source: str = "geometry"
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -224,8 +225,19 @@ class SingleVideoSceneAssembler:
         static_scene = self._assemble_static_background(geometry_artifact, human_artifact, object_artifact)
         humans = [] if human_artifact is None else self._assemble_entities(human_artifact.humans, "humans", track_artifact, geometry_artifact)
         objects = [] if object_artifact is None else self._assemble_entities(object_artifact.objects, "objects", track_artifact, geometry_artifact)
-        frame_refs = sorted(list(track_artifact.selected_frames or geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
+        requested_timeline = str((metadata or {}).get("timeline_source", self.timeline_source)).lower()
+        if requested_timeline not in {"geometry", "tracking"}:
+            requested_timeline = self.timeline_source
+        if requested_timeline == "tracking":
+            selected = list(track_artifact.selected_frames or [])
+            if not selected:
+                selected = list(geometry_artifact.selected_frames)
+                requested_timeline = "geometry"
+        else:
+            selected = list(geometry_artifact.selected_frames)
+        frame_refs = sorted(selected, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
+            "source": requested_timeline,
             "time_min_sec": float(min((fr.timestamp_sec for fr in frame_refs), default=0.0)),
             "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
