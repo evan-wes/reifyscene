@@ -113,6 +113,26 @@ class CoTrackerWrapper(PointTracker):
         self._model = model
         self._is_loaded = True
 
+
+    def plan_frame_refs(self, stream: VideoStreamRef) -> list[FrameRef]:
+        """Return the sampled frame refs this tracker would process for a stream."""
+        frame_indices: list[int] = list(range(0, max(stream.num_frames, 1), self.frame_stride))
+        if self.max_frames is not None:
+            frame_indices = frame_indices[: int(self.max_frames)]
+        if not frame_indices:
+            frame_indices = [0]
+        fps = max(float(stream.fps), 1e-6)
+        return [
+            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
+            for frame_idx in frame_indices
+        ]
+
+    def release_resources(self) -> None:
+        self._model = None
+        self._torch = None
+        self._is_loaded = False
+        self._backend_error = None
+
     @staticmethod
     def _resize_frame(frame: np.ndarray, max_dim: int | None) -> tuple[np.ndarray, float, float]:
         if max_dim is None:

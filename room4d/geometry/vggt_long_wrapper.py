@@ -142,6 +142,11 @@ class VGGTLongInitializer(VGGTInitializer):
                     "backend_mode to 'auto' or 'heuristic'."
                 ) from exc
 
+
+    def release_resources(self) -> None:
+        self._VGGT_Long = None
+        self._backend_error = None
+
     def _default_long_config(self) -> dict[str, Any]:
         """Build a VGGT-Long config compatible with upstream expectations.
 
@@ -430,10 +435,26 @@ class VGGTLongInitializer(VGGTInitializer):
             artifact.notes.append("VGGT-Long backend unavailable; emitted heuristic fallback geometry.")
             return artifact
 
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path(".room4d_cache") / "vggt_long_inputs"
+        cache_root = (
+            Path(self.frame_cache_dir)
+            if self.frame_cache_dir
+            else Path(".room4d_cache") / "vggt_long_inputs" / ingest_artifact.run_id
+        )
+
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
-        backend_output_root = Path(self.output_cache_dir) if self.output_cache_dir else cache_root.parent / "vggt_long_run"
+
+        backend_output_root = (
+            Path(self.output_cache_dir)
+            if self.output_cache_dir
+            else Path(".room4d_cache") / "vggt_long_run" / ingest_artifact.run_id
+        )
         backend_output_root.mkdir(parents=True, exist_ok=True)
+
+        if len(selected_frames) > self.chunk_size and self.overlap <= 0:
+            raise ValueError(
+                "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
+                f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+            )
 
         runner = self._create_runner(cache_root, backend_output_root)
         runner.img_list = [str(path) for path in image_paths]

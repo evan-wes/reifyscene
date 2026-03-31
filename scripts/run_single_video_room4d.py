@@ -17,6 +17,8 @@ from rich.console import Console
 from rich.table import Table
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
+from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from room4d.common.memory import release_memory
 from room4d.common.system_report import collect_system_report, recommend_tracking_profile, save_system_report
 
 
@@ -52,7 +54,6 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['use_dbow'] = bool(args.vggt_long_use_dbow)
     geometry['delete_temp_files'] = bool(args.vggt_long_delete_temp_files)
     geometry['debug_shapes'] = bool(args.debug)
-    geometry['save_depth_pngs'] = bool(args.debug)
     geometry['debug_max_points'] = int(args.debug_max_points)
     cpu_threads = getattr(args, 'cpu_threads', None)
     if cpu_threads is not None:
@@ -168,6 +169,7 @@ def main() -> None:
     parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
     parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
+    parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
@@ -219,6 +221,7 @@ def main() -> None:
 
     console = Console()
     system_report = collect_system_report()
+    debug_cfg = load_debug_config(args.debug_config)
     recommended = None
     if args.resource_profile != 'none':
         recommended = recommend_tracking_profile(system_report, device=args.tracking_device or args.geometry_device)

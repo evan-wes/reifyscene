@@ -95,6 +95,10 @@ class HumanDetector:
         self._backend_used = 'heuristic'
         return []
 
+
+    def release_resources(self) -> None:
+        self._model = None
+
     def detect(self, frame: np.ndarray) -> list[dict[str, Any]]:
         if self.backend_mode == 'heuristic':
             detections = self._detect_heuristic(frame)

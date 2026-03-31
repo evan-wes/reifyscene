@@ -166,6 +166,8 @@ class VGGTInitializer(GeometryInitializer):
         notes: list[str] = []
 
         target_root.mkdir(parents=True, exist_ok=True)
+        for old_png in target_root.glob("*.png"):
+            old_png.unlink()
         frame_iter = enumerate(frames)
         if self.debug_shapes:
             frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing keyframes")
@@ -290,6 +292,16 @@ class VGGTInitializer(GeometryInitializer):
             distortion_model="brown",
             distortion_params=np.zeros(4, dtype=float),
         )
+
+
+    def release_resources(self) -> None:
+        self._model = None
+        self._torch = None
+        self._VGGT = None
+        self._load_and_preprocess_images = None
+        self._cache_dir = None
+        self._is_loaded = False
+        self._backend_error = None
 
     def _normalize_per_frame_array(self, value: Any, *, item_ndim: int, num_frames: int) -> Any:
         """Normalize model outputs to an explicit per-frame leading dimension.
@@ -458,7 +470,7 @@ class VGGTInitializer(GeometryInitializer):
             notes=notes,
             metadata={
                 "debug_shapes": self.debug_shapes,
-                "save_depth_pngs": self.save_depth_pngs,
+                "save_depth_pngs": False,
                 "save_debug_assets": bool(self.debug_shapes),
                 "save_camera_json": bool(self.debug_shapes),
                 "save_pointcloud_plys": bool(self.debug_shapes),
@@ -540,7 +552,7 @@ class VGGTInitializer(GeometryInitializer):
             notes=notes,
             metadata={
                 "debug_shapes": self.debug_shapes,
-                "save_depth_pngs": self.save_depth_pngs,
+                "save_depth_pngs": False,
                 "save_debug_assets": bool(self.debug_shapes),
                 "save_camera_json": bool(self.debug_shapes),
                 "save_pointcloud_plys": bool(self.debug_shapes),

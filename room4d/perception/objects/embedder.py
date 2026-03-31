@@ -104,6 +104,10 @@ class InstanceEmbedder:
         self._backend_used = 'real'
         return feats.detach().cpu().numpy().astype(np.float32)
 
+
+    def release_resources(self) -> None:
+        self._model = None
+
     def embed(self, frame: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
         if self.backend_mode == 'histogram':
             return self._embed_histogram(frame, detections)

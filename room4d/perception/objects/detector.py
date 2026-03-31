@@ -114,6 +114,10 @@ class ObjectDetector:
         self._backend_used = 'heuristic'
         return []
 
+
+    def release_resources(self) -> None:
+        self._model = None
+
     def detect(self, frame: np.ndarray) -> list[dict[str, Any]]:
         """Return normalized detections for a frame.
 

@@ -116,6 +116,10 @@ class HumanPose2DEstimator:
         self._backend_used = 'real'
         return assigned
 
+
+    def release_resources(self) -> None:
+        self._model = None
+
     def predict(self, frame: np.ndarray, boxes: list[np.ndarray]) -> list[np.ndarray]:
         if self.backend_mode == 'heuristic':
             return self._heuristic_keypoints(boxes)

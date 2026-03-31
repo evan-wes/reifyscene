@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 from typing import Any
 
 from room4d.common.io import read_yaml
 from room4d.common.types import FrameRef, HumanState, ObjectState
 from room4d.common.paths import ensure_dir
+from room4d.common.memory import release_memory
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
@@ -215,29 +215,11 @@ class Room4DPipeline:
             selected.extend(by_stream[stream_id][::semantic_stride])
         return selected
 
-    def _materialize_debug_frame_sources(self, stage_name: str, selected_frames: list[FrameRef], ingest_artifact: IngestArtifact) -> dict[str, str]:
-        """Write stage-local RGB debug images for arbitrary selected frames."""
-        if not selected_frames:
-            return {}
-        source_dir = ensure_dir(self._stage_dir(stage_name) / '_debug_source_images')
-        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        debug_paths: dict[str, str] = {}
-        for semantic_idx, frame_ref in enumerate(selected_frames):
-            key = f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
-            filename = f"{key.replace(':', '__').replace('/', '_')}.png"
-            dst = source_dir / filename
-            if not dst.exists():
-                frame = self.decoder.get_frame(stream_lookup[frame_ref.stream_id], frame_ref.frame_idx)
-                Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(dst)
-            debug_paths[key] = str(dst)
-        return debug_paths
-
     def perceive_humans(self, ingest_artifact, track_artifact=None):
         """Run single-video human detection, pose, DensePose, SMPL, and association."""
         humans_cfg = self.cfg.get('humans', {})
         selected_frames = self._select_perception_frames(ingest_artifact, track_artifact, humans_cfg, default_source='tracking')
         stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        debug_image_paths = self._materialize_debug_frame_sources('humans', selected_frames, ingest_artifact) if humans_cfg.get('debug', False) else {}
         densepose_stride = max(1, int(humans_cfg.get('densepose_frame_stride', 1)))
         smpl_stride = max(1, int(humans_cfg.get('smpl_frame_stride', 1)))
         effective_stride = self._effective_sample_stride(humans_cfg)
@@ -364,9 +346,8 @@ class Room4DPipeline:
                 'pose_backend': self.human_pose.backend_used,
                 'densepose_backend': self.human_densepose.backend_used,
                 'smpl_backend': self.human_smpl.backend_used,
-                'save_debug_assets': bool(humans_cfg.get('debug', False)),
-                'save_debug_html': bool(humans_cfg.get('debug', False)),
-                'debug_image_paths': debug_image_paths,
+                'save_debug_assets': False,
+                'save_debug_html': False,
                 'frame_source': str(humans_cfg.get('frame_source', 'tracking')),
                 'frame_stride': int(humans_cfg.get('frame_stride', 1)),
                 'densepose_frame_stride': int(densepose_stride),
@@ -401,7 +382,6 @@ class Room4DPipeline:
         objects_cfg = self.cfg.get('objects', {})
         selected_frames = self._select_perception_frames(ingest_artifact, track_artifact, objects_cfg, default_source='tracking')
         stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        debug_image_paths = self._materialize_debug_frame_sources('objects', selected_frames, ingest_artifact) if objects_cfg.get('debug', False) else {}
         effective_stride = self._effective_sample_stride(objects_cfg)
         object_states: list[ObjectState] = []
         mask_arrays: dict[str, Any] = {}
@@ -504,9 +484,8 @@ class Room4DPipeline:
             metadata={
                 'detector_backend': self.object_detector.backend_used,
                 'embedder_backend': self.object_embedder.backend_used,
-                'save_debug_assets': bool(objects_cfg.get('debug', False)),
-                'save_debug_html': bool(objects_cfg.get('debug', False)),
-                'debug_image_paths': debug_image_paths,
+                'save_debug_assets': False,
+                'save_debug_html': False,
                 'frame_source': str(objects_cfg.get('frame_source', 'tracking')),
                 'frame_stride': int(objects_cfg.get('frame_stride', 1)),
                 'selected_frame_count': int(len(selected_frames)),
@@ -532,15 +511,6 @@ class Room4DPipeline:
         """Run staged joint optimization."""
         artifact = self.solver.solve_all(sync_artifact, geometry_artifact, track_artifact, human_artifact, object_artifact, graph_artifact)
         artifact.save_dir = self._stage_dir('optimization')
-        tracking_cfg = self.cfg.get('tracking', {})
-        artifact.metadata.update({
-            'save_refinement_viewer': bool(tracking_cfg.get('debug', False)),
-            'debug_max_points': int(tracking_cfg.get('debug_max_points', 5000)),
-            'debug_max_trails': int(tracking_cfg.get('debug_max_trails', 12)),
-            'debug_trail_window': int(tracking_cfg.get('debug_trail_window', 12)),
-        })
-        if artifact.metadata.get('save_refinement_viewer', False):
-            artifact.export_refinement_viewer(track_artifact, geometry_artifact)
         artifact.save()
         return artifact
 
@@ -552,6 +522,30 @@ class Room4DPipeline:
         artifact.save_dir = self._stage_dir('render')
         artifact.save()
         return artifact
+
+
+    def release_stage_resources(self, stage_name: str) -> None:
+        """Release heavy backend state after a stage completes."""
+        stage_name = str(stage_name)
+        components: list[Any] = []
+        if stage_name == 'geometry':
+            components = [self.geometry_init]
+        elif stage_name == 'tracking':
+            components = [self.tracker]
+        elif stage_name == 'humans':
+            components = [self.human_detector, self.human_pose, self.human_densepose, self.human_smpl]
+        elif stage_name == 'objects':
+            components = [self.object_detector, self.object_embedder]
+        for component in components:
+            if component is None:
+                continue
+            if hasattr(component, 'release_resources'):
+                try:
+                    component.release_resources()
+                except Exception:
+                    pass
+
+        release_memory()
 
     def run(self, video_paths: list[str]) -> dict[str, Any]:
         """Execute the current end-to-end vertical slice and persist artifacts."""

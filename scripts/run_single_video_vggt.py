@@ -22,6 +22,8 @@ from rich.table import Table
 
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
+from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from room4d.common.memory import release_memory
 from room4d.common.system_report import collect_system_report, save_system_report
 
 
@@ -126,6 +128,7 @@ def main() -> None:
     parser.add_argument("--video", required=True, help="Path to a single RGB video file.")
     parser.add_argument("--run-dir", required=True, help="Directory where artifacts will be written.")
     parser.add_argument("--config", default=None, help="Optional YAML config path.")
+    parser.add_argument("--debug-config", default=None, help="Optional YAML debug-export config path.")
 
     parser.add_argument(
         "--geometry-backend-name",
@@ -201,6 +204,7 @@ def main() -> None:
 
     console = Console()
     system_report = collect_system_report()
+    debug_cfg = load_debug_config(args.debug_config)
     report_path = Path(args.run_dir) / "preflight_system_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     save_system_report(report_path, {"report": system_report})
@@ -241,10 +245,13 @@ def main() -> None:
     started = _debug_stage(console, args.debug, "Stage 1/3 · Ingest / preprocess")
     ingest = pipeline.preprocess([args.video])
     _debug_stage_done(console, args.debug, "Ingest / preprocess", started, save_dir=str(ingest.save_dir))
+    shared_debug_images = materialize_shared_debug_frames(pipeline, ingest, debug_cfg) if debug_cfg.get('enabled', False) else {}
+    pipeline.release_stage_resources('ingest')
 
     started = _debug_stage(console, args.debug, "Stage 2/3 · Temporal sync")
     sync = pipeline.synchronize(ingest)
     _debug_stage_done(console, args.debug, "Temporal sync", started, save_dir=str(sync.save_dir))
+    pipeline.release_stage_resources('sync')
 
     stage_label = (
         "Stage 3/3 · VGGT-Long geometry"
@@ -254,6 +261,13 @@ def main() -> None:
     started = _debug_stage(console, args.debug, stage_label)
     geometry = pipeline.initialize_geometry(ingest, sync)
     _debug_stage_done(console, args.debug, stage_label, started, save_dir=str(geometry.save_dir))
+    pipeline.release_stage_resources('geometry')
+
+    if debug_cfg.get('enabled', False):
+        export_started = _debug_stage(console, args.debug, 'Deferred debug export')
+        export_debug_artifacts(args.run_dir, debug_cfg, shared_debug_images)
+        release_memory()
+        _debug_stage_done(console, args.debug, 'Deferred debug export', export_started, save_dir=args.run_dir)
 
     print("Ingest summary:", ingest.summary())
     print("Sync summary:", sync.summary())
