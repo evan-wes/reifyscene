@@ -7,6 +7,22 @@ from typing import Any
 import numpy as np
 
 
+def _z_up_rot() -> np.ndarray:
+    return np.asarray([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=np.float32)
+
+
+def _to_z_up_points(points: np.ndarray) -> np.ndarray:
+    arr = np.asarray(points, dtype=np.float32)
+    rot = _z_up_rot()
+    if arr.ndim >= 1 and arr.shape[-1] == 3:
+        return np.einsum('ij,...j->...i', rot, arr)
+    raise ValueError(f'Expected points with last dimension 3, got {arr.shape}.')
+
+
+def _to_z_up_vec(vec: np.ndarray) -> np.ndarray:
+    return _to_z_up_points(np.asarray(vec, dtype=np.float32)).astype(np.float32)
+
+
 class CameraPathGenerator:
     """Generate canonical or query-driven camera trajectories."""
 
@@ -21,9 +37,9 @@ class CameraPathGenerator:
         ]
 
     def orbit(self, scene_artifact, radius: float | None = None) -> dict[str, Any]:
-        center = np.asarray(scene_artifact.static_scene.get("center_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+        center = _to_z_up_vec(np.asarray(scene_artifact.static_scene.get("center_xyz", [0.0, 0.0, 0.0]), dtype=np.float32))
         times = self._time_grid(scene_artifact)
-        static_points = np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32)
+        static_points = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
         if radius is None:
             if static_points.size:
                 radius = float(np.percentile(np.linalg.norm(static_points - center[None, :], axis=1), 80))
@@ -38,8 +54,8 @@ class CameraPathGenerator:
         return {"path_name": "orbit", "cameras": cameras}
 
     def overhead(self, scene_artifact, height_scale: float = 1.8) -> dict[str, Any]:
-        center = np.asarray(scene_artifact.static_scene.get("center_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
-        static_points = np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32)
+        center = _to_z_up_vec(np.asarray(scene_artifact.static_scene.get("center_xyz", [0.0, 0.0, 0.0]), dtype=np.float32))
+        static_points = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
         if static_points.size:
             spread = float(np.percentile(np.linalg.norm(static_points[:, :2] - center[None, :2], axis=1), 85))
         else:
@@ -63,11 +79,11 @@ class CameraPathGenerator:
         for item in times:
             time_sec = item["time_sec"]
             if entity_times.size == 0:
-                target = np.asarray(entity.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+                target = _to_z_up_vec(np.asarray(entity.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32))
             else:
                 idx = int(np.argmin(np.abs(entity_times - float(time_sec))))
                 c = centers[idx] if idx < len(centers) else None
-                target = np.asarray(c if c is not None else entity.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+                target = _to_z_up_vec(np.asarray(c if c is not None else entity.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32))
             eye = target + np.asarray([-1.5, -1.5, 0.9], dtype=np.float32)
             cameras.append({"eye": eye.tolist(), "target": target.tolist(), "up": [0.0, 0.0, 1.0], **item})
         return {"path_name": path_name, "cameras": cameras, "entity_id": entity_id}
@@ -94,9 +110,9 @@ class CameraPathGenerator:
             if state is None:
                 continue
             Twc = np.asarray(state.pose.T_world_cam, dtype=np.float32)
-            eye = Twc[:3, 3]
-            forward = Twc[:3, :3] @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
-            up = Twc[:3, :3] @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32)
+            eye = _to_z_up_vec(Twc[:3, 3])
+            forward = _to_z_up_vec(Twc[:3, :3] @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
+            up = _to_z_up_vec(Twc[:3, :3] @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32))
             target = eye + forward
             cameras.append({"eye": eye.tolist(), "target": target.tolist(), "up": up.tolist(), **item})
         return {"path_name": "replay", "cameras": cameras}

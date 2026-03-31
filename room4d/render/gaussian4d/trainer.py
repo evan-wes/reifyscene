@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from room4d.common.paths import ensure_dir
-from room4d.render.camera_paths import CameraPathGenerator
+from room4d.render.camera_paths import CameraPathGenerator, _to_z_up_points, _to_z_up_vec
 from room4d.render.gaussian4d.render_artifact import RenderArtifact
 
 
@@ -29,10 +29,11 @@ class Gaussian4DTrainer:
         self.width = int(self.cfg.get("width", 960))
         self.height = int(self.cfg.get("height", 540))
         self.point_limit = int(self.cfg.get("point_limit", 40000))
+        self.dynamic_point_budget = int(self.cfg.get("dynamic_point_budget", 600))
         self.camera_paths = CameraPathGenerator()
 
     def _select_dynamic_points(self, scene_artifact, time_sec: float) -> list[dict[str, Any]]:
-        markers = []
+        entities = []
         for kind in ("humans", "objects"):
             for ent in scene_artifact.dynamic_entities.get(kind, []):
                 times = np.asarray(ent.get("times_sec", []), dtype=np.float32)
@@ -45,14 +46,44 @@ class Gaussian4DTrainer:
                     center = np.asarray(c if c is not None else ent.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
                 if not np.all(np.isfinite(center)):
                     continue
-                markers.append({
+                center = _to_z_up_vec(center)
+                entities.append({
                     "entity_id": ent["entity_id"],
                     "entity_type": ent["entity_type"],
                     "center_xyz": center.astype(np.float32),
                     "color_rgb": np.asarray(ent.get("color_rgb", [255, 64, 64]), dtype=np.uint8),
                     "label": ent.get("display_label", ent["entity_type"]),
+                    "support_count": int(np.max(ent.get("support_counts", [0])) if ent.get("support_counts") else 0),
                 })
-        return markers
+        return entities
+
+    def _entity_geometry(self, entity: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+        center = np.asarray(entity["center_xyz"], dtype=np.float32)
+        color = np.asarray(entity["color_rgb"], dtype=np.uint8)
+        if entity["entity_type"] == "human":
+            height = 1.6
+            radius = 0.16
+            levels = np.linspace(-0.45 * height, 0.55 * height, 9, dtype=np.float32)
+            angles = np.linspace(0.0, 2.0 * np.pi, 18, endpoint=False, dtype=np.float32)
+            pts = []
+            for z_off in levels:
+                r = radius * (0.75 if abs(z_off) > 0.35 * height else 1.0)
+                for a in angles:
+                    pts.append(center + np.asarray([r * np.cos(a), r * np.sin(a), z_off], dtype=np.float32))
+            pts.append(center + np.asarray([0.0, 0.0, 0.75 * height], dtype=np.float32))
+            pts.append(center + np.asarray([0.0, 0.0, -0.55 * height], dtype=np.float32))
+        else:
+            radius = 0.14
+            phi = np.linspace(0.0, np.pi, 9, dtype=np.float32)
+            theta = np.linspace(0.0, 2.0 * np.pi, 14, endpoint=False, dtype=np.float32)
+            pts = []
+            for p in phi:
+                for t in theta:
+                    pts.append(center + radius * np.asarray([np.sin(p) * np.cos(t), np.sin(p) * np.sin(t), np.cos(p)], dtype=np.float32))
+            pts.append(center)
+        pts_arr = np.asarray(pts, dtype=np.float32)
+        cols = np.repeat(color[None, :], pts_arr.shape[0], axis=0)
+        return pts_arr, cols
 
     def _project_points(self, points: np.ndarray, eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         forward = _normalize(target - eye)
@@ -70,7 +101,7 @@ class Gaussian4DTrainer:
         return np.stack([x, y], axis=1), valid
 
     def _render_frame(self, scene_artifact, camera: dict[str, Any]) -> Image.Image:
-        bg = np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32)
+        bg = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
         colors = np.asarray(scene_artifact.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
         if bg.shape[0] > self.point_limit:
             stride = max(1, int(np.ceil(bg.shape[0] / float(self.point_limit))))
@@ -81,30 +112,47 @@ class Gaussian4DTrainer:
         up = np.asarray(camera.get("up", [0.0, 0.0, 1.0]), dtype=np.float32)
         canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         zbuf = np.full((self.height, self.width), np.inf, dtype=np.float32)
-        if bg.size:
-            xy, valid = self._project_points(bg, eye, target, up)
-            cam_z = ((_normalize(target - eye)[None, :] * 0) + 1)  # placeholder
+
+        def splat(points: np.ndarray, point_colors: np.ndarray, radius_px: int) -> None:
+            if points.size == 0:
+                return
+            xy, valid = self._project_points(points, eye, target, up)
+            depths = np.linalg.norm(points - eye[None, :], axis=1)
             for idx, ok in enumerate(valid.tolist()):
                 if not ok:
                     continue
-                x, y = int(round(float(xy[idx, 0]))), int(round(float(xy[idx, 1])))
-                if 0 <= x < self.width and 0 <= y < self.height:
-                    depth = float(np.linalg.norm(bg[idx] - eye))
-                    if depth < zbuf[y, x]:
-                        zbuf[y, x] = depth
-                        canvas[y, x] = colors[idx]
+                x0 = int(round(float(xy[idx, 0])))
+                y0 = int(round(float(xy[idx, 1])))
+                depth = float(depths[idx])
+                color = point_colors[idx]
+                for dy in range(-radius_px, radius_px + 1):
+                    for dx in range(-radius_px, radius_px + 1):
+                        if dx * dx + dy * dy > radius_px * radius_px:
+                            continue
+                        x = x0 + dx
+                        y = y0 + dy
+                        if 0 <= x < self.width and 0 <= y < self.height and depth < zbuf[y, x]:
+                            zbuf[y, x] = depth
+                            canvas[y, x] = color
+
+        if bg.size:
+            splat(bg, colors, radius_px=1)
+
+        dynamic_entities = self._select_dynamic_points(scene_artifact, float(camera.get("time_sec", 0.0)))
+        for entity in dynamic_entities:
+            pts, cols = self._entity_geometry(entity)
+            splat(pts, cols, radius_px=2 if entity["entity_type"] == "human" else 1)
+
         img = Image.fromarray(canvas)
         draw = ImageDraw.Draw(img)
-        for marker in self._select_dynamic_points(scene_artifact, float(camera.get("time_sec", 0.0))):
-            pts = np.asarray([marker["center_xyz"]], dtype=np.float32)
+        for entity in dynamic_entities:
+            pts = np.asarray([entity["center_xyz"]], dtype=np.float32)
             xy, valid = self._project_points(pts, eye, target, up)
             if not bool(valid[0]):
                 continue
             x, y = float(xy[0, 0]), float(xy[0, 1])
-            color = tuple(int(v) for v in marker["color_rgb"].tolist())
-            r = 7 if marker["entity_type"] == "human" else 5
-            draw.ellipse((x - r, y - r, x + r, y + r), fill=color, outline=(255, 255, 255))
-            draw.text((x + r + 2, y - r), f"{marker['label']}:{marker['entity_id']}", fill=color)
+            color = tuple(int(v) for v in entity["color_rgb"].tolist())
+            draw.text((x + 6, y - 10), f"{entity['label']}:{entity['entity_id']}", fill=color)
         return img
 
     @staticmethod

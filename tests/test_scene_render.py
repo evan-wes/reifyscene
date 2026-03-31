@@ -8,11 +8,13 @@ from PIL import Image
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from room4d.geometry.geometry_artifact import GeometryArtifact
 from room4d.scene.assembler import SingleVideoSceneAssembler
+from room4d.scene.scene_artifact import SceneArtifact
 from room4d.tracking.track_artifact import TrackArtifact
 from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.render.camera_paths import CameraPathGenerator
 
 
 def _make_frame(tmp_path: Path, name: str) -> str:
@@ -114,6 +116,12 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
     assert 'orbit' in render_artifact.path_index
     assert render_artifact.coverage['rendered_frames'] > 0
 
+    frame_img = np.asarray(Image.open(tmp_path / 'render' / render_artifact.path_index['orbit'][0]))
+    assert frame_img.sum() > 0
+    # dynamic entities should occupy more than isolated single center pixels
+    nonzero = np.count_nonzero(frame_img.sum(axis=2) > 0)
+    assert nonzero > 100
+
 
 def test_scene_timeline_source_tracking(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
@@ -156,3 +164,26 @@ def test_scene_timeline_source_tracking(tmp_path: Path) -> None:
 
     assert [fr.frame_idx for fr in scene_artifact.frame_refs] == [0, 1, 2]
     assert scene_artifact.timeline['source'] == 'tracking'
+
+
+def test_camera_paths_use_z_up_debug_frame() -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    frame1 = FrameRef(stream_id='cam_00', frame_idx=1, timestamp_sec=0.1)
+    scene_artifact = SceneArtifact(
+        run_id='zup', stage_name='scene', save_dir=Path('.'),
+        static_scene={
+            'points_xyz': np.asarray([[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32),
+            'colors_rgb': np.asarray([[255, 255, 255]] * 3, dtype=np.uint8),
+            'center_xyz': [0.0, 0.0, 0.0],
+            'num_points': 3,
+        },
+        dynamic_entities={'humans': [], 'objects': []},
+        frame_refs=[frame0, frame1],
+        timeline={'source': 'geometry'},
+    )
+    path = CameraPathGenerator().orbit(scene_artifact, radius=2.0)
+    cams = path['cameras']
+    zs = [cam['eye'][2] for cam in cams]
+    assert np.allclose(zs, zs[0])
+    radii = [np.linalg.norm(np.asarray(cam['eye'][:2]) - np.asarray(cam['target'][:2])) for cam in cams]
+    assert np.allclose(radii, radii[0])
