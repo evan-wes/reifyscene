@@ -3,8 +3,8 @@
 class DynamicRenderer:
     """Base class for a dynamic scene renderer."""
 
-    def fit(self, optimization_artifact):
-        """Fit a renderable scene representation."""
+    def fit(self, scene_artifact, optimization_artifact=None):
+        """Fit or derive a renderable scene representation from a scene artifact."""
         raise NotImplementedError
 
     def render(self, scene, camera_path):

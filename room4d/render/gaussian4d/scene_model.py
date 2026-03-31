@@ -1,12 +1,16 @@
-"""Dynamic Gaussian scene representation."""
+"""Lightweight scene-model container for simple 4D scene rendering."""
+
+from __future__ import annotations
+
+from room4d.scene.scene_artifact import SceneArtifact
+
 
 class Gaussian4DScene:
-    """Container for a dynamic Gaussian scene model."""
+    """Container for a lightweight dynamic scene model."""
 
     def __init__(self, cfg: dict | None = None) -> None:
-        """Store renderer configuration."""
         self.cfg = cfg or {}
+        self.scene_artifact: SceneArtifact | None = None
 
-    def initialize_from_optimization(self, opt_artifact) -> None:
-        """Initialize scene state from an optimization artifact."""
-        return None
+    def initialize_from_scene(self, scene_artifact: SceneArtifact) -> None:
+        self.scene_artifact = scene_artifact

@@ -91,6 +91,13 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         tracking['cpu_threads'] = int(cpu_threads)
     elif rec.get('cpu_threads') is not None:
         tracking['cpu_threads'] = int(rec['cpu_threads'])
+    perception_side_presets = {
+        "lowmem": {"detector": 512, "pose": 512, "embedder": 256},
+        "balanced": {"detector": 768, "pose": 640, "embedder": 384},
+        "full": {"detector": 1024, "pose": 768, "embedder": 512},
+    }
+    side_preset = perception_side_presets.get((rec or {}).get("profile", ""), perception_side_presets["lowmem"])
+
     humans = cfg.setdefault('humans', {})
     humans['backend_mode'] = args.humans_backend_mode
     humans['device'] = args.humans_device or args.tracking_device or args.geometry_device
@@ -104,6 +111,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     humans['densepose_frame_stride'] = int(args.humans_densepose_frame_stride)
     humans['smpl_backend_mode'] = args.humans_smpl_backend_mode
     humans['smpl_frame_stride'] = int(args.humans_smpl_frame_stride)
+    humans.setdefault('max_inference_side', side_preset['detector'])
+    humans.setdefault('pose_max_inference_side', side_preset['pose'])
+    humans.setdefault('oom_retry_on_cpu', True)
 
     objects = cfg.setdefault('objects', {})
     objects['backend_mode'] = args.objects_backend_mode
@@ -114,6 +124,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     objects['frame_source'] = args.objects_frame_source
     objects['frame_stride'] = int(args.objects_frame_stride)
     objects['embedder_backend_mode'] = args.objects_embedder_backend_mode
+    objects.setdefault('max_inference_side', side_preset['detector'])
+    objects.setdefault('embedder_max_inference_side', side_preset['embedder'])
+    objects.setdefault('oom_retry_on_cpu', True)
 
     lifting = cfg.setdefault('lifting', {})
     lifting['point_conf_threshold'] = float(args.point_conf_threshold)
@@ -271,15 +284,16 @@ def main() -> None:
     outputs = {}
 
     stages = [
-        ("Stage 1/9 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
-        ("Stage 2/9 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
-        ("Stage 3/9 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
-        ("Stage 4/9 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
-        ("Stage 5/9 · Human perception", "humans", lambda: pipeline.perceive_humans(outputs["ingest"], track_artifact=outputs["tracks"])),
-        ("Stage 6/9 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
-        ("Stage 7/9 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"])),
-        ("Stage 8/9 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
-        ("Stage 9/9 · Render scaffold", "render", lambda: pipeline.fit_renderer(outputs["optimization"])),
+        ("Stage 1/10 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
+        ("Stage 2/10 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
+        ("Stage 3/10 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
+        ("Stage 4/10 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
+        ("Stage 5/10 · Human perception", "humans", lambda: pipeline.perceive_humans(outputs["ingest"], track_artifact=outputs["tracks"])),
+        ("Stage 6/10 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
+        ("Stage 7/10 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"])),
+        ("Stage 8/10 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
+        ("Stage 9/10 · 4D scene assembly", "scene", lambda: pipeline.assemble_scene(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], optimization_artifact=outputs["optimization"])),
+        ("Stage 10/10 · Novel-view render", "render", lambda: pipeline.fit_renderer(outputs["scene"], optimization_artifact=outputs["optimization"], geometry_artifact=outputs["geometry"])),
     ]
 
     for label, key, fn in stages:

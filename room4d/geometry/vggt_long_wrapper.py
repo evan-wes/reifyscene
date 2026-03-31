@@ -200,11 +200,13 @@ class VGGTLongInitializer(VGGTInitializer):
                     "use_conf_filter": bool(self.cfg.get("pc_use_conf_filter", True)),
                     "use_confidence_filtering": bool(self.cfg.get("pc_use_conf_filter", True)),
                 },
-            },
-            "IRLS": {
-                "delta": float(self.cfg.get("irls_delta", 0.1)),
-                "max_iters": int(self.cfg.get("irls_max_iters", 5)),
-                "tol": float(self.cfg.get("irls_tol", 1e-9)),
+                "IRLS": {
+                    "delta": float(self.cfg.get("irls_delta", 0.1)),
+                    "max_iters": int(self.cfg.get("irls_max_iters", 5)),
+                    # upstream sim3utils.py does eval(config['Model']['IRLS']['tol'])
+                    # so this must be a string, not a float
+                    "tol": str(self.cfg.get("irls_tol", "1e-9")),
+                },
             },
             "Loop": {
                 "DBoW": {
@@ -225,7 +227,7 @@ class VGGTLongInitializer(VGGTInitializer):
                     # extension has not been built.
                     "lang_version": self.cfg.get("sim3_lang_version", "python"),
                     "max_iterations": int(self.cfg.get("sim3_max_iterations", 30)),
-                    "lambda_init": self.cfg.get("sim3_lambda_init", "1e-6"),
+                    "lambda_init": str(self.cfg.get("sim3_lambda_init", "1e-6")),
                 },
             },
         }

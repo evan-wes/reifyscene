@@ -35,6 +35,7 @@ from room4d.perception.objects.segmenter import ObjectSegmenter
 from room4d.query.parser import PromptParser
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.scene.assembler import SingleVideoSceneAssembler
 from room4d.sync.global_time_solver import GlobalTimeAlignmentSolver
 from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
 
@@ -90,7 +91,8 @@ class Room4DPipeline:
         self.graph_builder = DynamicSceneGraphBuilder()
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
-        self.renderer = Gaussian4DTrainer()
+        self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
+        self.renderer = Gaussian4DTrainer(self.cfg.get("render", {}))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':
@@ -514,12 +516,34 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def fit_renderer(self, optimization_artifact):
-        """Fit a renderable 4D scene model."""
-        scene = Gaussian4DScene()
-        scene.initialize_from_optimization(optimization_artifact)
-        artifact = self.renderer.fit(scene, optimization_artifact)
-        artifact.save_dir = self._stage_dir('render')
+    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None):
+        """Assemble a lightweight static/dynamic single-video 4D scene."""
+        artifact = self.scene_assembler.assemble(
+            run_id=geometry_artifact.run_id,
+            save_dir=self._stage_dir('scene'),
+            geometry_artifact=geometry_artifact,
+            track_artifact=track_artifact,
+            human_artifact=human_artifact,
+            object_artifact=object_artifact,
+            metadata={
+                'optimization_available': optimization_artifact is not None,
+            },
+        )
+        artifact.save()
+        return artifact
+
+    def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None):
+        """Fit a renderable 4D scene model and export novel-view playback."""
+        scene = Gaussian4DScene(self.cfg.get('render', {}))
+        scene.initialize_from_scene(scene_artifact)
+        render_dir = self._stage_dir('render')
+        artifact = self.renderer.fit(
+            scene,
+            optimization_artifact=optimization_artifact,
+            geometry_artifact=geometry_artifact,
+            save_dir=render_dir,
+        )
+        artifact.save_dir = render_dir
         artifact.save()
         return artifact
 
@@ -557,7 +581,8 @@ class Room4DPipeline:
         object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
         graph_artifact = self.build_graph(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        render_artifact = self.fit_renderer(optimization_artifact)
+        scene_artifact = self.assemble_scene(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
+        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=geometry_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
@@ -567,5 +592,6 @@ class Room4DPipeline:
             'objects': object_artifact,
             'graph': graph_artifact,
             'optimization': optimization_artifact,
+            'scene': scene_artifact,
             'render': render_artifact,
         }
