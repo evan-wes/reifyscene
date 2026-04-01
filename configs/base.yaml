@@ -20,3 +20,19 @@ optimization:
 
 scene:
   timeline_source: geometry
+
+render:
+  device: auto
+  width: 800
+  height: 450
+  point_limit: 10000
+  dynamic_point_budget: 180
+  frame_stride: 1
+  max_frames_per_path: 32
+  use_gpu_projection: true
+  enabled_paths:
+    orbit: true
+    overhead: true
+    replay: true
+    follow_human: true
+    follow_object: true

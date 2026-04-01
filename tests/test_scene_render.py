@@ -187,3 +187,33 @@ def test_camera_paths_use_z_up_debug_frame() -> None:
     assert np.allclose(zs, zs[0])
     radii = [np.linalg.norm(np.asarray(cam['eye'][:2]) - np.asarray(cam['target'][:2])) for cam in cams]
     assert np.allclose(radii, radii[0])
+
+
+def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
+    frame1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
+    frame2 = FrameRef(stream_id="cam_00", frame_idx=2, timestamp_sec=0.2)
+    scene_artifact = SceneArtifact(
+        run_id='cfg', stage_name='scene', save_dir=tmp_path / 'scene_cfg',
+        static_scene={
+            'points_xyz': np.asarray([[0.0, 0.0, 2.0], [0.2, 0.0, 2.0], [0.0, 0.2, 2.0]], dtype=np.float32),
+            'colors_rgb': np.asarray([[255, 255, 255]] * 3, dtype=np.uint8),
+            'center_xyz': [0.0, 0.0, 2.0],
+            'num_points': 3,
+        },
+        dynamic_entities={'humans': [], 'objects': []},
+        frame_refs=[frame0, frame1, frame2],
+        timeline={'source': 'tracking'},
+    )
+    scene_model = Gaussian4DScene()
+    scene_model.initialize_from_scene(scene_artifact)
+    trainer = Gaussian4DTrainer({
+        'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
+        'frame_stride': 2,
+        'max_frames_per_path': 1,
+        'point_limit': 100,
+        'dynamic_point_budget': 20,
+    })
+    artifact = trainer.fit(scene_model, save_dir=tmp_path / 'render_cfg')
+    assert set(artifact.path_index.keys()) == {'orbit'}
+    assert len(artifact.path_index['orbit']) == 1

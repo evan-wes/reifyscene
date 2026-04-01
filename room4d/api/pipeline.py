@@ -579,6 +579,8 @@ class Room4DPipeline:
             components = [self.human_detector, self.human_pose, self.human_densepose, self.human_smpl]
         elif stage_name == 'objects':
             components = [self.object_detector, self.object_embedder]
+        elif stage_name == 'render':
+            components = [self.renderer]
         for component in components:
             if component is None:
                 continue
