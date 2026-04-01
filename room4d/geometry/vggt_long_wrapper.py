@@ -475,24 +475,25 @@ class VGGTLongInitializer(VGGTInitializer):
 
     @contextmanager
     def _patched_torch_load_for_device(self):
-        """Temporarily patch torch.load so CPU runs do not try to deserialize to CUDA.
+        """Temporarily patch torch.load so checkpoints always deserialize on CPU first.
 
         Upstream VGGT-Long hardcodes `map_location='cuda'` when loading VGGT
-        weights. For CPU runs, rewrite any CUDA map_location to CPU.
+        weights. Rewriting those calls to CPU reduces peak GPU memory during
+        model initialization; upstream then moves the fully loaded model to the
+        requested device via ``model.to(self.device)``.
         """
-        requested_device = self._requested_device()
-        if requested_device != "cpu":
-            yield
-            return
-
         original_torch_load = torch.load
 
         def _cpu_safe_torch_load(*args, **kwargs):
             map_location = kwargs.get("map_location", None)
+            if map_location is None and len(args) >= 2:
+                map_location = args[1]
 
             if map_location == "cuda":
                 kwargs["map_location"] = torch.device("cpu")
             elif isinstance(map_location, str) and map_location.startswith("cuda"):
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, torch.device) and map_location.type == "cuda":
                 kwargs["map_location"] = torch.device("cpu")
 
             return original_torch_load(*args, **kwargs)
@@ -550,24 +551,54 @@ class VGGTLongInitializer(VGGTInitializer):
         return candidates
 
     @staticmethod
-    def _resize_candidates(initial_resize_max_dim: int | None, min_resize_max_dim: int | None, source_max_dim: int | None) -> list[int | None]:
+    def _resize_candidates(
+        initial_resize_max_dim: int | None,
+        min_resize_max_dim: int | None,
+        source_max_dim: int | None,
+        recommendation_candidates: list[int | None] | None = None,
+    ) -> list[int | None]:
         if source_max_dim is not None and source_max_dim > 0 and initial_resize_max_dim is None:
             initial_resize_max_dim = source_max_dim
-        if initial_resize_max_dim is None:
+        if initial_resize_max_dim is None and not recommendation_candidates:
             return [None]
 
-        initial = int(initial_resize_max_dim)
-        floor = int(min_resize_max_dim) if min_resize_max_dim not in (None, 0) else max(384, int(round(initial * 0.5)))
-        if source_max_dim is not None and source_max_dim > 0:
-            initial = min(initial, int(source_max_dim))
+        floor = int(min_resize_max_dim) if min_resize_max_dim not in (None, 0) else None
+        if floor is None and initial_resize_max_dim not in (None, 0):
+            floor = max(256, int(round(int(initial_resize_max_dim) * 0.5)))
+        if source_max_dim is not None and source_max_dim > 0 and floor is not None:
             floor = min(floor, int(source_max_dim))
-        floor = max(1, min(floor, initial))
 
-        values: list[int] = []
-        for value in (initial, max(floor, int(round(initial * 0.75))), max(floor, int(round(initial * 0.5))), floor):
+        values: list[int | None] = []
+
+        def _append(value: int | None) -> None:
+            if value in (None, 0):
+                return
+            value = int(value)
+            if source_max_dim is not None and source_max_dim > 0:
+                value = min(value, int(source_max_dim))
+            if floor is not None:
+                value = max(floor, value)
             if value not in values:
                 values.append(value)
-        return values or [initial]
+
+        _append(initial_resize_max_dim)
+        for value in recommendation_candidates or []:
+            _append(value)
+        if not values and initial_resize_max_dim not in (None, 0):
+            initial = int(initial_resize_max_dim)
+            for value in (
+                initial,
+                int(round(initial * 0.9)),
+                int(round(initial * 0.8)),
+                int(round(initial * 0.7)),
+                int(round(initial * 0.6)),
+                int(round(initial * 0.5)),
+                floor,
+            ):
+                _append(value)
+        if floor is not None:
+            _append(floor)
+        return values or [initial_resize_max_dim]
 
     def _derive_overlap(self, chunk_size: int, num_frames: int, overlap_ratio: float, overlap_hint: int | None = None) -> int:
         if num_frames <= chunk_size:
@@ -625,6 +656,7 @@ class VGGTLongInitializer(VGGTInitializer):
             None if configured_resize in (None, 0) else int(configured_resize),
             None if min_resize_max_dim in (None, 0) else int(min_resize_max_dim),
             source_max_dim,
+            recommendation_candidates=recommendation.get("resize_candidates"),
         )
         chunk_candidates = self._chunk_candidates(configured_chunk, min_chunk_size, len(frames))
 

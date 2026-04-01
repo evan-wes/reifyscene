@@ -18,7 +18,9 @@ from pathlib import Path
 from time import perf_counter
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
@@ -121,6 +123,10 @@ def _print_system_report(console: Console, report: dict, geometry_recommendation
         "RAM total / available",
         f"{memory.get('total_gib', 0):.1f} GiB / {memory.get('available_gib', 0):.1f} GiB",
     )
+    table.add_row(
+        "Swap total / free",
+        f"{memory.get('swap_total_gib', 0):.1f} GiB / {memory.get('swap_free_gib', 0):.1f} GiB",
+    )
     gpus = report.get("gpus", []) or []
     if gpus:
         gpu = max(gpus, key=lambda g: g.get("memory_free_mb", 0))
@@ -131,7 +137,53 @@ def _print_system_report(console: Console, report: dict, geometry_recommendation
     else:
         table.add_row("GPU", "None detected via nvidia-smi")
     if geometry_recommendation:
-        table.add_row("VGGT-Long seed", f"profile={geometry_recommendation.get('profile')} chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}")
+        resize_candidates = geometry_recommendation.get("resize_candidates") or []
+        resize_preview = ", ".join(str(v) for v in resize_candidates[:6])
+        if len(resize_candidates) > 6:
+            resize_preview += ", ..."
+        table.add_row(
+            "VGGT-Long seed",
+            f"profile={geometry_recommendation.get('profile')} chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}",
+        )
+        if resize_preview:
+            table.add_row("Resize ladder", resize_preview)
+    console.print(table)
+
+
+def _print_run_header(console: Console, args: argparse.Namespace, geometry_recommendation: dict | None) -> None:
+    body = Text()
+    body.append(f"video: {args.video}\n")
+    body.append(f"run_dir: {args.run_dir}\n")
+    body.append(
+        f"geometry backend: {args.geometry_backend_name}  mode: {args.backend_mode}  frame_source: {args.geometry_frame_source}  device: {args.device or 'auto'}\n"
+    )
+    body.append(
+        f"max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}  cpu_threads: {args.cpu_threads}\n"
+    )
+    body.append(f"geometry_resize_max_dim: {args.geometry_resize_max_dim}\n")
+    if args.geometry_backend_name == "vggt-long":
+        body.append(
+            f"vggt-long: chunk_size={args.vggt_long_chunk_size} overlap={args.vggt_long_overlap} auto_tune={args.vggt_long_auto_tune} min_chunk={args.vggt_long_min_chunk_size} min_resize={args.vggt_long_min_resize_max_dim}\n"
+        )
+        if geometry_recommendation:
+            resize_candidates = geometry_recommendation.get("resize_candidates") or []
+            resize_preview = ", ".join(str(v) for v in resize_candidates[:6])
+            if len(resize_candidates) > 6:
+                resize_preview += ", ..."
+            body.append(
+                f"recommended seed: chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}  ladder=[{resize_preview}]"
+            )
+    console.print(Panel(body, title="room4d single-video geometry run", expand=False))
+
+
+def _print_stage_summary(console: Console, ingest, sync, geometry) -> None:
+    table = Table(title="Run outputs")
+    table.add_column("Artifact")
+    table.add_column("Summary")
+    table.add_column("Path")
+    table.add_row("Ingest", str(ingest.summary()), str(ingest.save_dir))
+    table.add_row("Sync", str(sync.summary()), str(sync.save_dir))
+    table.add_row("Geometry", str(geometry.summary()), str(geometry.save_dir))
     console.print(table)
 
 
@@ -234,37 +286,17 @@ def main() -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     save_system_report(report_path, {"report": system_report, "recommended_vggt_long_profile": geometry_recommended})
 
-    if args.debug or args.preflight_only:
-        _print_system_report(console, system_report, geometry_recommendation=geometry_recommended)
-        console.print(f"saved preflight report: {report_path}")
+    _print_system_report(console, system_report, geometry_recommendation=geometry_recommended)
+    console.print(f"saved preflight report: {report_path}")
     if args.preflight_only:
         return
 
-    if args.debug:
-        console.print("[bold]room4d single-video geometry debug run[/bold]")
-        console.print(f"video: {args.video}")
-        console.print(f"run_dir: {args.run_dir}")
+    _print_run_header(console, args, geometry_recommended)
+    if args.debug and args.geometry_backend_name == "vggt-long":
         console.print(
-            f"geometry backend: {args.geometry_backend_name}  "
-            f"mode: {args.backend_mode}  "
-            f"frame_source: {args.geometry_frame_source}  "
-            f"device: {args.device or 'auto'}"
+            f"loop_enable={args.vggt_long_loop_enable}  use_dbow={args.vggt_long_use_dbow}  "
+            f"delete_temp_files={args.vggt_long_delete_temp_files}  output_cache_dir={args.vggt_long_output_cache_dir}"
         )
-        console.print(
-            f"max_keyframes: {args.max_keyframes}  "
-            f"keyframe_stride_sec: {args.keyframe_stride_sec}"
-        )
-        console.print(f"cpu_threads: {args.cpu_threads}  geometry_resize_max_dim: {args.geometry_resize_max_dim}")
-        if args.geometry_backend_name == "vggt-long":
-            console.print(
-                "vggt-long:"
-                f" chunk_size={args.vggt_long_chunk_size}"
-                f" overlap={args.vggt_long_overlap}"
-                f" loop_enable={args.vggt_long_loop_enable}"
-                f" use_dbow={args.vggt_long_use_dbow}"
-                f" delete_temp_files={args.vggt_long_delete_temp_files}"
-                f" output_cache_dir={args.vggt_long_output_cache_dir}"
-            )
 
     pipeline = Room4DPipeline(build_config(args, system_report=system_report))
 
@@ -295,10 +327,7 @@ def main() -> None:
         release_memory()
         _debug_stage_done(console, args.debug, 'Deferred debug export', export_started, save_dir=args.run_dir)
 
-    print("Ingest summary:", ingest.summary())
-    print("Sync summary:", sync.summary())
-    print("Geometry summary:", geometry.summary())
-    print("Geometry artifact dir:", geometry.save_dir)
+    _print_stage_summary(console, ingest, sync, geometry)
 
 
 if __name__ == "__main__":

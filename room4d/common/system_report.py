@@ -178,48 +178,112 @@ def recommend_vggt_long_profile(
     source_max_dim = int(source_max_dim) if source_max_dim else None
     num_frames = int(num_frames) if num_frames else None
 
+    def _clip_resize(value: int | None) -> int | None:
+        if value in (None, 0):
+            return None
+        value = int(value)
+        if source_max_dim is not None and source_max_dim > 0:
+            value = min(value, source_max_dim)
+        return max(1, value)
+
+    def _dedupe_resize(values: list[int | None], floor_value: int | None) -> list[int | None]:
+        floor_norm = _clip_resize(floor_value)
+        out: list[int | None] = []
+        for value in values:
+            value_norm = _clip_resize(value)
+            if value_norm is None:
+                continue
+            if floor_norm is not None:
+                value_norm = max(floor_norm, value_norm)
+            if value_norm not in out:
+                out.append(value_norm)
+        if floor_norm is not None and floor_norm not in out:
+            out.append(floor_norm)
+        return out
+
     if device.startswith('cuda'):
-        if max_free_gpu_gib >= 18.0:
+        if max_free_gpu_gib >= 24.0:
             profile = 'full'
             initial_chunk_size = 48
             initial_resize_max_dim = source_max_dim
-            min_resize_max_dim = max(640, min(source_max_dim or 640, 960))
-        elif max_free_gpu_gib >= 12.0:
+            min_resize_max_dim = 768
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 1600, 1440, 1280, 1152, 1024, 960, 896, 832, 768],
+                min_resize_max_dim,
+            )
+        elif max_free_gpu_gib >= 16.0:
             profile = 'balanced'
             initial_chunk_size = 32
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1440)
-            min_resize_max_dim = max(576, min(source_max_dim or 576, 896))
-        elif max_free_gpu_gib >= 8.0:
+            initial_resize_max_dim = _clip_resize(1280 if source_max_dim is not None else 1280)
+            min_resize_max_dim = 640
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 1152, 1024, 960, 896, 832, 768, 704, 640],
+                min_resize_max_dim,
+            )
+        elif max_free_gpu_gib >= 12.0:
             profile = 'balanced'
             initial_chunk_size = 24
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1280)
-            min_resize_max_dim = max(512, min(source_max_dim or 512, 768))
-        elif max_free_gpu_gib >= 5.0:
+            initial_resize_max_dim = _clip_resize(960 if source_max_dim is not None else 960)
+            min_resize_max_dim = 512
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 896, 832, 768, 704, 640, 576, 512],
+                min_resize_max_dim,
+            )
+        elif max_free_gpu_gib >= 8.0:
             profile = 'lowmem'
-            initial_chunk_size = 16
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1024)
-            min_resize_max_dim = max(448, min(source_max_dim or 448, 640))
-        else:
+            initial_chunk_size = 12
+            initial_resize_max_dim = _clip_resize(640 if source_max_dim is not None else 640)
+            min_resize_max_dim = 320
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 576, 512, 448, 384, 320],
+                min_resize_max_dim,
+            )
+        elif max_free_gpu_gib >= 6.0:
             profile = 'lowmem'
             initial_chunk_size = 8
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 768)
-            min_resize_max_dim = max(384, min(source_max_dim or 384, 512))
+            initial_resize_max_dim = _clip_resize(512 if source_max_dim is not None else 512)
+            min_resize_max_dim = 256
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 448, 384, 320, 288, 256],
+                min_resize_max_dim,
+            )
+        else:
+            profile = 'lowmem'
+            initial_chunk_size = 4
+            initial_resize_max_dim = _clip_resize(384 if source_max_dim is not None else 384)
+            min_resize_max_dim = 224
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 320, 288, 256, 224],
+                min_resize_max_dim,
+            )
     else:
         if available_gib >= 32.0:
             profile = 'balanced'
             initial_chunk_size = 16
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 960)
-            min_resize_max_dim = max(512, min(source_max_dim or 512, 768))
+            initial_resize_max_dim = _clip_resize(960 if source_max_dim is not None else 960)
+            min_resize_max_dim = 512
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 896, 832, 768, 704, 640, 576, 512],
+                min_resize_max_dim,
+            )
         elif available_gib >= 16.0:
             profile = 'balanced'
             initial_chunk_size = 12
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 768)
-            min_resize_max_dim = max(448, min(source_max_dim or 448, 640))
+            initial_resize_max_dim = _clip_resize(768 if source_max_dim is not None else 768)
+            min_resize_max_dim = 384
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 704, 640, 576, 512, 448, 384],
+                min_resize_max_dim,
+            )
         else:
             profile = 'lowmem'
             initial_chunk_size = 8
-            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 640)
-            min_resize_max_dim = max(384, min(source_max_dim or 384, 512))
+            initial_resize_max_dim = _clip_resize(640 if source_max_dim is not None else 640)
+            min_resize_max_dim = 320
+            resize_candidates = _dedupe_resize(
+                [initial_resize_max_dim, 576, 512, 448, 384, 320],
+                min_resize_max_dim,
+            )
 
     if source_max_dim is not None:
         if source_max_dim >= 3000:
@@ -228,9 +292,9 @@ def recommend_vggt_long_profile(
             initial_chunk_size = max(2, int(round(initial_chunk_size * 0.625)))
         elif source_max_dim >= 1400:
             initial_chunk_size = max(2, int(round(initial_chunk_size * 0.75)))
-        if initial_resize_max_dim is not None:
-            initial_resize_max_dim = min(initial_resize_max_dim, source_max_dim)
-        min_resize_max_dim = min(min_resize_max_dim, source_max_dim)
+        initial_resize_max_dim = _clip_resize(initial_resize_max_dim)
+        min_resize_max_dim = int(_clip_resize(min_resize_max_dim) or min_resize_max_dim)
+        resize_candidates = _dedupe_resize(resize_candidates, min_resize_max_dim)
 
     if num_frames is not None and num_frames > 0:
         initial_chunk_size = max(1, min(initial_chunk_size, num_frames))
@@ -253,6 +317,7 @@ def recommend_vggt_long_profile(
         'min_chunk_size': min_chunk_size,
         'initial_resize_max_dim': initial_resize_max_dim,
         'min_resize_max_dim': min_resize_max_dim,
+        'resize_candidates': resize_candidates,
         'source_max_dim': source_max_dim,
         'num_frames': num_frames,
     }

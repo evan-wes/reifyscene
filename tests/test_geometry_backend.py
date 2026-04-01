@@ -325,6 +325,41 @@ def test_vggt_long_oom_detection_handles_missing_top_level_torch_oom(monkeypatch
     assert init._is_probable_oom_error(RuntimeError("CUDA out of memory while loading model")) is True
 
 
+def test_vggt_long_gpu_runs_still_deserialize_weights_on_cpu(monkeypatch) -> None:
+    init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda"})
+    seen = {}
+
+    def _fake_torch_load(*args, **kwargs):
+        seen["map_location"] = kwargs.get("map_location")
+        return "ok"
+
+    monkeypatch.setattr(torch, "load", _fake_torch_load)
+    with init._patched_torch_load_for_device():
+        result = torch.load("weights.pt", map_location="cuda")
+
+    assert result == "ok"
+    assert isinstance(seen["map_location"], torch.device)
+    assert seen["map_location"].type == "cpu"
+
+
+
+def test_vggt_gpu_runs_still_deserialize_weights_on_cpu(monkeypatch) -> None:
+    init = VGGTInitializer({"backend_mode": "real", "device": "cuda"})
+    seen = {}
+
+    def _fake_torch_load(*args, **kwargs):
+        seen["map_location"] = kwargs.get("map_location")
+        return "ok"
+
+    monkeypatch.setattr(torch, "load", _fake_torch_load)
+    with init._patched_torch_load_for_cpu_deserialize():
+        result = torch.load("weights.pt", map_location=torch.device("cuda"))
+
+    assert result == "ok"
+    assert isinstance(seen["map_location"], torch.device)
+    assert seen["map_location"].type == "cpu"
+
+
 
 def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_cpu_probe.mp4"

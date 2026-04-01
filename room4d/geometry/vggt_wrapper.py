@@ -7,6 +7,8 @@ installed locally.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,36 @@ class VGGTInitializer(GeometryInitializer):
         self._unproject_depth_map_to_point_map = None
         self._backend_error: Exception | None = None
 
+    @contextmanager
+    def _patched_torch_load_for_cpu_deserialize(self):
+        """Temporarily patch torch.load so weights deserialize on CPU first.
+
+        This keeps checkpoint loading off CUDA even when the requested execution
+        device is a GPU, reducing peak VRAM usage during model initialization.
+        The fully constructed model is moved to ``self.device`` afterwards.
+        """
+        original_torch_load = torch.load
+
+        def _cpu_safe_torch_load(*args, **kwargs):
+            map_location = kwargs.get("map_location", None)
+            if map_location is None and len(args) >= 2:
+                map_location = args[1]
+
+            if map_location == "cuda":
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, str) and map_location.startswith("cuda"):
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, torch.device) and map_location.type == "cuda":
+                kwargs["map_location"] = torch.device("cpu")
+
+            return original_torch_load(*args, **kwargs)
+
+        torch.load = _cpu_safe_torch_load
+        try:
+            yield
+        finally:
+            torch.load = original_torch_load
+
     def _load_backend_components(self) -> None:
         """Import the official VGGT modules lazily."""
         from vggt.models.vggt import VGGT  # type: ignore[import-not-found]
@@ -110,12 +142,15 @@ class VGGTInitializer(GeometryInitializer):
                 except Exception:
                     pass
             self._load_backend_components()
-            if self.checkpoint_path:
-                model = self._VGGT()
-                state_dict = torch.load(self.checkpoint_path, map_location="cpu")
-                model.load_state_dict(state_dict)
-            else:
-                model = self._VGGT.from_pretrained(self.hf_model_id)
+            with self._patched_torch_load_for_cpu_deserialize():
+                if self.checkpoint_path:
+                    model = self._VGGT()
+                    state_dict = torch.load(self.checkpoint_path, map_location="cpu")
+                    model.load_state_dict(state_dict)
+                else:
+                    model = self._VGGT.from_pretrained(self.hf_model_id)
+            if hasattr(model, "cpu"):
+                model = model.cpu()
             model = model.to(self.device)
             model.eval()
             self._model = model

@@ -22,6 +22,21 @@ def test_vggt_long_recommendation_prefers_conservative_defaults_on_small_gpu() -
     }
     rec = recommend_vggt_long_profile(report, device='cuda', num_frames=120, source_max_dim=1920)
     assert rec['profile'] == 'lowmem'
-    assert rec['initial_chunk_size'] <= 16
-    assert rec['initial_resize_max_dim'] <= 1024
+    assert rec['initial_chunk_size'] <= 8
+    assert rec['initial_resize_max_dim'] <= 384
     assert rec['min_resize_max_dim'] <= rec['initial_resize_max_dim']
+    assert rec['resize_candidates'][0] == rec['initial_resize_max_dim']
+    assert rec['resize_candidates'][-1] == rec['min_resize_max_dim']
+
+
+def test_vggt_long_recommendation_exposes_dense_resize_ladder_for_8gb_gpu() -> None:
+    report = {
+        'memory': {'available_gib': 32.0},
+        'gpus': [{'memory_free_mb': 8192}],
+    }
+    rec = recommend_vggt_long_profile(report, device='cuda', num_frames=180, source_max_dim=1920)
+    assert rec['profile'] == 'lowmem'
+    assert rec['initial_chunk_size'] <= 12
+    assert rec['initial_resize_max_dim'] == 640
+    assert rec['min_resize_max_dim'] == 320
+    assert rec['resize_candidates'] == [640, 576, 512, 448, 384, 320]
