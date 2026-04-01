@@ -62,6 +62,8 @@ class VGGTInitializer(GeometryInitializer):
         self.debug_shapes = bool(self.cfg.get("debug_shapes", False))
         self.save_depth_pngs = bool(self.cfg.get("save_depth_pngs", False))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        resize_max_dim = self.cfg.get("resize_max_dim")
+        self.resize_max_dim = None if resize_max_dim in (None, 0) else int(resize_max_dim)
         self.cpu_threads = self.cfg.get("cpu_threads")
 
         self._is_loaded = False
@@ -156,6 +158,8 @@ class VGGTInitializer(GeometryInitializer):
         frames: list[FrameRef],
         ingest_artifact,
         target_root: Path,
+        *,
+        resize_max_dim: int | None = None,
     ) -> tuple[list[Path], list[str]]:
         """Decode and save selected frames to disk for VGGT preprocessing."""
         if ingest_artifact is None:
@@ -164,21 +168,38 @@ class VGGTInitializer(GeometryInitializer):
         stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
         image_paths: list[Path] = []
         notes: list[str] = []
+        applied_resize = self.resize_max_dim if resize_max_dim is None else resize_max_dim
+        applied_resize = None if applied_resize in (None, 0) else int(applied_resize)
+        resized_any = False
 
         target_root.mkdir(parents=True, exist_ok=True)
         for old_png in target_root.glob("*.png"):
             old_png.unlink()
         frame_iter = enumerate(frames)
         if self.debug_shapes:
-            frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing keyframes")
+            frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing frames")
         for idx, frame in frame_iter:
             stream = stream_lookup[frame.stream_id]
             image = self.decoder.get_frame(stream, frame.frame_idx)
+            pil_image = Image.fromarray(image)
+            if applied_resize is not None:
+                width, height = pil_image.size
+                max_dim = max(width, height)
+                if max_dim > applied_resize:
+                    scale = float(applied_resize) / float(max_dim)
+                    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+                    pil_image = pil_image.resize(new_size, resample=Image.BILINEAR)
+                    resized_any = True
             out_path = target_root / f"{idx:04d}_{frame.stream_id}_{frame.frame_idx:06d}.png"
-            Image.fromarray(image).save(out_path)
+            pil_image.save(out_path)
             image_paths.append(out_path)
 
         notes.append(f"Materialized VGGT inputs under cache: {target_root}")
+        if applied_resize is not None:
+            if resized_any:
+                notes.append(f"Materialized images were resized to max_dim={applied_resize} before backend execution.")
+            else:
+                notes.append(f"Materialized images fit within resize_max_dim={applied_resize}; no resize was needed.")
         return image_paths, notes
 
     def _numpyify(self, value: Any) -> Any:

@@ -24,7 +24,7 @@ from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
 from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from room4d.common.memory import release_memory
-from room4d.common.system_report import collect_system_report, save_system_report
+from room4d.common.system_report import collect_system_report, recommend_vggt_long_profile, save_system_report
 
 
 def build_config(args: argparse.Namespace, *, system_report: dict | None = None) -> dict:
@@ -36,11 +36,15 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry["backend_name"] = getattr(args, "geometry_backend_name", "vggt")
     geometry["backend_mode"] = args.backend_mode
     geometry["frame_source"] = str(getattr(args, "geometry_frame_source", "keyframes")).lower()
+    geometry["system_report"] = system_report or collect_system_report()
 
     if args.device is not None:
         geometry["device"] = args.device
     if args.frame_cache_dir is not None:
         geometry["frame_cache_dir"] = args.frame_cache_dir
+    geometry_resize_max_dim = getattr(args, "geometry_resize_max_dim", None)
+    if geometry_resize_max_dim is not None:
+        geometry["resize_max_dim"] = int(geometry_resize_max_dim)
 
     geometry["debug_shapes"] = bool(args.debug)
     geometry["save_depth_pngs"] = bool(args.debug)
@@ -61,6 +65,11 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
             geometry["chunk_size"] = int(args.vggt_long_chunk_size)
         if args.vggt_long_overlap is not None:
             geometry["overlap"] = int(args.vggt_long_overlap)
+        geometry["auto_tune"] = bool(getattr(args, "vggt_long_auto_tune", False))
+        geometry["min_chunk_size"] = int(getattr(args, "vggt_long_min_chunk_size", 2))
+        vggt_long_min_resize_max_dim = getattr(args, "vggt_long_min_resize_max_dim", None)
+        if vggt_long_min_resize_max_dim is not None:
+            geometry["min_resize_max_dim"] = int(vggt_long_min_resize_max_dim)
         if args.vggt_long_loop_enable is not None:
             geometry["loop_enable"] = bool(args.vggt_long_loop_enable)
         if args.vggt_long_use_dbow is not None:
@@ -97,7 +106,7 @@ def _debug_stage_done(
         console.print(f"[green]✓[/green] {label} complete in {elapsed:.2f}s")
 
 
-def _print_system_report(console: Console, report: dict) -> None:
+def _print_system_report(console: Console, report: dict, geometry_recommendation: dict | None = None) -> None:
     table = Table(title="System preflight report")
     table.add_column("Item")
     table.add_column("Value")
@@ -121,6 +130,8 @@ def _print_system_report(console: Console, report: dict) -> None:
         )
     else:
         table.add_row("GPU", "None detected via nvidia-smi")
+    if geometry_recommendation:
+        table.add_row("VGGT-Long seed", f"profile={geometry_recommendation.get('profile')} chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}")
     console.print(table)
 
 
@@ -162,6 +173,7 @@ def main() -> None:
         help="Print/save the system report and exit.",
     )
     parser.add_argument("--frame-cache-dir", default=None)
+    parser.add_argument("--geometry-resize-max-dim", type=int, default=None, help="Optionally downscale materialized geometry frames before backend execution.")
 
     parser.add_argument("--max-keyframes", type=int, default=8)
     parser.add_argument("--keyframe-stride-sec", type=float, default=1.0)
@@ -169,6 +181,9 @@ def main() -> None:
     # VGGT-Long-specific flags
     parser.add_argument("--vggt-long-chunk-size", type=int, default=None)
     parser.add_argument("--vggt-long-overlap", type=int, default=None)
+    parser.add_argument("--vggt-long-auto-tune", action="store_true", help="Automatically back off VGGT-Long chunk/overlap/resize settings on OOM.")
+    parser.add_argument("--vggt-long-min-chunk-size", type=int, default=2)
+    parser.add_argument("--vggt-long-min-resize-max-dim", type=int, default=None)
     parser.add_argument(
         "--vggt-long-loop-enable",
         action=argparse.BooleanOptionalAction,
@@ -212,12 +227,15 @@ def main() -> None:
     console = Console()
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
+    geometry_recommended = None
+    if args.geometry_backend_name == "vggt-long":
+        geometry_recommended = recommend_vggt_long_profile(system_report, device=args.device)
     report_path = Path(args.run_dir) / "preflight_system_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    save_system_report(report_path, {"report": system_report})
+    save_system_report(report_path, {"report": system_report, "recommended_vggt_long_profile": geometry_recommended})
 
     if args.debug or args.preflight_only:
-        _print_system_report(console, system_report)
+        _print_system_report(console, system_report, geometry_recommendation=geometry_recommended)
         console.print(f"saved preflight report: {report_path}")
     if args.preflight_only:
         return
@@ -236,7 +254,7 @@ def main() -> None:
             f"max_keyframes: {args.max_keyframes}  "
             f"keyframe_stride_sec: {args.keyframe_stride_sec}"
         )
-        console.print(f"cpu_threads: {args.cpu_threads}")
+        console.print(f"cpu_threads: {args.cpu_threads}  geometry_resize_max_dim: {args.geometry_resize_max_dim}")
         if args.geometry_backend_name == "vggt-long":
             console.print(
                 "vggt-long:"

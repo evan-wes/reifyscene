@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
+import pytest
 import numpy as np
 import torch
 
@@ -237,6 +239,93 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         return artifact
 
 
+class _AutoTuneVGGTLong(VGGTLongInitializer):
+    def load_checkpoint(self) -> None:
+        self._VGGT_Long = object()
+        self._is_loaded = True
+
+    def _create_runner(self, image_dir: Path, output_dir: Path):
+        resize_max_dim = None
+        name = image_dir.name
+        if name.startswith("maxdim_"):
+            resize_max_dim = int(name.split("_", 1)[1])
+        runner = type("_Runner", (), {})()
+        runner.image_dir = image_dir
+        runner.output_dir = output_dir
+        runner.resize_max_dim = resize_max_dim
+        return runner
+
+    def _run_runner(self, runner) -> None:
+        if self.chunk_size > 4 or (runner.resize_max_dim is None or runner.resize_max_dim > 128):
+            raise torch.OutOfMemoryError("CUDA out of memory during fake VGGT-Long run")
+
+    def _load_chunk_predictions(self, runner):
+        num_frames = 8
+        return [
+            {
+                '_chunk_range': (0, num_frames),
+                'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3] for _ in range(num_frames)], axis=0),
+                'intrinsic': np.stack([np.eye(3, dtype=np.float32) for _ in range(num_frames)], axis=0),
+                'depth': np.ones((num_frames, 4, 4, 1), dtype=np.float32),
+                'depth_conf': np.ones((num_frames, 4, 4), dtype=np.float32),
+                'world_points': np.zeros((num_frames, 4, 4, 3), dtype=np.float32),
+                'world_points_conf': np.ones((num_frames, 4, 4), dtype=np.float32),
+            }
+        ]
+
+
+def test_vggt_long_auto_tune_backs_off_chunk_and_resize_on_oom(tmp_path: Path, capsys) -> None:
+    video_path = tmp_path / "sample_auto_tune.mp4"
+    _write_test_video(video_path, width=320, height=240, num_frames=8)
+
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(8)]
+    ingest = IngestArtifact(
+        run_id="auto_tune",
+        stage_name="ingest",
+        save_dir=tmp_path,
+        streams=[stream],
+        keyframes=frames,
+    )
+
+    init = _AutoTuneVGGTLong({
+        "backend_mode": "real",
+        "device": "cuda",
+        "auto_tune": True,
+        "chunk_size": 8,
+        "overlap": 2,
+        "resize_max_dim": 256,
+        "min_resize_max_dim": 128,
+        "min_chunk_size": 2,
+        "system_report": {"memory": {"available_gib": 64.0}, "gpus": [{"memory_free_mb": 8192}]},
+    })
+    artifact = init.initialize(frames, ingest_artifact=ingest, sync_artifact=None)
+
+    assert artifact.backend_name == "vggt-long"
+    assert artifact.metadata["vggt_long_auto_tune"] is True
+    assert artifact.metadata["vggt_long_chunk_size"] == 4
+    assert artifact.metadata["vggt_long_resize_max_dim"] == 128
+    attempts = artifact.metadata["vggt_long_auto_tune_attempts"]
+    assert len(attempts) >= 2
+    assert attempts[-1]["status"] == "success"
+    assert any(item["status"] == "oom" for item in attempts[:-1])
+    captured = capsys.readouterr()
+    assert "[VGGT-Long auto-tune] attempt 1/" in captured.out
+    assert "trying chunk_size=" in captured.out
+    assert "failed with OOM" in captured.out
+    assert "succeeded with" in captured.out
+
+
+def test_vggt_long_oom_detection_handles_missing_top_level_torch_oom(monkeypatch) -> None:
+    monkeypatch.delattr(torch, "OutOfMemoryError", raising=False)
+    init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda"})
+
+    assert init._is_probable_oom_error(torch.cuda.OutOfMemoryError("CUDA out of memory")) is True
+    assert init._is_probable_oom_error(RuntimeError("CUDA out of memory while loading model")) is True
+
+
+
 def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_cpu_probe.mp4"
     _write_test_video(video_path, num_frames=1)
@@ -355,3 +444,95 @@ def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) ->
     states = artifact.camera_states_by_stream["cam_00"]
     assert [round(float(state.time_sec), 6) for state in states] == [0.0, 0.125, 0.25, 0.375]
     assert artifact.metadata["geometry_frame_source"] == "all"
+
+
+class _AlwaysFailAutoTuneVGGTLong(_AutoTuneVGGTLong):
+    def _run_runner(self, runner) -> None:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory while loading fake VGGT-Long model")
+
+
+def test_vggt_long_auto_tune_exhaustion_reports_attempt_summary(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_auto_tune_fail.mp4"
+    _write_test_video(video_path, width=320, height=240, num_frames=4)
+
+    decoder = VideoDecoder(default_fps=30.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(4)]
+    ingest = IngestArtifact(
+        run_id="auto_tune_fail",
+        stage_name="ingest",
+        save_dir=tmp_path,
+        streams=[stream],
+        keyframes=frames,
+    )
+
+    init = _AlwaysFailAutoTuneVGGTLong({
+        "backend_mode": "real",
+        "device": "cuda",
+        "auto_tune": True,
+        "chunk_size": 4,
+        "overlap": 0,
+        "resize_max_dim": 256,
+        "min_resize_max_dim": 128,
+        "min_chunk_size": 2,
+        "auto_tune_max_attempts": 3,
+        "system_report": {"memory": {"available_gib": 64.0}, "gpus": [{"memory_free_mb": 8192}]},
+    })
+
+    with pytest.raises(RuntimeError, match="Attempts: attempt 1:") as excinfo:
+        init.initialize(frames, ingest_artifact=ingest, sync_artifact=None)
+
+    message = str(excinfo.value)
+    assert "chunk_size=" in message
+    assert "resize_max_dim=" in message
+    assert "status=oom" in message
+
+
+def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
+    initializer = VGGTLongInitializer({
+        "backend_mode": "real",
+        "device": "cuda",
+        "auto_tune": True,
+        "chunk_size": 8,
+        "overlap": 2,
+        "auto_tune_max_attempts": 1,
+    })
+    initializer._VGGT_Long = object()
+
+    frame = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
+    ingest = IngestArtifact(
+        run_id="cleanup-test",
+        stage_name="ingest",
+        save_dir=Path("/tmp/ingest"),
+        streams=[SimpleNamespace(stream_id="cam_00", width=854, height=480)],
+        keyframes=[frame],
+    )
+
+    monkeypatch.setattr(initializer, "_current_system_report", lambda: {"memory": {}, "gpus": []})
+    monkeypatch.setattr(initializer, "_frame_source_max_dim", lambda frames, ingest_artifact: 854)
+    monkeypatch.setattr(initializer, "_materialize_images", lambda *args, **kwargs: ([Path("/tmp/f0.png")], []))
+    monkeypatch.setattr(initializer, "_create_runner", lambda *args, **kwargs: SimpleNamespace(img_list=[], model=SimpleNamespace(model=None)))
+    monkeypatch.setattr(initializer, "_run_runner", lambda runner: (_ for _ in ()).throw(RuntimeError("CUDA out of memory")))
+    monkeypatch.setattr(initializer, "_release_runner_references", lambda runner: None)
+    monkeypatch.setattr(
+        "room4d.geometry.vggt_long_wrapper.process_memory_snapshot",
+        lambda: {
+            "rss_bytes": 3 * 1024 ** 3,
+            "swap_bytes": 1024 ** 3,
+            "cuda_allocated_bytes": 2 * 1024 ** 3,
+            "cuda_reserved_bytes": 4 * 1024 ** 3,
+        },
+    )
+    monkeypatch.setattr("room4d.geometry.vggt_long_wrapper.release_memory", lambda: None)
+
+    with pytest.raises(RuntimeError):
+        initializer._run_auto_tuned(
+            [frame],
+            ingest_artifact=ingest,
+            cache_root=Path("/tmp/cache"),
+            backend_output_root=Path("/tmp/out"),
+        )
+
+    captured = capsys.readouterr().out
+    assert "cleanup starting; before cleanup rss=3.00 GiB" in captured
+    assert "cleanup finished; after cleanup rss=3.00 GiB" in captured

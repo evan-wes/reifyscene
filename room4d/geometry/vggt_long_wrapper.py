@@ -8,12 +8,15 @@ initializer.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import traceback
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
+from room4d.common.memory import format_memory_snapshot, process_memory_snapshot, release_memory
+from room4d.common.system_report import collect_system_report, recommend_vggt_long_profile
 from room4d.common.types import FrameRef
 from room4d.geometry.geometry_artifact import GeometryArtifact
 from room4d.geometry.vggt_wrapper import VGGTInitializer
@@ -76,7 +79,101 @@ class VGGTLongInitializer(VGGTInitializer):
         self.delete_temp_files = bool(self.cfg.get("delete_temp_files", False))
         self.output_cache_dir = self.cfg.get("output_cache_dir")
         self.long_config = dict(self.cfg.get("long_config", {}))
+        self.auto_tune = bool(self.cfg.get("auto_tune", False))
+        self.auto_tune_max_attempts = max(int(self.cfg.get("auto_tune_max_attempts", 12)), 1)
+        self.min_chunk_size = max(int(self.cfg.get("min_chunk_size", 2)), 1)
+        min_resize_max_dim = self.cfg.get("min_resize_max_dim")
+        self.min_resize_max_dim = None if min_resize_max_dim in (None, 0) else int(min_resize_max_dim)
+        self.system_report = self.cfg.get("system_report")
         self._VGGT_Long: Any | None = None
+
+    def _log_auto_tune(self, message: str) -> None:
+        print(f"[VGGT-Long auto-tune] {message}", flush=True)
+
+    @staticmethod
+    def _format_resize_max_dim(resize_max_dim: int | None) -> str:
+        return "original" if resize_max_dim is None else str(int(resize_max_dim))
+
+    def _format_attempt_summary(self, attempt: dict[str, Any]) -> str:
+        summary = (
+            f"attempt {attempt.get('attempt_index', '?')}: "
+            f"chunk_size={attempt.get('chunk_size')}, "
+            f"overlap={attempt.get('overlap')}, "
+            f"resize_max_dim={self._format_resize_max_dim(attempt.get('resize_max_dim'))}, "
+            f"status={attempt.get('status', 'unknown')}"
+        )
+        error = attempt.get("error")
+        if error:
+            summary += f", error={error}"
+        chunk_files = attempt.get("num_chunk_files")
+        if chunk_files is not None:
+            summary += f", chunk_files={chunk_files}"
+        return summary
+
+    @staticmethod
+    def _clear_exception_traceback(exc: Exception | None) -> None:
+        if exc is None:
+            return
+        tb = exc.__traceback__
+        if tb is not None:
+            try:
+                traceback.clear_frames(tb)
+            except Exception:
+                pass
+        try:
+            exc.__traceback__ = None
+        except Exception:
+            pass
+        try:
+            exc.__cause__ = None
+        except Exception:
+            pass
+        try:
+            exc.__context__ = None
+        except Exception:
+            pass
+
+    @staticmethod
+    def _release_runner_references(runner: Any | None) -> None:
+        if runner is None:
+            return
+        try:
+            if hasattr(runner, "img_list"):
+                runner.img_list = []
+        except Exception:
+            pass
+        model_wrapper = getattr(runner, "model", None)
+        if model_wrapper is not None:
+            inner_model = getattr(model_wrapper, "model", None)
+            if inner_model is not None and hasattr(inner_model, "to"):
+                try:
+                    inner_model.to("cpu")
+                except Exception:
+                    pass
+            try:
+                if hasattr(model_wrapper, "model"):
+                    model_wrapper.model = None
+            except Exception:
+                pass
+        try:
+            if hasattr(runner, "model"):
+                runner.model = None
+        except Exception:
+            pass
+
+    def _cleanup_attempt_resources(self, runner: Any | None, exc: Exception | None, *, context: str) -> None:
+        before_snapshot = process_memory_snapshot()
+        self._log_auto_tune(
+            f"{context}: cleanup starting; before cleanup {format_memory_snapshot(before_snapshot)}."
+        )
+        self._release_runner_references(runner)
+        self._clear_exception_traceback(exc)
+        release_memory()
+        after_snapshot = process_memory_snapshot()
+        self._log_auto_tune(
+            f"{context}: cleanup finished; after cleanup {format_memory_snapshot(after_snapshot)}."
+        )
+
 
     def _load_backend_components(self) -> None:  # type: ignore[override]
         """Import the VGGT-Long module lazily.
@@ -417,6 +514,260 @@ class VGGTLongInitializer(VGGTInitializer):
             with self._patched_torch_load_for_device():
                 runner.run()
 
+    def _frame_source_max_dim(self, frames: list[FrameRef], ingest_artifact) -> int | None:
+        if ingest_artifact is None:
+            return None
+        requested_streams = {str(frame.stream_id) for frame in frames}
+        max_dim = 0
+        for stream in ingest_artifact.streams:
+            if requested_streams and stream.stream_id not in requested_streams:
+                continue
+            max_dim = max(max_dim, int(stream.width), int(stream.height))
+        return max_dim or None
+
+    def _current_system_report(self) -> dict[str, Any]:
+        report = self.system_report or self.cfg.get("system_report")
+        if isinstance(report, dict) and report:
+            return report
+        return collect_system_report()
+
+    @staticmethod
+    def _chunk_candidates(initial_chunk_size: int, min_chunk_size: int, num_frames: int) -> list[int]:
+        if num_frames <= 0:
+            return []
+        floor = max(1, min(min_chunk_size, num_frames))
+        initial = max(floor, min(int(initial_chunk_size), num_frames))
+        candidates: list[int] = []
+        for value in (
+            initial,
+            max(floor, int(round(initial * 0.75))),
+            max(floor, int(round(initial * 0.5))),
+            floor,
+        ):
+            value = max(floor, min(int(value), num_frames))
+            if value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    @staticmethod
+    def _resize_candidates(initial_resize_max_dim: int | None, min_resize_max_dim: int | None, source_max_dim: int | None) -> list[int | None]:
+        if source_max_dim is not None and source_max_dim > 0 and initial_resize_max_dim is None:
+            initial_resize_max_dim = source_max_dim
+        if initial_resize_max_dim is None:
+            return [None]
+
+        initial = int(initial_resize_max_dim)
+        floor = int(min_resize_max_dim) if min_resize_max_dim not in (None, 0) else max(384, int(round(initial * 0.5)))
+        if source_max_dim is not None and source_max_dim > 0:
+            initial = min(initial, int(source_max_dim))
+            floor = min(floor, int(source_max_dim))
+        floor = max(1, min(floor, initial))
+
+        values: list[int] = []
+        for value in (initial, max(floor, int(round(initial * 0.75))), max(floor, int(round(initial * 0.5))), floor):
+            if value not in values:
+                values.append(value)
+        return values or [initial]
+
+    def _derive_overlap(self, chunk_size: int, num_frames: int, overlap_ratio: float, overlap_hint: int | None = None) -> int:
+        if num_frames <= chunk_size:
+            return 0
+        if overlap_hint is not None and overlap_hint > 0:
+            overlap = int(round(float(overlap_hint) * (float(chunk_size) / float(max(self.chunk_size, 1)))))
+        else:
+            overlap = int(round(float(chunk_size) * overlap_ratio))
+        return max(1, min(chunk_size - 1, overlap))
+
+    @staticmethod
+    def _is_probable_oom_error(exc: Exception) -> bool:
+        oom_types = []
+        torch_oom = getattr(torch, "OutOfMemoryError", None)
+        if isinstance(torch_oom, type):
+            oom_types.append(torch_oom)
+        cuda_oom = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+        if isinstance(cuda_oom, type) and cuda_oom not in oom_types:
+            oom_types.append(cuda_oom)
+        if oom_types and isinstance(exc, tuple(oom_types)):
+            return True
+        msg = str(exc).lower()
+        markers = [
+            "out of memory",
+            "cuda oom",
+            "cublas_status_alloc_failed",
+            "cuda error: out of memory",
+            "failed to allocate memory",
+        ]
+        return any(marker in msg for marker in markers)
+
+    def _attempt_plan_sequence(self, frames: list[FrameRef], ingest_artifact) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        report = self._current_system_report()
+        source_max_dim = self._frame_source_max_dim(frames, ingest_artifact)
+        recommendation = recommend_vggt_long_profile(
+            report,
+            device=self.device,
+            num_frames=len(frames),
+            source_max_dim=source_max_dim,
+        )
+
+        configured_chunk = int(self.cfg.get("chunk_size", recommendation["initial_chunk_size"]))
+        configured_resize = self.resize_max_dim if self.resize_max_dim is not None else recommendation.get("initial_resize_max_dim")
+        overlap_hint = self.cfg.get("overlap")
+        overlap_ratio = 0.25
+        if configured_chunk > 0 and overlap_hint not in (None, 0):
+            overlap_ratio = max(0.1, min(0.45, float(overlap_hint) / float(configured_chunk)))
+
+        min_chunk_size = max(1, int(self.cfg.get("min_chunk_size", recommendation.get("min_chunk_size", self.min_chunk_size))))
+        min_resize_max_dim = self.min_resize_max_dim
+        if min_resize_max_dim is None:
+            min_resize_max_dim = recommendation.get("min_resize_max_dim")
+
+        resize_candidates = self._resize_candidates(
+            None if configured_resize in (None, 0) else int(configured_resize),
+            None if min_resize_max_dim in (None, 0) else int(min_resize_max_dim),
+            source_max_dim,
+        )
+        chunk_candidates = self._chunk_candidates(configured_chunk, min_chunk_size, len(frames))
+
+        plans: list[dict[str, Any]] = []
+        seen: set[tuple[int, int | None]] = set()
+        for resize_max_dim in resize_candidates:
+            for chunk_size in chunk_candidates:
+                overlap = self._derive_overlap(chunk_size, len(frames), overlap_ratio, overlap_hint=overlap_hint)
+                key = (int(chunk_size), None if resize_max_dim is None else int(resize_max_dim))
+                if key in seen:
+                    continue
+                seen.add(key)
+                plans.append({
+                    "chunk_size": int(chunk_size),
+                    "overlap": int(overlap),
+                    "resize_max_dim": None if resize_max_dim is None else int(resize_max_dim),
+                })
+                if len(plans) >= self.auto_tune_max_attempts:
+                    return plans, recommendation
+        return plans, recommendation
+
+    def _run_auto_tuned(
+        self,
+        selected_frames: list[FrameRef],
+        *,
+        ingest_artifact,
+        cache_root: Path,
+        backend_output_root: Path,
+    ) -> tuple[dict[str, Any], list[Path], list[str], list[dict[str, Any]], dict[str, Any]]:
+        plans, recommendation = self._attempt_plan_sequence(selected_frames, ingest_artifact)
+        attempt_history: list[dict[str, Any]] = []
+        image_cache: dict[int | None, tuple[list[Path], list[str]]] = {}
+        last_error_summary: str | None = None
+
+        self._log_auto_tune(
+            f"starting auto-tune for {len(selected_frames)} frame(s) with {len(plans)} candidate setting(s); "
+            f"recommended start chunk_size={recommendation.get('initial_chunk_size')}, "
+            f"overlap={recommendation.get('initial_overlap')}, "
+            f"resize_max_dim={self._format_resize_max_dim(recommendation.get('initial_resize_max_dim'))}."
+        )
+
+        for attempt_idx, plan in enumerate(plans, start=1):
+            resize_max_dim = plan["resize_max_dim"]
+            resize_label = self._format_resize_max_dim(resize_max_dim)
+            self._log_auto_tune(
+                f"attempt {attempt_idx}/{len(plans)}: trying chunk_size={plan['chunk_size']}, "
+                f"overlap={plan['overlap']}, resize_max_dim={resize_label}."
+            )
+            self.resize_max_dim = None if resize_max_dim is None else int(resize_max_dim)
+            if resize_max_dim not in image_cache:
+                resize_tag = "orig" if resize_max_dim is None else f"maxdim_{int(resize_max_dim)}"
+                image_dir = cache_root / resize_tag
+                image_cache[resize_max_dim] = self._materialize_images(
+                    selected_frames,
+                    ingest_artifact,
+                    image_dir,
+                    resize_max_dim=resize_max_dim,
+                )
+                self._log_auto_tune(
+                    f"attempt {attempt_idx}/{len(plans)}: prepared {len(image_cache[resize_max_dim][0])} image(s) at resize_max_dim={resize_label}."
+                )
+            else:
+                self._log_auto_tune(
+                    f"attempt {attempt_idx}/{len(plans)}: reusing cached images for resize_max_dim={resize_label}."
+                )
+            image_paths, resize_notes = image_cache[resize_max_dim]
+
+            self.chunk_size = int(plan["chunk_size"])
+            self.overlap = int(plan["overlap"])
+            attempt_output_dir = backend_output_root / (
+                f"attempt_{attempt_idx:02d}_chunk_{self.chunk_size:03d}_overlap_{self.overlap:02d}_"
+                f"resize_{'orig' if resize_max_dim is None else int(resize_max_dim)}"
+            )
+            attempt_output_dir.mkdir(parents=True, exist_ok=True)
+            runner = None
+            try:
+                if len(selected_frames) > self.chunk_size and self.overlap <= 0:
+                    raise ValueError(
+                        "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
+                        f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+                    )
+                runner = self._create_runner(Path(image_paths[0]).parent if image_paths else cache_root, attempt_output_dir)
+                runner.img_list = [str(path) for path in image_paths]
+                self._run_runner(runner)
+                chunks = self._load_chunk_predictions(runner)
+                predictions = self._combined_predictions_from_chunks(selected_frames, chunks)
+                attempt_history.append({
+                    **plan,
+                    "attempt_index": attempt_idx,
+                    "status": "success",
+                    "num_chunk_files": len(chunks),
+                })
+                self._log_auto_tune(
+                    f"attempt {attempt_idx}/{len(plans)} succeeded with {len(chunks)} chunk file(s); "
+                    f"selected chunk_size={self.chunk_size}, overlap={self.overlap}, resize_max_dim={resize_label}."
+                )
+                notes = list(resize_notes)
+                notes.append(
+                    f"VGGT-Long auto-tune selected chunk_size={self.chunk_size}, overlap={self.overlap}, "
+                    f"resize_max_dim={'original' if resize_max_dim is None else resize_max_dim}."
+                )
+                notes.append(
+                    f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s)."
+                )
+                return predictions, image_paths, notes, attempt_history, recommendation
+            except Exception as exc:
+                is_oom = self._is_probable_oom_error(exc)
+                error_summary = f"{type(exc).__name__}: {exc}"
+                attempt_record = {
+                    **plan,
+                    "attempt_index": attempt_idx,
+                    "status": "oom" if is_oom else "error",
+                    "error": error_summary,
+                }
+                attempt_history.append(attempt_record)
+                self._log_auto_tune(
+                    f"attempt {attempt_idx}/{len(plans)} failed with {'OOM' if is_oom else 'error'}: "
+                    f"{error_summary}"
+                )
+                last_error_summary = error_summary
+                self._cleanup_attempt_resources(
+                    runner,
+                    exc,
+                    context=f"attempt {attempt_idx}/{len(plans)}",
+                )
+                runner = None
+                if not is_oom:
+                    raise
+
+        if last_error_summary is None:
+            raise RuntimeError("VGGT-Long auto-tune did not produce any attempt plans.")
+        summary_lines = [self._format_attempt_summary(item) for item in attempt_history]
+        self._log_auto_tune(
+            "exhausted all candidate settings. Summary: " + " | ".join(summary_lines)
+        )
+        raise RuntimeError(
+            "VGGT-Long auto-tune exhausted all candidate chunk/resize settings without finding a fit. "
+            + "Attempts: "
+            + " | ".join(summary_lines)
+            + f". Last error: {last_error_summary}"
+        ) from None
+
+
     def initialize(
         self,
         frames: list[FrameRef],
@@ -442,8 +793,7 @@ class VGGTLongInitializer(VGGTInitializer):
             if self.frame_cache_dir
             else Path(".room4d_cache") / "vggt_long_inputs" / ingest_artifact.run_id
         )
-
-        image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
+        cache_root.mkdir(parents=True, exist_ok=True)
 
         backend_output_root = (
             Path(self.output_cache_dir)
@@ -452,23 +802,38 @@ class VGGTLongInitializer(VGGTInitializer):
         )
         backend_output_root.mkdir(parents=True, exist_ok=True)
 
-        if len(selected_frames) > self.chunk_size and self.overlap <= 0:
-            raise ValueError(
-                "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
-                f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+        attempt_history: list[dict[str, Any]] = []
+        auto_tune_recommendation: dict[str, Any] | None = None
+        if self.auto_tune:
+            predictions, image_paths, notes, attempt_history, auto_tune_recommendation = self._run_auto_tuned(
+                selected_frames,
+                ingest_artifact=ingest_artifact,
+                cache_root=cache_root,
+                backend_output_root=backend_output_root,
             )
+        else:
+            if len(selected_frames) > self.chunk_size and self.overlap <= 0:
+                raise ValueError(
+                    "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
+                    f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+                )
+            image_paths, notes = self._materialize_images(
+                selected_frames,
+                ingest_artifact,
+                cache_root,
+                resize_max_dim=self.resize_max_dim,
+            )
+            runner = self._create_runner(cache_root, backend_output_root)
+            runner.img_list = [str(path) for path in image_paths]
+            self._run_runner(runner)
+            chunks = self._load_chunk_predictions(runner)
+            predictions = self._combined_predictions_from_chunks(selected_frames, chunks)
+            notes = list(notes)
+            notes.append(
+                f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
+            )
+            notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
 
-        runner = self._create_runner(cache_root, backend_output_root)
-        runner.img_list = [str(path) for path in image_paths]
-        self._run_runner(runner)
-
-        chunks = self._load_chunk_predictions(runner)
-        predictions = self._combined_predictions_from_chunks(selected_frames, chunks)
-        notes = list(notes)
-        notes.append(
-            f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
-        )
-        notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
         artifact = self._initialize_from_predictions(
             selected_frames,
             predictions,
@@ -482,4 +847,9 @@ class VGGTLongInitializer(VGGTInitializer):
         artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
         artifact.metadata["vggt_long_overlap"] = self.overlap
         artifact.metadata["vggt_long_loop_enable"] = self.loop_enable
+        artifact.metadata["vggt_long_auto_tune"] = bool(self.auto_tune)
+        artifact.metadata["vggt_long_auto_tune_attempts"] = attempt_history
+        if auto_tune_recommendation is not None:
+            artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
+        artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
         return artifact

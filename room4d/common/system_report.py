@@ -157,5 +157,106 @@ def recommend_tracking_profile(report: dict[str, Any], *, device: str | None = N
     return rec
 
 
+def recommend_vggt_long_profile(
+    report: dict[str, Any],
+    *,
+    device: str | None = None,
+    num_frames: int | None = None,
+    source_max_dim: int | None = None,
+) -> dict[str, Any]:
+    """Return a resource-aware starting point for VGGT-Long auto-tuning.
+
+    The goal is not to predict the exact safe setting up front. Instead we use
+    the preflight report to choose an aggressive first attempt and conservative
+    lower bounds so the runtime retry loop can back off systematically.
+    """
+    device = str(device or 'cpu').lower()
+    memory = report.get('memory', {})
+    available_gib = float(memory.get('available_gib') or 0.0)
+    gpus = report.get('gpus', []) or []
+    max_free_gpu_gib = max((gpu.get('memory_free_mb', 0) / 1024.0 for gpu in gpus), default=0.0)
+    source_max_dim = int(source_max_dim) if source_max_dim else None
+    num_frames = int(num_frames) if num_frames else None
+
+    if device.startswith('cuda'):
+        if max_free_gpu_gib >= 18.0:
+            profile = 'full'
+            initial_chunk_size = 48
+            initial_resize_max_dim = source_max_dim
+            min_resize_max_dim = max(640, min(source_max_dim or 640, 960))
+        elif max_free_gpu_gib >= 12.0:
+            profile = 'balanced'
+            initial_chunk_size = 32
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1440)
+            min_resize_max_dim = max(576, min(source_max_dim or 576, 896))
+        elif max_free_gpu_gib >= 8.0:
+            profile = 'balanced'
+            initial_chunk_size = 24
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1280)
+            min_resize_max_dim = max(512, min(source_max_dim or 512, 768))
+        elif max_free_gpu_gib >= 5.0:
+            profile = 'lowmem'
+            initial_chunk_size = 16
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 1024)
+            min_resize_max_dim = max(448, min(source_max_dim or 448, 640))
+        else:
+            profile = 'lowmem'
+            initial_chunk_size = 8
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 768)
+            min_resize_max_dim = max(384, min(source_max_dim or 384, 512))
+    else:
+        if available_gib >= 32.0:
+            profile = 'balanced'
+            initial_chunk_size = 16
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 960)
+            min_resize_max_dim = max(512, min(source_max_dim or 512, 768))
+        elif available_gib >= 16.0:
+            profile = 'balanced'
+            initial_chunk_size = 12
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 768)
+            min_resize_max_dim = max(448, min(source_max_dim or 448, 640))
+        else:
+            profile = 'lowmem'
+            initial_chunk_size = 8
+            initial_resize_max_dim = None if source_max_dim is None else min(source_max_dim, 640)
+            min_resize_max_dim = max(384, min(source_max_dim or 384, 512))
+
+    if source_max_dim is not None:
+        if source_max_dim >= 3000:
+            initial_chunk_size = max(2, initial_chunk_size // 2)
+        elif source_max_dim >= 2000:
+            initial_chunk_size = max(2, int(round(initial_chunk_size * 0.625)))
+        elif source_max_dim >= 1400:
+            initial_chunk_size = max(2, int(round(initial_chunk_size * 0.75)))
+        if initial_resize_max_dim is not None:
+            initial_resize_max_dim = min(initial_resize_max_dim, source_max_dim)
+        min_resize_max_dim = min(min_resize_max_dim, source_max_dim)
+
+    if num_frames is not None and num_frames > 0:
+        initial_chunk_size = max(1, min(initial_chunk_size, num_frames))
+        min_chunk_size = 1 if num_frames <= 1 else min(2, num_frames)
+    else:
+        min_chunk_size = 2
+
+    if num_frames is not None and initial_chunk_size >= num_frames:
+        initial_overlap = 0
+    else:
+        initial_overlap = max(1, min(8, initial_chunk_size // 4))
+
+    return {
+        'profile': profile,
+        'device': device,
+        'max_free_gpu_gib': max_free_gpu_gib,
+        'available_ram_gib': available_gib,
+        'initial_chunk_size': initial_chunk_size,
+        'initial_overlap': initial_overlap,
+        'min_chunk_size': min_chunk_size,
+        'initial_resize_max_dim': initial_resize_max_dim,
+        'min_resize_max_dim': min_resize_max_dim,
+        'source_max_dim': source_max_dim,
+        'num_frames': num_frames,
+    }
+
+
 def save_system_report(path: str | Path, report: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(report, indent=2), encoding='utf-8')

@@ -19,7 +19,7 @@ from room4d.api.pipeline import Room4DPipeline
 from room4d.common.io import read_yaml
 from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from room4d.common.memory import release_memory
-from room4d.common.system_report import collect_system_report, recommend_tracking_profile, save_system_report
+from room4d.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile, save_system_report
 
 
 def _coalesce(explicit, profile_value, fallback):
@@ -43,14 +43,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['backend_name'] = args.geometry_backend_name
     geometry['backend_mode'] = args.geometry_backend_mode
     geometry['frame_source'] = str(args.geometry_frame_source).lower()
+    geometry['system_report'] = system_report or collect_system_report()
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
     if args.frame_cache_dir is not None:
         geometry['frame_cache_dir'] = args.frame_cache_dir
+    if args.geometry_resize_max_dim is not None:
+        geometry['resize_max_dim'] = int(args.geometry_resize_max_dim)
     if args.vggt_long_output_cache_dir is not None:
         geometry['output_cache_dir'] = args.vggt_long_output_cache_dir
     geometry['chunk_size'] = int(args.vggt_long_chunk_size)
     geometry['overlap'] = int(args.vggt_long_overlap)
+    geometry['auto_tune'] = bool(args.vggt_long_auto_tune)
+    geometry['min_chunk_size'] = int(args.vggt_long_min_chunk_size)
+    if args.vggt_long_min_resize_max_dim is not None:
+        geometry['min_resize_max_dim'] = int(args.vggt_long_min_resize_max_dim)
     geometry['loop_enable'] = bool(args.vggt_long_loop_enable)
     geometry['use_dbow'] = bool(args.vggt_long_use_dbow)
     geometry['delete_temp_files'] = bool(args.vggt_long_delete_temp_files)
@@ -186,7 +193,7 @@ def _debug_stage_done(console: Console, enabled: bool, label: str, started_at: f
         console.print(f"[green]✓[/green] {label} complete in {elapsed:.2f}s")
 
 
-def _print_system_report(console: Console, report: dict, recommendation: dict | None) -> None:
+def _print_system_report(console: Console, report: dict, recommendation: dict | None, geometry_recommendation: dict | None = None) -> None:
     table = Table(title='System preflight report')
     table.add_column('Item')
     table.add_column('Value')
@@ -205,6 +212,8 @@ def _print_system_report(console: Console, report: dict, recommendation: dict | 
     if recommendation:
         table.add_row('Recommended profile', str(recommendation.get('profile')))
         table.add_row('Tracking preset', f"resize={recommendation.get('resize_max_dim')} max_frames={recommendation.get('max_frames')} window={recommendation.get('window_size')} overlap={recommendation.get('window_overlap')} stride={recommendation.get('frame_stride')}")
+    if geometry_recommendation:
+        table.add_row('VGGT-Long seed', f"profile={geometry_recommendation.get('profile')} chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}")
     console.print(table)
 
 
@@ -343,8 +352,12 @@ def main() -> None:
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
     parser.add_argument('--geometry-device', default='cpu')
+    parser.add_argument('--geometry-resize-max-dim', type=int, default=None, help='Optionally downscale materialized geometry frames before backend execution.')
     parser.add_argument('--vggt-long-chunk-size', type=int, default=16)
     parser.add_argument('--vggt-long-overlap', type=int, default=4)
+    parser.add_argument('--vggt-long-auto-tune', action='store_true', help='Automatically back off VGGT-Long chunk/overlap/resize settings on OOM.')
+    parser.add_argument('--vggt-long-min-chunk-size', type=int, default=2)
+    parser.add_argument('--vggt-long-min-resize-max-dim', type=int, default=None)
     parser.add_argument('--vggt-long-loop-enable', action='store_true')
     parser.add_argument('--vggt-long-use-dbow', action='store_true')
     parser.add_argument('--vggt-long-delete-temp-files', action='store_true')
@@ -391,19 +404,23 @@ def main() -> None:
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
     recommended = None
+    geometry_recommended = None
     if args.resource_profile != 'none':
         recommended = recommend_tracking_profile(system_report, device=args.tracking_device or args.geometry_device)
         if args.resource_profile != 'auto':
             recommended['profile'] = args.resource_profile
+    if args.geometry_backend_name == 'vggt-long':
+        geometry_recommended = recommend_vggt_long_profile(system_report, device=args.geometry_device)
     report_path = Path(args.run_dir) / 'preflight_system_report.json'
     report_path.parent.mkdir(parents=True, exist_ok=True)
     save_system_report(report_path, {
         'report': system_report,
         'recommended_tracking_profile': recommended,
+        'recommended_vggt_long_profile': geometry_recommended,
     })
 
     if args.debug or args.preflight_only:
-        _print_system_report(console, system_report, recommended)
+        _print_system_report(console, system_report, recommended, geometry_recommendation=geometry_recommended)
         console.print(f'saved preflight report: {report_path}')
     if args.preflight_only:
         return
@@ -422,6 +439,7 @@ def main() -> None:
         )
         console.print(
             f"geometry_frame_source: {cfg['geometry']['frame_source']}  "
+            f"geometry_resize_max_dim: {cfg['geometry'].get('resize_max_dim')}  vggt_long_auto_tune: {cfg['geometry'].get('auto_tune', False)}  "
             f"tracking_window_size: {cfg['tracking']['window_size']}  tracking_window_overlap: {cfg['tracking']['window_overlap']}  "
             f"cpu_threads: {cfg['tracking'].get('cpu_threads')}  resource_profile: {(rec or {}).get('profile', 'none')}"
         )
