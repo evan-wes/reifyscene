@@ -260,3 +260,98 @@ def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tm
     assert runner.run_cuda_available is False
     assert runner.device == "cpu"
     assert runner.model.device == "cpu"
+
+
+
+def test_pipeline_dense_camera_interpolation_matches_tracking_timeline(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_dense_interp.mp4"
+    _write_test_video(video_path, num_frames=5, fps=10.0)
+
+    decoder = VideoDecoder(default_fps=10.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    ingest = IngestArtifact(
+        run_id="dense_interp",
+        stage_name="ingest",
+        save_dir=tmp_path / "ingest_dense",
+        streams=[stream],
+        keyframes=[
+            FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0),
+            FrameRef(stream_id="cam_00", frame_idx=4, timestamp_sec=0.4),
+        ],
+    )
+
+    pipe = Room4DPipeline(
+        {
+            "run_dir": tmp_path / "run_dense",
+            "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "keyframes"},
+            "tracking": {"frame_stride": 1},
+        }
+    )
+    artifact = pipe.initialize_geometry(ingest, sync_artifact=None)
+
+    assert [frame.frame_idx for frame in artifact.selected_frames] == [0, 4]
+    states = artifact.camera_states_by_stream["cam_00"]
+    assert [round(float(state.time_sec), 6) for state in states] == [0.0, 0.1, 0.2, 0.3, 0.4]
+    assert artifact.metadata["dense_camera_target"] == "tracking"
+    assert artifact.metadata["dense_camera_summary"]["added_camera_states"] == 3
+
+
+def test_pipeline_geometry_frame_source_tracking_uses_tracker_timeline(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_tracking_source.mp4"
+    _write_test_video(video_path, num_frames=6, fps=10.0)
+
+    decoder = VideoDecoder(default_fps=10.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    ingest = IngestArtifact(
+        run_id="tracking_source",
+        stage_name="ingest",
+        save_dir=tmp_path / "ingest_tracking",
+        streams=[stream],
+        keyframes=[
+            FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0),
+            FrameRef(stream_id="cam_00", frame_idx=5, timestamp_sec=0.5),
+        ],
+    )
+
+    pipe = Room4DPipeline(
+        {
+            "run_dir": tmp_path / "run_tracking",
+            "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "tracking"},
+            "tracking": {"frame_stride": 2},
+        }
+    )
+    artifact = pipe.initialize_geometry(ingest, sync_artifact=None)
+
+    assert [frame.frame_idx for frame in artifact.selected_frames] == [0, 2, 4]
+    states = artifact.camera_states_by_stream["cam_00"]
+    assert [round(float(state.time_sec), 6) for state in states] == [0.0, 0.2, 0.4]
+    assert artifact.metadata["geometry_frame_source"] == "tracking"
+
+
+def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) -> None:
+    video_path = tmp_path / "sample_all_source.mp4"
+    _write_test_video(video_path, num_frames=4, fps=8.0)
+
+    decoder = VideoDecoder(default_fps=8.0)
+    stream = decoder.decode(video_path, stream_id="cam_00")
+    ingest = IngestArtifact(
+        run_id="all_source",
+        stage_name="ingest",
+        save_dir=tmp_path / "ingest_all",
+        streams=[stream],
+        keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
+    )
+
+    pipe = Room4DPipeline(
+        {
+            "run_dir": tmp_path / "run_all",
+            "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "all"},
+            "tracking": {"frame_stride": 2},
+        }
+    )
+    artifact = pipe.initialize_geometry(ingest, sync_artifact=None)
+
+    assert [frame.frame_idx for frame in artifact.selected_frames] == [0, 1, 2, 3]
+    states = artifact.camera_states_by_stream["cam_00"]
+    assert [round(float(state.time_sec), 6) for state in states] == [0.0, 0.125, 0.25, 0.375]
+    assert artifact.metadata["geometry_frame_source"] == "all"

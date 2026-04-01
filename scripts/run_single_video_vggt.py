@@ -33,8 +33,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cfg["run_dir"] = str(Path(args.run_dir))
 
     geometry = cfg.setdefault("geometry", {})
-    geometry["backend_name"] = args.geometry_backend_name
+    geometry["backend_name"] = getattr(args, "geometry_backend_name", "vggt")
     geometry["backend_mode"] = args.backend_mode
+    geometry["frame_source"] = str(getattr(args, "geometry_frame_source", "keyframes")).lower()
 
     if args.device is not None:
         geometry["device"] = args.device
@@ -55,7 +56,7 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         cfg["keyframe_stride_sec"] = args.keyframe_stride_sec
 
     # VGGT-Long-specific geometry options
-    if args.geometry_backend_name == "vggt-long":
+    if getattr(args, "geometry_backend_name", "vggt") == "vggt-long":
         if args.vggt_long_chunk_size is not None:
             geometry["chunk_size"] = int(args.vggt_long_chunk_size)
         if args.vggt_long_overlap is not None:
@@ -142,6 +143,12 @@ def main() -> None:
         choices=["real", "auto", "heuristic"],
         help="Geometry backend mode.",
     )
+    parser.add_argument(
+        "--geometry-frame-source",
+        default="keyframes",
+        choices=["keyframes", "tracking", "all"],
+        help="Which frame timeline geometry should run on. Use 'all' for the full sequence or 'tracking' to mirror the tracker cadence from config.",
+    )
     parser.add_argument("--device", default=None, help="Geometry device override, e.g. cpu or cuda.")
     parser.add_argument(
         "--cpu-threads",
@@ -222,6 +229,7 @@ def main() -> None:
         console.print(
             f"geometry backend: {args.geometry_backend_name}  "
             f"mode: {args.backend_mode}  "
+            f"frame_source: {args.geometry_frame_source}  "
             f"device: {args.device or 'auto'}"
         )
         console.print(

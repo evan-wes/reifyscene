@@ -42,6 +42,7 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry = cfg.setdefault('geometry', {})
     geometry['backend_name'] = args.geometry_backend_name
     geometry['backend_mode'] = args.geometry_backend_mode
+    geometry['frame_source'] = str(args.geometry_frame_source).lower()
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
     if args.frame_cache_dir is not None:
@@ -340,6 +341,7 @@ def main() -> None:
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
     parser.add_argument('--geometry-device', default='cpu')
     parser.add_argument('--vggt-long-chunk-size', type=int, default=16)
     parser.add_argument('--vggt-long-overlap', type=int, default=4)
@@ -419,6 +421,7 @@ def main() -> None:
             f"max_frames: {cfg['tracking']['max_frames']}  frame_stride: {cfg['tracking']['frame_stride']}"
         )
         console.print(
+            f"geometry_frame_source: {cfg['geometry']['frame_source']}  "
             f"tracking_window_size: {cfg['tracking']['window_size']}  tracking_window_overlap: {cfg['tracking']['window_overlap']}  "
             f"cpu_threads: {cfg['tracking'].get('cpu_threads')}  resource_profile: {(rec or {}).get('profile', 'none')}"
         )

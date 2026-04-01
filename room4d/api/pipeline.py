@@ -12,6 +12,7 @@ from room4d.common.types import FrameRef, HumanState, ObjectState
 from room4d.common.paths import ensure_dir
 from room4d.common.memory import release_memory
 from room4d.data.dataset import MultiVideoDataset
+from room4d.geometry.camera_interpolation import densify_camera_states_for_frames
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
@@ -147,13 +148,62 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
+    @staticmethod
+    def _all_frame_refs_for_stream(stream) -> list[FrameRef]:
+        fps = max(float(stream.fps), 1e-6)
+        num_frames = max(int(stream.num_frames), 1)
+        return [
+            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
+            for frame_idx in range(num_frames)
+        ]
+
+    def _planned_tracking_frames(self, ingest_artifact: IngestArtifact) -> list[FrameRef]:
+        frames: list[FrameRef] = []
+        for stream in ingest_artifact.streams:
+            frames.extend(self.tracker.plan_frame_refs(stream))
+        return sorted(frames, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
+
+    def _select_geometry_frames(self, ingest_artifact: IngestArtifact) -> list[FrameRef]:
+        geometry_cfg = self.cfg.get('geometry', {})
+        frame_source = str(geometry_cfg.get('frame_source', 'keyframes')).lower()
+        if frame_source == 'tracking':
+            frames = self._planned_tracking_frames(ingest_artifact)
+        elif frame_source == 'all':
+            frames = []
+            for stream in ingest_artifact.streams:
+                frames.extend(self._all_frame_refs_for_stream(stream))
+        else:
+            frame_source = 'keyframes'
+            frames = list(ingest_artifact.keyframes)
+
+        unique: dict[tuple[str, int], FrameRef] = {}
+        for frame in frames:
+            unique[(str(frame.stream_id), int(frame.frame_idx))] = frame
+        selected = [unique[key] for key in sorted(unique)]
+        return selected
+
+    def _densify_geometry_cameras_for_tracking(self, geometry_artifact, ingest_artifact: IngestArtifact) -> None:
+        tracking_frames = self._planned_tracking_frames(ingest_artifact)
+        if not tracking_frames:
+            return
+        summary = densify_camera_states_for_frames(geometry_artifact.camera_states_by_stream, tracking_frames)
+        geometry_artifact.metadata['dense_camera_target'] = 'tracking'
+        geometry_artifact.metadata['dense_camera_summary'] = summary
+        if int(summary.get('added_camera_states', 0)) > 0:
+            geometry_artifact.notes.append(
+                f"Added {int(summary['added_camera_states'])} interpolated/extrapolated camera states so tracking frames have camera estimates."
+            )
+
     def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
         """Run coarse geometry initialization and persist its heavy outputs."""
+        selected_frames = self._select_geometry_frames(ingest_artifact)
         artifact = self.geometry_init.initialize(
-            ingest_artifact.keyframes,
+            selected_frames,
             ingest_artifact=ingest_artifact,
             sync_artifact=sync_artifact,
         )
+        artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
+        self._densify_geometry_cameras_for_tracking(artifact, ingest_artifact)
         artifact.save_dir = self._stage_dir('geometry')
         artifact.save()
         return artifact
