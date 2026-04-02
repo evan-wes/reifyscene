@@ -1,4 +1,4 @@
-"""Artifact for simple rendered novel-view outputs."""
+"""Artifact for rendered novel-view outputs."""
 
 from __future__ import annotations
 
@@ -18,7 +18,9 @@ class RenderArtifact(BaseArtifact):
     scene_state: dict[str, Any] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
     path_index: dict[str, list[str]] = field(default_factory=dict)
+    layer_path_index: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     player_html: str | None = None
+    debug_player_html: str | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -26,7 +28,12 @@ class RenderArtifact(BaseArtifact):
             "stage_name": self.stage_name,
             "num_paths": len(self.path_index),
             "frames_per_path": {k: len(v) for k, v in self.path_index.items()},
+            "layer_frames_per_path": {
+                path: {layer: len(frames) for layer, frames in layers.items()}
+                for path, layers in self.layer_path_index.items()
+            },
             "player_html": self.player_html,
+            "debug_player_html": self.debug_player_html,
             "coverage": self.coverage,
         }
 
@@ -40,7 +47,9 @@ class RenderArtifact(BaseArtifact):
             "scene_state": self.scene_state,
             "coverage": self.coverage,
             "path_index": self.path_index,
+            "layer_path_index": self.layer_path_index,
             "player_html": self.player_html,
+            "debug_player_html": self.debug_player_html,
         })
 
     @classmethod
@@ -54,5 +63,7 @@ class RenderArtifact(BaseArtifact):
             scene_state=raw.get("scene_state", {}),
             coverage=raw.get("coverage", {}),
             path_index=raw.get("path_index", {}),
+            layer_path_index=raw.get("layer_path_index", {}),
             player_html=raw.get("player_html"),
+            debug_player_html=raw.get("debug_player_html"),
         )

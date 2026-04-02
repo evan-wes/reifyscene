@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.render.offline_high_quality.trainer import OfflineHighQualityTrainer
 
 
 _BACKENDS = {
     "gaussian_layered": Gaussian4DTrainer,
     "gaussian4d": Gaussian4DTrainer,
+    "offline_high_quality": OfflineHighQualityTrainer,
 }
 
 

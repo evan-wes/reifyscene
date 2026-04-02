@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import math
 
 import cv2
 import numpy as np
@@ -40,6 +41,7 @@ class CoTrackerWrapper(PointTracker):
         self.model_name = str(self.cfg.get('model_name', 'cotracker3_offline'))
         self.grid_size = int(self.cfg.get('grid_size', 12))
         self.frame_stride = max(int(self.cfg.get('frame_stride', 1)), 1)
+        self.frame_spacing_sec = self.cfg.get('frame_spacing_sec')
         self.max_frames = self.cfg.get('max_frames')
         self.resize_max_dim = self.cfg.get('resize_max_dim')
         self.window_size = self.cfg.get('window_size')
@@ -114,13 +116,29 @@ class CoTrackerWrapper(PointTracker):
         self._is_loaded = True
 
 
-    def plan_frame_refs(self, stream: VideoStreamRef) -> list[FrameRef]:
-        """Return the sampled frame refs this tracker would process for a stream."""
-        frame_indices: list[int] = list(range(0, max(stream.num_frames, 1), self.frame_stride))
+    def _planned_frame_indices(self, stream: VideoStreamRef) -> list[int]:
+        """Return frame indices after applying stride or time-spacing controls."""
+        num_frames = max(int(stream.num_frames), 1)
+        stride = self.frame_stride
+        spacing_sec = self.frame_spacing_sec
+        if spacing_sec is not None:
+            try:
+                spacing_sec = float(spacing_sec)
+            except Exception:
+                spacing_sec = None
+        if spacing_sec is not None and spacing_sec > 0.0:
+            fps = max(float(stream.fps), 1e-6)
+            stride = max(1, int(math.ceil(spacing_sec * fps - 1e-9)))
+        frame_indices: list[int] = list(range(0, num_frames, max(int(stride), 1)))
         if self.max_frames is not None:
             frame_indices = frame_indices[: int(self.max_frames)]
         if not frame_indices:
             frame_indices = [0]
+        return frame_indices
+
+    def plan_frame_refs(self, stream: VideoStreamRef) -> list[FrameRef]:
+        """Return the sampled frame refs this tracker would process for a stream."""
+        frame_indices = self._planned_frame_indices(stream)
         fps = max(float(stream.fps), 1e-6)
         return [
             FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
@@ -147,9 +165,7 @@ class CoTrackerWrapper(PointTracker):
         return resized, float(w) / float(new_w), float(h) / float(new_h)
 
     def _read_video_frames(self, stream: VideoStreamRef) -> tuple[np.ndarray, np.ndarray, tuple[int, int], tuple[int, int]]:
-        frame_indices: list[int] = list(range(0, max(stream.num_frames, 1), self.frame_stride))
-        if self.max_frames is not None:
-            frame_indices = frame_indices[: int(self.max_frames)]
+        frame_indices = self._planned_frame_indices(stream)
         frames: list[np.ndarray] = []
         model_wh: tuple[int, int] | None = None
         frame_iter = frame_indices

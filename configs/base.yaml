@@ -22,6 +22,8 @@ scene:
   timeline_source: geometry
 
 render:
+  backend_name: gaussian_layered
+  quality_mode: realtime
   device: auto
   width: 800
   height: 450
@@ -29,10 +31,21 @@ render:
   dynamic_point_budget: 180
   frame_stride: 1
   max_frames_per_path: 32
+  debug_triptych: true
   use_gpu_projection: true
   enabled_paths:
     orbit: true
-    overhead: true
-    replay: true
-    follow_human: true
-    follow_object: true
+    overhead: false
+    replay: false
+    follow_human: false
+    follow_object: false
+  offline_high_quality:
+    render_scale: 2
+    filter_radius: 1.1
+    detail_strength: 0.12
+    nerf_refinement:
+      enabled: true
+      blend_weight: 0.28
+      detail_strength: 0.18
+      sharpen_radius: 1.1
+      max_dynamic_boost: 0.45

@@ -14,6 +14,7 @@ from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.render.registry import build_renderer
 from room4d.render.camera_paths import CameraPathGenerator
 
 
@@ -113,8 +114,14 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
     render_artifact.save()
 
     assert (tmp_path / 'render' / 'novel_view_player.html').exists()
+    assert (tmp_path / 'render' / 'novel_view_debug_player.html').exists()
     assert 'orbit' in render_artifact.path_index
+    assert 'orbit' in render_artifact.layer_path_index
     assert render_artifact.coverage['rendered_frames'] > 0
+
+    debug_layers = render_artifact.layer_path_index['orbit']
+    assert set(debug_layers) == {'full', 'static_only', 'dynamic_only', 'triptych'}
+    assert all(debug_layers[layer] for layer in ('full', 'static_only', 'dynamic_only', 'triptych'))
 
     frame_img = np.asarray(Image.open(tmp_path / 'render' / render_artifact.path_index['orbit'][0]))
     assert frame_img.sum() > 0
@@ -217,3 +224,52 @@ def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
     artifact = trainer.fit(scene_model, save_dir=tmp_path / 'render_cfg')
     assert set(artifact.path_index.keys()) == {'orbit'}
     assert len(artifact.path_index['orbit']) == 1
+
+
+
+def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
+    frame1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
+    scene_artifact = SceneArtifact(
+        run_id='hq', stage_name='scene', save_dir=tmp_path / 'scene_hq',
+        static_scene={
+            'points_xyz': np.asarray([[0.0, 0.0, 2.0], [0.3, 0.0, 2.0], [0.0, 0.3, 2.0]], dtype=np.float32),
+            'colors_rgb': np.asarray([[255, 255, 255], [200, 180, 255], [180, 255, 220]], dtype=np.uint8),
+            'center_xyz': [0.0, 0.0, 2.0],
+            'num_points': 3,
+        },
+        dynamic_entities={'humans': [], 'objects': []},
+        frame_refs=[frame0, frame1],
+        timeline={'source': 'tracking'},
+        render_contract={
+            'schema': 'layered_scene_v1',
+            'supported_backends': ['gaussian_layered', 'offline_high_quality'],
+            'quality_modes': ['realtime', 'offline_high_quality'],
+            'static_layer': {
+                'num_gaussians': 3,
+                'means_xyz': np.asarray([[0.0, 0.0, 2.0], [0.3, 0.0, 2.0], [0.0, 0.3, 2.0]], dtype=np.float32),
+                'scales_xyz': np.full((3, 3), 0.04, dtype=np.float32),
+                'colors_rgb': np.asarray([[255, 255, 255], [200, 180, 255], [180, 255, 220]], dtype=np.uint8),
+                'opacities': np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
+                'source_codes': np.asarray([0, 0, 0], dtype=np.int16),
+            },
+            'dynamic_layers': {},
+        },
+    )
+    scene_model = Gaussian4DScene()
+    scene_model.initialize_from_scene(scene_artifact)
+    renderer = build_renderer({
+        'backend_name': 'offline_high_quality',
+        'width': 160,
+        'height': 90,
+        'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
+        'offline_high_quality': {'render_scale': 2, 'nerf_refinement': {'enabled': True}},
+    })
+    artifact = renderer.fit(scene_model, save_dir=tmp_path / 'render_hq')
+    assert artifact.scene_state['backend_name'] == 'offline_high_quality'
+    assert artifact.scene_state['quality_mode'] == 'offline_high_quality'
+    assert artifact.scene_state['offline_high_quality']['nerf_refinement_enabled'] is True
+    assert artifact.debug_player_html == 'novel_view_debug_player.html'
+    assert (tmp_path / 'render_hq' / 'novel_view_debug_player.html').exists()
+    assert 'orbit' in artifact.layer_path_index
+    assert all(artifact.layer_path_index['orbit'][key] for key in ('full', 'static_only', 'dynamic_only', 'triptych'))

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from room4d.common.memory import release_memory
 from room4d.common.paths import ensure_dir
@@ -42,12 +42,23 @@ class Gaussian4DTrainer(RenderBackend):
         self.frame_stride = max(1, int(self.cfg.get("frame_stride", 1)))
         self.max_frames_per_path = self.cfg.get("max_frames_per_path")
         self.label_entities = bool(self.cfg.get("label_entities", True))
+        self.debug_triptych = bool(self.cfg.get("debug_triptych", True))
         self.min_sigma_px = float(self.cfg.get("min_sigma_px", 0.85))
         self.max_sigma_px = float(self.cfg.get("max_sigma_px", 12.0))
         self.max_dynamic_entities_per_kind = int(self.cfg.get("max_dynamic_entities_per_kind", 3))
         self.cpu_threads = self.cfg.get("cpu_threads")
         self.use_gpu_projection = bool(self.cfg.get("use_gpu_projection", True))
         self.quality_mode = str(self.cfg.get("quality_mode", "realtime"))
+        offline_cfg = dict(self.cfg.get("offline_high_quality", {}) or {})
+        self.offline_render_scale = max(1, int(offline_cfg.get("render_scale", 2 if self.quality_mode == "offline_high_quality" else 1)))
+        self.offline_filter_radius = float(offline_cfg.get("filter_radius", 1.1))
+        self.offline_detail_strength = float(offline_cfg.get("detail_strength", 0.12))
+        nerf_cfg = dict(offline_cfg.get("nerf_refinement", {}) or {})
+        self.nerf_refinement_enabled = bool(nerf_cfg.get("enabled", self.quality_mode == "offline_high_quality"))
+        self.nerf_blend_weight = float(nerf_cfg.get("blend_weight", 0.28))
+        self.nerf_detail_strength = float(nerf_cfg.get("detail_strength", 0.18))
+        self.nerf_sharpen_radius = float(nerf_cfg.get("sharpen_radius", 1.1))
+        self.nerf_max_dynamic_boost = float(nerf_cfg.get("max_dynamic_boost", 0.45))
         self.device = self._select_device(self.cfg.get("device", "auto"))
         self.camera_paths = CameraPathGenerator()
         self.enabled_paths = {
@@ -238,7 +249,7 @@ class Gaussian4DTrainer(RenderBackend):
         sigma_world = np.mean(scales, axis=1)
         sigma_px = fx * sigma_world / np.clip(z, 1e-3, None)
         sigma_px = np.clip(sigma_px, self.min_sigma_px, self.max_sigma_px)
-        order = np.argsort(z)[::-1]  # far-to-near blending
+        order = np.argsort(z)[::-1]
         for idx in order.tolist():
             cx = float(xy[idx, 0])
             cy = float(xy[idx, 1])
@@ -266,17 +277,42 @@ class Gaussian4DTrainer(RenderBackend):
             alpha[y0:y1 + 1, x0:x1 + 1] = np.clip(existing + contrib, 0.0, 1.0)
             rgb[y0:y1 + 1, x0:x1 + 1, :] += contrib[..., None] * colors[idx][None, None, :]
 
-    def _render_frame(self, scene_artifact, camera: dict[str, Any]) -> Image.Image:
+    @staticmethod
+    def _composite_layers(back_rgb: np.ndarray, back_alpha: np.ndarray, front_rgb: np.ndarray, front_alpha: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        composed_rgb = back_rgb + (1.0 - back_alpha[..., None]) * front_rgb
+        composed_alpha = back_alpha + (1.0 - back_alpha) * front_alpha
+        return np.clip(composed_rgb, 0.0, 1.0), np.clip(composed_alpha, 0.0, 1.0)
+
+    @staticmethod
+    def _canvas_to_image(rgb: np.ndarray) -> Image.Image:
+        canvas = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+        return Image.fromarray(canvas)
+
+    def _annotate_entities(self, image: Image.Image, dynamic_entities: list[dict[str, Any]], eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> Image.Image:
+        if not self.label_entities or not dynamic_entities:
+            return image
+        draw = ImageDraw.Draw(image)
+        for entity in dynamic_entities:
+            pts = np.asarray([entity["center_xyz"]], dtype=np.float32)
+            xy, valid, _ = self._project_points(pts, eye, target, up)
+            if not bool(valid[0]):
+                continue
+            x, y = float(xy[0, 0]), float(xy[0, 1])
+            color = tuple(int(v) for v in entity["color_rgb"].tolist())
+            draw.text((x + 6, y - 10), f"{entity['display_label']}:{entity['entity_id']}", fill=color)
+        return image
+
+    def _render_frame_arrays(self, scene_artifact, camera: dict[str, Any]) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], np.ndarray, np.ndarray, np.ndarray]:
         static = self._static_gaussians(scene_artifact)
         eye = np.asarray(camera["eye"], dtype=np.float32)
         target = np.asarray(camera["target"], dtype=np.float32)
         up = np.asarray(camera.get("up", [0.0, 0.0, 1.0]), dtype=np.float32)
-        rgb = np.zeros((self.height, self.width, 3), dtype=np.float32)
-        alpha = np.zeros((self.height, self.width), dtype=np.float32)
 
+        static_rgb = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        static_alpha = np.zeros((self.height, self.width), dtype=np.float32)
         self._splat_gaussians(
-            rgb,
-            alpha,
+            static_rgb,
+            static_alpha,
             static["means_xyz"],
             static["scales_xyz"],
             static["colors_rgb"],
@@ -286,24 +322,79 @@ class Gaussian4DTrainer(RenderBackend):
             up,
         )
 
+        dynamic_rgb = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        dynamic_alpha = np.zeros((self.height, self.width), dtype=np.float32)
         dynamic_entities = self._select_dynamic_layers(scene_artifact, float(camera.get("time_sec", 0.0)))
         for entity in dynamic_entities:
             means, scales, colors, opacities = self._expand_dynamic_entity(entity)
-            self._splat_gaussians(rgb, alpha, means, scales, colors, opacities, eye, target, up)
+            self._splat_gaussians(dynamic_rgb, dynamic_alpha, means, scales, colors, opacities, eye, target, up)
 
-        canvas = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
-        img = Image.fromarray(canvas)
-        if self.label_entities:
-            draw = ImageDraw.Draw(img)
-            for entity in dynamic_entities:
-                pts = np.asarray([entity["center_xyz"]], dtype=np.float32)
-                xy, valid, _ = self._project_points(pts, eye, target, up)
-                if not bool(valid[0]):
-                    continue
-                x, y = float(xy[0, 0]), float(xy[0, 1])
-                color = tuple(int(v) for v in entity["color_rgb"].tolist())
-                draw.text((x + 6, y - 10), f"{entity['display_label']}:{entity['entity_id']}", fill=color)
-        return img
+        full_rgb, full_alpha = self._composite_layers(static_rgb, static_alpha, dynamic_rgb, dynamic_alpha)
+        return {
+            "full": full_rgb,
+            "static_only": static_rgb,
+            "dynamic_only": dynamic_rgb,
+            "full_alpha": full_alpha,
+            "static_alpha": static_alpha,
+            "dynamic_alpha": dynamic_alpha,
+        }, dynamic_entities, eye, target, up
+
+    def _apply_nerf_refinement(self, full_img: Image.Image, static_img: Image.Image, dynamic_img: Image.Image) -> Image.Image:
+        if not self.nerf_refinement_enabled:
+            return full_img
+        blurred = full_img.filter(ImageFilter.GaussianBlur(radius=self.nerf_sharpen_radius))
+        full = np.asarray(full_img, dtype=np.float32) / 255.0
+        static = np.asarray(static_img, dtype=np.float32) / 255.0
+        dynamic = np.asarray(dynamic_img, dtype=np.float32) / 255.0
+        blur = np.asarray(blurred, dtype=np.float32) / 255.0
+        dynamic_energy = np.mean(np.abs(dynamic), axis=2, keepdims=True)
+        dynamic_peak = float(dynamic_energy.max()) if dynamic_energy.size else 0.0
+        dynamic_mask = np.clip(dynamic_energy / max(dynamic_peak, 1e-6), 0.0, self.nerf_max_dynamic_boost)
+        detail = full - blur
+        refined = full + (self.offline_detail_strength + self.nerf_detail_strength) * detail + self.nerf_blend_weight * dynamic_mask * (full - static)
+        refined = np.clip(refined, 0.0, 1.0)
+        return Image.fromarray((refined * 255.0).astype(np.uint8))
+
+    def _compose_triptych(self, images: dict[str, Image.Image]) -> Image.Image:
+        labels = [("static_only", "Static"), ("dynamic_only", "Dynamic"), ("full", "Full")]
+        triptych = Image.new("RGB", (self.width * 3, self.height), color=(0, 0, 0))
+        for idx, (key, label) in enumerate(labels):
+            panel = images[key].copy()
+            draw = ImageDraw.Draw(panel)
+            draw.rectangle((0, 0, 112, 20), fill=(0, 0, 0))
+            draw.text((8, 4), label, fill=(255, 255, 255))
+            triptych.paste(panel, (idx * self.width, 0))
+        return triptych
+
+    def _render_frame_bundle(self, scene_artifact, camera: dict[str, Any]) -> tuple[dict[str, Image.Image], list[dict[str, Any]]]:
+        base_w, base_h = self.width, self.height
+        if self.quality_mode == "offline_high_quality" and self.offline_render_scale > 1:
+            self.width = base_w * self.offline_render_scale
+            self.height = base_h * self.offline_render_scale
+        try:
+            arrays, dynamic_entities, eye, target, up = self._render_frame_arrays(scene_artifact, camera)
+        finally:
+            render_w, render_h = self.width, self.height
+            self.width = base_w
+            self.height = base_h
+
+        images = {
+            "full": self._canvas_to_image(arrays["full"]),
+            "static_only": self._canvas_to_image(arrays["static_only"]),
+            "dynamic_only": self._canvas_to_image(arrays["dynamic_only"]),
+        }
+        if render_w != base_w or render_h != base_h:
+            for key, image in list(images.items()):
+                images[key] = image.resize((base_w, base_h), resample=Image.Resampling.LANCZOS)
+        if self.quality_mode == "offline_high_quality" and self.offline_filter_radius > 0.0:
+            for key in ("static_only", "dynamic_only"):
+                images[key] = images[key].filter(ImageFilter.GaussianBlur(radius=self.offline_filter_radius * 0.5))
+            images["full"] = images["full"].filter(ImageFilter.GaussianBlur(radius=self.offline_filter_radius))
+        images["full"] = self._apply_nerf_refinement(images["full"], images["static_only"], images["dynamic_only"])
+        images["full"] = self._annotate_entities(images["full"], dynamic_entities, eye, target, up)
+        triptych = self._compose_triptych(images)
+        images["triptych"] = triptych
+        return images, dynamic_entities
 
     @staticmethod
     def _image_data_uri(image: Image.Image) -> str:
@@ -362,6 +453,74 @@ update();
         html_path.write_text(html, encoding="utf-8")
         return html_path.name
 
+    def _write_debug_player_html(self, render_dir: Path, layer_path_index: dict[str, dict[str, list[str]]]) -> str:
+        html_path = render_dir / "novel_view_debug_player.html"
+        frames = {
+            path: {layer: [Path(rel).as_posix() for rel in rels] for layer, rels in layers.items()}
+            for path, layers in layer_path_index.items()
+        }
+        first_path = next(iter(frames.keys()), "")
+        first_layers = frames.get(first_path, {})
+        html = f"""
+<!DOCTYPE html>
+<html><head><meta charset='utf-8'><title>room4d debug viewer</title>
+<style>
+body {{ font-family: sans-serif; margin: 18px; }}
+.controls {{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }}
+.grid {{ display:grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }}
+.panel img {{ width: 100%; border: 1px solid #ccc; }}
+.panel h3 {{ margin: 0 0 6px 0; }}
+pre {{ background:#f6f6f6; padding:12px; }}
+</style></head>
+<body>
+<h2>room4d debug render viewer</h2>
+<div class='controls'>
+<label>Path <select id='pathSelect'></select></label>
+<label>Frame <input id='frameSlider' type='range' min='0' max='0' value='0' /></label>
+<span id='frameLabel'></span>
+</div>
+<div class='grid'>
+  <div class='panel'><h3>Static</h3><img id='staticImg' src='{(first_layers.get("static_only") or [""])[0] if first_layers else ""}' /></div>
+  <div class='panel'><h3>Dynamic</h3><img id='dynamicImg' src='{(first_layers.get("dynamic_only") or [""])[0] if first_layers else ""}' /></div>
+  <div class='panel'><h3>Full</h3><img id='fullImg' src='{(first_layers.get("full") or [""])[0] if first_layers else ""}' /></div>
+</div>
+<pre id='summary'></pre>
+<script>
+const frames = {frames!r};
+const pathSelect = document.getElementById('pathSelect');
+const frameSlider = document.getElementById('frameSlider');
+const staticImg = document.getElementById('staticImg');
+const dynamicImg = document.getElementById('dynamicImg');
+const fullImg = document.getElementById('fullImg');
+const frameLabel = document.getElementById('frameLabel');
+const summary = document.getElementById('summary');
+Object.keys(frames).forEach((path) => {{
+  const opt = document.createElement('option'); opt.value = path; opt.textContent = path; pathSelect.appendChild(opt);
+}});
+function seqLen(layers) {{
+  return Math.max((layers.full || []).length, (layers.static_only || []).length, (layers.dynamic_only || []).length, 0);
+}}
+function update() {{
+  const path = pathSelect.value;
+  const layers = frames[path] || {{}};
+  const count = seqLen(layers);
+  frameSlider.max = Math.max(count - 1, 0);
+  const idx = Math.min(Number(frameSlider.value || 0), Math.max(count - 1, 0));
+  staticImg.src = (layers.static_only || [])[idx] || '';
+  dynamicImg.src = (layers.dynamic_only || [])[idx] || '';
+  fullImg.src = (layers.full || [])[idx] || '';
+  frameLabel.textContent = `${{path}} frame ${{idx + 1}} / ${{count}}`;
+  summary.textContent = JSON.stringify({{path, frame_index: idx, frames_in_path: count}}, null, 2);
+}}
+pathSelect.value = {first_path!r};
+pathSelect.addEventListener('change', () => {{ frameSlider.value = '0'; update(); }});
+frameSlider.addEventListener('input', update);
+update();
+</script></body></html>
+"""
+        html_path.write_text(html, encoding="utf-8")
+        return html_path.name
+
     def fit(self, scene: RenderSceneModel, optimization_artifact=None, geometry_artifact=None, save_dir: str | Path | None = None) -> RenderArtifact:
         scene_artifact = scene.scene_artifact
         if scene_artifact is None:
@@ -382,24 +541,38 @@ update();
             paths[f"follow_object_{first_object}"] = self.camera_paths.follow_subject(scene_artifact, first_object)
 
         views_root = ensure_dir(render_dir / "novel_views")
+        debug_root = ensure_dir(render_dir / "novel_views_debug")
         path_index: dict[str, list[str]] = {}
+        layer_path_index: dict[str, dict[str, list[str]]] = {}
         total_frames = 0
+        debug_frames = 0
         for path_name, path in paths.items():
             cameras = self._limit_cameras(path.get("cameras", []))
             if not cameras:
                 continue
             path_dir = ensure_dir(views_root / path_name)
-            rels = []
+            debug_path_dir = ensure_dir(debug_root / path_name)
+            rels: list[str] = []
+            layer_rels = {"full": [], "static_only": [], "dynamic_only": [], "triptych": []}
             for idx, camera in enumerate(cameras):
-                image = self._render_frame(scene_artifact, camera)
+                images, _ = self._render_frame_bundle(scene_artifact, camera)
                 filename = f"frame_{idx:05d}.png"
-                image.save(path_dir / filename)
+                images["full"].save(path_dir / filename)
                 rels.append(str((Path("novel_views") / path_name / filename).as_posix()))
+                if self.debug_triptych:
+                    for key, stem in (("full", "full"), ("static_only", "static_only"), ("dynamic_only", "dynamic_only"), ("triptych", "triptych")):
+                        layer_filename = f"frame_{idx:05d}_{stem}.png"
+                        images[key].save(debug_path_dir / layer_filename)
+                        layer_rels[key].append(str((Path("novel_views_debug") / path_name / layer_filename).as_posix()))
+                    debug_frames += 1
             path_index[path_name] = rels
+            if self.debug_triptych:
+                layer_path_index[path_name] = layer_rels
             total_frames += len(rels)
             release_memory()
 
         player_html = self._write_player_html(render_dir, path_index)
+        debug_player_html = self._write_debug_player_html(render_dir, layer_path_index) if layer_path_index else None
         static_layer = self._scene_contract(scene_artifact).get("static_layer", {}) or {}
         dynamic_layers = self._scene_contract(scene_artifact).get("dynamic_layers", {}) or {}
         return RenderArtifact(
@@ -416,8 +589,18 @@ update();
                 "dynamic_layers": {k: len(v) for k, v in dynamic_layers.items()} if isinstance(dynamic_layers, dict) else {},
                 "device": self.device,
                 "enabled_paths": {k: bool(v) for k, v in self.enabled_paths.items()},
+                "debug_triptych": self.debug_triptych,
+                "offline_high_quality": {
+                    "render_scale": self.offline_render_scale,
+                    "filter_radius": self.offline_filter_radius,
+                    "nerf_refinement_enabled": self.nerf_refinement_enabled,
+                    "nerf_blend_weight": self.nerf_blend_weight,
+                    "nerf_detail_strength": self.nerf_detail_strength,
+                },
             },
-            coverage={"rendered_paths": len(path_index), "rendered_frames": total_frames},
+            coverage={"rendered_paths": len(path_index), "rendered_frames": total_frames, "debug_frames": debug_frames},
             path_index=path_index,
+            layer_path_index=layer_path_index,
             player_html=player_html,
+            debug_player_html=debug_player_html,
         )

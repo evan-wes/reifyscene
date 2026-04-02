@@ -1,0 +1,29 @@
+render:
+  backend_name: offline_high_quality
+  quality_mode: offline_high_quality
+  device: auto
+  width: 800
+  height: 450
+  point_limit: 10000000
+  dynamic_point_budget: 5000000
+  frame_stride: 1
+  max_frames_per_path: 24
+  label_entities: true
+  debug_triptych: true
+  use_gpu_projection: true
+  enabled_paths:
+    orbit: true
+    overhead: false
+    replay: false
+    follow_human: false
+    follow_object: false
+  offline_high_quality:
+    render_scale: 2
+    filter_radius: 1.1
+    detail_strength: 0.12
+    nerf_refinement:
+      enabled: true
+      blend_weight: 0.28
+      detail_strength: 0.18
+      sharpen_radius: 1.1
+      max_dynamic_boost: 0.45

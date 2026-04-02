@@ -177,6 +177,26 @@ class Room4DPipeline:
             for frame_idx in range(num_frames)
         ]
 
+    @staticmethod
+    def _subsample_frame_refs(frames: list[FrameRef], *, frame_stride: int | None = None, frame_spacing_sec: float | None = None) -> list[FrameRef]:
+        by_stream: dict[str, list[FrameRef]] = {}
+        for frame in sorted(frames, key=lambda fr: (fr.stream_id, float(fr.timestamp_sec), int(fr.frame_idx))):
+            by_stream.setdefault(str(frame.stream_id), []).append(frame)
+
+        selected: list[FrameRef] = []
+        for stream_id in sorted(by_stream):
+            stream_frames = by_stream[stream_id]
+            if frame_spacing_sec is not None and float(frame_spacing_sec) > 0.0:
+                last_time: float | None = None
+                for frame in stream_frames:
+                    if last_time is None or float(frame.timestamp_sec) >= last_time + float(frame_spacing_sec) - 1e-9:
+                        selected.append(frame)
+                        last_time = float(frame.timestamp_sec)
+                continue
+            stride = max(int(frame_stride or 1), 1)
+            selected.extend(stream_frames[::stride])
+        return selected
+
     def _planned_tracking_frames(self, ingest_artifact: IngestArtifact) -> list[FrameRef]:
         frames: list[FrameRef] = []
         for stream in ingest_artifact.streams:
@@ -195,6 +215,12 @@ class Room4DPipeline:
         else:
             frame_source = 'keyframes'
             frames = list(ingest_artifact.keyframes)
+
+        frames = self._subsample_frame_refs(
+            frames,
+            frame_stride=geometry_cfg.get('frame_stride'),
+            frame_spacing_sec=geometry_cfg.get('frame_spacing_sec'),
+        )
 
         unique: dict[tuple[str, int], FrameRef] = {}
         for frame in frames:

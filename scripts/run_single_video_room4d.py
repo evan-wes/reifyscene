@@ -46,6 +46,12 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['backend_name'] = args.geometry_backend_name
     geometry['backend_mode'] = args.geometry_backend_mode
     geometry['frame_source'] = str(args.geometry_frame_source).lower()
+    geometry_frame_stride = getattr(args, 'geometry_frame_stride', None)
+    geometry_frame_spacing_sec = getattr(args, 'geometry_frame_spacing_sec', None)
+    if geometry_frame_stride is not None:
+        geometry['frame_stride'] = max(1, int(geometry_frame_stride))
+    if geometry_frame_spacing_sec is not None:
+        geometry['frame_spacing_sec'] = float(geometry_frame_spacing_sec)
     geometry['system_report'] = system_report or collect_system_report()
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
@@ -91,6 +97,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     tracking['device'] = tracking_device
     tracking['grid_size'] = int(_coalesce(args.tracking_grid_size, None, 12))
     tracking['frame_stride'] = int(_coalesce(args.tracking_frame_stride, rec.get('frame_stride'), 1))
+    tracking_frame_spacing_sec = getattr(args, 'tracking_frame_spacing_sec', None)
+    if tracking_frame_spacing_sec is not None:
+        tracking['frame_spacing_sec'] = float(tracking_frame_spacing_sec)
     tracking['max_frames'] = None if _coalesce(args.tracking_max_frames, rec.get('max_frames'), None) is None else int(_coalesce(args.tracking_max_frames, rec.get('max_frames'), None))
     tracking['resize_max_dim'] = None if _coalesce(args.tracking_resize_max_dim, rec.get('resize_max_dim'), 512) is None else int(_coalesce(args.tracking_resize_max_dim, rec.get('resize_max_dim'), 512))
     tracking['window_size'] = None if _coalesce(args.tracking_window_size, rec.get('window_size'), None) is None else int(_coalesce(args.tracking_window_size, rec.get('window_size'), None))
@@ -152,6 +161,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'dynamic_point_budget': 600, 'frame_stride': 1, 'max_frames_per_path': None},
     }
     render_preset = render_presets.get((rec or {}).get('profile', 'lowmem'), render_presets['lowmem'])
+    render_cfg.setdefault('backend_name', 'gaussian_layered')
+    render_cfg.setdefault('quality_mode', 'realtime')
+    render_cfg.setdefault('debug_triptych', True)
+    render_cfg.setdefault('offline_high_quality', {
+        'render_scale': 2,
+        'filter_radius': 1.1,
+        'detail_strength': 0.12,
+        'nerf_refinement': {
+            'enabled': True,
+            'blend_weight': 0.28,
+            'detail_strength': 0.18,
+            'sharpen_radius': 1.1,
+            'max_dynamic_boost': 0.45,
+        },
+    })
     render_cfg.setdefault('width', render_preset['width'])
     render_cfg.setdefault('height', render_preset['height'])
     render_cfg.setdefault('point_limit', render_preset['point_limit'])
@@ -356,6 +380,8 @@ def main() -> None:
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
+    parser.add_argument('--geometry-frame-stride', type=int, default=None, help='Subsample the geometry frame set by original-frame stride after selecting the source timeline.')
+    parser.add_argument('--geometry-frame-spacing-sec', type=float, default=None, help='Subsample the geometry frame set by approximate time spacing in seconds. Overrides --geometry-frame-stride when set.')
     parser.add_argument('--geometry-device', default='cpu')
     parser.add_argument('--geometry-resize-max-dim', type=int, default=None, help='Optionally downscale materialized geometry frames before backend execution.')
     parser.add_argument('--vggt-long-chunk-size', type=int, default=16)
@@ -371,6 +397,7 @@ def main() -> None:
     parser.add_argument('--tracking-device', default=None)
     parser.add_argument('--tracking-grid-size', type=int, default=12)
     parser.add_argument('--tracking-frame-stride', type=int, default=None)
+    parser.add_argument('--tracking-frame-spacing-sec', type=float, default=None, help='Sample tracking frames by approximate time spacing in seconds. Overrides the effective tracking frame stride when set.')
     parser.add_argument('--tracking-max-frames', type=int, default=None)
     parser.add_argument('--tracking-resize-max-dim', type=int, default=None)
     parser.add_argument('--tracking-window-size', type=int, default=None)
