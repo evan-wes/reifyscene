@@ -34,6 +34,8 @@ from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.perception.objects.object_assoc import ObjectAssociator
 from room4d.perception.objects.segmenter import ObjectSegmenter
 from room4d.query.parser import PromptParser
+from room4d.api.resume import apply_stage_compatibility_metadata
+from room4d.api.stages import build_stage_registry
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
 from room4d.scene.assembler import SingleVideoSceneAssembler
@@ -104,6 +106,22 @@ class Room4DPipeline:
         """Return the canonical save directory for a stage artifact."""
         return ensure_dir(self.run_dir / stage_name)
 
+    def stage_registry(self):
+        """Return the declarative stage registry for this pipeline instance."""
+        return build_stage_registry()
+
+    @staticmethod
+    def _video_paths_from_ingest(ingest_artifact: IngestArtifact) -> list[str]:
+        return [str(Path(stream.video_path).expanduser().resolve()) for stream in ingest_artifact.streams]
+
+    def _video_paths_for_stage(self, ingest_artifact: IngestArtifact | None = None) -> list[str]:
+        if ingest_artifact is not None:
+            return self._video_paths_from_ingest(ingest_artifact)
+        return [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+
+    def _stamp_stage_metadata(self, artifact, stage_name: str, *, video_paths: list[str]) -> None:
+        apply_stage_compatibility_metadata(artifact, self.cfg, stage_name, video_paths)
+
     def preprocess(self, video_paths: list[str]) -> IngestArtifact:
         """Build an ingest artifact from raw video paths.
 
@@ -129,6 +147,7 @@ class Room4DPipeline:
             sampled_windows={},
             warnings=[],
         )
+        self._stamp_stage_metadata(artifact, 'ingest', video_paths=video_paths)
         artifact.save()
         return artifact
 
@@ -145,6 +164,7 @@ class Room4DPipeline:
                 pairwise_offsets[(stream_a, stream_b)] = (0.0, 0.0)
         artifact = self.sync_solver.solve_pairwise_offsets(pairwise_offsets, run_id=ingest_artifact.run_id)
         artifact.save_dir = self._stage_dir('sync')
+        self._stamp_stage_metadata(artifact, 'sync', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
@@ -205,6 +225,7 @@ class Room4DPipeline:
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         self._densify_geometry_cameras_for_tracking(artifact, ingest_artifact)
         artifact.save_dir = self._stage_dir('geometry')
+        self._stamp_stage_metadata(artifact, 'geometry', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
@@ -244,6 +265,7 @@ class Room4DPipeline:
                 'debug_image_paths': dict(geometry_artifact.metadata.get('debug_image_paths', {})),
             })
         artifact.save_dir = self._stage_dir('tracking')
+        self._stamp_stage_metadata(artifact, 'tracking', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
@@ -444,6 +466,7 @@ class Room4DPipeline:
         ) for h in human_states]
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
         artifact = self.human_associator.associate_across_views(artifact)
+        self._stamp_stage_metadata(artifact, 'humans', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
@@ -567,6 +590,7 @@ class Room4DPipeline:
         ])
         artifact.frame_index = artifact._build_frame_index(artifact.objects)
         artifact = self.object_associator.associate(artifact, track_artifact=track_artifact)
+        self._stamp_stage_metadata(artifact, 'objects', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
@@ -574,6 +598,7 @@ class Room4DPipeline:
         """Build the dynamic scene graph."""
         artifact = self.graph_builder.build(geometry_artifact, track_artifact, human_artifact, object_artifact)
         artifact.save_dir = self._stage_dir('graph')
+        self._stamp_stage_metadata(artifact, 'graph', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
 
@@ -581,6 +606,7 @@ class Room4DPipeline:
         """Run staged joint optimization."""
         artifact = self.solver.solve_all(sync_artifact, geometry_artifact, track_artifact, human_artifact, object_artifact, graph_artifact)
         artifact.save_dir = self._stage_dir('optimization')
+        self._stamp_stage_metadata(artifact, 'optimization', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
 
@@ -598,6 +624,7 @@ class Room4DPipeline:
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
             },
         )
+        self._stamp_stage_metadata(artifact, 'scene', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
 
@@ -613,6 +640,7 @@ class Room4DPipeline:
             save_dir=render_dir,
         )
         artifact.save_dir = render_dir
+        self._stamp_stage_metadata(artifact, 'render', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
 

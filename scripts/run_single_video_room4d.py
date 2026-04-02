@@ -16,6 +16,8 @@ from time import perf_counter
 from rich.console import Console
 from rich.table import Table
 from room4d.api.pipeline import Room4DPipeline
+from room4d.api.resume import ensure_start_stage, materialize_stage_from_prior
+from room4d.api.stages import STAGE_ORDER, write_run_manifest
 from room4d.common.io import read_yaml
 from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from room4d.common.memory import release_memory
@@ -34,6 +36,7 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cfg = read_yaml(args.config) if args.config else {}
     cfg.setdefault('run_id', Path(args.video).stem)
     cfg['run_dir'] = str(Path(args.run_dir))
+    cfg['_resume_video_paths'] = [str(Path(args.video).expanduser().resolve())]
     if args.max_keyframes is not None:
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
     if args.keyframe_stride_sec is not None:
@@ -343,6 +346,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
     parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
+    parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
+    parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
@@ -400,6 +405,7 @@ def main() -> None:
     parser.add_argument('--debug-max-points', type=int, default=5000)
     args = parser.parse_args()
 
+    ensure_start_stage(args.start_stage)
     console = Console()
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
@@ -454,43 +460,75 @@ def main() -> None:
         )
         console.print(f"scene timeline source: {cfg.get('scene', {}).get('timeline_source', 'geometry')}")
 
+    write_run_manifest(
+        args.run_dir,
+        {
+            'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
+            'run_dir': str(Path(args.run_dir).expanduser().resolve()),
+            'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
+            'start_stage': args.start_stage,
+            'config': cfg,
+        },
+    )
+
     pipeline = Room4DPipeline(cfg)
+    registry = pipeline.stage_registry()
 
     outputs = {}
-
-    stages = [
-        ("Stage 1/10 · Ingest / preprocess", "ingest", lambda: pipeline.preprocess([args.video])),
-        ("Stage 2/10 · Temporal sync", "sync", lambda: pipeline.synchronize(outputs["ingest"])),
-        ("Stage 3/10 · VGGT geometry", "geometry", lambda: pipeline.initialize_geometry(outputs["ingest"], outputs["sync"])),
-        ("Stage 4/10 · Tracking + lifting + static/dynamic", "tracks", lambda: pipeline.track(outputs["ingest"], geometry_artifact=outputs["geometry"])),
-        ("Stage 5/10 · Human perception", "humans", lambda: pipeline.perceive_humans(outputs["ingest"], track_artifact=outputs["tracks"])),
-        ("Stage 6/10 · Object perception", "objects", lambda: pipeline.perceive_objects(outputs["ingest"], track_artifact=outputs["tracks"])),
-        ("Stage 7/10 · Scene graph", "graph", lambda: pipeline.build_graph(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"])),
-        ("Stage 8/10 · Optimization", "optimization", lambda: pipeline.optimize(outputs["sync"], outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], graph_artifact=outputs["graph"])),
-        ("Stage 9/10 · 4D scene assembly", "scene", lambda: pipeline.assemble_scene(outputs["geometry"], outputs["tracks"], human_artifact=outputs["humans"], object_artifact=outputs["objects"], optimization_artifact=outputs["optimization"])),
-        ("Stage 10/10 · Novel-view render", "render", lambda: pipeline.fit_renderer(outputs["scene"], optimization_artifact=outputs["optimization"], geometry_artifact=outputs["geometry"])),
-    ]
+    stage_labels = {
+        'ingest': 'Stage 1/10 · Ingest / preprocess',
+        'sync': 'Stage 2/10 · Temporal sync',
+        'geometry': 'Stage 3/10 · VGGT geometry',
+        'tracking': 'Stage 4/10 · Tracking + lifting + static/dynamic',
+        'humans': 'Stage 5/10 · Human perception',
+        'objects': 'Stage 6/10 · Object perception',
+        'graph': 'Stage 7/10 · Scene graph',
+        'optimization': 'Stage 8/10 · Optimization',
+        'scene': 'Stage 9/10 · 4D scene assembly',
+        'render': 'Stage 10/10 · Novel-view render',
+    }
 
     stage_release_names = {
         'geometry': 'geometry',
-        'tracks': 'tracking',
+        'tracking': 'tracking',
         'humans': 'humans',
         'objects': 'objects',
         'render': 'render',
     }
 
-    for label, key, fn in stages:
+    start_idx = list(STAGE_ORDER).index(args.start_stage)
+    if start_idx > 0 and not args.prior_run_dir:
+        raise ValueError('--prior-run-dir is required when --start-stage is later than ingest.')
+
+    for idx, stage_name in enumerate(STAGE_ORDER):
+        spec = registry[stage_name]
+        label = stage_labels[stage_name]
+        if idx < start_idx:
+            started = _debug_stage(console, args.debug, f"{label} [load]")
+            artifact = materialize_stage_from_prior(args.prior_run_dir, args.run_dir, spec, cfg, [args.video])
+            outputs[stage_name] = artifact
+            if stage_name == 'tracking':
+                outputs['tracks'] = artifact
+            _debug_stage_done(console, args.debug, f"{label.split('·', 1)[1].strip()} loaded", started, save_dir=str(artifact.save_dir))
+            continue
+
+        missing = [dep for dep in spec.dependencies if dep not in outputs]
+        if missing:
+            raise RuntimeError(f"Cannot execute stage '{stage_name}' because dependencies are missing: {missing}")
         started = _debug_stage(console, args.debug, label)
-        artifact = fn()
-        outputs[key] = artifact
+        artifact = spec.run_fn(pipeline, outputs, [args.video])
+        outputs[stage_name] = artifact
+        if stage_name == 'tracking':
+            outputs['tracks'] = artifact
         _debug_stage_done(console, args.debug, label.split('·', 1)[1].strip(), started, save_dir=str(artifact.save_dir))
-        release_name = stage_release_names.get(key)
+        release_name = stage_release_names.get(stage_name)
         if release_name is not None:
             pipeline.release_stage_resources(release_name)
 
     _print_frame_summary(console, outputs, cfg)
 
-    for name, artifact in outputs.items():
+    for name in STAGE_ORDER:
+        artifact = outputs[name]
         print(f'{name}: {artifact.summary()}')
         print(f'  save_dir: {artifact.save_dir}')
 
