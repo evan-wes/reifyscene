@@ -233,27 +233,27 @@ def recommend_vggt_long_profile(
             profile = 'lowmem'
             initial_chunk_size = 12
             initial_resize_max_dim = _clip_resize(640 if source_max_dim is not None else 640)
-            min_resize_max_dim = 320
+            min_resize_max_dim = 224
             resize_candidates = _dedupe_resize(
-                [initial_resize_max_dim, 576, 512, 448, 384, 320],
+                [initial_resize_max_dim, 576, 512, 448, 384, 320, 288, 256, 224],
                 min_resize_max_dim,
             )
         elif max_free_gpu_gib >= 6.0:
             profile = 'lowmem'
             initial_chunk_size = 8
             initial_resize_max_dim = _clip_resize(512 if source_max_dim is not None else 512)
-            min_resize_max_dim = 256
+            min_resize_max_dim = 192
             resize_candidates = _dedupe_resize(
-                [initial_resize_max_dim, 448, 384, 320, 288, 256],
+                [initial_resize_max_dim, 448, 384, 320, 288, 256, 224, 192],
                 min_resize_max_dim,
             )
         else:
             profile = 'lowmem'
             initial_chunk_size = 4
             initial_resize_max_dim = _clip_resize(384 if source_max_dim is not None else 384)
-            min_resize_max_dim = 224
+            min_resize_max_dim = 160
             resize_candidates = _dedupe_resize(
-                [initial_resize_max_dim, 320, 288, 256, 224],
+                [initial_resize_max_dim, 320, 288, 256, 224, 192, 160],
                 min_resize_max_dim,
             )
     else:

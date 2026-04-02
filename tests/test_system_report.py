@@ -38,5 +38,5 @@ def test_vggt_long_recommendation_exposes_dense_resize_ladder_for_8gb_gpu() -> N
     assert rec['profile'] == 'lowmem'
     assert rec['initial_chunk_size'] <= 12
     assert rec['initial_resize_max_dim'] == 640
-    assert rec['min_resize_max_dim'] == 320
-    assert rec['resize_candidates'] == [640, 576, 512, 448, 384, 320]
+    assert rec['min_resize_max_dim'] == 224
+    assert rec['resize_candidates'] == [640, 576, 512, 448, 384, 320, 288, 256, 224]

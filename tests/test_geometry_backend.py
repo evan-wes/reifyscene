@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+import sys
 
 import cv2
 import pytest
@@ -571,3 +572,65 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert "cleanup starting; before cleanup rss=3.00 GiB" in captured
     assert "cleanup finished; after cleanup rss=3.00 GiB" in captured
+
+
+def test_vggt_long_bounded_preprocess_avoids_reinflating_small_inputs(tmp_path: Path) -> None:
+    image_path = tmp_path / "small.png"
+    image = np.zeros((240, 320, 3), dtype=np.uint8)
+    image[..., 1] = 127
+    cv2.imwrite(str(image_path), image)
+
+    init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda", "resize_max_dim": 320})
+    target_size = init._effective_vggt_input_target_size(320)
+    batch = init._load_and_preprocess_images_without_upscale([str(image_path)], target_size=target_size)
+
+    assert batch.shape[0] == 1
+    assert batch.shape[-1] == target_size
+    assert batch.shape[-1] < 518
+    assert batch.shape[-2] <= target_size
+
+
+def test_vggt_long_true_mixed_precision_patch_overrides_forward_without_third_party_edit(monkeypatch) -> None:
+    base_models_module = ModuleType("base_models")
+    vggt_pkg = ModuleType("base_models.vggt")
+    models_pkg = ModuleType("base_models.vggt.models")
+    vggt_module = ModuleType("base_models.vggt.models.vggt")
+
+    class FakeVGGT:
+        def __init__(self) -> None:
+            self.camera_head = lambda tokens: [torch.ones((1, 2, 9), dtype=torch.float32)]
+            self.depth_head = lambda tokens, images=None, patch_start_idx=None: (
+                torch.ones((1, 2, 4, 4, 1), dtype=torch.float32),
+                torch.ones((1, 2, 4, 4), dtype=torch.float32),
+            )
+            self.point_head = lambda tokens, images=None, patch_start_idx=None: (
+                torch.ones((1, 2, 4, 4, 3), dtype=torch.float32),
+                torch.ones((1, 2, 4, 4), dtype=torch.float32),
+            )
+            self.track_head = None
+
+        def aggregator(self, images):
+            return [torch.ones((1, 2, 4), dtype=torch.float32)], 0
+
+        def forward(self, images, query_points=None):
+            return {"original": True}
+
+    vggt_module.VGGT = FakeVGGT
+    monkeypatch.setitem(sys.modules, "base_models", base_models_module)
+    monkeypatch.setitem(sys.modules, "base_models.vggt", vggt_pkg)
+    monkeypatch.setitem(sys.modules, "base_models.vggt.models", models_pkg)
+    monkeypatch.setitem(sys.modules, "base_models.vggt.models.vggt", vggt_module)
+
+    init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda", "enable_true_mixed_precision": True})
+    model = FakeVGGT()
+
+    assert model.forward(torch.zeros((2, 3, 28, 28))) == {"original": True}
+
+    with init._patched_vggt_true_mixed_precision():
+        predictions = model.forward(torch.zeros((2, 3, 28, 28)))
+        assert "pose_enc" in predictions
+        assert "depth" in predictions
+        assert "world_points" in predictions
+        assert "images" in predictions
+
+    assert model.forward(torch.zeros((2, 3, 28, 28))) == {"original": True}

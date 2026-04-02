@@ -7,7 +7,7 @@ initializer.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import traceback
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,10 @@ class VGGTLongInitializer(VGGTInitializer):
         min_resize_max_dim = self.cfg.get("min_resize_max_dim")
         self.min_resize_max_dim = None if min_resize_max_dim in (None, 0) else int(min_resize_max_dim)
         self.system_report = self.cfg.get("system_report")
+        self.enable_true_mixed_precision = bool(
+            self.cfg.get("enable_true_mixed_precision", str(self.device).lower().startswith("cuda"))
+        )
+        self.prevent_input_upscale = bool(self.cfg.get("prevent_input_upscale", True))
         self._VGGT_Long: Any | None = None
 
     def _log_auto_tune(self, message: str) -> None:
@@ -94,12 +98,21 @@ class VGGTLongInitializer(VGGTInitializer):
     def _format_resize_max_dim(resize_max_dim: int | None) -> str:
         return "original" if resize_max_dim is None else str(int(resize_max_dim))
 
+    @staticmethod
+    def _effective_vggt_input_target_size(resize_max_dim: int | None, source_max_dim: int | None = None) -> int:
+        candidate = 518 if resize_max_dim in (None, 0) else int(resize_max_dim)
+        if source_max_dim not in (None, 0):
+            candidate = min(candidate, int(source_max_dim))
+        candidate = min(518, max(14, candidate))
+        return max(14, (candidate // 14) * 14)
+
     def _format_attempt_summary(self, attempt: dict[str, Any]) -> str:
         summary = (
             f"attempt {attempt.get('attempt_index', '?')}: "
             f"chunk_size={attempt.get('chunk_size')}, "
             f"overlap={attempt.get('overlap')}, "
             f"resize_max_dim={self._format_resize_max_dim(attempt.get('resize_max_dim'))}, "
+            f"effective_vggt_input_max_dim={attempt.get('effective_vggt_input_max_dim')}, "
             f"status={attempt.get('status', 'unknown')}"
         )
         error = attempt.get("error")
@@ -504,6 +517,167 @@ class VGGTLongInitializer(VGGTInitializer):
         finally:
             torch.load = original_torch_load
 
+    def _load_and_preprocess_images_without_upscale(
+        self,
+        image_path_list: list[str],
+        *,
+        mode: str = "crop",
+        target_size: int,
+    ) -> torch.Tensor:
+        from PIL import Image
+
+        if len(image_path_list) == 0:
+            raise ValueError("At least 1 image is required")
+        if mode not in {"crop", "pad"}:
+            raise ValueError("Mode must be either 'crop' or 'pad'")
+
+        target_size = max(14, int(target_size))
+        images: list[torch.Tensor] = []
+        shapes: set[tuple[int, int]] = set()
+
+        for image_path in image_path_list:
+            img = Image.open(image_path)
+            if img.mode == "RGBA":
+                background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                img = Image.alpha_composite(background, img)
+            img = img.convert("RGB")
+
+            width, height = img.size
+            base_dim = max(width, height) if mode == "pad" else max(width, 1)
+            scale = min(1.0, float(target_size) / float(base_dim))
+
+            new_width = max(14, int(np.floor((width * scale) / 14.0)) * 14)
+            new_height = max(14, int(np.floor((height * scale) / 14.0)) * 14)
+            new_width = min(target_size, new_width)
+            new_height = min(target_size, new_height)
+
+            img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+            tensor = torch.from_numpy(np.asarray(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
+
+            if mode == "crop" and tensor.shape[1] > target_size:
+                start_y = (tensor.shape[1] - target_size) // 2
+                tensor = tensor[:, start_y : start_y + target_size, :]
+
+            shapes.add((tensor.shape[1], tensor.shape[2]))
+            images.append(tensor)
+
+        if len(shapes) > 1:
+            max_height = max(shape[0] for shape in shapes)
+            max_width = max(shape[1] for shape in shapes)
+            padded_images: list[torch.Tensor] = []
+            for img in images:
+                h_padding = max_height - img.shape[1]
+                w_padding = max_width - img.shape[2]
+                if h_padding > 0 or w_padding > 0:
+                    pad_top = h_padding // 2
+                    pad_bottom = h_padding - pad_top
+                    pad_left = w_padding // 2
+                    pad_right = w_padding - pad_left
+                    img = torch.nn.functional.pad(
+                        img,
+                        (pad_left, pad_right, pad_top, pad_bottom),
+                        mode="constant",
+                        value=1.0,
+                    )
+                padded_images.append(img)
+            images = padded_images
+
+        return torch.stack(images)
+
+    @contextmanager
+    def _patched_vggt_long_preprocess(self):
+        if not self.prevent_input_upscale:
+            yield
+            return
+
+        target_size = self._effective_vggt_input_target_size(self.resize_max_dim)
+        if target_size >= 518:
+            yield
+            return
+
+        try:
+            from base_models.vggt.utils import load_fn as load_fn_module
+        except Exception:
+            yield
+            return
+
+        original_loader = load_fn_module.load_and_preprocess_images
+
+        def _bounded_loader(image_path_list, mode="crop"):
+            return self._load_and_preprocess_images_without_upscale(
+                [str(path) for path in image_path_list],
+                mode=mode,
+                target_size=target_size,
+            )
+
+        load_fn_module.load_and_preprocess_images = _bounded_loader
+        try:
+            yield
+        finally:
+            load_fn_module.load_and_preprocess_images = original_loader
+
+    @contextmanager
+    def _patched_vggt_true_mixed_precision(self):
+        if not self.enable_true_mixed_precision or not self._requested_device().startswith("cuda"):
+            yield
+            return
+
+        try:
+            from base_models.vggt.models.vggt import VGGT
+        except Exception:
+            yield
+            return
+
+        original_forward = VGGT.forward
+
+        def _forward_mixed_precision(model_self, images: torch.Tensor, query_points: torch.Tensor = None):
+            if len(images.shape) == 4:
+                images = images.unsqueeze(0)
+            if query_points is not None and len(query_points.shape) == 2:
+                query_points = query_points.unsqueeze(0)
+
+            aggregated_tokens_list, patch_start_idx = model_self.aggregator(images)
+
+            predictions = {}
+            if model_self.camera_head is not None:
+                pose_enc_list = model_self.camera_head(aggregated_tokens_list)
+                predictions["pose_enc"] = pose_enc_list[-1]
+            if model_self.depth_head is not None:
+                depth, depth_conf = model_self.depth_head(
+                    aggregated_tokens_list,
+                    images=images,
+                    patch_start_idx=patch_start_idx,
+                )
+                predictions["depth"] = depth
+                predictions["depth_conf"] = depth_conf
+            if model_self.point_head is not None:
+                pts3d, pts3d_conf = model_self.point_head(
+                    aggregated_tokens_list,
+                    images=images,
+                    patch_start_idx=patch_start_idx,
+                )
+                predictions["world_points"] = pts3d
+                predictions["world_points_conf"] = pts3d_conf
+            if model_self.track_head is not None and query_points is not None:
+                track_list, vis, conf = model_self.track_head(
+                    aggregated_tokens_list,
+                    images=images,
+                    patch_start_idx=patch_start_idx,
+                    query_points=query_points,
+                )
+                predictions["track"] = track_list[-1]
+                predictions["vis"] = vis
+                predictions["conf"] = conf
+
+            predictions["images"] = images
+            return predictions
+
+        VGGT.forward = _forward_mixed_precision
+        try:
+            yield
+        finally:
+            VGGT.forward = original_forward
+
     def _create_runner(self, image_dir: Path, output_dir: Path) -> Any:
         with _torch_cuda_visibility(self._requested_device()):
             runner = self._VGGT_Long(str(image_dir), str(output_dir), self._default_long_config())
@@ -512,7 +686,10 @@ class VGGTLongInitializer(VGGTInitializer):
 
     def _run_runner(self, runner: Any) -> None:
         with _torch_cuda_visibility(self._requested_device()):
-            with self._patched_torch_load_for_device():
+            with ExitStack() as stack:
+                stack.enter_context(self._patched_torch_load_for_device())
+                stack.enter_context(self._patched_vggt_long_preprocess())
+                stack.enter_context(self._patched_vggt_true_mixed_precision())
                 runner.run()
 
     def _frame_source_max_dim(self, frames: list[FrameRef], ingest_artifact) -> int | None:
@@ -581,8 +758,24 @@ class VGGTLongInitializer(VGGTInitializer):
             if value not in values:
                 values.append(value)
 
-        _append(initial_resize_max_dim)
+        initial_value = None if initial_resize_max_dim in (None, 0) else int(initial_resize_max_dim)
+        _append(initial_value)
+
+        smaller_or_equal: list[int | None] = []
+        larger: list[int | None] = []
         for value in recommendation_candidates or []:
+            if value in (None, 0):
+                continue
+            value = int(value)
+            if initial_value is not None and value > initial_value:
+                larger.append(value)
+            else:
+                smaller_or_equal.append(value)
+        for value in smaller_or_equal:
+            _append(value)
+        if floor is not None:
+            _append(floor)
+        for value in larger:
             _append(value)
         if not values and initial_resize_max_dim not in (None, 0):
             initial = int(initial_resize_max_dim)
@@ -596,8 +789,6 @@ class VGGTLongInitializer(VGGTInitializer):
                 floor,
             ):
                 _append(value)
-        if floor is not None:
-            _append(floor)
         return values or [initial_resize_max_dim]
 
     def _derive_overlap(self, chunk_size: int, num_frames: int, overlap_ratio: float, overlap_hint: int | None = None) -> int:
@@ -701,9 +892,11 @@ class VGGTLongInitializer(VGGTInitializer):
         for attempt_idx, plan in enumerate(plans, start=1):
             resize_max_dim = plan["resize_max_dim"]
             resize_label = self._format_resize_max_dim(resize_max_dim)
+            effective_input_target = self._effective_vggt_input_target_size(resize_max_dim)
             self._log_auto_tune(
                 f"attempt {attempt_idx}/{len(plans)}: trying chunk_size={plan['chunk_size']}, "
-                f"overlap={plan['overlap']}, resize_max_dim={resize_label}."
+                f"overlap={plan['overlap']}, resize_max_dim={resize_label}, "
+                f"effective_vggt_input_max_dim={effective_input_target}."
             )
             self.resize_max_dim = None if resize_max_dim is None else int(resize_max_dim)
             if resize_max_dim not in image_cache:
@@ -746,6 +939,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 attempt_history.append({
                     **plan,
                     "attempt_index": attempt_idx,
+                    "effective_vggt_input_max_dim": effective_input_target,
                     "status": "success",
                     "num_chunk_files": len(chunks),
                 })
@@ -756,7 +950,8 @@ class VGGTLongInitializer(VGGTInitializer):
                 notes = list(resize_notes)
                 notes.append(
                     f"VGGT-Long auto-tune selected chunk_size={self.chunk_size}, overlap={self.overlap}, "
-                    f"resize_max_dim={'original' if resize_max_dim is None else resize_max_dim}."
+                    f"resize_max_dim={'original' if resize_max_dim is None else resize_max_dim}, "
+                    f"effective_vggt_input_max_dim={effective_input_target}."
                 )
                 notes.append(
                     f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s)."
@@ -768,6 +963,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 attempt_record = {
                     **plan,
                     "attempt_index": attempt_idx,
+                    "effective_vggt_input_max_dim": effective_input_target,
                     "status": "oom" if is_oom else "error",
                     "error": error_summary,
                 }
