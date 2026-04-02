@@ -8,8 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from room4d.common.types import FrameRef, HumanState, ObjectState
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from room4d.common.types import FrameRef
 from room4d.scene.scene_artifact import SceneArtifact
 
 
@@ -21,6 +20,7 @@ class SingleVideoSceneAssembler:
     max_static_points_total: int = 60000
     dynamic_trail_window: int = 16
     timeline_source: str = "geometry"
+    static_track_gaussian_budget: int = 1200
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -221,6 +221,180 @@ class SingleVideoSceneAssembler:
             })
         return entities
 
+    @staticmethod
+    def _template_offsets(kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if kind == "human":
+            offsets = np.asarray([
+                [0.0, 0.0, -0.50],
+                [0.0, 0.0, -0.15],
+                [0.0, 0.0, 0.15],
+                [0.0, 0.0, 0.45],
+                [0.18, 0.0, -0.10],
+                [-0.18, 0.0, -0.10],
+                [0.0, 0.0, 0.75],
+            ], dtype=np.float32)
+            scales = np.asarray([
+                [0.10, 0.10, 0.18],
+                [0.14, 0.12, 0.18],
+                [0.16, 0.12, 0.20],
+                [0.14, 0.12, 0.18],
+                [0.09, 0.09, 0.14],
+                [0.09, 0.09, 0.14],
+                [0.11, 0.11, 0.11],
+            ], dtype=np.float32)
+            opacities = np.asarray([0.70, 0.82, 0.86, 0.76, 0.54, 0.54, 0.62], dtype=np.float32)
+            return offsets, scales, opacities
+        offsets = np.asarray([
+            [0.0, 0.0, 0.0],
+            [0.08, 0.0, 0.0],
+            [-0.08, 0.0, 0.0],
+            [0.0, 0.08, 0.0],
+            [0.0, -0.08, 0.0],
+        ], dtype=np.float32)
+        scales = np.asarray([
+            [0.10, 0.10, 0.10],
+            [0.08, 0.08, 0.08],
+            [0.08, 0.08, 0.08],
+            [0.08, 0.08, 0.08],
+            [0.08, 0.08, 0.08],
+        ], dtype=np.float32)
+        opacities = np.asarray([0.88, 0.58, 0.58, 0.58, 0.58], dtype=np.float32)
+        return offsets, scales, opacities
+
+    def _static_track_gaussians(self, track_artifact) -> dict[str, np.ndarray]:
+        means: list[np.ndarray] = []
+        scales: list[np.ndarray] = []
+        colors: list[np.ndarray] = []
+        opacities: list[float] = []
+        source_codes: list[int] = []
+        if track_artifact is None:
+            return {
+                "means_xyz": np.zeros((0, 3), dtype=np.float32),
+                "scales_xyz": np.zeros((0, 3), dtype=np.float32),
+                "colors_rgb": np.zeros((0, 3), dtype=np.uint8),
+                "opacities": np.zeros((0,), dtype=np.float32),
+                "source_codes": np.zeros((0,), dtype=np.int16),
+            }
+        for stream_id, payload in (track_artifact.track_payloads_by_stream or {}).items():
+            track_ids = np.asarray(payload.get("track_ids", []), dtype=int)
+            labels = np.asarray(payload.get("static_labels", np.full((track_ids.shape[0],), -1, dtype=np.int8)), dtype=np.int8)
+            scores = np.asarray(payload.get("static_scores", np.full((track_ids.shape[0],), np.nan, dtype=np.float32)), dtype=np.float32)
+            lifted = np.asarray(payload.get("refined_lifted_xyz", payload.get("lifted_xyz", np.zeros((0, 0, 3), dtype=np.float32))), dtype=np.float32)
+            valid = np.asarray(payload.get("refined_lifted_valid", payload.get("lifted_valid", np.zeros((0, 0), dtype=bool))))
+            if lifted.ndim != 3 or track_ids.size == 0:
+                continue
+            for j, track_id in enumerate(track_ids.tolist()):
+                label = int(labels[j]) if labels.size else -1
+                if label <= 0:
+                    continue
+                pts = lifted[:, j]
+                keep = valid[:, j].astype(bool) if valid.size else np.isfinite(pts).all(axis=1)
+                pts = pts[keep]
+                pts = pts[np.isfinite(pts).all(axis=1)]
+                if pts.size == 0:
+                    continue
+                center = np.mean(pts, axis=0).astype(np.float32)
+                dispersion = float(np.median(np.linalg.norm(pts - center[None, :], axis=1))) if pts.shape[0] > 1 else 0.0
+                scale = float(np.clip(max(dispersion * 1.5, 0.03), 0.03, 0.12))
+                score = float(scores[j]) if scores.size and np.isfinite(scores[j]) else 0.5
+                opacity = float(np.clip(0.65 + 0.25 * score, 0.55, 0.95))
+                means.append(center)
+                scales.append(np.full((3,), scale, dtype=np.float32))
+                colors.append(np.asarray(self._stable_color(f"{stream_id}:track:{track_id}"), dtype=np.uint8))
+                opacities.append(opacity)
+                source_codes.append(1)
+        if not means:
+            return {
+                "means_xyz": np.zeros((0, 3), dtype=np.float32),
+                "scales_xyz": np.zeros((0, 3), dtype=np.float32),
+                "colors_rgb": np.zeros((0, 3), dtype=np.uint8),
+                "opacities": np.zeros((0,), dtype=np.float32),
+                "source_codes": np.zeros((0,), dtype=np.int16),
+            }
+        means_arr = np.asarray(means, dtype=np.float32)
+        scales_arr = np.asarray(scales, dtype=np.float32)
+        colors_arr = np.asarray(colors, dtype=np.uint8)
+        opacities_arr = np.asarray(opacities, dtype=np.float32)
+        codes_arr = np.asarray(source_codes, dtype=np.int16)
+        stride = self._estimate_sampling_stride(means_arr.shape[0], self.static_track_gaussian_budget)
+        return {
+            "means_xyz": means_arr[::stride],
+            "scales_xyz": scales_arr[::stride],
+            "colors_rgb": colors_arr[::stride],
+            "opacities": opacities_arr[::stride],
+            "source_codes": codes_arr[::stride],
+        }
+
+    def _build_render_contract(self, static_scene: dict[str, Any], humans: list[dict[str, Any]], objects: list[dict[str, Any]], track_artifact) -> dict[str, Any]:
+        static_points = np.asarray(static_scene.get("points_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        static_colors = np.asarray(static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
+        if static_points.size:
+            extent = np.ptp(static_points, axis=0)
+            scene_scale = float(np.linalg.norm(extent))
+            base_scale = float(np.clip(scene_scale / max(40.0, np.sqrt(float(static_points.shape[0]) * 10.0)), 0.01, 0.08))
+            bg_scales = np.full_like(static_points, base_scale, dtype=np.float32)
+            bg_opacities = np.full((static_points.shape[0],), 0.92, dtype=np.float32)
+            bg_codes = np.zeros((static_points.shape[0],), dtype=np.int16)
+        else:
+            bg_scales = np.zeros((0, 3), dtype=np.float32)
+            bg_opacities = np.zeros((0,), dtype=np.float32)
+            bg_codes = np.zeros((0,), dtype=np.int16)
+
+        static_tracks = self._static_track_gaussians(track_artifact)
+        means = np.concatenate([static_points, static_tracks["means_xyz"]], axis=0) if static_tracks["means_xyz"].size else static_points
+        scales = np.concatenate([bg_scales, static_tracks["scales_xyz"]], axis=0) if static_tracks["scales_xyz"].size else bg_scales
+        colors = np.concatenate([static_colors, static_tracks["colors_rgb"]], axis=0) if static_tracks["colors_rgb"].size else static_colors
+        opacities = np.concatenate([bg_opacities, static_tracks["opacities"]], axis=0) if static_tracks["opacities"].size else bg_opacities
+        source_codes = np.concatenate([bg_codes, static_tracks["source_codes"]], axis=0) if static_tracks["source_codes"].size else bg_codes
+
+        dynamic_layers: dict[str, list[dict[str, Any]]] = {"humans": [], "objects": []}
+        for kind, entities in (("humans", humans), ("objects", objects)):
+            template_offsets, template_scales, template_opacities = self._template_offsets("human" if kind == "humans" else "object")
+            for ent in entities:
+                centers = []
+                for center in ent.get("centers_3d", []):
+                    if center is None:
+                        centers.append(list(ent.get("anchor_xyz", [0.0, 0.0, 0.0])))
+                    else:
+                        centers.append(list(np.asarray(center, dtype=np.float32).tolist()))
+                dynamic_layers[kind].append({
+                    "entity_id": ent["entity_id"],
+                    "entity_type": ent["entity_type"],
+                    "display_label": ent.get("display_label", ent["entity_type"]),
+                    "color_rgb": list(ent.get("color_rgb", [255, 80, 80])),
+                    "times_sec": [float(t) for t in ent.get("times_sec", [])],
+                    "centers_xyz": centers,
+                    "anchor_xyz": list(ent.get("anchor_xyz", [0.0, 0.0, 0.0])),
+                    "support_counts": [int(v) for v in ent.get("support_counts", [])],
+                    "template_offsets_xyz": template_offsets.tolist(),
+                    "template_scales_xyz": template_scales.tolist(),
+                    "template_opacities": template_opacities.tolist(),
+                })
+
+        return {
+            "schema": "layered_scene_v1",
+            "supported_backends": ["gaussian_layered", "gaussian4d", "offline_high_quality"],
+            "quality_modes": ["realtime", "offline_high_quality"],
+            "static_layer": {
+                "layer_name": "static_3dgs_seed",
+                "num_gaussians": int(means.shape[0]),
+                "means_xyz": means.astype(np.float32),
+                "scales_xyz": scales.astype(np.float32),
+                "colors_rgb": colors.astype(np.uint8),
+                "opacities": opacities.astype(np.float32),
+                "source_codes": source_codes.astype(np.int16),
+                "source_counts": {
+                    "geometry_points": int(static_points.shape[0]),
+                    "static_track_seeds": int(static_tracks["means_xyz"].shape[0]),
+                },
+            },
+            "dynamic_layers": dynamic_layers,
+            "scene_summary": {
+                "num_human_layers": int(len(dynamic_layers["humans"])),
+                "num_object_layers": int(len(dynamic_layers["objects"])),
+            },
+        }
+
     def assemble(self, *, run_id: str, save_dir, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, metadata: dict[str, Any] | None = None) -> SceneArtifact:
         static_scene = self._assemble_static_background(geometry_artifact, human_artifact, object_artifact)
         humans = [] if human_artifact is None else self._assemble_entities(human_artifact.humans, "humans", track_artifact, geometry_artifact)
@@ -242,8 +416,10 @@ class SingleVideoSceneAssembler:
             "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
         }
+        render_contract = self._build_render_contract(static_scene, humans, objects, track_artifact)
         notes = [
             f"static_points={static_scene['num_points']}",
+            f"static_gaussians={render_contract['static_layer']['num_gaussians']}",
             f"humans={len(humans)}",
             f"objects={len(objects)}",
         ]
@@ -256,5 +432,6 @@ class SingleVideoSceneAssembler:
             dynamic_entities={"humans": humans, "objects": objects},
             frame_refs=frame_refs,
             timeline=timeline,
+            render_contract=render_contract,
             notes=notes,
         )

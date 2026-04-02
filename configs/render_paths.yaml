@@ -2,8 +2,8 @@ render:
   device: auto
   width: 800
   height: 450
-  point_limit: 1000
-  dynamic_point_budget: 180
+  point_limit: 10000000
+  dynamic_point_budget: 5000000
   frame_stride: 1
   max_frames_per_path: 24
   label_entities: true

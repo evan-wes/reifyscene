@@ -37,7 +37,7 @@ from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
 from room4d.api.stages import build_stage_registry
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
-from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.render.registry import build_renderer
 from room4d.scene.assembler import SingleVideoSceneAssembler
 from room4d.sync.global_time_solver import GlobalTimeAlignmentSolver
 from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
@@ -95,7 +95,7 @@ class Room4DPipeline:
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
-        self.renderer = Gaussian4DTrainer(self.cfg.get("render", {}))
+        self.renderer = build_renderer(self.cfg.get("render", {}))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':

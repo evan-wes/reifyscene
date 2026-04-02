@@ -1,4 +1,4 @@
-"""Simple point-splat novel-view renderer for single-video 4D scenes."""
+"""Layered Gaussian renderer for assembled room4d scenes."""
 from __future__ import annotations
 
 import base64
@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 
 from room4d.common.memory import release_memory
 from room4d.common.paths import ensure_dir
+from room4d.render.base import RenderBackend, RenderSceneModel
 from room4d.render.camera_paths import CameraPathGenerator, _to_z_up_points, _to_z_up_vec
 from room4d.render.gaussian4d.render_artifact import RenderArtifact
 
@@ -27,8 +28,10 @@ def _normalize(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
-class Gaussian4DTrainer:
-    """Fit a lightweight renderable scene representation from assembled state."""
+class Gaussian4DTrainer(RenderBackend):
+    """Fit a lightweight layered static/dynamic Gaussian scene and render novel views."""
+
+    backend_name = "gaussian_layered"
 
     def __init__(self, cfg: dict | None = None) -> None:
         self.cfg = cfg or {}
@@ -39,12 +42,12 @@ class Gaussian4DTrainer:
         self.frame_stride = max(1, int(self.cfg.get("frame_stride", 1)))
         self.max_frames_per_path = self.cfg.get("max_frames_per_path")
         self.label_entities = bool(self.cfg.get("label_entities", True))
-        self.static_radius_px = int(self.cfg.get("static_radius_px", 1))
-        self.human_radius_px = int(self.cfg.get("human_radius_px", 2))
-        self.object_radius_px = int(self.cfg.get("object_radius_px", 1))
+        self.min_sigma_px = float(self.cfg.get("min_sigma_px", 0.85))
+        self.max_sigma_px = float(self.cfg.get("max_sigma_px", 12.0))
         self.max_dynamic_entities_per_kind = int(self.cfg.get("max_dynamic_entities_per_kind", 3))
         self.cpu_threads = self.cfg.get("cpu_threads")
         self.use_gpu_projection = bool(self.cfg.get("use_gpu_projection", True))
+        self.quality_mode = str(self.cfg.get("quality_mode", "realtime"))
         self.device = self._select_device(self.cfg.get("device", "auto"))
         self.camera_paths = CameraPathGenerator()
         self.enabled_paths = {
@@ -82,65 +85,86 @@ class Gaussian4DTrainer:
             limited = limited[: int(self.max_frames_per_path)]
         return limited
 
-    def _select_dynamic_points(self, scene_artifact, time_sec: float) -> list[dict[str, Any]]:
-        entities = []
+    def _scene_contract(self, scene_artifact) -> dict[str, Any]:
+        return dict(getattr(scene_artifact, "render_contract", {}) or {})
+
+    def _static_gaussians(self, scene_artifact) -> dict[str, np.ndarray]:
+        contract = self._scene_contract(scene_artifact)
+        static_layer = dict(contract.get("static_layer", {}) or {})
+        means = np.asarray(static_layer.get("means_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        scales = np.asarray(static_layer.get("scales_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        colors = np.asarray(static_layer.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
+        opacities = np.asarray(static_layer.get("opacities", np.zeros((0,), dtype=np.float32)), dtype=np.float32)
+        if means.shape[0] == 0:
+            means = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
+            colors = np.asarray(scene_artifact.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
+            base_scale = np.full_like(means, 0.03, dtype=np.float32)
+            scales = base_scale
+            opacities = np.full((means.shape[0],), 0.92, dtype=np.float32)
+        else:
+            means = _to_z_up_points(means)
+        if means.shape[0] > self.point_limit:
+            stride = max(1, int(np.ceil(means.shape[0] / float(self.point_limit))))
+            means = means[::stride]
+            scales = scales[::stride]
+            colors = colors[::stride]
+            opacities = opacities[::stride]
+        return {
+            "means_xyz": means,
+            "scales_xyz": scales,
+            "colors_rgb": colors,
+            "opacities": opacities,
+            "source_counts": static_layer.get("source_counts", {}),
+        }
+
+    def _select_dynamic_layers(self, scene_artifact, time_sec: float) -> list[dict[str, Any]]:
+        contract = self._scene_contract(scene_artifact)
+        dynamic_layers = contract.get("dynamic_layers", {}) or {}
+        selected: list[dict[str, Any]] = []
         for kind in ("humans", "objects"):
-            per_kind = []
-            for ent in scene_artifact.dynamic_entities.get(kind, []):
+            per_kind: list[dict[str, Any]] = []
+            for ent in dynamic_layers.get(kind, []):
                 times = np.asarray(ent.get("times_sec", []), dtype=np.float32)
-                centers = ent.get("centers_3d", [])
+                centers = ent.get("centers_xyz", [])
                 if times.size == 0:
                     center = np.asarray(ent.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
                 else:
                     idx = int(np.argmin(np.abs(times - float(time_sec))))
-                    c = centers[idx] if idx < len(centers) else None
-                    center = np.asarray(c if c is not None else ent.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+                    chosen = centers[idx] if idx < len(centers) else ent.get("anchor_xyz", [0.0, 0.0, 0.0])
+                    center = np.asarray(chosen, dtype=np.float32)
                 if not np.all(np.isfinite(center)):
                     continue
-                center = _to_z_up_vec(center)
+                color = np.asarray(ent.get("color_rgb", [255, 64, 64]), dtype=np.uint8)
+                support_counts = ent.get("support_counts", [])
+                support_count = int(max(support_counts) if support_counts else 0)
                 per_kind.append({
                     "entity_id": ent["entity_id"],
                     "entity_type": ent["entity_type"],
-                    "center_xyz": center.astype(np.float32),
-                    "color_rgb": np.asarray(ent.get("color_rgb", [255, 64, 64]), dtype=np.uint8),
-                    "label": ent.get("display_label", ent["entity_type"]),
-                    "support_count": int(np.max(ent.get("support_counts", [0])) if ent.get("support_counts") else 0),
+                    "display_label": ent.get("display_label", ent["entity_type"]),
+                    "center_xyz": _to_z_up_vec(center).astype(np.float32),
+                    "template_offsets_xyz": _to_z_up_points(np.asarray(ent.get("template_offsets_xyz", [[0.0, 0.0, 0.0]]), dtype=np.float32)),
+                    "template_scales_xyz": np.asarray(ent.get("template_scales_xyz", [[0.12, 0.12, 0.12]]), dtype=np.float32),
+                    "template_opacities": np.asarray(ent.get("template_opacities", [0.8]), dtype=np.float32),
+                    "color_rgb": color,
+                    "support_count": support_count,
                 })
             per_kind = sorted(per_kind, key=lambda e: (-e["support_count"], e["entity_id"]))[: self.max_dynamic_entities_per_kind]
-            entities.extend(per_kind)
-        return entities
+            selected.extend(per_kind)
+        return selected
 
-    def _entity_geometry(self, entity: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    @staticmethod
+    def _expand_dynamic_entity(entity: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         center = np.asarray(entity["center_xyz"], dtype=np.float32)
-        color = np.asarray(entity["color_rgb"], dtype=np.uint8)
-        if entity["entity_type"] == "human":
-            height = 1.6
-            radius = 0.16
-            levels = np.linspace(-0.45 * height, 0.55 * height, 7, dtype=np.float32)
-            angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False, dtype=np.float32)
-            pts = []
-            for z_off in levels:
-                r = radius * (0.75 if abs(z_off) > 0.35 * height else 1.0)
-                for a in angles:
-                    pts.append(center + np.asarray([r * np.cos(a), r * np.sin(a), z_off], dtype=np.float32))
-            pts.append(center + np.asarray([0.0, 0.0, 0.75 * height], dtype=np.float32))
-            pts.append(center + np.asarray([0.0, 0.0, -0.55 * height], dtype=np.float32))
-        else:
-            radius = 0.14
-            phi = np.linspace(0.0, np.pi, 6, dtype=np.float32)
-            theta = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False, dtype=np.float32)
-            pts = []
-            for p in phi:
-                for t in theta:
-                    pts.append(center + radius * np.asarray([np.sin(p) * np.cos(t), np.sin(p) * np.sin(t), np.cos(p)], dtype=np.float32))
-            pts.append(center)
-        pts_arr = np.asarray(pts, dtype=np.float32)
-        budget = max(1, int(self.dynamic_point_budget // max(1, 2 * self.max_dynamic_entities_per_kind)))
-        if pts_arr.shape[0] > budget:
-            stride = max(1, int(np.ceil(pts_arr.shape[0] / float(budget))))
-            pts_arr = pts_arr[::stride]
-        cols = np.repeat(color[None, :], pts_arr.shape[0], axis=0)
-        return pts_arr, cols
+        offsets = np.asarray(entity.get("template_offsets_xyz", [[0.0, 0.0, 0.0]]), dtype=np.float32)
+        means = center[None, :] + offsets
+        scales = np.asarray(entity.get("template_scales_xyz", np.full_like(means, 0.1)), dtype=np.float32)
+        if scales.shape[0] != means.shape[0]:
+            scales = np.repeat(scales[:1], means.shape[0], axis=0)
+        opacities = np.asarray(entity.get("template_opacities", np.full((means.shape[0],), 0.8)), dtype=np.float32)
+        if opacities.shape[0] != means.shape[0]:
+            opacities = np.repeat(opacities[:1], means.shape[0], axis=0)
+        colors = np.repeat(np.asarray(entity["color_rgb"], dtype=np.uint8)[None, :], means.shape[0], axis=0)
+        return means, scales, colors, opacities
 
     def _project_points_numpy(self, points: np.ndarray, eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         forward = _normalize(target - eye)
@@ -188,7 +212,7 @@ class Gaussian4DTrainer:
                         z.cpu().numpy(),
                     )
             except Exception as exc:
-                if torch is not None and isinstance(exc, torch.cuda.OutOfMemoryError):
+                if torch is not None and hasattr(torch, "cuda") and isinstance(exc, torch.cuda.OutOfMemoryError):
                     self.device = "cpu"
                     release_memory()
                 else:
@@ -198,90 +222,76 @@ class Gaussian4DTrainer:
                         pass
         return self._project_points_numpy(points, eye, target, up)
 
-    @staticmethod
-    def _disk_offsets(radius_px: int) -> np.ndarray:
-        offs = []
-        for dy in range(-radius_px, radius_px + 1):
-            for dx in range(-radius_px, radius_px + 1):
-                if dx * dx + dy * dy <= radius_px * radius_px:
-                    offs.append((dx, dy))
-        return np.asarray(offs, dtype=np.int32)
-
-    def _splat_points(self, canvas: np.ndarray, zbuf: np.ndarray, points: np.ndarray, point_colors: np.ndarray, eye: np.ndarray, target: np.ndarray, up: np.ndarray, radius_px: int) -> None:
-        if points.size == 0:
+    def _splat_gaussians(self, rgb: np.ndarray, alpha: np.ndarray, means: np.ndarray, scales: np.ndarray, colors: np.ndarray, opacities: np.ndarray, eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> None:
+        if means.size == 0:
             return
-        xy, valid, z = self._project_points(points, eye, target, up)
-        valid &= np.isfinite(xy).all(axis=1) & np.isfinite(z)
+        xy, valid, z = self._project_points(means, eye, target, up)
+        valid &= np.isfinite(xy).all(axis=1) & np.isfinite(z) & np.isfinite(scales).all(axis=1)
         if not np.any(valid):
             return
         xy = xy[valid]
         z = z[valid].astype(np.float32)
-        point_colors = point_colors[valid]
-        x0 = np.rint(xy[:, 0]).astype(np.int32)
-        y0 = np.rint(xy[:, 1]).astype(np.int32)
-        offsets = self._disk_offsets(radius_px)
-        xs = x0[:, None] + offsets[None, :, 0]
-        ys = y0[:, None] + offsets[None, :, 1]
-        depths = np.repeat(z[:, None], offsets.shape[0], axis=1)
-        cols = np.repeat(point_colors[:, None, :], offsets.shape[0], axis=1)
-        in_bounds = (xs >= 0) & (xs < self.width) & (ys >= 0) & (ys < self.height)
-        if not np.any(in_bounds):
-            return
-        xs = xs[in_bounds]
-        ys = ys[in_bounds]
-        depths = depths[in_bounds]
-        cols = cols[in_bounds]
-        lin = ys.astype(np.int64) * self.width + xs.astype(np.int64)
-        order = np.lexsort((depths, lin))
-        lin_sorted = lin[order]
-        keep = np.empty(lin_sorted.shape[0], dtype=bool)
-        keep[0] = True
-        keep[1:] = lin_sorted[1:] != lin_sorted[:-1]
-        chosen = order[keep]
-        xs = xs[chosen]
-        ys = ys[chosen]
-        depths = depths[chosen]
-        cols = cols[chosen]
-        # only overwrite pixels where the new depth is nearer
-        nearer = depths < zbuf[ys, xs]
-        if np.any(nearer):
-            xs = xs[nearer]
-            ys = ys[nearer]
-            depths = depths[nearer]
-            cols = cols[nearer]
-            zbuf[ys, xs] = depths
-            canvas[ys, xs] = cols
+        scales = np.asarray(scales[valid], dtype=np.float32)
+        colors = np.asarray(colors[valid], dtype=np.float32) / 255.0
+        opacities = np.asarray(opacities[valid], dtype=np.float32)
+        fx = 0.75 * max(self.width, self.height)
+        sigma_world = np.mean(scales, axis=1)
+        sigma_px = fx * sigma_world / np.clip(z, 1e-3, None)
+        sigma_px = np.clip(sigma_px, self.min_sigma_px, self.max_sigma_px)
+        order = np.argsort(z)[::-1]  # far-to-near blending
+        for idx in order.tolist():
+            cx = float(xy[idx, 0])
+            cy = float(xy[idx, 1])
+            sigma = float(sigma_px[idx])
+            opacity = float(np.clip(opacities[idx], 0.0, 1.0))
+            if sigma <= 1e-4 or opacity <= 1e-4:
+                continue
+            radius = max(1, int(np.ceil(2.5 * sigma)))
+            x0 = max(0, int(np.floor(cx - radius)))
+            x1 = min(self.width - 1, int(np.ceil(cx + radius)))
+            y0 = max(0, int(np.floor(cy - radius)))
+            y1 = min(self.height - 1, int(np.ceil(cy + radius)))
+            if x1 < x0 or y1 < y0:
+                continue
+            xs = np.arange(x0, x1 + 1, dtype=np.float32)
+            ys = np.arange(y0, y1 + 1, dtype=np.float32)
+            xx, yy = np.meshgrid(xs, ys)
+            dist2 = (xx - cx) ** 2 + (yy - cy) ** 2
+            weights = np.exp(-0.5 * dist2 / max(sigma * sigma, 1e-6))
+            patch_alpha = np.clip(opacity * weights, 0.0, 0.98)
+            if float(np.max(patch_alpha)) < 1e-4:
+                continue
+            existing = alpha[y0:y1 + 1, x0:x1 + 1]
+            contrib = (1.0 - existing) * patch_alpha
+            alpha[y0:y1 + 1, x0:x1 + 1] = np.clip(existing + contrib, 0.0, 1.0)
+            rgb[y0:y1 + 1, x0:x1 + 1, :] += contrib[..., None] * colors[idx][None, None, :]
 
     def _render_frame(self, scene_artifact, camera: dict[str, Any]) -> Image.Image:
-        bg = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
-        colors = np.asarray(scene_artifact.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
-        if bg.shape[0] > self.point_limit:
-            stride = max(1, int(np.ceil(bg.shape[0] / float(self.point_limit))))
-            bg = bg[::stride]
-            colors = colors[::stride]
+        static = self._static_gaussians(scene_artifact)
         eye = np.asarray(camera["eye"], dtype=np.float32)
         target = np.asarray(camera["target"], dtype=np.float32)
         up = np.asarray(camera.get("up", [0.0, 0.0, 1.0]), dtype=np.float32)
-        canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        zbuf = np.full((self.height, self.width), np.inf, dtype=np.float32)
+        rgb = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        alpha = np.zeros((self.height, self.width), dtype=np.float32)
 
-        if bg.size:
-            self._splat_points(canvas, zbuf, bg, colors, eye, target, up, radius_px=self.static_radius_px)
+        self._splat_gaussians(
+            rgb,
+            alpha,
+            static["means_xyz"],
+            static["scales_xyz"],
+            static["colors_rgb"],
+            static["opacities"],
+            eye,
+            target,
+            up,
+        )
 
-        dynamic_entities = self._select_dynamic_points(scene_artifact, float(camera.get("time_sec", 0.0)))
+        dynamic_entities = self._select_dynamic_layers(scene_artifact, float(camera.get("time_sec", 0.0)))
         for entity in dynamic_entities:
-            pts, cols = self._entity_geometry(entity)
-            self._splat_points(
-                canvas,
-                zbuf,
-                pts,
-                cols,
-                eye,
-                target,
-                up,
-                radius_px=self.human_radius_px if entity["entity_type"] == "human" else self.object_radius_px,
-            )
+            means, scales, colors, opacities = self._expand_dynamic_entity(entity)
+            self._splat_gaussians(rgb, alpha, means, scales, colors, opacities, eye, target, up)
 
+        canvas = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
         img = Image.fromarray(canvas)
         if self.label_entities:
             draw = ImageDraw.Draw(img)
@@ -292,7 +302,7 @@ class Gaussian4DTrainer:
                     continue
                 x, y = float(xy[0, 0]), float(xy[0, 1])
                 color = tuple(int(v) for v in entity["color_rgb"].tolist())
-                draw.text((x + 6, y - 10), f"{entity['label']}:{entity['entity_id']}", fill=color)
+                draw.text((x + 6, y - 10), f"{entity['display_label']}:{entity['entity_id']}", fill=color)
         return img
 
     @staticmethod
@@ -352,7 +362,7 @@ update();
         html_path.write_text(html, encoding="utf-8")
         return html_path.name
 
-    def fit(self, scene, optimization_artifact=None, geometry_artifact=None, save_dir: str | Path | None = None) -> RenderArtifact:
+    def fit(self, scene: RenderSceneModel, optimization_artifact=None, geometry_artifact=None, save_dir: str | Path | None = None) -> RenderArtifact:
         scene_artifact = scene.scene_artifact
         if scene_artifact is None:
             raise ValueError("Scene model has not been initialized from a SceneArtifact.")
@@ -390,13 +400,20 @@ update();
             release_memory()
 
         player_html = self._write_player_html(render_dir, path_index)
+        static_layer = self._scene_contract(scene_artifact).get("static_layer", {}) or {}
+        dynamic_layers = self._scene_contract(scene_artifact).get("dynamic_layers", {}) or {}
         return RenderArtifact(
             run_id=scene_artifact.run_id,
             stage_name="render",
             save_dir=render_dir,
             scene_state={
+                "backend_name": self.backend_name,
+                "quality_mode": self.quality_mode,
+                "scene_contract": scene.summary(),
                 "static_points": int(scene_artifact.static_scene.get("num_points", 0)),
+                "static_gaussians": int(static_layer.get("num_gaussians", 0)),
                 "dynamic_entities": {k: len(v) for k, v in scene_artifact.dynamic_entities.items()},
+                "dynamic_layers": {k: len(v) for k, v in dynamic_layers.items()} if isinstance(dynamic_layers, dict) else {},
                 "device": self.device,
                 "enabled_paths": {k: bool(v) for k, v in self.enabled_paths.items()},
             },
