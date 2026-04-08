@@ -1,0 +1,242 @@
+"""Ground-plane detection and world-frame canonicalization utilities."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from room4d.common.types import CameraPose, TimedCameraState
+
+
+@dataclass
+class GroundPlaneEstimate:
+    normal_world: np.ndarray
+    offset: float
+    inlier_ratio: float
+    num_points: int
+    num_inliers: int
+    transform_world_old_to_new: np.ndarray
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "normal_world": np.asarray(self.normal_world, dtype=float).tolist(),
+            "offset": float(self.offset),
+            "inlier_ratio": float(self.inlier_ratio),
+            "num_points": int(self.num_points),
+            "num_inliers": int(self.num_inliers),
+            "transform_world_old_to_new": np.asarray(self.transform_world_old_to_new, dtype=float).tolist(),
+        }
+
+
+class GroundPlaneCanonicalizer:
+    """Estimate a dominant ground plane and rotate the scene to global Z-up."""
+
+    def __init__(self, cfg: dict[str, Any] | None = None) -> None:
+        cfg = cfg or {}
+        self.enabled = bool(cfg.get("enabled", True))
+        self.max_frames = max(1, int(cfg.get("max_frames", 24)))
+        self.max_points_per_frame = max(256, int(cfg.get("max_points_per_frame", 3000)))
+        self.ransac_iterations = max(16, int(cfg.get("ransac_iterations", 160)))
+        self.distance_threshold = float(cfg.get("distance_threshold", 0.035))
+        self.min_inlier_ratio = float(cfg.get("min_inlier_ratio", 0.06))
+        self.random_seed = int(cfg.get("random_seed", 7))
+
+    @staticmethod
+    def _frame_key(stream_id: str, frame_idx: int) -> str:
+        return f"{stream_id}:{int(frame_idx)}"
+
+    @staticmethod
+    def _rotation_align_a_to_b(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        a /= max(np.linalg.norm(a), 1e-9)
+        b /= max(np.linalg.norm(b), 1e-9)
+        v = np.cross(a, b)
+        c = float(np.clip(np.dot(a, b), -1.0, 1.0))
+        s = float(np.linalg.norm(v))
+        if s < 1e-8:
+            if c > 0.0:
+                return np.eye(3, dtype=np.float64)
+            axis = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+            if abs(a[0]) > 0.9:
+                axis = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
+            axis = axis - np.dot(axis, a) * a
+            axis /= max(np.linalg.norm(axis), 1e-9)
+            x, y, z = axis
+            K = np.asarray([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
+            return np.eye(3, dtype=np.float64) + 2.0 * (K @ K)
+        K = np.asarray([
+            [0.0, -v[2], v[1]],
+            [v[2], 0.0, -v[0]],
+            [-v[1], v[0], 0.0],
+        ], dtype=np.float64)
+        return np.eye(3, dtype=np.float64) + K + K @ K * ((1.0 - c) / (s * s))
+
+    def _sample_points(self, geometry_artifact) -> np.ndarray:
+        rng = np.random.default_rng(self.random_seed)
+        frames = list(getattr(geometry_artifact, "selected_frames", []) or [])
+        if len(frames) > self.max_frames:
+            indices = np.linspace(0, len(frames) - 1, self.max_frames).round().astype(int)
+            frames = [frames[int(i)] for i in indices.tolist()]
+        sampled: list[np.ndarray] = []
+        for frame in frames:
+            payload = geometry_artifact.pointmaps_by_frame.get(self._frame_key(frame.stream_id, frame.frame_idx))
+            if payload is None:
+                continue
+            pts = np.asarray(payload.get("points"), dtype=np.float32)
+            if pts.ndim != 3 or pts.shape[-1] != 3:
+                continue
+            valid = np.isfinite(pts).all(axis=2)
+            conf = payload.get("confidence")
+            if conf is not None:
+                conf_arr = np.asarray(conf, dtype=np.float32)
+                if conf_arr.shape == valid.shape and np.any(valid):
+                    conf_valid = conf_arr[valid]
+                    threshold = float(np.nanmedian(conf_valid)) if conf_valid.size else 0.0
+                    valid &= conf_arr >= threshold
+            pts_flat = pts[valid]
+            if pts_flat.shape[0] == 0:
+                continue
+            if pts_flat.shape[0] > self.max_points_per_frame:
+                choose = rng.choice(pts_flat.shape[0], size=self.max_points_per_frame, replace=False)
+                pts_flat = pts_flat[choose]
+            sampled.append(pts_flat.astype(np.float64))
+        if not sampled:
+            return np.zeros((0, 3), dtype=np.float64)
+        return np.concatenate(sampled, axis=0)
+
+    @staticmethod
+    def _camera_centers(geometry_artifact) -> np.ndarray:
+        centers: list[np.ndarray] = []
+        for states in (getattr(geometry_artifact, "camera_states_by_stream", {}) or {}).values():
+            for state in states:
+                Twc = np.asarray(state.pose.T_world_cam, dtype=np.float64)
+                if Twc.shape == (4, 4) and np.isfinite(Twc[:3, 3]).all():
+                    centers.append(Twc[:3, 3].astype(np.float64))
+        if not centers:
+            return np.zeros((0, 3), dtype=np.float64)
+        return np.stack(centers, axis=0)
+
+    def estimate(self, geometry_artifact) -> GroundPlaneEstimate | None:
+        if not self.enabled:
+            return None
+        points = self._sample_points(geometry_artifact)
+        if points.shape[0] < 32:
+            return None
+        cameras = self._camera_centers(geometry_artifact)
+        rng = np.random.default_rng(self.random_seed)
+        best: dict[str, Any] | None = None
+        n_points = points.shape[0]
+        for _ in range(self.ransac_iterations):
+            idx = rng.choice(n_points, size=3, replace=False)
+            tri = points[idx]
+            normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            norm = float(np.linalg.norm(normal))
+            if norm < 1e-8:
+                continue
+            normal = normal / norm
+            offset = -float(np.dot(normal, tri[0]))
+            if cameras.size:
+                cam_signed = cameras @ normal + offset
+                if np.median(cam_signed) < 0.0:
+                    normal = -normal
+                    offset = -offset
+                    cam_signed = -cam_signed
+            signed = points @ normal + offset
+            distances = np.abs(signed)
+            inliers = distances <= self.distance_threshold
+            inlier_count = int(np.count_nonzero(inliers))
+            if inlier_count < 3:
+                continue
+            inlier_ratio = inlier_count / float(n_points)
+            low_height = float(np.percentile(signed, 8.0))
+            low_penalty = abs(low_height)
+            score = inlier_ratio - 0.04 * low_penalty
+            if best is None or score > best["score"]:
+                best = {
+                    "normal": normal,
+                    "offset": offset,
+                    "inliers": inliers,
+                    "score": score,
+                    "ratio": inlier_ratio,
+                }
+        if best is None or float(best["ratio"]) < self.min_inlier_ratio:
+            return None
+
+        inlier_points = points[best["inliers"]]
+        centroid = inlier_points.mean(axis=0)
+        demeaned = inlier_points - centroid[None, :]
+        _, _, vh = np.linalg.svd(demeaned, full_matrices=False)
+        normal = vh[-1]
+        normal = normal / max(np.linalg.norm(normal), 1e-9)
+        offset = -float(np.dot(normal, centroid))
+        if cameras.size:
+            cam_signed = cameras @ normal + offset
+            if np.median(cam_signed) < 0.0:
+                normal = -normal
+                offset = -offset
+        rotation = self._rotation_align_a_to_b(normal, np.asarray([0.0, 0.0, 1.0], dtype=np.float64))
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = rotation
+        transform[:3, 3] = np.asarray([0.0, 0.0, offset], dtype=np.float64)
+        return GroundPlaneEstimate(
+            normal_world=normal.astype(np.float32),
+            offset=float(offset),
+            inlier_ratio=float(best["ratio"]),
+            num_points=int(points.shape[0]),
+            num_inliers=int(inlier_points.shape[0]),
+            transform_world_old_to_new=transform.astype(np.float32),
+        )
+
+    @staticmethod
+    def _transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        arr = np.asarray(points, dtype=np.float32)
+        rot = np.asarray(transform[:3, :3], dtype=np.float32)
+        trans = np.asarray(transform[:3, 3], dtype=np.float32)
+        return np.einsum('ij,...j->...i', rot, arr) + trans
+
+    @staticmethod
+    def _transform_pose(T_world_cam: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        T = np.asarray(T_world_cam, dtype=np.float32)
+        A = np.asarray(transform, dtype=np.float32)
+        return A @ T
+
+    def apply(self, geometry_artifact, estimate: GroundPlaneEstimate) -> None:
+        transform = np.asarray(estimate.transform_world_old_to_new, dtype=np.float32)
+        for frame_key, payload in list((geometry_artifact.pointmaps_by_frame or {}).items()):
+            points = payload.get("points")
+            if points is None:
+                continue
+            geometry_artifact.pointmaps_by_frame[frame_key] = {
+                **payload,
+                "points": self._transform_points(np.asarray(points, dtype=np.float32), transform),
+            }
+        for stream_id, states in list((geometry_artifact.camera_states_by_stream or {}).items()):
+            new_states: list[TimedCameraState] = []
+            for state in states:
+                Twc = self._transform_pose(state.pose.T_world_cam, transform)
+                new_states.append(
+                    TimedCameraState(
+                        stream_id=state.stream_id,
+                        time_sec=float(state.time_sec),
+                        intrinsics=state.intrinsics,
+                        pose=CameraPose(T_world_cam=Twc),
+                    )
+                )
+            geometry_artifact.camera_states_by_stream[stream_id] = new_states
+        geometry_artifact.metadata["world_frame"] = {
+            "type": "ground_plane_z_up",
+            **estimate.summary(),
+        }
+        geometry_artifact.notes.append(
+            "Canonicalized world frame using a detected ground plane so Z points upward and the floor lies near z=0."
+        )
+
+    def estimate_and_apply(self, geometry_artifact) -> GroundPlaneEstimate | None:
+        estimate = self.estimate(geometry_artifact)
+        if estimate is None:
+            return None
+        self.apply(geometry_artifact, estimate)
+        return estimate

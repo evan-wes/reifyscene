@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
@@ -28,6 +30,7 @@ class SceneArtifact(BaseArtifact):
         counts = {kind: len(items) for kind, items in self.dynamic_entities.items()}
         static_layer = (self.render_contract or {}).get("static_layer", {}) or {}
         dynamic_layers = (self.render_contract or {}).get("dynamic_layers", {}) or {}
+        appearance = (self.render_contract or {}).get("appearance", {}) or {}
         dynamic_layer_counts = {kind: len(items) for kind, items in dynamic_layers.items()} if isinstance(dynamic_layers, dict) else {}
         return {
             "run_id": self.run_id,
@@ -38,6 +41,7 @@ class SceneArtifact(BaseArtifact):
             "render_contract_schema": str((self.render_contract or {}).get("schema", "")),
             "num_static_gaussians": int(static_layer.get("num_gaussians", 0)),
             "dynamic_layer_counts": dynamic_layer_counts,
+            "static_appearance_sources": int(appearance.get("static_source_count", 0)),
             "notes": list(self.notes),
         }
 
@@ -53,11 +57,7 @@ class SceneArtifact(BaseArtifact):
             serializable.pop("static_layer", None)
         return serializable
 
-    def _save_render_contract(self) -> dict[str, Any]:
-        contract = dict(self.render_contract or {})
-        if not contract:
-            return {}
-        layer_dir = ensure_dir(self.save_dir / "render_contract")
+    def _save_static_gaussians(self, contract: dict[str, Any], layer_dir: Path) -> dict[str, Any]:
         static_layer = dict(contract.get("static_layer", {}) or {})
         means = np.asarray(static_layer.get("means_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
         scales = np.asarray(static_layer.get("scales_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
@@ -76,6 +76,70 @@ class SceneArtifact(BaseArtifact):
         static_meta["num_gaussians"] = int(means.shape[0])
         static_meta["npz_file"] = str((Path("render_contract") / "static_gaussians.npz").as_posix())
         contract["static_layer"] = static_meta
+        return contract
+
+    def _save_appearance(self, contract: dict[str, Any], layer_dir: Path) -> dict[str, Any]:
+        appearance = dict(contract.get("appearance", {}) or {})
+        static_sources = list(appearance.get("static_sources", []) or [])
+        saved_static_sources: list[dict[str, Any]] = []
+        static_dir = ensure_dir(layer_dir / "static_sources")
+        for idx, source in enumerate(static_sources):
+            src = dict(source)
+            stem = f"{idx:03d}_{str(src.get('frame_key', idx)).replace(':', '__').replace('/', '_')}"
+            image_path = src.get("image_path") or src.get("image_file")
+            if image_path is not None:
+                src_path = Path(image_path)
+                dst_path = static_dir / f"{stem}{src_path.suffix or '.png'}"
+                if src_path.exists() and src_path.resolve() != dst_path.resolve():
+                    shutil.copy2(src_path, dst_path)
+                src["image_file"] = str((Path("render_contract") / "static_sources" / dst_path.name).as_posix())
+            points = src.pop("points_xyz", None)
+            confidence = src.pop("confidence", None)
+            existing_points_file = src.get("points_file")
+            if points is not None:
+                npz_path = static_dir / f"{stem}_points.npz"
+                np.savez_compressed(
+                    npz_path,
+                    points_xyz=np.asarray(points, dtype=np.float32),
+                    confidence=np.zeros((0,), dtype=np.float32) if confidence is None else np.asarray(confidence, dtype=np.float32),
+                )
+                src["points_file"] = str((Path("render_contract") / "static_sources" / npz_path.name).as_posix())
+            elif existing_points_file is not None:
+                src["points_file"] = str((Path("render_contract") / "static_sources" / Path(existing_points_file).name).as_posix()) if Path(existing_points_file).exists() else existing_points_file
+            saved_static_sources.append(src)
+        appearance["static_sources"] = saved_static_sources
+        appearance["static_source_count"] = int(len(saved_static_sources))
+        contract["appearance"] = appearance
+
+        dynamic_dir = ensure_dir(layer_dir / "dynamic_sprites")
+        dynamic_layers = dict(contract.get("dynamic_layers", {}) or {})
+        for kind, entities in list(dynamic_layers.items()):
+            saved_entities = []
+            for ent_idx, entity in enumerate(list(entities or [])):
+                ent = dict(entity)
+                saved_obs = []
+                for obs_idx, obs in enumerate(list(ent.get("observations", []) or [])):
+                    obs_dict = dict(obs)
+                    sprite = obs_dict.pop("sprite_rgba", None)
+                    if sprite is not None:
+                        name = f"{kind}_{ent_idx:03d}_{obs_idx:03d}.png"
+                        sprite_path = dynamic_dir / name
+                        Image.fromarray(np.asarray(sprite, dtype=np.uint8), mode="RGBA").save(sprite_path)
+                        obs_dict["sprite_file"] = str((Path("render_contract") / "dynamic_sprites" / name).as_posix())
+                    saved_obs.append(obs_dict)
+                ent["observations"] = saved_obs
+                saved_entities.append(ent)
+            dynamic_layers[kind] = saved_entities
+        contract["dynamic_layers"] = dynamic_layers
+        return contract
+
+    def _save_render_contract(self) -> dict[str, Any]:
+        contract = dict(self.render_contract or {})
+        if not contract:
+            return {}
+        layer_dir = ensure_dir(self.save_dir / "render_contract")
+        contract = self._save_static_gaussians(contract, layer_dir)
+        contract = self._save_appearance(contract, layer_dir)
         return self._strip_static_layer_arrays(contract)
 
     @classmethod
@@ -96,6 +160,35 @@ class SceneArtifact(BaseArtifact):
                 static_layer["source_codes"] = np.asarray(static_npz["source_codes"], dtype=np.int16)
         if static_layer:
             contract["static_layer"] = static_layer
+        appearance = dict(contract.get("appearance", {}) or {})
+        static_sources = []
+        for source in list(appearance.get("static_sources", []) or []):
+            src = dict(source)
+            image_file = src.get("image_file")
+            if image_file is not None:
+                src["image_file"] = str((save_dir / Path(image_file)).resolve())
+            points_file = src.get("points_file")
+            if points_file is not None:
+                src["points_file"] = str((save_dir / Path(points_file)).resolve())
+            static_sources.append(src)
+        appearance["static_sources"] = static_sources
+        contract["appearance"] = appearance
+        dynamic_layers = dict(contract.get("dynamic_layers", {}) or {})
+        for kind, entities in list(dynamic_layers.items()):
+            loaded_entities = []
+            for entity in list(entities or []):
+                ent = dict(entity)
+                obs_loaded = []
+                for obs in list(ent.get("observations", []) or []):
+                    obs_dict = dict(obs)
+                    sprite_file = obs_dict.get("sprite_file")
+                    if sprite_file is not None:
+                        obs_dict["sprite_file"] = str((save_dir / Path(sprite_file)).resolve())
+                    obs_loaded.append(obs_dict)
+                ent["observations"] = obs_loaded
+                loaded_entities.append(ent)
+            dynamic_layers[kind] = loaded_entities
+        contract["dynamic_layers"] = dynamic_layers
         return contract
 
     def save(self) -> None:
