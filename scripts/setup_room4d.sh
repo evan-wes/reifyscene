@@ -55,12 +55,16 @@ INSTALL_VGGT_LONG=0
 INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
+FORCE_VGGT_LONG_WEIGHTS=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 VGGT_DIR="${THIRD_PARTY_DIR}/vggt"
 COTRACKER_DIR="${THIRD_PARTY_DIR}/co-tracker"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
+VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
+VGGT_LONG_WEIGHTS_STAMP="${VGGT_LONG_WEIGHTS_DIR}/.room4d_download_complete"
+VGGT_LONG_WEIGHTS_MIN_MB="${VGGT_LONG_WEIGHTS_MIN_MB:-8000}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +84,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_COTRACKER=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
+    --force-vggt-long-weights)
+      FORCE_VGGT_LONG_WEIGHTS=1; shift ;;
     --with-dev)
       INSTALL_DEV=1; shift ;;
     --no-vision)
@@ -101,6 +107,8 @@ Install options:
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
+  --force-vggt-long-weights
+                          Re-download VGGT-Long weights even if already present
   --with-dev              Install dev tools (pytest, ruff, mypy)
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
@@ -168,6 +176,180 @@ run_conda_install_relaxed() {
   fi
 
   return ${rc}
+}
+
+python_one_liner() {
+  local snippet="$1"
+  python - <<PY
+${snippet}
+PY
+}
+
+detect_torch_cuda_version() {
+  python_one_liner "import torch; print(torch.version.cuda or '')" 2>/dev/null || true
+}
+
+detect_torch_cuda_home() {
+  python_one_liner "from torch.utils.cpp_extension import CUDA_HOME; print(CUDA_HOME or '')" 2>/dev/null || true
+}
+
+nvcc_cuda_version() {
+  if ! command -v nvcc >/dev/null 2>&1; then
+    return 0
+  fi
+  nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/p' | head -n 1
+}
+
+ensure_cuda_home_exports() {
+  local cuda_home="$1"
+  if [[ -z "${cuda_home}" ]]; then
+    return 1
+  fi
+
+  export CUDA_HOME="${cuda_home}"
+
+  if [[ -d "${CUDA_HOME}/bin" ]]; then
+    case ":${PATH}:" in
+      *":${CUDA_HOME}/bin:"*) ;;
+      *) export PATH="${CUDA_HOME}/bin:${PATH}" ;;
+    esac
+  fi
+
+  local lib_dir
+  for lib_dir in \
+    "${CUDA_HOME}/lib64" \
+    "${CUDA_HOME}/lib" \
+    "${CUDA_HOME}/targets/x86_64-linux/lib"
+  do
+    if [[ -d "${lib_dir}" ]]; then
+      case ":${LD_LIBRARY_PATH:-}:" in
+        *":${lib_dir}:"*) ;;
+        *) export LD_LIBRARY_PATH="${lib_dir}:${LD_LIBRARY_PATH:-}" ;;
+      esac
+    fi
+  done
+
+  return 0
+}
+
+ensure_cuda_toolkit_for_torch_extensions() {
+  local existing_cuda_home=""
+  existing_cuda_home="$(detect_torch_cuda_home | tr -d '[:space:]')"
+
+  if [[ -n "${existing_cuda_home}" && -x "${existing_cuda_home}/bin/nvcc" ]]; then
+    ensure_cuda_home_exports "${existing_cuda_home}"
+    echo "Using existing CUDA toolkit detected by torch: ${CUDA_HOME}"
+    echo "  nvcc: $(command -v nvcc)"
+    echo "  nvcc version: $(nvcc --version | tail -n 1)"
+    return
+  fi
+
+  if [[ $USE_VENV -eq 1 ]]; then
+    echo "VGGT-Long editable install needs a CUDA toolkit with nvcc, but none was detected." >&2
+    echo "In --use-venv mode the setup script does not install CUDA automatically." >&2
+    echo "Either install a local CUDA toolkit manually and set CUDA_HOME, or use a conda env." >&2
+    exit 1
+  fi
+
+  if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    echo "No active conda environment detected while ensuring CUDA toolkit." >&2
+    exit 1
+  fi
+
+  local torch_cuda=""
+  torch_cuda="$(detect_torch_cuda_version | tr -d '[:space:]')"
+  if [[ -z "${torch_cuda}" ]]; then
+    echo "Could not determine torch.version.cuda from the active environment." >&2
+    echo "Make sure torch is installed before requesting VGGT-Long setup." >&2
+    exit 1
+  fi
+
+  local -a channels=()
+  local patch
+  for patch in 2 1 0; do
+    channels+=("nvidia/label/cuda-${torch_cuda}.${patch}")
+  done
+  channels+=("nvidia")
+
+  local installed=0
+  local channel
+  for channel in "${channels[@]}"; do
+    echo "Attempting to install CUDA toolkit for VGGT-Long from conda channel: ${channel}"
+    if run_conda_install_relaxed -y -c "${channel}" cuda-toolkit; then
+      installed=1
+      break
+    fi
+    echo "Conda install attempt from ${channel} did not succeed; trying next option..."
+  done
+
+  if [[ ${installed} -ne 1 ]]; then
+    echo "Failed to install a CUDA toolkit into the active conda environment." >&2
+    echo "Tried torch CUDA line ${torch_cuda} and a generic NVIDIA channel fallback." >&2
+    exit 1
+  fi
+
+  ensure_cuda_home_exports "${CONDA_PREFIX}"
+
+  local refreshed_cuda_home=""
+  refreshed_cuda_home="$(detect_torch_cuda_home | tr -d '[:space:]')"
+  if [[ -n "${refreshed_cuda_home}" ]]; then
+    ensure_cuda_home_exports "${refreshed_cuda_home}"
+  fi
+
+  if ! command -v nvcc >/dev/null 2>&1; then
+    echo "CUDA toolkit install completed, but nvcc is still not on PATH." >&2
+    echo "CUDA_HOME=${CUDA_HOME:-unset}" >&2
+    exit 1
+  fi
+
+  echo "Installed CUDA toolkit for extension builds:"
+  echo "  torch.version.cuda=${torch_cuda}"
+  echo "  CUDA_HOME=${CUDA_HOME}"
+  echo "  nvcc=$(command -v nvcc)"
+  echo "  nvcc version: $(nvcc --version | tail -n 1)"
+}
+
+vggt_long_weights_present() {
+  if [[ ! -d "${VGGT_LONG_WEIGHTS_DIR}" ]]; then
+    return 1
+  fi
+
+  if [[ -f "${VGGT_LONG_WEIGHTS_STAMP}" ]]; then
+    return 0
+  fi
+
+  local total_mb=""
+  total_mb="$(du -sm "${VGGT_LONG_WEIGHTS_DIR}" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "${total_mb}" || "${total_mb}" -lt "${VGGT_LONG_WEIGHTS_MIN_MB}" ]]; then
+    return 1
+  fi
+
+  [[ -f "${VGGT_LONG_WEIGHTS_DIR}/dinov2_vitb14_pretrain.pth" ]] || return 1
+  [[ -f "${VGGT_LONG_WEIGHTS_DIR}/ORBvoc.txt" ]] || return 1
+
+  if [[ -d "${VGGT_LONG_WEIGHTS_DIR}/Pi3" || -d "${VGGT_LONG_WEIGHTS_DIR}/pi3" || -d "${VGGT_LONG_WEIGHTS_DIR}/map_anything" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+download_vggt_long_weights_if_needed() {
+  mkdir -p "${VGGT_LONG_WEIGHTS_DIR}"
+
+  if [[ ${FORCE_VGGT_LONG_WEIGHTS} -eq 1 ]]; then
+    echo "Forcing VGGT-Long weights download because --force-vggt-long-weights was provided."
+  elif vggt_long_weights_present; then
+    echo "Skipping VGGT-Long weights download; existing weights look complete in ${VGGT_LONG_WEIGHTS_DIR}."
+    return
+  fi
+
+  echo "Downloading VGGT-Long weights into ${VGGT_LONG_WEIGHTS_DIR} ..."
+  (
+    cd "${VGGT_LONG_DIR}"
+    bash ./scripts/download_weights.sh
+  )
+  touch "${VGGT_LONG_WEIGHTS_STAMP}"
 }
 
 ensure_modern_conda_compilers() {
@@ -323,9 +505,13 @@ install_vggt_long_requirements() {
   rm -f "${tmp_req}"
 
   if grep -Eqi '^[[:space:]]*xformers([[:space:]]*(==|=|>=|<=|!=|~=).*)?[[:space:]]*$' "${req_file}"; then
+    local torch_cuda_version=""
+    local local_nvcc_version=""
+    torch_cuda_version="$(detect_torch_cuda_version | tr -d '[:space:]')"
+    local_nvcc_version="$(nvcc_cuda_version | tr -d '[:space:]')"
     echo "Skipping xformers automatic install."
-    echo "Reason: local CUDA toolkit must match the CUDA version used to compile torch."
-    echo "Current torch is cu121, but your local build toolchain is detecting CUDA 11.2."
+    echo "Reason: xformers often needs a local CUDA toolkit/build chain aligned with torch."
+    echo "Current torch CUDA: ${torch_cuda_version:-unknown}; local nvcc CUDA: ${local_nvcc_version:-not detected}."
     echo "Install xformers manually later only if VGGT-Long actually needs it."
   fi
 
@@ -374,6 +560,7 @@ if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
   ensure_modern_conda_compilers
   clone_or_update_checkout "${VGGT_LONG_REPO}" "${VGGT_LONG_DIR}" "${VGGT_LONG_COMMIT}"
   install_vggt_long_requirements
+  ensure_cuda_toolkit_for_torch_extensions
 
   if [[ -f "${VGGT_LONG_DIR}/scripts/download_weights.sh" ]]; then
     echo "Patching VGGT-Long download_weights.sh for current Hugging Face CLI..."
@@ -392,14 +579,10 @@ EOF
     export PATH="${CONDA_PREFIX:-${ROOT_DIR}/.room4d_cache}/bin:${PATH}"
   fi
 
-  echo "Downloading VGGT-Long weights into ${VGGT_LONG_DIR}/weights ..."
-  (
-    cd "${VGGT_LONG_DIR}"
-    bash ./scripts/download_weights.sh
-  )
+  download_vggt_long_weights_if_needed
 
   echo "Installing VGGT-Long from ${VGGT_LONG_DIR}..."
-  python -m pip install --no-build-isolation -e "${VGGT_LONG_DIR}"
+  MAX_JOBS="${MAX_JOBS:-4}" python -m pip install --no-build-isolation -e "${VGGT_LONG_DIR}"
 fi
 
 cat <<EOF
