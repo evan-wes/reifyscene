@@ -87,6 +87,7 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
         attributes={'track_ids': [1], 'support_track_count': 1, 'detection_id': 'hum0'}
     )
     humans = HumanArtifact(run_id='scene', stage_name='humans', save_dir=tmp_path / 'humans', humans=[human], frame_index={'cam_00:0': ['human_0']})
+    humans.mask_arrays = {'hum0': np.pad(np.ones((12, 10), dtype=bool), ((8, 12), (8, 14)))}
 
     obj = ObjectState(
         object_id='object_0', frame_ref=frame1, category='ball', bbox_xyxy=np.asarray([18, 14, 28, 24], dtype=np.float32),
@@ -94,6 +95,7 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
         attributes={'track_ids': [2], 'support_track_count': 1, 'detection_id': 'obj0'}
     )
     objects = ObjectArtifact(run_id='scene', stage_name='objects', save_dir=tmp_path / 'objects', objects=[obj], frame_index={'cam_00:2': ['object_0']})
+    objects.mask_arrays = {'obj0': np.pad(np.ones((10, 10), dtype=bool), ((14, 8), (18, 4)))}
 
     assembler = SingleVideoSceneAssembler(max_static_points_per_frame=32, max_static_points_total=64)
     scene_artifact = assembler.assemble(
@@ -105,10 +107,27 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
     assert scene_artifact.static_scene['num_points'] > 0
     assert len(scene_artifact.dynamic_entities['humans']) == 1
     assert len(scene_artifact.dynamic_entities['objects']) == 1
+    assert scene_artifact.render_contract['schema'] == 'layered_scene_v2'
+    assert scene_artifact.render_contract['appearance']['static_source_count'] == 2
+    assert scene_artifact.render_contract['appearance']['dynamic_observation_counts']['humans'] == 1
+    assert scene_artifact.render_contract['appearance']['dynamic_observation_counts']['objects'] == 1
+    assert (tmp_path / 'scene' / 'render_contract' / 'static_gaussians.npz').exists()
+
+    loaded_scene = SceneArtifact.load(tmp_path / 'scene')
+    static_sources = loaded_scene.render_contract['appearance']['static_sources']
+    assert len(static_sources) == 2
+    assert all(Path(src['image_file']).exists() for src in static_sources)
+    assert all(Path(src['points_file']).exists() for src in static_sources)
+    loaded_dynamic = loaded_scene.render_contract['dynamic_layers']
+    human_obs = loaded_dynamic['humans'][0]['observations']
+    object_obs = loaded_dynamic['objects'][0]['observations']
+    assert human_obs and object_obs
+    assert Path(human_obs[0]['sprite_file']).exists()
+    assert Path(object_obs[0]['sprite_file']).exists()
 
     trainer = Gaussian4DTrainer({'width': 320, 'height': 180, 'point_limit': 2000})
     scene_model = Gaussian4DScene()
-    scene_model.initialize_from_scene(scene_artifact)
+    scene_model.initialize_from_scene(loaded_scene)
     render_artifact = trainer.fit(scene_model, geometry_artifact=geometry, save_dir=tmp_path / 'render')
     render_artifact.save_dir = tmp_path / 'render'
     render_artifact.save()
@@ -125,7 +144,6 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
 
     frame_img = np.asarray(Image.open(tmp_path / 'render' / render_artifact.path_index['orbit'][0]))
     assert frame_img.sum() > 0
-    # dynamic entities should occupy more than isolated single center pixels
     nonzero = np.count_nonzero(frame_img.sum(axis=2) > 0)
     assert nonzero > 100
 
@@ -230,6 +248,7 @@ def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
 def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
     frame1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
+    static_img = _make_frame(tmp_path, 'hq_static')
     scene_artifact = SceneArtifact(
         run_id='hq', stage_name='scene', save_dir=tmp_path / 'scene_hq',
         static_scene={
@@ -242,9 +261,10 @@ def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> N
         frame_refs=[frame0, frame1],
         timeline={'source': 'tracking'},
         render_contract={
-            'schema': 'layered_scene_v1',
+            'schema': 'layered_scene_v2',
             'supported_backends': ['gaussian_layered', 'offline_high_quality'],
             'quality_modes': ['realtime', 'offline_high_quality'],
+            'world_frame': {'up_axis': 'z', 'gravity_dir': [0.0, 0.0, -1.0]},
             'static_layer': {
                 'num_gaussians': 3,
                 'means_xyz': np.asarray([[0.0, 0.0, 2.0], [0.3, 0.0, 2.0], [0.0, 0.3, 2.0]], dtype=np.float32),
@@ -253,17 +273,44 @@ def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> N
                 'opacities': np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
                 'source_codes': np.asarray([0, 0, 0], dtype=np.int16),
             },
-            'dynamic_layers': {},
+            'appearance': {
+                'static_sources': [
+                    {
+                        'frame_key': 'cam_00:0',
+                        'time_sec': 0.0,
+                        'image_path': static_img,
+                        'points_xyz': np.full((8, 8, 3), [0.0, 0.0, 2.0], dtype=np.float32),
+                        'confidence': np.ones((8, 8), dtype=np.float32),
+                    }
+                ],
+                'static_source_count': 1,
+                'dynamic_observation_counts': {'humans': 0, 'objects': 0},
+            },
+            'dynamic_layers': {
+                'humans': [],
+                'objects': [],
+            },
         },
     )
+    scene_artifact.save()
+    loaded_scene = SceneArtifact.load(tmp_path / 'scene_hq')
+    assert Path(loaded_scene.render_contract['appearance']['static_sources'][0]['image_file']).exists()
+
     scene_model = Gaussian4DScene()
-    scene_model.initialize_from_scene(scene_artifact)
+    scene_model.initialize_from_scene(loaded_scene)
     renderer = build_renderer({
         'backend_name': 'offline_high_quality',
         'width': 160,
         'height': 90,
         'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
-        'offline_high_quality': {'render_scale': 2, 'nerf_refinement': {'enabled': True}},
+        'offline_high_quality': {
+            'render_scale': 2,
+            'static_source_count': 1,
+            'static_source_point_budget': 64,
+            'dynamic_sprite_scale': 1.0,
+            'gaussian_fill_weight': 0.2,
+            'nerf_refinement': {'enabled': True},
+        },
     })
     artifact = renderer.fit(scene_model, save_dir=tmp_path / 'render_hq')
     assert artifact.scene_state['backend_name'] == 'offline_high_quality'

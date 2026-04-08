@@ -53,6 +53,12 @@ class Gaussian4DTrainer(RenderBackend):
         self.offline_render_scale = max(1, int(offline_cfg.get("render_scale", 2 if self.quality_mode == "offline_high_quality" else 1)))
         self.offline_filter_radius = float(offline_cfg.get("filter_radius", 1.1))
         self.offline_detail_strength = float(offline_cfg.get("detail_strength", 0.12))
+        self.static_source_count = max(1, int(offline_cfg.get("static_source_count", 3)))
+        self.static_source_point_budget = max(1000, int(offline_cfg.get("static_source_point_budget", 7000)))
+        self.dynamic_sprite_scale = float(offline_cfg.get("dynamic_sprite_scale", 1.0))
+        self.dynamic_sprite_sharpen = float(offline_cfg.get("dynamic_sprite_sharpen", 0.4))
+        self.dynamic_sprite_min_alpha = int(offline_cfg.get("dynamic_sprite_min_alpha", 12))
+        self.gaussian_fill_weight = float(offline_cfg.get("gaussian_fill_weight", 0.35))
         nerf_cfg = dict(offline_cfg.get("nerf_refinement", {}) or {})
         self.nerf_refinement_enabled = bool(nerf_cfg.get("enabled", self.quality_mode == "offline_high_quality"))
         self.nerf_blend_weight = float(nerf_cfg.get("blend_weight", 0.28))
@@ -69,6 +75,7 @@ class Gaussian4DTrainer(RenderBackend):
             "follow_object": True,
         }
         self.enabled_paths.update({str(k): bool(v) for k, v in (self.cfg.get("enabled_paths", {}) or {}).items()})
+        self._asset_cache: dict[str, Any] = {}
         if torch is not None and self.cpu_threads is not None:
             try:
                 torch.set_num_threads(int(self.cpu_threads))
@@ -88,6 +95,7 @@ class Gaussian4DTrainer(RenderBackend):
         return "cpu"
 
     def release_resources(self) -> None:
+        self._asset_cache.clear()
         release_memory()
 
     def _limit_cameras(self, cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -99,6 +107,9 @@ class Gaussian4DTrainer(RenderBackend):
     def _scene_contract(self, scene_artifact) -> dict[str, Any]:
         return dict(getattr(scene_artifact, "render_contract", {}) or {})
 
+    def _appearance_contract(self, scene_artifact) -> dict[str, Any]:
+        return dict(self._scene_contract(scene_artifact).get("appearance", {}) or {})
+
     def _static_gaussians(self, scene_artifact) -> dict[str, np.ndarray]:
         contract = self._scene_contract(scene_artifact)
         static_layer = dict(contract.get("static_layer", {}) or {})
@@ -109,8 +120,7 @@ class Gaussian4DTrainer(RenderBackend):
         if means.shape[0] == 0:
             means = _to_z_up_points(np.asarray(scene_artifact.static_scene.get("points_xyz", np.zeros((0, 3))), dtype=np.float32))
             colors = np.asarray(scene_artifact.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
-            base_scale = np.full_like(means, 0.03, dtype=np.float32)
-            scales = base_scale
+            scales = np.full_like(means, 0.03, dtype=np.float32)
             opacities = np.full((means.shape[0],), 0.92, dtype=np.float32)
         else:
             means = _to_z_up_points(means)
@@ -137,12 +147,15 @@ class Gaussian4DTrainer(RenderBackend):
             for ent in dynamic_layers.get(kind, []):
                 times = np.asarray(ent.get("times_sec", []), dtype=np.float32)
                 centers = ent.get("centers_xyz", [])
+                observations = list(ent.get("observations", []) or [])
                 if times.size == 0:
                     center = np.asarray(ent.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+                    obs = observations[0] if observations else None
                 else:
                     idx = int(np.argmin(np.abs(times - float(time_sec))))
                     chosen = centers[idx] if idx < len(centers) else ent.get("anchor_xyz", [0.0, 0.0, 0.0])
                     center = np.asarray(chosen, dtype=np.float32)
+                    obs = min(observations, key=lambda o: abs(float(o.get("time_sec", time_sec)) - float(time_sec))) if observations else None
                 if not np.all(np.isfinite(center)):
                     continue
                 color = np.asarray(ent.get("color_rgb", [255, 64, 64]), dtype=np.uint8)
@@ -158,6 +171,7 @@ class Gaussian4DTrainer(RenderBackend):
                     "template_opacities": np.asarray(ent.get("template_opacities", [0.8]), dtype=np.float32),
                     "color_rgb": color,
                     "support_count": support_count,
+                    "observation": obs,
                 })
             per_kind = sorted(per_kind, key=lambda e: (-e["support_count"], e["entity_id"]))[: self.max_dynamic_entities_per_kind]
             selected.extend(per_kind)
@@ -184,44 +198,60 @@ class Gaussian4DTrainer(RenderBackend):
             right = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
         true_up = _normalize(np.cross(right, forward))
         R = np.stack([right, true_up, forward], axis=0)
-        cam = (points - eye[None, :]) @ R.T
+        centered = points.astype(np.float32) - eye[None, :].astype(np.float32)
+        cam = centered @ R.T
         z = cam[:, 2]
         valid = z > 1e-3
-        fx = fy = 0.75 * max(self.width, self.height)
-        x = fx * (cam[:, 0] / np.clip(z, 1e-3, None)) + self.width * 0.5
-        y = -fy * (cam[:, 1] / np.clip(z, 1e-3, None)) + self.height * 0.5
-        return np.stack([x, y], axis=1), valid, z
+        if not np.any(valid):
+            return np.zeros((points.shape[0], 2), dtype=np.float32), valid, z
+        fx = 0.75 * max(self.width, self.height)
+        fy = fx
+        xy = np.zeros((points.shape[0], 2), dtype=np.float32)
+        xy[valid, 0] = self.width * 0.5 + fx * (cam[valid, 0] / z[valid])
+        xy[valid, 1] = self.height * 0.5 - fy * (cam[valid, 1] / z[valid])
+        in_bounds = (
+            (xy[:, 0] >= -10.0)
+            & (xy[:, 0] <= self.width + 10.0)
+            & (xy[:, 1] >= -10.0)
+            & (xy[:, 1] <= self.height + 10.0)
+        )
+        valid &= in_bounds
+        return xy, valid, z
 
     def _project_points(self, points: np.ndarray, eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if self.device.startswith("cuda") and torch is not None and torch.cuda.is_available():
+        if self.device.startswith("cuda") and torch is not None and torch.cuda.is_available() and self.use_gpu_projection:
             try:
-                with torch.no_grad():
-                    p = torch.as_tensor(points, dtype=torch.float32, device=self.device)
-                    eye_t = torch.as_tensor(eye, dtype=torch.float32, device=self.device)
-                    target_t = torch.as_tensor(target, dtype=torch.float32, device=self.device)
-                    up_t = torch.as_tensor(up, dtype=torch.float32, device=self.device)
+                with torch.inference_mode():
+                    pts = torch.as_tensor(points, device=self.device, dtype=torch.float32)
+                    eye_t = torch.as_tensor(eye, device=self.device, dtype=torch.float32)
+                    target_t = torch.as_tensor(target, device=self.device, dtype=torch.float32)
+                    up_t = torch.as_tensor(up, device=self.device, dtype=torch.float32)
                     forward = target_t - eye_t
                     forward = forward / torch.clamp(torch.linalg.norm(forward), min=1e-8)
-                    right = torch.linalg.cross(forward, up_t)
+                    right = torch.cross(forward, up_t)
                     right_norm = torch.linalg.norm(right)
-                    if float(right_norm) < 1e-8:
-                        right = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+                    if float(right_norm.item()) < 1e-8:
+                        right = torch.tensor([1.0, 0.0, 0.0], device=self.device)
                     else:
                         right = right / right_norm
-                    true_up = torch.linalg.cross(right, forward)
+                    true_up = torch.cross(right, forward)
                     true_up = true_up / torch.clamp(torch.linalg.norm(true_up), min=1e-8)
                     R = torch.stack([right, true_up, forward], dim=0)
-                    cam = (p - eye_t[None, :]) @ R.T
+                    cam = (pts - eye_t[None, :]) @ R.T
                     z = cam[:, 2]
                     valid = z > 1e-3
-                    fx = fy = 0.75 * max(self.width, self.height)
-                    x = fx * (cam[:, 0] / torch.clamp(z, min=1e-3)) + self.width * 0.5
-                    y = -fy * (cam[:, 1] / torch.clamp(z, min=1e-3)) + self.height * 0.5
-                    return (
-                        torch.stack([x, y], dim=1).cpu().numpy(),
-                        valid.cpu().numpy(),
-                        z.cpu().numpy(),
+                    fx = float(0.75 * max(self.width, self.height))
+                    xy = torch.zeros((pts.shape[0], 2), device=self.device, dtype=torch.float32)
+                    xy[valid, 0] = self.width * 0.5 + fx * (cam[valid, 0] / z[valid])
+                    xy[valid, 1] = self.height * 0.5 - fx * (cam[valid, 1] / z[valid])
+                    in_bounds = (
+                        (xy[:, 0] >= -10.0)
+                        & (xy[:, 0] <= self.width + 10.0)
+                        & (xy[:, 1] >= -10.0)
+                        & (xy[:, 1] <= self.height + 10.0)
                     )
+                    valid &= in_bounds
+                    return xy.cpu().numpy(), valid.cpu().numpy(), z.cpu().numpy()
             except Exception as exc:
                 if torch is not None and hasattr(torch, "cuda") and isinstance(exc, torch.cuda.OutOfMemoryError):
                     self.device = "cpu"
@@ -302,6 +332,123 @@ class Gaussian4DTrainer(RenderBackend):
             draw.text((x + 6, y - 10), f"{entity['display_label']}:{entity['entity_id']}", fill=color)
         return image
 
+    def _static_sources(self, scene_artifact) -> list[dict[str, Any]]:
+        return list(self._appearance_contract(scene_artifact).get("static_sources", []) or [])
+
+    def _load_static_source(self, source: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        key = f"static::{source.get('frame_key', '')}::{source.get('points_file', '')}::{source.get('image_file', source.get('image_path', ''))}"
+        if key in self._asset_cache:
+            return self._asset_cache[key]
+        if source.get("points_xyz") is not None:
+            points = np.asarray(source.get("points_xyz"), dtype=np.float32)
+            confidence = None if source.get("confidence") is None else np.asarray(source.get("confidence"), dtype=np.float32)
+        else:
+            npz_path = Path(source.get("points_file", ""))
+            npz = np.load(npz_path)
+            points = np.asarray(npz["points_xyz"], dtype=np.float32)
+            confidence = np.asarray(npz["confidence"], dtype=np.float32) if "confidence" in npz else None
+        image_path = source.get("image_file") or source.get("image_path")
+        rgb = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+        self._asset_cache[key] = (rgb, points, confidence)
+        return rgb, points, confidence
+
+    def _choose_static_sources(self, scene_artifact, time_sec: float) -> list[dict[str, Any]]:
+        sources = self._static_sources(scene_artifact)
+        if not sources:
+            return []
+        ranked = sorted(sources, key=lambda s: (abs(float(s.get("time_sec", time_sec)) - float(time_sec)), str(s.get("frame_key", ""))))
+        return ranked[: self.static_source_count]
+
+    def _render_static_appearance(self, scene_artifact, camera: dict[str, Any], eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        rgb_canvas = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        alpha_canvas = np.zeros((self.height, self.width), dtype=np.float32)
+        if self.quality_mode != "offline_high_quality":
+            return rgb_canvas, alpha_canvas
+        sources = self._choose_static_sources(scene_artifact, float(camera.get("time_sec", 0.0)))
+        if not sources:
+            return rgb_canvas, alpha_canvas
+        for rank, source in enumerate(sources):
+            src_rgb, src_points, src_conf = self._load_static_source(source)
+            if src_points.ndim != 3 or src_points.shape[-1] != 3:
+                continue
+            h, w = src_points.shape[:2]
+            if src_rgb.shape[:2] != (h, w):
+                src_rgb = np.asarray(Image.fromarray(src_rgb).resize((w, h), resample=Image.Resampling.BILINEAR), dtype=np.uint8)
+            valid = np.isfinite(src_points).all(axis=2)
+            if src_conf is not None and src_conf.shape == valid.shape:
+                valid &= src_conf > 0
+            if not np.any(valid):
+                continue
+            pts = src_points[valid]
+            cols = src_rgb[valid]
+            if pts.shape[0] > self.static_source_point_budget:
+                stride = max(1, int(np.ceil(pts.shape[0] / float(self.static_source_point_budget))))
+                pts = pts[::stride]
+                cols = cols[::stride]
+            means = _to_z_up_points(np.asarray(pts, dtype=np.float32))
+            colors = np.asarray(cols, dtype=np.uint8)
+            scales = np.full((means.shape[0], 3), 0.012 + 0.004 * rank, dtype=np.float32)
+            source_weight = 1.0 / float(rank + 1)
+            opacities = np.full((means.shape[0],), 0.90 * source_weight, dtype=np.float32)
+            self._splat_gaussians(rgb_canvas, alpha_canvas, means, scales, colors, opacities, eye, target, up)
+        return rgb_canvas, alpha_canvas
+
+    def _load_sprite_rgba(self, obs: dict[str, Any]) -> Image.Image | None:
+        sprite = obs.get("sprite_rgba")
+        if sprite is not None:
+            return Image.fromarray(np.asarray(sprite, dtype=np.uint8), mode="RGBA")
+        sprite_file = obs.get("sprite_file")
+        if sprite_file is None:
+            return None
+        key = f"sprite::{sprite_file}"
+        if key not in self._asset_cache:
+            self._asset_cache[key] = Image.open(sprite_file).convert("RGBA")
+        return self._asset_cache[key].copy()
+
+    def _render_dynamic_sprites(self, dynamic_entities: list[dict[str, Any]], eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> Image.Image:
+        canvas = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        sprite_items: list[tuple[float, Image.Image, tuple[int, int]]] = []
+        view_dir = _normalize(target - eye)
+        right_world = _normalize(np.cross(view_dir, up))
+        if not np.any(right_world):
+            right_world = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+        up_world = _normalize(up)
+        if not np.any(up_world):
+            up_world = np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
+        for entity in dynamic_entities:
+            obs = entity.get("observation")
+            if obs is None:
+                continue
+            sprite = self._load_sprite_rgba(obs)
+            if sprite is None:
+                continue
+            center = np.asarray(entity["center_xyz"], dtype=np.float32)
+            size_wh = np.asarray(obs.get("world_size_wh", [0.4, 0.8]), dtype=np.float32) * float(self.dynamic_sprite_scale)
+            width_world = float(np.clip(size_wh[0], 0.08, 3.5))
+            height_world = float(np.clip(size_wh[1], 0.08, 4.0))
+            top = center + 0.5 * height_world * up_world
+            bottom = center - 0.5 * height_world * up_world
+            right_pt = center + 0.5 * width_world * right_world
+            pts = np.stack([center, top, bottom, right_pt], axis=0)
+            xy, valid, z = self._project_points(pts, eye, target, up)
+            if not (bool(valid[0]) and bool(valid[1]) and bool(valid[2]) and bool(valid[3])):
+                continue
+            px_height = int(max(4.0, np.linalg.norm(xy[1] - xy[2])))
+            px_width = int(max(4.0, 2.0 * np.linalg.norm(xy[3] - xy[0])))
+            if px_height <= 2 or px_width <= 2:
+                continue
+            sprite_resized = sprite.resize((px_width, px_height), resample=Image.Resampling.LANCZOS)
+            alpha = np.asarray(sprite_resized.getchannel("A"), dtype=np.uint8)
+            alpha[alpha < self.dynamic_sprite_min_alpha] = 0
+            sprite_resized.putalpha(Image.fromarray(alpha, mode="L"))
+            if self.dynamic_sprite_sharpen > 1e-6:
+                sprite_resized = sprite_resized.filter(ImageFilter.UnsharpMask(radius=1, percent=int(120 + 180 * self.dynamic_sprite_sharpen), threshold=2))
+            pos = (int(round(float(xy[0, 0] - px_width * 0.5))), int(round(float(xy[0, 1] - px_height * 0.5))))
+            sprite_items.append((float(z[0]), sprite_resized, pos))
+        for _, sprite_img, pos in sorted(sprite_items, key=lambda item: item[0], reverse=True):
+            canvas.alpha_composite(sprite_img, dest=pos)
+        return canvas
+
     def _render_frame_arrays(self, scene_artifact, camera: dict[str, Any]) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], np.ndarray, np.ndarray, np.ndarray]:
         static = self._static_gaussians(scene_artifact)
         eye = np.asarray(camera["eye"], dtype=np.float32)
@@ -321,6 +468,12 @@ class Gaussian4DTrainer(RenderBackend):
             target,
             up,
         )
+        if self.quality_mode == "offline_high_quality":
+            appearance_rgb, appearance_alpha = self._render_static_appearance(scene_artifact, camera, eye, target, up)
+            if float(self.gaussian_fill_weight) > 0.0:
+                static_rgb = np.clip(self.gaussian_fill_weight * static_rgb, 0.0, 1.0)
+                static_alpha = np.clip(self.gaussian_fill_weight * static_alpha, 0.0, 1.0)
+            static_rgb, static_alpha = self._composite_layers(static_rgb, static_alpha, appearance_rgb, appearance_alpha)
 
         dynamic_rgb = np.zeros((self.height, self.width, 3), dtype=np.float32)
         dynamic_alpha = np.zeros((self.height, self.width), dtype=np.float32)
@@ -328,6 +481,13 @@ class Gaussian4DTrainer(RenderBackend):
         for entity in dynamic_entities:
             means, scales, colors, opacities = self._expand_dynamic_entity(entity)
             self._splat_gaussians(dynamic_rgb, dynamic_alpha, means, scales, colors, opacities, eye, target, up)
+
+        if self.quality_mode == "offline_high_quality":
+            sprite_img = self._render_dynamic_sprites(dynamic_entities, eye, target, up)
+            sprite_rgba = np.asarray(sprite_img, dtype=np.float32) / 255.0
+            sprite_rgb = sprite_rgba[..., :3]
+            sprite_alpha = sprite_rgba[..., 3]
+            dynamic_rgb, dynamic_alpha = self._composite_layers(dynamic_rgb, dynamic_alpha, sprite_rgb, sprite_alpha)
 
         full_rgb, full_alpha = self._composite_layers(static_rgb, static_alpha, dynamic_rgb, dynamic_alpha)
         return {
@@ -392,8 +552,7 @@ class Gaussian4DTrainer(RenderBackend):
             images["full"] = images["full"].filter(ImageFilter.GaussianBlur(radius=self.offline_filter_radius))
         images["full"] = self._apply_nerf_refinement(images["full"], images["static_only"], images["dynamic_only"])
         images["full"] = self._annotate_entities(images["full"], dynamic_entities, eye, target, up)
-        triptych = self._compose_triptych(images)
-        images["triptych"] = triptych
+        images["triptych"] = self._compose_triptych(images)
         return images, dynamic_entities
 
     @staticmethod
@@ -575,6 +734,7 @@ update();
         debug_player_html = self._write_debug_player_html(render_dir, layer_path_index) if layer_path_index else None
         static_layer = self._scene_contract(scene_artifact).get("static_layer", {}) or {}
         dynamic_layers = self._scene_contract(scene_artifact).get("dynamic_layers", {}) or {}
+        appearance = self._appearance_contract(scene_artifact)
         return RenderArtifact(
             run_id=scene_artifact.run_id,
             stage_name="render",
@@ -585,6 +745,7 @@ update();
                 "scene_contract": scene.summary(),
                 "static_points": int(scene_artifact.static_scene.get("num_points", 0)),
                 "static_gaussians": int(static_layer.get("num_gaussians", 0)),
+                "static_appearance_sources": int(appearance.get("static_source_count", len(appearance.get("static_sources", []) or []))),
                 "dynamic_entities": {k: len(v) for k, v in scene_artifact.dynamic_entities.items()},
                 "dynamic_layers": {k: len(v) for k, v in dynamic_layers.items()} if isinstance(dynamic_layers, dict) else {},
                 "device": self.device,
@@ -596,6 +757,9 @@ update();
                     "nerf_refinement_enabled": self.nerf_refinement_enabled,
                     "nerf_blend_weight": self.nerf_blend_weight,
                     "nerf_detail_strength": self.nerf_detail_strength,
+                    "static_source_count": self.static_source_count,
+                    "static_source_point_budget": self.static_source_point_budget,
+                    "dynamic_sprite_scale": self.dynamic_sprite_scale,
                 },
             },
             coverage={"rendered_paths": len(path_index), "rendered_frames": total_frames, "debug_frames": debug_frames},

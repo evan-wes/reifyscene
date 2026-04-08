@@ -14,6 +14,17 @@ models:
   use_smpl: true
   detect_objects: true
 
+
+geometry:
+  ground_plane:
+    enabled: true
+    max_frames: 24
+    max_points_per_frame: 3000
+    ransac_iterations: 160
+    distance_threshold: 0.035
+    min_inlier_ratio: 0.06
+    random_seed: 7
+
 optimization:
   schedule: stage1_sync_pose
   max_iterations: 100
@@ -43,6 +54,12 @@ render:
     render_scale: 2
     filter_radius: 1.1
     detail_strength: 0.12
+    static_source_count: 3
+    static_source_point_budget: 7000
+    dynamic_sprite_scale: 1.0
+    dynamic_sprite_sharpen: 0.4
+    dynamic_sprite_min_alpha: 12
+    gaussian_fill_weight: 0.35
     nerf_refinement:
       enabled: true
       blend_weight: 0.28

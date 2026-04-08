@@ -21,6 +21,12 @@ render:
     render_scale: 2
     filter_radius: 1.1
     detail_strength: 0.12
+    static_source_count: 3
+    static_source_point_budget: 7000
+    dynamic_sprite_scale: 1.0
+    dynamic_sprite_sharpen: 0.4
+    dynamic_sprite_min_alpha: 12
+    gaussian_fill_weight: 0.35
     nerf_refinement:
       enabled: true
       blend_weight: 0.28

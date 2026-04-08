@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
-from room4d.common.types import FrameRef
+from room4d.common.types import CameraIntrinsics, FrameRef
 from room4d.scene.scene_artifact import SceneArtifact
 
 
@@ -21,6 +23,12 @@ class SingleVideoSceneAssembler:
     dynamic_trail_window: int = 16
     timeline_source: str = "geometry"
     static_track_gaussian_budget: int = 1200
+    static_appearance_source_stride: int = 1
+    max_static_appearance_sources: int = 24
+    max_dynamic_observations_per_entity: int = 16
+    dynamic_crop_padding: float = 0.12
+    min_sprite_world_height: float = 0.20
+    max_sprite_world_height: float = 2.80
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -44,6 +52,22 @@ class SingleVideoSceneAssembler:
         if num_points <= target:
             return 1
         return max(1, int(math.ceil(num_points / float(target))))
+
+    @staticmethod
+    def _intrinsics_to_dict(intr: CameraIntrinsics | None) -> dict[str, float]:
+        if intr is None:
+            return {"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0}
+        return {"fx": float(intr.fx), "fy": float(intr.fy), "cx": float(intr.cx), "cy": float(intr.cy)}
+
+    @staticmethod
+    def _sanitize_key(key: str) -> str:
+        return key.replace(':', '__').replace('/', '_')
+
+    def _camera_state_for_frame(self, geometry_artifact, frame_ref: FrameRef):
+        states = list((geometry_artifact.camera_states_by_stream or {}).get(frame_ref.stream_id, []))
+        if not states:
+            return None
+        return min(states, key=lambda s: (abs(float(s.time_sec) - float(frame_ref.timestamp_sec)), abs(float(s.time_sec) - float(frame_ref.timestamp_sec))))
 
     def _dynamic_mask_for_frame(self, frame_key: str, geometry_shape: tuple[int, int], human_artifact, object_artifact) -> np.ndarray:
         mask = np.zeros(geometry_shape, dtype=bool)
@@ -77,8 +101,6 @@ class SingleVideoSceneAssembler:
         if source is None:
             return None
         try:
-            from PIL import Image
-
             return np.asarray(Image.open(source).convert("RGB"), dtype=np.uint8)
         except Exception:
             return None
@@ -102,8 +124,8 @@ class SingleVideoSceneAssembler:
             conf = point_payload.get("confidence")
             if conf is not None:
                 conf_arr = np.asarray(conf)
-                if conf_arr.shape == valid.shape:
-                    conf_thresh = float(np.nanmedian(conf_arr[valid])) if np.any(valid) else 0.0
+                if conf_arr.shape == valid.shape and np.any(valid):
+                    conf_thresh = float(np.nanmedian(conf_arr[valid]))
                     valid &= conf_arr >= conf_thresh
             if not np.any(valid):
                 continue
@@ -117,7 +139,6 @@ class SingleVideoSceneAssembler:
                 colors = np.full((sampled.shape[0], 3), 180, dtype=np.uint8)
             else:
                 if rgb.shape[:2] != (h, w):
-                    from PIL import Image
                     rgb = np.asarray(Image.fromarray(rgb).resize((w, h)), dtype=np.uint8)
                 colors = rgb[valid]
             all_points.append(sampled.astype(np.float32))
@@ -175,7 +196,85 @@ class SingleVideoSceneAssembler:
             return valid.reshape(-1, 3).mean(axis=0).astype(np.float32)
         return None
 
-    def _assemble_entities(self, states: list[Any], kind: str, track_artifact, geometry_artifact) -> list[dict[str, Any]]:
+    def _extract_crop_rgba(self, rgb: np.ndarray, bbox_xyxy: np.ndarray, mask: np.ndarray | None) -> tuple[np.ndarray, list[int]]:
+        h, w = rgb.shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in np.asarray(bbox_xyxy, dtype=np.float32).tolist()]
+        pad_x = (x2 - x1) * self.dynamic_crop_padding
+        pad_y = (y2 - y1) * self.dynamic_crop_padding
+        x1i = max(0, int(np.floor(x1 - pad_x)))
+        y1i = max(0, int(np.floor(y1 - pad_y)))
+        x2i = min(w, int(np.ceil(x2 + pad_x)))
+        y2i = min(h, int(np.ceil(y2 + pad_y)))
+        if x2i <= x1i or y2i <= y1i:
+            return np.zeros((1, 1, 4), dtype=np.uint8), [0, 0, 1, 1]
+        crop_rgb = np.asarray(rgb[y1i:y2i, x1i:x2i], dtype=np.uint8)
+        if mask is not None and mask.shape[:2] == (h, w):
+            alpha = (np.asarray(mask[y1i:y2i, x1i:x2i], dtype=np.uint8) * 255)
+        else:
+            alpha = np.full(crop_rgb.shape[:2], 255, dtype=np.uint8)
+        rgba = np.dstack([crop_rgb, alpha]).astype(np.uint8)
+        return rgba, [x1i, y1i, x2i, y2i]
+
+    def _estimate_sprite_world_size(self, frame_ref: FrameRef, bbox_xyxy: np.ndarray, center_xyz: np.ndarray | None, geometry_artifact, kind: str) -> list[float]:
+        if center_xyz is None:
+            if kind == "humans":
+                return [0.55, 1.75]
+            return [0.45, 0.45]
+        state = self._camera_state_for_frame(geometry_artifact, frame_ref)
+        if state is None:
+            return [0.55, 1.75] if kind == "humans" else [0.45, 0.45]
+        Twc = np.asarray(state.pose.T_world_cam, dtype=np.float32)
+        Tcw = np.linalg.inv(Twc)
+        p = np.asarray(list(np.asarray(center_xyz, dtype=np.float32)) + [1.0], dtype=np.float32)
+        cam = Tcw @ p
+        depth = abs(float(cam[2]))
+        intr = state.intrinsics
+        bbox = np.asarray(bbox_xyxy, dtype=np.float32)
+        bbox_w = max(float(bbox[2] - bbox[0]), 1.0)
+        bbox_h = max(float(bbox[3] - bbox[1]), 1.0)
+        width_world = float(np.clip(depth * bbox_w / max(float(intr.fx), 1e-6), 0.08, 2.5))
+        height_world = float(np.clip(depth * bbox_h / max(float(intr.fy), 1e-6), self.min_sprite_world_height, self.max_sprite_world_height))
+        return [width_world, height_world]
+
+    def _build_entity_observations(self, seq: list[Any], centers_3d: list[Any], kind: str, source_artifact, geometry_artifact) -> list[dict[str, Any]]:
+        if source_artifact is None:
+            return []
+        image_map = geometry_artifact.metadata.get("debug_image_paths", {}) if geometry_artifact is not None else {}
+        observations: list[dict[str, Any]] = []
+        if len(seq) > self.max_dynamic_observations_per_entity:
+            sample_idx = np.linspace(0, len(seq) - 1, self.max_dynamic_observations_per_entity).round().astype(int).tolist()
+        else:
+            sample_idx = list(range(len(seq)))
+        for idx in sample_idx:
+            state = seq[idx]
+            center = centers_3d[idx]
+            frame_key = self._frame_key(state.frame_ref.stream_id, state.frame_ref.frame_idx)
+            image_path = image_map.get(frame_key)
+            if image_path is None:
+                continue
+            try:
+                rgb = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+            except Exception:
+                continue
+            attrs = getattr(state, "attributes", {}) or {}
+            det_id = attrs.get("detection_id", getattr(state, "human_id", getattr(state, "object_id", frame_key)))
+            mask = None
+            if hasattr(source_artifact, "mask_arrays"):
+                mask = source_artifact.mask_arrays.get(det_id)
+            rgba, crop_box = self._extract_crop_rgba(rgb, np.asarray(state.bbox_xyxy, dtype=np.float32), None if mask is None else np.asarray(mask, dtype=bool))
+            observations.append({
+                "frame_key": frame_key,
+                "time_sec": float(state.frame_ref.timestamp_sec),
+                "bbox_xyxy": np.asarray(state.bbox_xyxy, dtype=np.float32).tolist(),
+                "crop_box_xyxy": crop_box,
+                "sprite_rgba": rgba,
+                "world_size_wh": self._estimate_sprite_world_size(state.frame_ref, np.asarray(state.bbox_xyxy, dtype=np.float32), None if center is None else np.asarray(center, dtype=np.float32), geometry_artifact, kind),
+                "confidence": float(getattr(state, "confidence", 0.0)),
+                "center_xyz": None if center is None else np.asarray(center, dtype=np.float32).tolist(),
+            })
+        return observations
+
+    def _assemble_entities(self, states: list[Any], kind: str, track_artifact, geometry_artifact, source_artifact=None) -> list[dict[str, Any]]:
         grouped: dict[str, list[Any]] = {}
         for state in states:
             stable_id = getattr(state, "human_id", getattr(state, "object_id", ""))
@@ -204,6 +303,7 @@ class SingleVideoSceneAssembler:
             valid_positions = [np.asarray(v, dtype=np.float32) for v in centers_3d if v is not None]
             anchor = (np.mean(np.stack(valid_positions, axis=0), axis=0).astype(np.float32).tolist() if valid_positions else [0.0, 0.0, 0.0])
             majority_label = max(set(labels), key=labels.count) if labels else kind[:-1]
+            observations = self._build_entity_observations(seq, centers_3d, kind, source_artifact, geometry_artifact)
             entities.append({
                 "entity_id": stable_id,
                 "entity_type": kind[:-1],
@@ -218,6 +318,7 @@ class SingleVideoSceneAssembler:
                 "mean_confidence": float(np.mean(confs)) if confs else 0.0,
                 "lifespan_frames": int(len(seq)),
                 "frame_keys": [self._frame_key(s.frame_ref.stream_id, s.frame_ref.frame_idx) for s in seq],
+                "observations": observations,
             })
         return entities
 
@@ -325,7 +426,49 @@ class SingleVideoSceneAssembler:
             "source_codes": codes_arr[::stride],
         }
 
-    def _build_render_contract(self, static_scene: dict[str, Any], humans: list[dict[str, Any]], objects: list[dict[str, Any]], track_artifact) -> dict[str, Any]:
+    def _build_static_appearance_sources(self, geometry_artifact, human_artifact, object_artifact) -> list[dict[str, Any]]:
+        image_map = geometry_artifact.metadata.get("debug_image_paths", {}) if geometry_artifact is not None else {}
+        frames = list(getattr(geometry_artifact, "selected_frames", []) or [])
+        if self.static_appearance_source_stride > 1:
+            frames = frames[:: int(self.static_appearance_source_stride)]
+        if len(frames) > self.max_static_appearance_sources:
+            indices = np.linspace(0, len(frames) - 1, self.max_static_appearance_sources).round().astype(int).tolist()
+            frames = [frames[i] for i in indices]
+        sources: list[dict[str, Any]] = []
+        for frame in frames:
+            frame_key = self._frame_key(frame.stream_id, frame.frame_idx)
+            payload = geometry_artifact.pointmaps_by_frame.get(frame_key)
+            image_path = image_map.get(frame_key)
+            if payload is None or image_path is None:
+                continue
+            points = np.asarray(payload.get("points"), dtype=np.float32)
+            if points.ndim != 3 or points.shape[-1] != 3:
+                continue
+            valid = np.isfinite(points).all(axis=2)
+            dynamic_mask = self._dynamic_mask_for_frame(frame_key, points.shape[:2], human_artifact, object_artifact)
+            valid &= ~dynamic_mask
+            conf = payload.get("confidence")
+            conf_arr = None if conf is None else np.asarray(conf, dtype=np.float32)
+            if conf_arr is not None and conf_arr.shape == valid.shape and np.any(valid):
+                conf_threshold = float(np.nanmedian(conf_arr[valid]))
+                valid &= conf_arr >= conf_threshold
+            masked_points = np.asarray(points, dtype=np.float32).copy()
+            masked_points[~valid] = np.nan
+            state = self._camera_state_for_frame(geometry_artifact, frame)
+            intr = state.intrinsics if state is not None else geometry_artifact.intrinsics_by_stream.get(frame.stream_id)
+            pose = np.eye(4, dtype=np.float32) if state is None else np.asarray(state.pose.T_world_cam, dtype=np.float32)
+            sources.append({
+                "frame_key": frame_key,
+                "time_sec": float(frame.timestamp_sec),
+                "image_path": str(image_path),
+                "points_xyz": masked_points,
+                "confidence": None if conf_arr is None else np.where(valid, conf_arr, 0.0).astype(np.float32),
+                "pose": pose.astype(np.float32),
+                "intrinsics": self._intrinsics_to_dict(intr),
+            })
+        return sources
+
+    def _build_render_contract(self, static_scene: dict[str, Any], humans: list[dict[str, Any]], objects: list[dict[str, Any]], track_artifact, geometry_artifact, human_artifact=None, object_artifact=None) -> dict[str, Any]:
         static_points = np.asarray(static_scene.get("points_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
         static_colors = np.asarray(static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
         if static_points.size:
@@ -369,12 +512,15 @@ class SingleVideoSceneAssembler:
                     "template_offsets_xyz": template_offsets.tolist(),
                     "template_scales_xyz": template_scales.tolist(),
                     "template_opacities": template_opacities.tolist(),
+                    "observations": list(ent.get("observations", [])),
                 })
 
+        static_sources = self._build_static_appearance_sources(geometry_artifact, human_artifact, object_artifact)
         return {
-            "schema": "layered_scene_v1",
+            "schema": "layered_scene_v2",
             "supported_backends": ["gaussian_layered", "gaussian4d", "offline_high_quality"],
             "quality_modes": ["realtime", "offline_high_quality"],
+            "world_frame": {"up_axis": "z", "gravity_dir": [0.0, 0.0, -1.0]},
             "static_layer": {
                 "layer_name": "static_3dgs_seed",
                 "num_gaussians": int(means.shape[0]),
@@ -384,8 +530,16 @@ class SingleVideoSceneAssembler:
                 "opacities": opacities.astype(np.float32),
                 "source_codes": source_codes.astype(np.int16),
                 "source_counts": {
-                    "geometry_points": int(static_points.shape[0]),
-                    "static_track_seeds": int(static_tracks["means_xyz"].shape[0]),
+                    "background_points": int(static_points.shape[0]),
+                    "static_track_points": int(static_tracks["means_xyz"].shape[0]),
+                },
+            },
+            "appearance": {
+                "static_sources": static_sources,
+                "static_source_count": int(len(static_sources)),
+                "dynamic_observation_counts": {
+                    "humans": int(sum(len(ent.get("observations", [])) for ent in dynamic_layers["humans"])),
+                    "objects": int(sum(len(ent.get("observations", [])) for ent in dynamic_layers["objects"])),
                 },
             },
             "dynamic_layers": dynamic_layers,
@@ -397,8 +551,8 @@ class SingleVideoSceneAssembler:
 
     def assemble(self, *, run_id: str, save_dir, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, metadata: dict[str, Any] | None = None) -> SceneArtifact:
         static_scene = self._assemble_static_background(geometry_artifact, human_artifact, object_artifact)
-        humans = [] if human_artifact is None else self._assemble_entities(human_artifact.humans, "humans", track_artifact, geometry_artifact)
-        objects = [] if object_artifact is None else self._assemble_entities(object_artifact.objects, "objects", track_artifact, geometry_artifact)
+        humans = [] if human_artifact is None else self._assemble_entities(human_artifact.humans, "humans", track_artifact, geometry_artifact, source_artifact=human_artifact)
+        objects = [] if object_artifact is None else self._assemble_entities(object_artifact.objects, "objects", track_artifact, geometry_artifact, source_artifact=object_artifact)
         requested_timeline = str((metadata or {}).get("timeline_source", self.timeline_source)).lower()
         if requested_timeline not in {"geometry", "tracking"}:
             requested_timeline = self.timeline_source
@@ -416,20 +570,25 @@ class SingleVideoSceneAssembler:
             "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
         }
-        render_contract = self._build_render_contract(static_scene, humans, objects, track_artifact)
+        render_contract = self._build_render_contract(static_scene, humans, objects, track_artifact, geometry_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         notes = [
             f"static_points={static_scene['num_points']}",
             f"static_gaussians={render_contract['static_layer']['num_gaussians']}",
+            f"static_sources={render_contract.get('appearance', {}).get('static_source_count', 0)}",
             f"humans={len(humans)}",
             f"objects={len(objects)}",
         ]
+        dynamic_entities_light = {
+            "humans": [{k: v for k, v in ent.items() if k != "observations"} for ent in humans],
+            "objects": [{k: v for k, v in ent.items() if k != "observations"} for ent in objects],
+        }
         return SceneArtifact(
             run_id=run_id,
             stage_name="scene",
             save_dir=save_dir,
             metadata=metadata or {},
             static_scene=static_scene,
-            dynamic_entities={"humans": humans, "objects": objects},
+            dynamic_entities=dynamic_entities_light,
             frame_refs=frame_refs,
             timeline=timeline,
             render_contract=render_contract,

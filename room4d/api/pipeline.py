@@ -13,6 +13,7 @@ from room4d.common.paths import ensure_dir
 from room4d.common.memory import release_memory
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.camera_interpolation import densify_camera_states_for_frames
+from room4d.geometry.world_frame import GroundPlaneCanonicalizer
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
@@ -95,6 +96,7 @@ class Room4DPipeline:
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
+        self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
 
     @classmethod
@@ -249,6 +251,11 @@ class Room4DPipeline:
             sync_artifact=sync_artifact,
         )
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
+        estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
+        if estimate is not None:
+            artifact.metadata['ground_plane_applied'] = True
+        else:
+            artifact.metadata['ground_plane_applied'] = False
         self._densify_geometry_cameras_for_tracking(artifact, ingest_artifact)
         artifact.save_dir = self._stage_dir('geometry')
         self._stamp_stage_metadata(artifact, 'geometry', video_paths=self._video_paths_for_stage(ingest_artifact))

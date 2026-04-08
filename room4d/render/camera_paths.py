@@ -8,7 +8,14 @@ import numpy as np
 
 
 def _z_up_rot() -> np.ndarray:
-    return np.asarray([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], dtype=np.float32)
+    """Return the canonical world rotation.
+
+    The pipeline now canonicalizes geometry into a global Z-up frame before
+    downstream stages run, so this helper returns identity for new artifacts.
+    It remains as a named utility to preserve call sites and keep a single seam
+    if legacy compatibility handling is reintroduced later.
+    """
+    return np.eye(3, dtype=np.float32)
 
 
 def _to_z_up_points(points: np.ndarray) -> np.ndarray:
@@ -102,6 +109,9 @@ class CameraPathGenerator:
             for state in getattr(optimization_artifact, "refined_camera_states", []):
                 state_map[(state.stream_id, float(state.time_sec))] = state
         if not state_map and geometry_artifact is not None:
+            for stream_id, states in getattr(geometry_artifact, "camera_states_by_stream", {}).items():
+                for state in states:
+                    state_map[(stream_id, float(state.time_sec))] = state
             for state in getattr(geometry_artifact, "camera_states", []):
                 state_map[(state.stream_id, float(state.time_sec))] = state
         for item in self._time_grid(scene_artifact):
