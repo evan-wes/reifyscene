@@ -247,6 +247,17 @@ class VGGTInitializer(GeometryInitializer):
             return type(value)(self._numpyify(v) for v in value)
         return value
 
+    def _promote_camera_prediction_precision(self, predictions: dict[str, Any]) -> dict[str, Any]:
+        """Promote camera-related tensors to float32 before linalg-heavy decoding."""
+        promoted = predictions
+        for key in ("pose_enc", "extrinsic", "intrinsic"):
+            value = predictions.get(key)
+            if isinstance(value, torch.Tensor) and value.dtype in (torch.float16, torch.bfloat16):
+                if promoted is predictions:
+                    promoted = dict(predictions)
+                promoted[key] = value.float()
+        return promoted
+
     def _debug_describe_value(
         self,
         name: str,
@@ -658,6 +669,8 @@ class VGGTInitializer(GeometryInitializer):
                 "VGGT returned a tuple instead of the expected prediction dictionary; "
                 "update the adapter if the upstream API changed."
             )
+
+        predictions = self._promote_camera_prediction_precision(predictions)
 
         if "pose_enc" in predictions and ("extrinsic" not in predictions or "intrinsic" not in predictions):
             extrinsic, intrinsic = self._pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])

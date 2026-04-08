@@ -629,8 +629,29 @@ def test_vggt_long_true_mixed_precision_patch_overrides_forward_without_third_pa
     with init._patched_vggt_true_mixed_precision():
         predictions = model.forward(torch.zeros((2, 3, 28, 28)))
         assert "pose_enc" in predictions
+        assert predictions["pose_enc"].dtype == torch.float32
         assert "depth" in predictions
         assert "world_points" in predictions
         assert "images" in predictions
 
     assert model.forward(torch.zeros((2, 3, 28, 28))) == {"original": True}
+
+
+def test_vggt_promotes_camera_predictions_before_pose_decoding() -> None:
+    init = VGGTInitializer({"backend_mode": "real", "device": "cuda"})
+
+    pose_enc = torch.ones((1, 2, 9), dtype=torch.bfloat16)
+    extrinsic = torch.ones((1, 2, 4, 4), dtype=torch.bfloat16)
+    intrinsic = torch.ones((1, 2, 3, 3), dtype=torch.bfloat16)
+
+    promoted = init._promote_camera_prediction_precision({
+        "pose_enc": pose_enc,
+        "extrinsic": extrinsic,
+        "intrinsic": intrinsic,
+        "depth": torch.ones((1, 2, 4, 4, 1), dtype=torch.bfloat16),
+    })
+
+    assert promoted["pose_enc"].dtype == torch.float32
+    assert promoted["extrinsic"].dtype == torch.float32
+    assert promoted["intrinsic"].dtype == torch.float32
+    assert promoted["depth"].dtype == torch.bfloat16

@@ -320,3 +320,81 @@ def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> N
     assert (tmp_path / 'render_hq' / 'novel_view_debug_player.html').exists()
     assert 'orbit' in artifact.layer_path_index
     assert all(artifact.layer_path_index['orbit'][key] for key in ('full', 'static_only', 'dynamic_only', 'triptych'))
+
+def test_offline_high_quality_dynamic_sprites_use_writable_alpha(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    sprite_rgba = np.zeros((16, 12, 4), dtype=np.uint8)
+    sprite_rgba[..., 0] = 220
+    sprite_rgba[..., 1] = 120
+    sprite_rgba[..., 2] = 80
+    sprite_rgba[..., 3] = 180
+
+    scene_artifact = SceneArtifact(
+        run_id='sprite', stage_name='scene', save_dir=tmp_path / 'scene_sprite',
+        static_scene={
+            'points_xyz': np.asarray([[0.0, 0.0, 2.5]], dtype=np.float32),
+            'colors_rgb': np.asarray([[255, 255, 255]], dtype=np.uint8),
+            'center_xyz': [0.0, 0.0, 2.5],
+            'num_points': 1,
+        },
+        dynamic_entities={'humans': [], 'objects': []},
+        frame_refs=[frame0],
+        timeline={'source': 'tracking'},
+        render_contract={
+            'schema': 'layered_scene_v2',
+            'supported_backends': ['gaussian_layered', 'offline_high_quality'],
+            'quality_modes': ['realtime', 'offline_high_quality'],
+            'world_frame': {'up_axis': 'z', 'gravity_dir': [0.0, 0.0, -1.0]},
+            'static_layer': {
+                'num_gaussians': 1,
+                'means_xyz': np.asarray([[0.0, 0.0, 2.5]], dtype=np.float32),
+                'scales_xyz': np.asarray([[0.04, 0.04, 0.04]], dtype=np.float32),
+                'colors_rgb': np.asarray([[255, 255, 255]], dtype=np.uint8),
+                'opacities': np.asarray([0.9], dtype=np.float32),
+                'source_codes': np.asarray([0], dtype=np.int16),
+            },
+            'appearance': {
+                'static_sources': [],
+                'static_source_count': 0,
+                'dynamic_observation_counts': {'humans': 1, 'objects': 0},
+            },
+            'dynamic_layers': {
+                'humans': [{
+                    'entity_id': 'human_0',
+                    'entity_type': 'human',
+                    'display_label': 'human_0',
+                    'anchor_xyz': [0.0, 0.0, 2.0],
+                    'times_sec': [0.0],
+                    'centers_xyz': [[0.0, 0.0, 2.0]],
+                    'template_offsets_xyz': [[0.0, 0.0, 0.0]],
+                    'template_scales_xyz': [[0.12, 0.12, 0.12]],
+                    'template_opacities': [0.8],
+                    'color_rgb': [220, 120, 80],
+                    'support_counts': [1],
+                    'observations': [{
+                        'time_sec': 0.0,
+                        'world_size_wh': [0.6, 1.4],
+                        'sprite_rgba': sprite_rgba,
+                    }],
+                }],
+                'objects': [],
+            },
+        },
+    )
+    scene_model = Gaussian4DScene()
+    scene_model.initialize_from_scene(scene_artifact)
+    renderer = build_renderer({
+        'backend_name': 'offline_high_quality',
+        'width': 160,
+        'height': 90,
+        'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
+        'offline_high_quality': {
+            'render_scale': 1,
+            'dynamic_sprite_min_alpha': 12,
+            'nerf_refinement': {'enabled': False},
+        },
+    })
+    artifact = renderer.fit(scene_model, save_dir=tmp_path / 'render_sprite')
+    assert artifact.path_index['orbit']
+    frame_img = np.asarray(Image.open(tmp_path / 'render_sprite' / artifact.path_index['orbit'][0]))
+    assert frame_img.sum() > 0

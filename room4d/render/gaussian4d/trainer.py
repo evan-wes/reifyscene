@@ -228,13 +228,13 @@ class Gaussian4DTrainer(RenderBackend):
                     up_t = torch.as_tensor(up, device=self.device, dtype=torch.float32)
                     forward = target_t - eye_t
                     forward = forward / torch.clamp(torch.linalg.norm(forward), min=1e-8)
-                    right = torch.cross(forward, up_t)
+                    right = torch.linalg.cross(forward, up_t)
                     right_norm = torch.linalg.norm(right)
                     if float(right_norm.item()) < 1e-8:
                         right = torch.tensor([1.0, 0.0, 0.0], device=self.device)
                     else:
                         right = right / right_norm
-                    true_up = torch.cross(right, forward)
+                    true_up = torch.linalg.cross(right, forward)
                     true_up = true_up / torch.clamp(torch.linalg.norm(true_up), min=1e-8)
                     R = torch.stack([right, true_up, forward], dim=0)
                     cam = (pts - eye_t[None, :]) @ R.T
@@ -438,7 +438,7 @@ class Gaussian4DTrainer(RenderBackend):
             if px_height <= 2 or px_width <= 2:
                 continue
             sprite_resized = sprite.resize((px_width, px_height), resample=Image.Resampling.LANCZOS)
-            alpha = np.asarray(sprite_resized.getchannel("A"), dtype=np.uint8)
+            alpha = np.array(sprite_resized.getchannel("A"), dtype=np.uint8, copy=True)
             alpha[alpha < self.dynamic_sprite_min_alpha] = 0
             sprite_resized.putalpha(Image.fromarray(alpha, mode="L"))
             if self.dynamic_sprite_sharpen > 1e-6:

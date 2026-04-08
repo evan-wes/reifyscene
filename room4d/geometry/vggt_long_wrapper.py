@@ -641,7 +641,10 @@ class VGGTLongInitializer(VGGTInitializer):
             predictions = {}
             if model_self.camera_head is not None:
                 pose_enc_list = model_self.camera_head(aggregated_tokens_list)
-                predictions["pose_enc"] = pose_enc_list[-1]
+                pose_enc = pose_enc_list[-1]
+                if isinstance(pose_enc, torch.Tensor) and pose_enc.dtype in (torch.float16, torch.bfloat16):
+                    pose_enc = pose_enc.float()
+                predictions["pose_enc"] = pose_enc
             if model_self.depth_head is not None:
                 depth, depth_conf = model_self.depth_head(
                     aggregated_tokens_list,
