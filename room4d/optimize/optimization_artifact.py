@@ -195,8 +195,10 @@ class OptimizationArtifact(BaseArtifact):
             rgb = np.asarray(Image.open(self.save_dir / 'images' / image_name).convert('RGB'))
             depth_preview = GeometryArtifact._depth_to_preview_image(depth_payload['depth'])
             depth_preview = np.repeat(depth_preview[..., None], 3, axis=2)
-            bg_pts, bg_cols = GeometryArtifact._sample_point_cloud(
-                point_payload['points'], rgb=rgb, max_points=max_points, confidence=point_payload.get('confidence')
+            bg_pts, bg_cols = track_artifact._sample_geometry_debug_cloud(
+                point_payload,
+                rgb=rgb,
+                max_points=max_points,
             )
             if bg_pts.size == 0:
                 bg_pts = np.zeros((1, 3), dtype=np.float32)

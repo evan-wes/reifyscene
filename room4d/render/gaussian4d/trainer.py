@@ -138,6 +138,38 @@ class Gaussian4DTrainer(RenderBackend):
             "source_counts": static_layer.get("source_counts", {}),
         }
 
+    @staticmethod
+    def _closest_valid_center(times: np.ndarray, centers: list[Any], fallback: list[float], time_sec: float) -> np.ndarray:
+        candidates: list[tuple[float, np.ndarray]] = []
+        for idx, center in enumerate(centers):
+            if center is None:
+                continue
+            arr = np.asarray(center, dtype=np.float32)
+            if arr.shape != (3,) or not np.all(np.isfinite(arr)):
+                continue
+            t = float(times[idx]) if idx < times.size else float(time_sec)
+            candidates.append((abs(t - float(time_sec)), arr))
+        if not candidates:
+            return np.asarray(fallback, dtype=np.float32)
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1].astype(np.float32)
+
+    @staticmethod
+    def _choose_observation(observations: list[dict[str, Any]], center_xyz: np.ndarray, time_sec: float) -> dict[str, Any] | None:
+        if not observations:
+            return None
+        def score(obs: dict[str, Any]) -> tuple[float, float]:
+            time_gap = abs(float(obs.get("time_sec", time_sec)) - float(time_sec))
+            render_score = float(obs.get("render_score", 0.0))
+            center_gap = 0.0
+            obs_center = obs.get("center_xyz")
+            if obs_center is not None:
+                obs_center_arr = np.asarray(obs_center, dtype=np.float32)
+                if obs_center_arr.shape == (3,) and np.all(np.isfinite(obs_center_arr)):
+                    center_gap = float(np.linalg.norm(obs_center_arr - center_xyz))
+            return (time_gap + 0.15 * center_gap, -render_score)
+        return min(observations, key=score)
+
     def _select_dynamic_layers(self, scene_artifact, time_sec: float) -> list[dict[str, Any]]:
         contract = self._scene_contract(scene_artifact)
         dynamic_layers = contract.get("dynamic_layers", {}) or {}
@@ -150,17 +182,21 @@ class Gaussian4DTrainer(RenderBackend):
                 observations = list(ent.get("observations", []) or [])
                 if times.size == 0:
                     center = np.asarray(ent.get("anchor_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
-                    obs = observations[0] if observations else None
                 else:
-                    idx = int(np.argmin(np.abs(times - float(time_sec))))
-                    chosen = centers[idx] if idx < len(centers) else ent.get("anchor_xyz", [0.0, 0.0, 0.0])
-                    center = np.asarray(chosen, dtype=np.float32)
-                    obs = min(observations, key=lambda o: abs(float(o.get("time_sec", time_sec)) - float(time_sec))) if observations else None
+                    center = self._closest_valid_center(times, centers, ent.get("anchor_xyz", [0.0, 0.0, 0.0]), float(time_sec))
                 if not np.all(np.isfinite(center)):
                     continue
+                obs = self._choose_observation(observations, center, float(time_sec))
+                if obs is not None and obs.get("center_xyz") is not None:
+                    obs_center = np.asarray(obs.get("center_xyz"), dtype=np.float32)
+                    if obs_center.shape == (3,) and np.all(np.isfinite(obs_center)):
+                        center = obs_center
                 color = np.asarray(ent.get("color_rgb", [255, 64, 64]), dtype=np.uint8)
                 support_counts = ent.get("support_counts", [])
                 support_count = int(max(support_counts) if support_counts else 0)
+                render_priority = float(ent.get("render_priority", 0.0))
+                obs_score = 0.0 if obs is None else float(obs.get("render_score", 0.0))
+                time_gap = 0.0 if obs is None else abs(float(obs.get("time_sec", time_sec)) - float(time_sec))
                 per_kind.append({
                     "entity_id": ent["entity_id"],
                     "entity_type": ent["entity_type"],
@@ -171,9 +207,12 @@ class Gaussian4DTrainer(RenderBackend):
                     "template_opacities": np.asarray(ent.get("template_opacities", [0.8]), dtype=np.float32),
                     "color_rgb": color,
                     "support_count": support_count,
+                    "render_priority": render_priority,
                     "observation": obs,
+                    "observation_score": obs_score,
+                    "observation_time_gap": time_gap,
                 })
-            per_kind = sorted(per_kind, key=lambda e: (-e["support_count"], e["entity_id"]))[: self.max_dynamic_entities_per_kind]
+            per_kind = sorted(per_kind, key=lambda e: (-e["render_priority"], -e["observation_score"], e["observation_time_gap"], -e["support_count"], e["entity_id"]))[: self.max_dynamic_entities_per_kind]
             selected.extend(per_kind)
         return selected
 

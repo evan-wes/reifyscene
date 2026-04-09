@@ -218,3 +218,19 @@ def test_track_lifting_preserves_tracking_timeline(tmp_path: Path) -> None:
     assert [fr.frame_idx for fr in lifted.selected_frames] == [fr.frame_idx for fr in tracking_timeline]
     assert lifted.metadata['geometry_selected_frames'][0]['frame_idx'] == 0
     assert lifted.metadata['geometry_selected_frames'][1]['frame_idx'] == 4
+
+
+def test_tracking_debug_sampler_fallback_when_geometry_sampler_signature_changes(tmp_path: Path, monkeypatch) -> None:
+    geometry = _make_geometry_artifact(tmp_path, 'cam_00', width=16, height=12)
+    payload = geometry.pointmaps_by_frame['cam_00:0']
+    rgb = np.zeros((12, 16, 3), dtype=np.uint8)
+
+    def _broken_sampler(*args, **kwargs):
+        raise TypeError("GeometryArtifact._sample_point_cloud() missing 1 required positional argument: 'points'")
+
+    monkeypatch.setattr(GeometryArtifact, '_sample_point_cloud', _broken_sampler)
+    pts, cols = TrackArtifact._sample_geometry_debug_cloud(payload, rgb=rgb, max_points=32)
+    assert pts.shape[1] == 3
+    assert cols is not None
+    assert cols.shape[1] == 3
+

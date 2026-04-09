@@ -95,6 +95,64 @@ class TrackArtifact(BaseArtifact):
         r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
+
+    @staticmethod
+    def _sample_geometry_debug_cloud(
+        point_payload: dict[str, Any],
+        *,
+        rgb: np.ndarray | None,
+        max_points: int,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Sample a geometry point map for debug visualization.
+
+        This wrapper tolerates older and newer GeometryArtifact helper
+        signatures by falling back to the public geometry normalization helpers
+        if the direct sampler lookup is not callable in the current form.
+        """
+        kwargs = {
+            'rgb': rgb,
+            'max_points': max_points,
+            'confidence': point_payload.get('confidence'),
+        }
+        sample_fn = GeometryArtifact._sample_point_cloud
+        try:
+            return sample_fn(point_payload['points'], **kwargs)
+        except TypeError as exc:
+            message = str(exc)
+            if 'points' not in message:
+                raise
+            points = GeometryArtifact._points_to_debug_basis(
+                GeometryArtifact._ensure_hwc_points(point_payload['points'])
+            )
+            h, w, _ = points.shape
+            pts = points.reshape(-1, 3)
+            valid = np.isfinite(pts).all(axis=1)
+            conf = kwargs['confidence']
+            if conf is not None:
+                conf_arr = np.asarray(conf).reshape(-1)
+                if conf_arr.shape[0] == pts.shape[0]:
+                    valid &= np.isfinite(conf_arr)
+                    valid &= conf_arr > 0
+            cols = None
+            if rgb is not None:
+                rgb_arr = np.asarray(rgb)
+                if rgb_arr.ndim == 3 and rgb_arr.shape[-1] == 3:
+                    if rgb_arr.shape[:2] != (h, w):
+                        rgb_arr = np.asarray(
+                            Image.fromarray(rgb_arr.astype(np.uint8)).resize((w, h), resample=Image.BILINEAR)
+                        )
+                    flat_rgb = rgb_arr.reshape(-1, 3)
+                    if flat_rgb.shape[0] == pts.shape[0]:
+                        cols = flat_rgb[valid]
+            pts = pts[valid]
+            if pts.shape[0] > max_points:
+                stride = int(np.ceil(pts.shape[0] / max_points))
+                pts = pts[::stride]
+                if cols is not None:
+                    cols = cols[::stride]
+            return pts.astype(np.float32), None if cols is None else cols.astype(np.uint8)
+
+
     @staticmethod
     def _observations_from_payload(stream_id: str, payload: dict[str, Any]) -> list[TrackObservation]:
         frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
@@ -309,11 +367,10 @@ class TrackArtifact(BaseArtifact):
             rgb = np.asarray(Image.open(self.save_dir / 'images' / image_name).convert('RGB'))
             depth_preview = GeometryArtifact._depth_to_preview_image(depth_payload['depth'])
             depth_preview = np.repeat(depth_preview[..., None], 3, axis=2)
-            bg_pts, bg_cols = GeometryArtifact._sample_point_cloud(
-                point_payload['points'],
+            bg_pts, bg_cols = self._sample_geometry_debug_cloud(
+                point_payload,
                 rgb=rgb,
                 max_points=max_points,
-                confidence=point_payload.get('confidence'),
             )
             if bg_pts.size == 0:
                 bg_pts = np.zeros((1, 3), dtype=np.float32)

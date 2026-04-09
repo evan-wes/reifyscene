@@ -182,8 +182,21 @@ class GeometryArtifact(BaseArtifact):
         A_inv[:3, :3] = A[:3, :3].T
         return A @ T @ A_inv
 
-    @staticmethod
+
+    @classmethod
+    def _points_to_debug_basis(cls, points: np.ndarray) -> np.ndarray:
+        """Transform points into the debug visualization basis.
+
+        This wrapper keeps the debug export path compatible across revisions
+        where the basis helper was named differently or switched between class
+        and instance-style methods. The current debug basis is the same Z-up
+        transform used by ``_points_to_z_up``.
+        """
+        return cls._points_to_z_up(points)
+
+    @classmethod
     def _sample_point_cloud(
+        cls,
         points: np.ndarray,
         rgb: np.ndarray | None = None,
         *,
@@ -199,7 +212,7 @@ class GeometryArtifact(BaseArtifact):
         RGB image is resized to the point-map resolution before flattening so the
         boolean validity mask lines up with the color array.
         """
-        point_arr = GeometryArtifact._points_to_z_up(GeometryArtifact._ensure_hwc_points(points))
+        point_arr = cls._points_to_debug_basis(cls._ensure_hwc_points(points))
         h, w, _ = point_arr.shape
         pts = point_arr.reshape(-1, 3)
         valid = np.isfinite(pts).all(axis=1)

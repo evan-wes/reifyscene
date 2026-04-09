@@ -398,3 +398,79 @@ def test_offline_high_quality_dynamic_sprites_use_writable_alpha(tmp_path: Path)
     assert artifact.path_index['orbit']
     frame_img = np.asarray(Image.open(tmp_path / 'render_sprite' / artifact.path_index['orbit'][0]))
     assert frame_img.sum() > 0
+
+
+def test_scene_assembler_estimates_dynamic_center_from_masked_point_region(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    img0 = _make_frame(tmp_path, 'center_mask')
+    pts = np.zeros((16, 16, 3), dtype=np.float32)
+    pts[..., 2] = 10.0
+    pts[4:12, 5:11, 2] = 2.0
+    geometry = GeometryArtifact(
+        run_id='mask_center',
+        stage_name='geometry',
+        save_dir=tmp_path / 'geometry_mask_center',
+        selected_frames=[frame0],
+        intrinsics_by_stream={'cam_00': CameraIntrinsics(500, 500, 8, 8)},
+        camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0.0, CameraIntrinsics(500, 500, 8, 8), CameraPose(np.eye(4, dtype=np.float32)))]},
+        pointmaps_by_frame={'cam_00:0': {'points': pts, 'confidence': np.ones((16, 16), dtype=np.float32)}},
+        depthmaps_by_frame={},
+        metadata={'debug_image_paths': {'cam_00:0': img0}},
+    )
+    track_artifact = TrackArtifact(
+        run_id='mask_center', stage_name='tracking', save_dir=tmp_path / 'tracking_mask_center',
+        track_payloads_by_stream={'cam_00': {'frame_indices': np.asarray([0], dtype=np.int32), 'points_xy': np.zeros((1, 0, 2), dtype=np.float32), 'visibility': np.zeros((1, 0), dtype=bool)}}, selected_frames=[frame0]
+    )
+    human = HumanState(
+        human_id='human_main', frame_ref=frame0, bbox_xyxy=np.asarray([5, 4, 11, 12], dtype=np.float32),
+        mask_rle=None, keypoints_2d=None, densepose=None, smpl_params=None, confidence=0.95,
+        attributes={'track_ids': [], 'support_track_count': 0, 'detection_id': 'hum_main'}
+    )
+    humans = HumanArtifact(run_id='mask_center', stage_name='humans', save_dir=tmp_path / 'humans_mask_center', humans=[human], frame_index={'cam_00:0': ['human_main']})
+    mask = np.zeros((16, 16), dtype=bool)
+    mask[4:12, 5:11] = True
+    humans.mask_arrays = {'hum_main': mask}
+    assembler = SingleVideoSceneAssembler(max_static_points_per_frame=32, max_static_points_total=64)
+    scene_artifact = assembler.assemble(
+        run_id='mask_center', save_dir=tmp_path / 'scene_mask_center', geometry_artifact=geometry,
+        track_artifact=track_artifact, human_artifact=humans,
+    )
+    ent = scene_artifact.dynamic_entities['humans'][0]
+    assert np.allclose(ent['anchor_xyz'][2], 2.0, atol=0.3)
+
+
+def test_dynamic_layer_selection_prefers_render_priority(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    scene_artifact = SceneArtifact(
+        run_id='priority', stage_name='scene', save_dir=tmp_path / 'scene_priority',
+        static_scene={'points_xyz': np.zeros((0, 3), dtype=np.float32), 'colors_rgb': np.zeros((0, 3), dtype=np.uint8), 'center_xyz': [0.0, 0.0, 0.0], 'num_points': 0},
+        dynamic_entities={'humans': [], 'objects': []},
+        frame_refs=[frame0],
+        timeline={'source': 'tracking'},
+        render_contract={
+            'schema': 'layered_scene_v2',
+            'dynamic_layers': {
+                'humans': [
+                    {
+                        'entity_id': 'dancer', 'entity_type': 'human', 'display_label': 'person', 'color_rgb': [255, 0, 0],
+                        'times_sec': [0.0], 'centers_xyz': [[0.0, 0.0, 2.0]], 'anchor_xyz': [0.0, 0.0, 2.0],
+                        'support_counts': [1], 'render_priority': 10.0,
+                        'template_offsets_xyz': [[0.0, 0.0, 0.0]], 'template_scales_xyz': [[0.1, 0.1, 0.1]], 'template_opacities': [0.8],
+                        'observations': [{'time_sec': 0.0, 'render_score': 1.0, 'center_xyz': [0.0, 0.0, 2.0]}],
+                    },
+                    {
+                        'entity_id': 'background_person', 'entity_type': 'human', 'display_label': 'person', 'color_rgb': [0, 255, 0],
+                        'times_sec': [0.0], 'centers_xyz': [[1.0, 0.0, 3.0]], 'anchor_xyz': [1.0, 0.0, 3.0],
+                        'support_counts': [4], 'render_priority': 1.0,
+                        'template_offsets_xyz': [[0.0, 0.0, 0.0]], 'template_scales_xyz': [[0.1, 0.1, 0.1]], 'template_opacities': [0.8],
+                        'observations': [{'time_sec': 0.0, 'render_score': 0.1, 'center_xyz': [1.0, 0.0, 3.0]}],
+                    },
+                ],
+                'objects': [],
+            },
+        },
+    )
+    trainer = Gaussian4DTrainer({'max_dynamic_entities_per_kind': 1})
+    selected = trainer._select_dynamic_layers(scene_artifact, 0.0)
+    assert len(selected) == 1
+    assert selected[0]['entity_id'] == 'dancer'

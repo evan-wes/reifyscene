@@ -68,3 +68,14 @@ def test_ground_plane_detection_canonicalizes_to_z_up(tmp_path: Path) -> None:
     cam_zs = [state.pose.T_world_cam[2, 3] for state in geometry.camera_states_by_stream['cam_00']]
     assert min(cam_zs) > 1.0
     assert any('Z points upward' in note for note in geometry.notes)
+
+
+def test_geometry_sample_point_cloud_callable_from_class() -> None:
+    points = np.zeros((4, 5, 3), dtype=np.float32)
+    points[..., 2] = 1.0
+    rgb = np.zeros((4, 5, 3), dtype=np.uint8)
+    pts, cols = GeometryArtifact._sample_point_cloud(points, rgb=rgb, max_points=16)
+    assert pts.shape[1] == 3
+    assert cols is not None
+    assert cols.shape[1] == 3
+

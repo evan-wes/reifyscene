@@ -23,6 +23,9 @@ geometry:
     ransac_iterations: 160
     distance_threshold: 0.035
     min_inlier_ratio: 0.06
+    min_alignment_cos: 0.45
+    alignment_weight: 0.18
+    camera_up_axis: -y
     random_seed: 7
 
 optimization:
@@ -40,6 +43,7 @@ render:
   height: 450
   point_limit: 10000
   dynamic_point_budget: 180
+  max_dynamic_entities_per_kind: 3
   frame_stride: 1
   max_frames_per_path: 32
   debug_triptych: true

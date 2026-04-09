@@ -41,6 +41,9 @@ class GroundPlaneCanonicalizer:
         self.ransac_iterations = max(16, int(cfg.get("ransac_iterations", 160)))
         self.distance_threshold = float(cfg.get("distance_threshold", 0.035))
         self.min_inlier_ratio = float(cfg.get("min_inlier_ratio", 0.06))
+        self.min_alignment_cos = float(cfg.get("min_alignment_cos", 0.45))
+        self.alignment_weight = float(cfg.get("alignment_weight", 0.18))
+        self.camera_up_axis = str(cfg.get("camera_up_axis", "-y")).strip().lower()
         self.random_seed = int(cfg.get("random_seed", 7))
 
     @staticmethod
@@ -119,6 +122,44 @@ class GroundPlaneCanonicalizer:
             return np.zeros((0, 3), dtype=np.float64)
         return np.stack(centers, axis=0)
 
+    def _preferred_up_direction(self, geometry_artifact) -> np.ndarray | None:
+        axes: list[np.ndarray] = []
+        axis_map = {
+            "x": lambda R: R[:, 0],
+            "+x": lambda R: R[:, 0],
+            "-x": lambda R: -R[:, 0],
+            "y": lambda R: R[:, 1],
+            "+y": lambda R: R[:, 1],
+            "-y": lambda R: -R[:, 1],
+            "z": lambda R: R[:, 2],
+            "+z": lambda R: R[:, 2],
+            "-z": lambda R: -R[:, 2],
+        }
+        extractor = axis_map.get(self.camera_up_axis, axis_map["-y"])
+        ref: np.ndarray | None = None
+        for states in (getattr(geometry_artifact, "camera_states_by_stream", {}) or {}).values():
+            for state in states:
+                Twc = np.asarray(state.pose.T_world_cam, dtype=np.float64)
+                if Twc.shape != (4, 4) or not np.isfinite(Twc[:3, :3]).all():
+                    continue
+                up = np.asarray(extractor(Twc[:3, :3]), dtype=np.float64)
+                norm = float(np.linalg.norm(up))
+                if norm < 1e-8:
+                    continue
+                up = up / norm
+                if ref is None:
+                    ref = up
+                elif float(np.dot(up, ref)) < 0.0:
+                    up = -up
+                axes.append(up)
+        if not axes:
+            return None
+        mean = np.mean(np.stack(axes, axis=0), axis=0)
+        norm = float(np.linalg.norm(mean))
+        if norm < 1e-8:
+            return None
+        return mean / norm
+
     def estimate(self, geometry_artifact) -> GroundPlaneEstimate | None:
         if not self.enabled:
             return None
@@ -126,6 +167,7 @@ class GroundPlaneCanonicalizer:
         if points.shape[0] < 32:
             return None
         cameras = self._camera_centers(geometry_artifact)
+        preferred_up = self._preferred_up_direction(geometry_artifact)
         rng = np.random.default_rng(self.random_seed)
         best: dict[str, Any] | None = None
         n_points = points.shape[0]
@@ -138,12 +180,15 @@ class GroundPlaneCanonicalizer:
                 continue
             normal = normal / norm
             offset = -float(np.dot(normal, tri[0]))
-            if cameras.size:
+            if preferred_up is not None:
+                if float(np.dot(normal, preferred_up)) < 0.0:
+                    normal = -normal
+                    offset = -offset
+            elif cameras.size:
                 cam_signed = cameras @ normal + offset
                 if np.median(cam_signed) < 0.0:
                     normal = -normal
                     offset = -offset
-                    cam_signed = -cam_signed
             signed = points @ normal + offset
             distances = np.abs(signed)
             inliers = distances <= self.distance_threshold
@@ -153,7 +198,12 @@ class GroundPlaneCanonicalizer:
             inlier_ratio = inlier_count / float(n_points)
             low_height = float(np.percentile(signed, 8.0))
             low_penalty = abs(low_height)
-            score = inlier_ratio - 0.04 * low_penalty
+            alignment = 1.0
+            if preferred_up is not None:
+                alignment = float(abs(np.dot(normal, preferred_up)))
+                if alignment < self.min_alignment_cos:
+                    continue
+            score = inlier_ratio + self.alignment_weight * alignment - 0.04 * low_penalty
             if best is None or score > best["score"]:
                 best = {
                     "normal": normal,
@@ -172,7 +222,11 @@ class GroundPlaneCanonicalizer:
         normal = vh[-1]
         normal = normal / max(np.linalg.norm(normal), 1e-9)
         offset = -float(np.dot(normal, centroid))
-        if cameras.size:
+        if preferred_up is not None:
+            if float(np.dot(normal, preferred_up)) < 0.0:
+                normal = -normal
+                offset = -offset
+        elif cameras.size:
             cam_signed = cameras @ normal + offset
             if np.median(cam_signed) < 0.0:
                 normal = -normal
