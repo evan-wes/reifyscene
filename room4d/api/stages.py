@@ -82,9 +82,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'humans': StageSpec(
             name='humans',
-            dependencies=('ingest', 'tracking'),
+            dependencies=('ingest', 'tracking', 'geometry'),
             artifact_cls=HumanArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_humans(outputs['ingest'], track_artifact=outputs['tracking']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_humans(outputs['ingest'], track_artifact=outputs['tracking'], geometry_artifact=outputs['geometry']),
             load_fn=HumanArtifact.load,
         ),
         'objects': StageSpec(
@@ -117,9 +117,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'render': StageSpec(
             name='render',
-            dependencies=('scene', 'optimization', 'geometry'),
+            dependencies=('scene', 'optimization', 'geometry', 'tracking', 'humans'),
             artifact_cls=RenderArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene'], optimization_artifact=outputs['optimization'], geometry_artifact=outputs['geometry']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene'], optimization_artifact=outputs['optimization'], geometry_artifact=outputs['geometry'], track_artifact=outputs['tracking'], human_artifact=outputs['humans']),
             load_fn=RenderArtifact.load,
         ),
     }

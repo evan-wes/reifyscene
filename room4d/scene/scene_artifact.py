@@ -198,6 +198,10 @@ class SceneArtifact(BaseArtifact):
         colors = np.asarray(self.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
         np.savez_compressed(static_dir / "background_points.npz", points_xyz=points, colors_rgb=colors)
 
+        entity_debug_summary = dict((self.metadata or {}).get('entity_debug_summary', {}) or {})
+        if entity_debug_summary:
+            write_json(self.save_dir / 'render_entity_summary.json', entity_debug_summary)
+
         serializable = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
@@ -216,6 +220,7 @@ class SceneArtifact(BaseArtifact):
             "timeline": self.timeline,
             "render_contract": self._serialize_value(self._save_render_contract()),
             "notes": self.notes,
+            "entity_debug_summary_file": "render_entity_summary.json" if entity_debug_summary else None,
         }
         write_json(self.artifact_path(), serializable)
 

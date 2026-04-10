@@ -27,6 +27,12 @@ render:
     dynamic_sprite_scale: 1.0
     dynamic_sprite_sharpen: 0.4
     dynamic_sprite_min_alpha: 12
+    dynamic_sprite_alpha_blur: 0.9
+    dynamic_soft_depth_margin: 0.08
+    dynamic_soft_depth_scale: 0.18
+    dynamic_observation_bank_size: 3
+    dynamic_temporal_switch_penalty: 0.18
+    dynamic_view_weight: 0.35
     gaussian_fill_weight: 0.35
     nerf_refinement:
       enabled: true

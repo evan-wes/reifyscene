@@ -40,6 +40,7 @@ from room4d.api.stages import build_stage_registry
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.registry import build_renderer
 from room4d.scene.assembler import SingleVideoSceneAssembler
+from room4d.eval.benchmark_runner import BenchmarkRunner
 from room4d.sync.global_time_solver import GlobalTimeAlignmentSolver
 from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
 
@@ -98,6 +99,7 @@ class Room4DPipeline:
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
         self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
+        self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':
@@ -302,6 +304,59 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
+
+    def _project_world_to_image(self, xyz_world: np.ndarray, frame_ref: FrameRef, geometry_artifact) -> np.ndarray | None:
+        if geometry_artifact is None:
+            return None
+        states = (getattr(geometry_artifact, 'camera_states_by_stream', {}) or {}).get(frame_ref.stream_id, [])
+        if not states:
+            return None
+        best = None
+        best_dt = None
+        for st in states:
+            dt = abs(float(st.time_sec) - float(frame_ref.timestamp_sec))
+            if best is None or dt < best_dt:
+                best = st
+                best_dt = dt
+        if best is None:
+            return None
+        Twc = np.asarray(best.pose.T_world_cam, dtype=np.float32)
+        try:
+            Tcw = np.linalg.inv(Twc)
+        except np.linalg.LinAlgError:
+            return None
+        xyz_h = np.asarray(list(np.asarray(xyz_world, dtype=np.float32)) + [1.0], dtype=np.float32)
+        cam = Tcw @ xyz_h
+        if not np.all(np.isfinite(cam)) or abs(float(cam[2])) < 1e-6:
+            return None
+        intr = best.intrinsics
+        x = float(intr.cx) + float(intr.fx) * (float(cam[0]) / float(cam[2]))
+        y = float(intr.cy) + float(intr.fy) * (float(cam[1]) / float(cam[2]))
+        return np.asarray([x, y], dtype=np.float32)
+
+    def _attach_human_debug_projections(self, artifact, track_artifact, geometry_artifact) -> None:
+        if geometry_artifact is None or artifact is None:
+            return
+        projected_by_frame: dict[str, list[dict[str, Any]]] = {}
+        for human in list(getattr(artifact, 'humans', []) or []):
+            try:
+                world = self.scene_assembler._state_world_position(human, 'humans', track_artifact, geometry_artifact, source_artifact=artifact)
+            except Exception:
+                world = None
+            if world is None:
+                continue
+            xy = self._project_world_to_image(np.asarray(world, dtype=np.float32), human.frame_ref, geometry_artifact)
+            if xy is None or not np.all(np.isfinite(xy)):
+                continue
+            frame_key = f"{human.frame_ref.stream_id}:{int(human.frame_ref.frame_idx)}"
+            projected_by_frame.setdefault(frame_key, []).append({
+                'human_id': str(human.human_id),
+                'xy': np.asarray(xy, dtype=np.float32).tolist(),
+                'world_xyz': np.asarray(world, dtype=np.float32).tolist(),
+                'confidence': float(getattr(human, 'confidence', 0.0)),
+            })
+        artifact.metadata['projected_centers_by_frame'] = projected_by_frame
+
     def _effective_sample_stride(self, stage_cfg: dict[str, Any]) -> int:
         """Return the effective original-frame stride for a perception stage."""
         semantic_stride = max(1, int(stage_cfg.get('frame_stride', 1)))
@@ -340,7 +395,7 @@ class Room4DPipeline:
             selected.extend(by_stream[stream_id][::semantic_stride])
         return selected
 
-    def perceive_humans(self, ingest_artifact, track_artifact=None):
+    def perceive_humans(self, ingest_artifact, track_artifact=None, geometry_artifact=None):
         """Run single-video human detection, pose, DensePose, SMPL, and association."""
         humans_cfg = self.cfg.get('humans', {})
         selected_frames = self._select_perception_frames(ingest_artifact, track_artifact, humans_cfg, default_source='tracking')
@@ -499,6 +554,7 @@ class Room4DPipeline:
         ) for h in human_states]
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
         artifact = self.human_associator.associate_across_views(artifact)
+        self._attach_human_debug_projections(artifact, track_artifact, geometry_artifact)
         self._stamp_stage_metadata(artifact, 'humans', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
@@ -661,7 +717,7 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None):
+    def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None, track_artifact=None, human_artifact=None):
         """Fit a renderable 4D scene model and export novel-view playback."""
         scene = Gaussian4DScene(self.cfg.get('render', {}))
         scene.initialize_from_scene(scene_artifact)
@@ -672,6 +728,17 @@ class Room4DPipeline:
             geometry_artifact=geometry_artifact,
             save_dir=render_dir,
         )
+        evaluation = self.benchmark_runner.run(
+            geometry_artifact=geometry_artifact,
+            track_artifact=track_artifact,
+            human_artifact=human_artifact,
+            scene_artifact=scene_artifact,
+            render_artifact=artifact,
+            renderer=self.renderer,
+            output_dir=render_dir,
+        )
+        artifact.scene_state['evaluation'] = evaluation.get('metrics', {})
+        artifact.metadata['failure_report'] = evaluation.get('failure_report', {})
         artifact.save_dir = render_dir
         self._stamp_stage_metadata(artifact, 'render', video_paths=self._video_paths_for_stage())
         artifact.save()
@@ -709,12 +776,12 @@ class Room4DPipeline:
         sync_artifact = self.synchronize(ingest_artifact)
         geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
         track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
-        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact)
+        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact, geometry_artifact=geometry_artifact)
         object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
         graph_artifact = self.build_graph(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
         scene_artifact = self.assemble_scene(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
-        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=geometry_artifact)
+        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=geometry_artifact, track_artifact=track_artifact, human_artifact=human_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,

@@ -27,6 +27,10 @@ geometry:
     alignment_weight: 0.18
     camera_up_axis: -y
     random_seed: 7
+    manual_up_vector: null
+    lock_gravity_vector: false
+    floor_height_quantile: 0.06
+    max_saved_candidates: 12
 
 optimization:
   schedule: stage1_sync_pose
@@ -63,6 +67,12 @@ render:
     dynamic_sprite_scale: 1.0
     dynamic_sprite_sharpen: 0.4
     dynamic_sprite_min_alpha: 12
+    dynamic_sprite_alpha_blur: 0.9
+    dynamic_soft_depth_margin: 0.08
+    dynamic_soft_depth_scale: 0.18
+    dynamic_observation_bank_size: 3
+    dynamic_temporal_switch_penalty: 0.18
+    dynamic_view_weight: 0.35
     gaussian_fill_weight: 0.35
     nerf_refinement:
       enabled: true
@@ -70,3 +80,13 @@ render:
       detail_strength: 0.18
       sharpen_radius: 1.1
       max_dynamic_boost: 0.45
+
+evaluation:
+  reprojection_error_p90_px_max: 24.0
+  mean_human_fragments_max: 1.5
+  height_abs_p90_max: 0.40
+  heldout_psnr_mean_min: 11.0
+  geometry: {}
+  tracking: {}
+  rendering:
+    max_views: 4

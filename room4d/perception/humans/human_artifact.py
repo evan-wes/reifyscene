@@ -200,16 +200,28 @@ class HumanArtifact(BaseArtifact):
             history = sorted(history, key=lambda item: item[2])
             if len(history) >= 2:
                 draw.line([(x, y) for x, y, _ in history], fill=(*rgb_color, 220), width=2)
+        for item in list((self.metadata.get('projected_centers_by_frame', {}) or {}).get(frame_key, []) or []):
+            xy = np.asarray(item.get('xy', []), dtype=np.float32)
+            if xy.shape != (2,) or not np.all(np.isfinite(xy)):
+                continue
+            hid = str(item.get('human_id', 'human'))
+            color = ImageColor.getrgb(self._track_color(hid))
+            x, y = float(xy[0]), float(xy[1])
+            draw.line([(x - 6, y), (x + 6, y)], fill=(*color, 255), width=2)
+            draw.line([(x, y - 6), (x, y + 6)], fill=(*color, 255), width=2)
+            draw.text((x + 6, y + 4), f"3D {hid}", fill=(*color, 255))
         composed = Image.alpha_composite(base, overlay).convert('RGB')
         return np.asarray(composed, dtype=np.uint8)
 
     def _build_summary_rows(self, frame_key: str, frame_humans: list[HumanState], raw_frame_humans: list[HumanState]) -> list[list[str]]:
+        projected = list((self.metadata.get('projected_centers_by_frame', {}) or {}).get(frame_key, []) or [])
         rows = [
             ['Frame', frame_key],
             ['Raw detections', str(len(raw_frame_humans))],
             ['Kept humans', str(len(frame_humans))],
             ['Suppressed', str(len([h for h in raw_frame_humans if h.attributes.get('suppressed')]))],
             ['Persistent IDs', str(len({h.human_id for h in self.humans}))],
+            ['Projected 3D centers', str(len(projected))],
         ]
         track_summaries = self.linked_ids.get('track_summaries', {})
         for h in frame_humans[:8]:

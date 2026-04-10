@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -18,6 +18,11 @@ class GroundPlaneEstimate:
     num_points: int
     num_inliers: int
     transform_world_old_to_new: np.ndarray
+    chosen_score: float = 0.0
+    preferred_up: np.ndarray | None = None
+    candidate_planes: list[dict[str, Any]] = field(default_factory=list)
+    lock_gravity_vector: bool = False
+    manual_up_vector: np.ndarray | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -26,6 +31,11 @@ class GroundPlaneEstimate:
             "inlier_ratio": float(self.inlier_ratio),
             "num_points": int(self.num_points),
             "num_inliers": int(self.num_inliers),
+            "chosen_score": float(self.chosen_score),
+            "preferred_up": None if self.preferred_up is None else np.asarray(self.preferred_up, dtype=float).tolist(),
+            "candidate_planes": list(self.candidate_planes),
+            "lock_gravity_vector": bool(self.lock_gravity_vector),
+            "manual_up_vector": None if self.manual_up_vector is None else np.asarray(self.manual_up_vector, dtype=float).tolist(),
             "transform_world_old_to_new": np.asarray(self.transform_world_old_to_new, dtype=float).tolist(),
         }
 
@@ -45,10 +55,24 @@ class GroundPlaneCanonicalizer:
         self.alignment_weight = float(cfg.get("alignment_weight", 0.18))
         self.camera_up_axis = str(cfg.get("camera_up_axis", "-y")).strip().lower()
         self.random_seed = int(cfg.get("random_seed", 7))
+        self.manual_up_vector = None if cfg.get("manual_up_vector") in (None, "", []) else np.asarray(cfg.get("manual_up_vector"), dtype=np.float64)
+        self.lock_gravity_vector = bool(cfg.get("lock_gravity_vector", False))
+        self.floor_height_quantile = float(cfg.get("floor_height_quantile", 0.06))
+        self.max_saved_candidates = max(4, int(cfg.get("max_saved_candidates", 12)))
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
         return f"{stream_id}:{int(frame_idx)}"
+
+    @staticmethod
+    def _normalize(vec: np.ndarray | None) -> np.ndarray | None:
+        if vec is None:
+            return None
+        arr = np.asarray(vec, dtype=np.float64)
+        norm = float(np.linalg.norm(arr))
+        if norm < 1e-8:
+            return None
+        return arr / norm
 
     @staticmethod
     def _rotation_align_a_to_b(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -70,11 +94,7 @@ class GroundPlaneCanonicalizer:
             x, y, z = axis
             K = np.asarray([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
             return np.eye(3, dtype=np.float64) + 2.0 * (K @ K)
-        K = np.asarray([
-            [0.0, -v[2], v[1]],
-            [v[2], 0.0, -v[0]],
-            [-v[1], v[0], 0.0],
-        ], dtype=np.float64)
+        K = np.asarray([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]], dtype=np.float64)
         return np.eye(3, dtype=np.float64) + K + K @ K * ((1.0 - c) / (s * s))
 
     def _sample_points(self, geometry_artifact) -> np.ndarray:
@@ -85,7 +105,7 @@ class GroundPlaneCanonicalizer:
             frames = [frames[int(i)] for i in indices.tolist()]
         sampled: list[np.ndarray] = []
         for frame in frames:
-            payload = geometry_artifact.pointmaps_by_frame.get(self._frame_key(frame.stream_id, frame.frame_idx))
+            payload = (getattr(geometry_artifact, "pointmaps_by_frame", {}) or {}).get(self._frame_key(frame.stream_id, frame.frame_idx))
             if payload is None:
                 continue
             pts = np.asarray(payload.get("points"), dtype=np.float32)
@@ -123,17 +143,13 @@ class GroundPlaneCanonicalizer:
         return np.stack(centers, axis=0)
 
     def _preferred_up_direction(self, geometry_artifact) -> np.ndarray | None:
+        if self.manual_up_vector is not None:
+            return self._normalize(self.manual_up_vector)
         axes: list[np.ndarray] = []
         axis_map = {
-            "x": lambda R: R[:, 0],
-            "+x": lambda R: R[:, 0],
-            "-x": lambda R: -R[:, 0],
-            "y": lambda R: R[:, 1],
-            "+y": lambda R: R[:, 1],
-            "-y": lambda R: -R[:, 1],
-            "z": lambda R: R[:, 2],
-            "+z": lambda R: R[:, 2],
-            "-z": lambda R: -R[:, 2],
+            "x": lambda R: R[:, 0], "+x": lambda R: R[:, 0], "-x": lambda R: -R[:, 0],
+            "y": lambda R: R[:, 1], "+y": lambda R: R[:, 1], "-y": lambda R: -R[:, 1],
+            "z": lambda R: R[:, 2], "+z": lambda R: R[:, 2], "-z": lambda R: -R[:, 2],
         }
         extractor = axis_map.get(self.camera_up_axis, axis_map["-y"])
         ref: np.ndarray | None = None
@@ -155,10 +171,51 @@ class GroundPlaneCanonicalizer:
         if not axes:
             return None
         mean = np.mean(np.stack(axes, axis=0), axis=0)
-        norm = float(np.linalg.norm(mean))
-        if norm < 1e-8:
+        return self._normalize(mean)
+
+    def _build_transform(self, normal: np.ndarray, offset: float) -> np.ndarray:
+        rotation = self._rotation_align_a_to_b(normal, np.asarray([0.0, 0.0, 1.0], dtype=np.float64))
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = rotation
+        transformed_origin_height = float(rotation[2, :].dot(np.zeros((3,), dtype=np.float64)) + offset)
+        transform[:3, 3] = np.asarray([0.0, 0.0, offset], dtype=np.float64)
+        return transform
+
+    def _locked_estimate(self, points: np.ndarray, preferred_up: np.ndarray) -> GroundPlaneEstimate | None:
+        preferred_up = self._normalize(preferred_up)
+        if preferred_up is None:
             return None
-        return mean / norm
+        signed = points @ preferred_up
+        floor_height = float(np.quantile(signed, np.clip(self.floor_height_quantile, 0.0, 0.25)))
+        offset = -floor_height
+        distances = np.abs(signed - floor_height)
+        inliers = distances <= self.distance_threshold
+        num_inliers = int(np.count_nonzero(inliers))
+        inlier_ratio = num_inliers / float(max(points.shape[0], 1))
+        if inlier_ratio < self.min_inlier_ratio:
+            return None
+        candidates = [{
+            "score": float(inlier_ratio + self.alignment_weight),
+            "inlier_ratio": float(inlier_ratio),
+            "alignment": 1.0,
+            "offset": float(offset),
+            "normal_world": preferred_up.astype(float).tolist(),
+            "mode": "locked_manual_up",
+        }]
+        transform = self._build_transform(preferred_up, offset)
+        return GroundPlaneEstimate(
+            normal_world=preferred_up.astype(np.float32),
+            offset=float(offset),
+            inlier_ratio=float(inlier_ratio),
+            num_points=int(points.shape[0]),
+            num_inliers=int(num_inliers),
+            transform_world_old_to_new=transform.astype(np.float32),
+            chosen_score=float(candidates[0]["score"]),
+            preferred_up=preferred_up.astype(np.float32),
+            candidate_planes=candidates,
+            lock_gravity_vector=True,
+            manual_up_vector=None if self.manual_up_vector is None else self.manual_up_vector.astype(np.float32),
+        )
 
     def estimate(self, geometry_artifact) -> GroundPlaneEstimate | None:
         if not self.enabled:
@@ -168,8 +225,11 @@ class GroundPlaneCanonicalizer:
             return None
         cameras = self._camera_centers(geometry_artifact)
         preferred_up = self._preferred_up_direction(geometry_artifact)
+        if self.lock_gravity_vector and preferred_up is not None:
+            return self._locked_estimate(points, preferred_up)
         rng = np.random.default_rng(self.random_seed)
         best: dict[str, Any] | None = None
+        candidates: list[dict[str, Any]] = []
         n_points = points.shape[0]
         for _ in range(self.ransac_iterations):
             idx = rng.choice(n_points, size=3, replace=False)
@@ -204,17 +264,19 @@ class GroundPlaneCanonicalizer:
                 if alignment < self.min_alignment_cos:
                     continue
             score = inlier_ratio + self.alignment_weight * alignment - 0.04 * low_penalty
+            candidate = {
+                "score": float(score),
+                "inlier_ratio": float(inlier_ratio),
+                "alignment": float(alignment),
+                "offset": float(offset),
+                "low_height_penalty": float(low_penalty),
+                "normal_world": normal.astype(float).tolist(),
+            }
+            candidates.append(candidate)
             if best is None or score > best["score"]:
-                best = {
-                    "normal": normal,
-                    "offset": offset,
-                    "inliers": inliers,
-                    "score": score,
-                    "ratio": inlier_ratio,
-                }
+                best = {"normal": normal, "offset": offset, "inliers": inliers, "score": score, "ratio": inlier_ratio}
         if best is None or float(best["ratio"]) < self.min_inlier_ratio:
             return None
-
         inlier_points = points[best["inliers"]]
         centroid = inlier_points.mean(axis=0)
         demeaned = inlier_points - centroid[None, :]
@@ -231,10 +293,8 @@ class GroundPlaneCanonicalizer:
             if np.median(cam_signed) < 0.0:
                 normal = -normal
                 offset = -offset
-        rotation = self._rotation_align_a_to_b(normal, np.asarray([0.0, 0.0, 1.0], dtype=np.float64))
-        transform = np.eye(4, dtype=np.float64)
-        transform[:3, :3] = rotation
-        transform[:3, 3] = np.asarray([0.0, 0.0, offset], dtype=np.float64)
+        transform = self._build_transform(normal, offset)
+        candidates = sorted(candidates, key=lambda item: item["score"], reverse=True)[: self.max_saved_candidates]
         return GroundPlaneEstimate(
             normal_world=normal.astype(np.float32),
             offset=float(offset),
@@ -242,6 +302,11 @@ class GroundPlaneCanonicalizer:
             num_points=int(points.shape[0]),
             num_inliers=int(inlier_points.shape[0]),
             transform_world_old_to_new=transform.astype(np.float32),
+            chosen_score=float(best["score"]),
+            preferred_up=None if preferred_up is None else preferred_up.astype(np.float32),
+            candidate_planes=candidates,
+            lock_gravity_vector=False,
+            manual_up_vector=None if self.manual_up_vector is None else self.manual_up_vector.astype(np.float32),
         )
 
     @staticmethod
@@ -263,30 +328,15 @@ class GroundPlaneCanonicalizer:
             points = payload.get("points")
             if points is None:
                 continue
-            geometry_artifact.pointmaps_by_frame[frame_key] = {
-                **payload,
-                "points": self._transform_points(np.asarray(points, dtype=np.float32), transform),
-            }
+            geometry_artifact.pointmaps_by_frame[frame_key] = {**payload, "points": self._transform_points(np.asarray(points, dtype=np.float32), transform)}
         for stream_id, states in list((geometry_artifact.camera_states_by_stream or {}).items()):
             new_states: list[TimedCameraState] = []
             for state in states:
                 Twc = self._transform_pose(state.pose.T_world_cam, transform)
-                new_states.append(
-                    TimedCameraState(
-                        stream_id=state.stream_id,
-                        time_sec=float(state.time_sec),
-                        intrinsics=state.intrinsics,
-                        pose=CameraPose(T_world_cam=Twc),
-                    )
-                )
+                new_states.append(TimedCameraState(stream_id=state.stream_id, time_sec=float(state.time_sec), intrinsics=state.intrinsics, pose=CameraPose(T_world_cam=Twc)))
             geometry_artifact.camera_states_by_stream[stream_id] = new_states
-        geometry_artifact.metadata["world_frame"] = {
-            "type": "ground_plane_z_up",
-            **estimate.summary(),
-        }
-        geometry_artifact.notes.append(
-            "Canonicalized world frame using a detected ground plane so Z points upward and the floor lies near z=0."
-        )
+        geometry_artifact.metadata["world_frame"] = {"type": "ground_plane_z_up", **estimate.summary()}
+        geometry_artifact.notes.append("Canonicalized world frame using a detected ground plane so Z points upward and the floor lies near z=0.")
 
     def estimate_and_apply(self, geometry_artifact) -> GroundPlaneEstimate | None:
         estimate = self.estimate(geometry_artifact)

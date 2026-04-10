@@ -124,6 +124,10 @@ def test_scene_assembly_and_render(tmp_path: Path) -> None:
     assert human_obs and object_obs
     assert Path(human_obs[0]['sprite_file']).exists()
     assert Path(object_obs[0]['sprite_file']).exists()
+    assert (tmp_path / 'scene' / 'render_entity_summary.json').exists()
+    assert 'mask_coverage' in human_obs[0]
+    assert 'camera_center_xyz' in human_obs[0]
+    assert 'view_dir_xyz' in human_obs[0]
 
     trainer = Gaussian4DTrainer({'width': 320, 'height': 180, 'point_limit': 2000})
     scene_model = Gaussian4DScene()
@@ -471,6 +475,7 @@ def test_dynamic_layer_selection_prefers_render_priority(tmp_path: Path) -> None
         },
     )
     trainer = Gaussian4DTrainer({'max_dynamic_entities_per_kind': 1})
-    selected = trainer._select_dynamic_layers(scene_artifact, 0.0)
+    selected = trainer._select_dynamic_layers(scene_artifact, 0.0, np.asarray([0.0, 0.0, 0.0], dtype=np.float32), np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
     assert len(selected) == 1
     assert selected[0]['entity_id'] == 'dancer'
+    assert 'observation_bank' in selected[0]

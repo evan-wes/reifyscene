@@ -375,11 +375,27 @@ class SingleVideoSceneAssembler:
             mask = None
             if hasattr(source_artifact, "mask_arrays"):
                 mask = source_artifact.mask_arrays.get(det_id)
-            rgba, crop_box = self._extract_crop_rgba(rgb, np.asarray(state.bbox_xyxy, dtype=np.float32), None if mask is None else np.asarray(mask, dtype=bool))
+            mask_bool = None if mask is None else np.asarray(mask, dtype=bool)
+            rgba, crop_box = self._extract_crop_rgba(rgb, np.asarray(state.bbox_xyxy, dtype=np.float32), mask_bool)
             area_norm, center_proximity = self._observation_metrics(state, geometry_artifact)
             confidence = float(getattr(state, "confidence", 0.0))
+            camera_state = self._camera_state_for_frame(geometry_artifact, state.frame_ref)
+            camera_center = None
+            view_dir = None
+            if camera_state is not None:
+                Twc = np.asarray(camera_state.pose.T_world_cam, dtype=np.float32)
+                camera_center = Twc[:3, 3].astype(np.float32).tolist()
+                if center is not None:
+                    vec = np.asarray(center, dtype=np.float32) - Twc[:3, 3].astype(np.float32)
+                    n = float(np.linalg.norm(vec))
+                    if n > 1e-6:
+                        view_dir = (vec / n).astype(np.float32).tolist()
+            mask_coverage = float(np.mean(rgba[..., 3] > 0)) if rgba.size else 0.0
+            alpha_edge_softness = float(np.mean((rgba[..., 3] > 0) & (rgba[..., 3] < 255))) if rgba.size else 0.0
+            render_score = float(0.55 * confidence + 1.8 * area_norm + 0.8 * center_proximity + 0.25 * mask_coverage + 0.08 * alpha_edge_softness)
             observations.append({
                 "frame_key": frame_key,
+                "frame_idx": int(state.frame_ref.frame_idx),
                 "time_sec": float(state.frame_ref.timestamp_sec),
                 "bbox_xyxy": np.asarray(state.bbox_xyxy, dtype=np.float32).tolist(),
                 "crop_box_xyxy": crop_box,
@@ -389,7 +405,11 @@ class SingleVideoSceneAssembler:
                 "center_xyz": None if center is None else np.asarray(center, dtype=np.float32).tolist(),
                 "area_norm": area_norm,
                 "center_proximity": center_proximity,
-                "render_score": float(0.55 * confidence + 1.8 * area_norm + 0.8 * center_proximity),
+                "mask_coverage": mask_coverage,
+                "alpha_edge_softness": alpha_edge_softness,
+                "camera_center_xyz": camera_center,
+                "view_dir_xyz": view_dir,
+                "render_score": render_score,
             })
         return observations
 
@@ -725,11 +745,35 @@ class SingleVideoSceneAssembler:
             "humans": [{k: v for k, v in ent.items() if k != "observations"} for ent in humans],
             "objects": [{k: v for k, v in ent.items() if k != "observations"} for ent in objects],
         }
+        entity_debug_summary = {
+            "humans": [{
+                "stable_id": ent["entity_id"],
+                "render_entity_id": ent["entity_id"],
+                "display_label": ent.get("display_label", ent["entity_type"]),
+                "lifespan_frames": int(ent.get("lifespan_frames", 0)),
+                "support_track_count": int(len(ent.get("support_track_ids", []))),
+                "mean_confidence": float(ent.get("mean_confidence", 0.0)),
+                "render_priority": float(ent.get("render_priority", 0.0)),
+                "observation_count": int(len(ent.get("observations", []))),
+            } for ent in humans],
+            "objects": [{
+                "stable_id": ent["entity_id"],
+                "render_entity_id": ent["entity_id"],
+                "display_label": ent.get("display_label", ent["entity_type"]),
+                "lifespan_frames": int(ent.get("lifespan_frames", 0)),
+                "support_track_count": int(len(ent.get("support_track_ids", []))),
+                "mean_confidence": float(ent.get("mean_confidence", 0.0)),
+                "render_priority": float(ent.get("render_priority", 0.0)),
+                "observation_count": int(len(ent.get("observations", []))),
+            } for ent in objects],
+        }
+        scene_metadata = dict(metadata or {})
+        scene_metadata['entity_debug_summary'] = entity_debug_summary
         return SceneArtifact(
             run_id=run_id,
             stage_name="scene",
             save_dir=save_dir,
-            metadata=metadata or {},
+            metadata=scene_metadata,
             static_scene=static_scene,
             dynamic_entities=dynamic_entities_light,
             frame_refs=frame_refs,
