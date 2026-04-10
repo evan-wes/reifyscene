@@ -4,6 +4,16 @@ shared_rgb_frames:
   enabled: true
   dir_name: debug_rgb_frames
 
+ingest:
+  enabled: false
+  debug_assets: false
+  viewer: false
+
+sync:
+  enabled: false
+  debug_assets: false
+  viewer: false
+
 geometry:
   enabled: true
   depth_pngs: true
@@ -19,19 +29,35 @@ tracking:
   max_trails: 12
   trail_window: 12
 
-objects:
-  enabled: true
-  debug_assets: true
-  viewer: true
-
 humans:
   enabled: true
   debug_assets: true
   viewer: true
 
+objects:
+  enabled: true
+  debug_assets: true
+  viewer: true
+
+graph:
+  enabled: false
+  debug_assets: false
+  viewer: false
+
 optimization:
   enabled: true
+  debug_assets: false
   viewer: true
   max_points: 1000
   max_trails: 12
   trail_window: 12
+
+scene:
+  enabled: false
+  debug_assets: false
+  viewer: false
+
+render:
+  enabled: true
+  debug_assets: false
+  viewer: true

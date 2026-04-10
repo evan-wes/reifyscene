@@ -526,8 +526,9 @@ class Room4DPipeline:
                 'pose_backend': self.human_pose.backend_used,
                 'densepose_backend': self.human_densepose.backend_used,
                 'smpl_backend': self.human_smpl.backend_used,
-                'save_debug_assets': False,
-                'save_debug_html': False,
+                'save_debug_assets': bool(humans_cfg.get('save_debug_assets', humans_cfg.get('debug', False))),
+                'save_debug_html': bool(humans_cfg.get('save_debug_html', humans_cfg.get('debug', False))),
+                'debug_image_paths': dict((track_artifact.metadata.get('debug_image_paths', {}) if track_artifact is not None else {})),
                 'frame_source': str(humans_cfg.get('frame_source', 'tracking')),
                 'frame_stride': int(humans_cfg.get('frame_stride', 1)),
                 'densepose_frame_stride': int(densepose_stride),
@@ -666,8 +667,9 @@ class Room4DPipeline:
             metadata={
                 'detector_backend': self.object_detector.backend_used,
                 'embedder_backend': self.object_embedder.backend_used,
-                'save_debug_assets': False,
-                'save_debug_html': False,
+                'save_debug_assets': bool(objects_cfg.get('save_debug_assets', objects_cfg.get('debug', False))),
+                'save_debug_html': bool(objects_cfg.get('save_debug_html', objects_cfg.get('debug', False))),
+                'debug_image_paths': dict((track_artifact.metadata.get('debug_image_paths', {}) if track_artifact is not None else {})),
                 'frame_source': str(objects_cfg.get('frame_source', 'tracking')),
                 'frame_stride': int(objects_cfg.get('frame_stride', 1)),
                 'selected_frame_count': int(len(selected_frames)),
@@ -694,6 +696,13 @@ class Room4DPipeline:
     def optimize(self, sync_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, graph_artifact=None):
         """Run staged joint optimization."""
         artifact = self.solver.solve_all(sync_artifact, geometry_artifact, track_artifact, human_artifact, object_artifact, graph_artifact)
+        optimization_cfg = self.cfg.get('optimization', {})
+        artifact.metadata.update({
+            'save_refinement_viewer': bool(optimization_cfg.get('save_refinement_viewer', False)),
+            'debug_max_points': int(optimization_cfg.get('debug_max_points', 5000)),
+            'debug_max_trails': int(optimization_cfg.get('debug_max_trails', 12)),
+            'debug_trail_window': int(optimization_cfg.get('debug_trail_window', 12)),
+        })
         artifact.save_dir = self._stage_dir('optimization')
         self._stamp_stage_metadata(artifact, 'optimization', video_paths=self._video_paths_for_stage())
         artifact.save()

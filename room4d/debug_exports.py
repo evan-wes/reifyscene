@@ -29,11 +29,59 @@ def load_debug_config(path: str | None) -> dict[str, Any]:
     cfg = read_yaml(path) or {}
     cfg.setdefault('enabled', True)
     cfg.setdefault('shared_rgb_frames', {'enabled': True, 'dir_name': 'debug_rgb_frames'})
-    cfg.setdefault('geometry', {})
-    cfg.setdefault('tracking', {})
-    cfg.setdefault('objects', {})
-    cfg.setdefault('humans', {})
-    cfg.setdefault('optimization', {})
+    for stage_name in ('ingest', 'sync', 'geometry', 'tracking', 'humans', 'objects', 'graph', 'optimization', 'scene', 'render'):
+        cfg.setdefault(stage_name, {})
+    return cfg
+
+
+def apply_debug_config_to_runtime_cfg(cfg: dict[str, Any], debug_cfg: dict[str, Any]) -> dict[str, Any]:
+    if not debug_cfg or not debug_cfg.get('enabled', False):
+        return cfg
+
+    geometry_cfg = cfg.setdefault('geometry', {})
+    geom_debug = debug_cfg.get('geometry', {})
+    geom_enabled = bool(geom_debug.get('enabled', False))
+    geometry_cfg['debug_shapes'] = geom_enabled and bool(
+        geom_debug.get('debug_assets', True) or geom_debug.get('viewer', True) or geom_debug.get('depth_pngs', True)
+    )
+    geometry_cfg['save_depth_pngs'] = geom_enabled and bool(geom_debug.get('depth_pngs', True))
+    geometry_cfg['debug_max_points'] = int(geom_debug.get('max_points', geometry_cfg.get('debug_max_points', 5000)))
+
+    tracking_cfg = cfg.setdefault('tracking', {})
+    trk_debug = debug_cfg.get('tracking', {})
+    trk_enabled = bool(trk_debug.get('enabled', False))
+    tracking_cfg['debug'] = trk_enabled and bool(trk_debug.get('debug_assets', True) or trk_debug.get('viewer', True))
+    tracking_cfg['debug_max_points'] = int(trk_debug.get('max_points', tracking_cfg.get('debug_max_points', 5000)))
+    tracking_cfg['debug_max_trails'] = int(trk_debug.get('max_trails', tracking_cfg.get('debug_max_trails', 12)))
+    tracking_cfg['debug_trail_window'] = int(trk_debug.get('trail_window', tracking_cfg.get('debug_trail_window', 12)))
+
+    humans_cfg = cfg.setdefault('humans', {})
+    hum_debug = debug_cfg.get('humans', {})
+    hum_enabled = bool(hum_debug.get('enabled', False))
+    humans_cfg['debug'] = hum_enabled and bool(hum_debug.get('debug_assets', True) or hum_debug.get('viewer', True))
+    humans_cfg['save_debug_assets'] = hum_enabled and bool(hum_debug.get('debug_assets', True))
+    humans_cfg['save_debug_html'] = hum_enabled and bool(hum_debug.get('viewer', True))
+
+    objects_cfg = cfg.setdefault('objects', {})
+    obj_debug = debug_cfg.get('objects', {})
+    obj_enabled = bool(obj_debug.get('enabled', False))
+    objects_cfg['debug'] = obj_enabled and bool(obj_debug.get('debug_assets', True) or obj_debug.get('viewer', True))
+    objects_cfg['save_debug_assets'] = obj_enabled and bool(obj_debug.get('debug_assets', True))
+    objects_cfg['save_debug_html'] = obj_enabled and bool(obj_debug.get('viewer', True))
+
+    optimization_cfg = cfg.setdefault('optimization', {})
+    opt_debug = debug_cfg.get('optimization', {})
+    opt_enabled = bool(opt_debug.get('enabled', False))
+    optimization_cfg['save_refinement_viewer'] = opt_enabled and bool(opt_debug.get('viewer', True))
+    optimization_cfg['debug_max_points'] = int(opt_debug.get('max_points', optimization_cfg.get('debug_max_points', 5000)))
+    optimization_cfg['debug_max_trails'] = int(opt_debug.get('max_trails', optimization_cfg.get('debug_max_trails', 12)))
+    optimization_cfg['debug_trail_window'] = int(opt_debug.get('trail_window', optimization_cfg.get('debug_trail_window', 12)))
+
+    render_cfg = cfg.setdefault('render', {})
+    render_debug = debug_cfg.get('render', {})
+    if render_debug:
+        render_cfg['debug_triptych'] = bool(render_debug.get('enabled', False)) and bool(render_debug.get('viewer', True))
+
     return cfg
 
 

@@ -19,7 +19,7 @@ from room4d.api.pipeline import Room4DPipeline
 from room4d.api.resume import ensure_start_stage, materialize_stage_from_prior
 from room4d.api.stages import STAGE_ORDER, write_run_manifest
 from room4d.common.io import read_yaml
-from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from room4d.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from room4d.common.memory import release_memory
 from room4d.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile, save_system_report
 
@@ -459,6 +459,7 @@ def main() -> None:
         return
 
     cfg, rec = build_config(args, system_report=system_report)
+    cfg = apply_debug_config_to_runtime_cfg(cfg, debug_cfg)
     if args.debug:
         console.print('[bold]room4d single-video end-to-end debug run[/bold]')
         console.print(f'video: {args.video}')
@@ -551,6 +552,13 @@ def main() -> None:
         release_name = stage_release_names.get(stage_name)
         if release_name is not None:
             pipeline.release_stage_resources(release_name)
+
+    if debug_cfg.get('enabled', False) and 'ingest' in outputs:
+        export_started = _debug_stage(console, args.debug, 'Deferred debug export')
+        shared_debug_images = materialize_shared_debug_frames(pipeline, outputs['ingest'], debug_cfg)
+        export_debug_artifacts(args.run_dir, debug_cfg, shared_debug_images)
+        release_memory()
+        _debug_stage_done(console, args.debug, 'Deferred debug export', export_started, save_dir=args.run_dir)
 
     _print_frame_summary(console, outputs, cfg)
 
