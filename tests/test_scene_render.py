@@ -479,3 +479,124 @@ def test_dynamic_layer_selection_prefers_render_priority(tmp_path: Path) -> None
     assert len(selected) == 1
     assert selected[0]['entity_id'] == 'dancer'
     assert 'observation_bank' in selected[0]
+
+
+def test_human_smpl_pelvis_anchor_overrides_bad_support_track(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    pts = np.zeros((16, 16, 3), dtype=np.float32)
+    yy, xx = np.mgrid[0:16, 0:16]
+    pts[..., 0] = (xx - 8) * 0.05
+    pts[..., 1] = (yy - 8) * 0.05
+    pts[..., 2] = 2.0
+    pts[8:11, 7:10, 2] = 1.15  # pelvis neighborhood
+    pts[12:15, 6:11, 2] = 0.20  # feet neighborhood, slightly above floor before grounding
+    geometry = GeometryArtifact(
+        run_id='smpl_anchor',
+        stage_name='geometry',
+        save_dir=tmp_path / 'geometry_smpl_anchor',
+        selected_frames=[frame0],
+        intrinsics_by_stream={'cam_00': CameraIntrinsics(500, 500, 8, 8)},
+        camera_states_by_stream={'cam_00': [
+            TimedCameraState('cam_00', 0.0, CameraIntrinsics(500, 500, 8, 8), CameraPose(np.eye(4, dtype=np.float32))),
+        ]},
+        pointmaps_by_frame={'cam_00:0': {'points': pts, 'confidence': np.ones((16, 16), dtype=np.float32)}},
+        depthmaps_by_frame={},
+        metadata={'world_frame': {'type': 'ground_plane_z_up'}},
+    )
+    track_payload = {
+        'frame_indices': np.asarray([0], dtype=np.int32),
+        'points_xy': np.asarray([[[8, 8]]], dtype=np.float32),
+        'visibility': np.asarray([[True]]),
+        'track_ids': np.asarray([1], dtype=np.int32),
+        'lifted_frame_indices': np.asarray([0], dtype=np.int32),
+        'lifted_xyz': np.asarray([[[5.0, 0.0, 5.0]]], dtype=np.float32),
+        'lifted_valid': np.asarray([[True]]),
+        'refined_lifted_frame_indices': np.asarray([0], dtype=np.int32),
+        'refined_lifted_xyz': np.asarray([[[5.0, 0.0, 5.0]]], dtype=np.float32),
+        'refined_lifted_valid': np.asarray([[True]]),
+    }
+    track_artifact = TrackArtifact(
+        run_id='smpl_anchor', stage_name='tracking', save_dir=tmp_path / 'tracking_smpl_anchor',
+        track_payloads_by_stream={'cam_00': track_payload}, selected_frames=[frame0]
+    )
+    keypoints = np.zeros((17, 3), dtype=np.float32)
+    keypoints[11] = np.asarray([7.5, 9.0, 1.0], dtype=np.float32)
+    keypoints[12] = np.asarray([8.5, 9.0, 1.0], dtype=np.float32)
+    keypoints[15] = np.asarray([7.2, 13.0, 1.0], dtype=np.float32)
+    keypoints[16] = np.asarray([8.8, 13.0, 1.0], dtype=np.float32)
+    human = HumanState(
+        human_id='human_main', frame_ref=frame0, bbox_xyxy=np.asarray([5, 5, 11, 15], dtype=np.float32),
+        mask_rle=None, keypoints_2d=keypoints, densepose=None,
+        smpl_params={'valid': True, 'transl': np.asarray([8.0, 9.0, 4.0], dtype=np.float32)}, confidence=0.95,
+        attributes={'track_ids': [1], 'support_track_count': 1, 'detection_id': 'hum_main'}
+    )
+    humans = HumanArtifact(run_id='smpl_anchor', stage_name='humans', save_dir=tmp_path / 'humans_smpl_anchor', humans=[human], frame_index={'cam_00:0': ['human_main']})
+    mask = np.zeros((16, 16), dtype=bool)
+    mask[5:15, 5:11] = True
+    humans.mask_arrays = {'hum_main': mask}
+    assembler = SingleVideoSceneAssembler(max_static_points_per_frame=32, max_static_points_total=64)
+    scene_artifact = assembler.assemble(
+        run_id='smpl_anchor', save_dir=tmp_path / 'scene_smpl_anchor', geometry_artifact=geometry,
+        track_artifact=track_artifact, human_artifact=humans,
+    )
+    ent = scene_artifact.dynamic_entities['humans'][0]
+    assert ent['center_sources'][0].startswith('smpl_root')
+    # Support track is wildly wrong; anchored center should stay near the lifted SMPL pelvis neighborhood.
+    assert abs(ent['anchor_xyz'][0]) < 0.5
+    assert ent['anchor_xyz'][2] < 1.2
+
+
+def test_human_smpl_temporal_smoothing_reduces_anchor_jump(tmp_path: Path) -> None:
+    frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
+    frame1 = FrameRef(stream_id='cam_00', frame_idx=1, timestamp_sec=0.1)
+    pts0 = np.zeros((16, 16, 3), dtype=np.float32)
+    pts1 = np.zeros((16, 16, 3), dtype=np.float32)
+    yy, xx = np.mgrid[0:16, 0:16]
+    for pts, z_pelvis in ((pts0, 1.0), (pts1, 2.2)):
+        pts[..., 0] = (xx - 8) * 0.05
+        pts[..., 1] = (yy - 8) * 0.05
+        pts[..., 2] = 2.0
+        pts[8:11, 7:10, 2] = z_pelvis
+        pts[12:15, 6:11, 2] = 0.0
+    geometry = GeometryArtifact(
+        run_id='smooth', stage_name='geometry', save_dir=tmp_path / 'geometry_smooth',
+        selected_frames=[frame0, frame1],
+        intrinsics_by_stream={'cam_00': CameraIntrinsics(500, 500, 8, 8)},
+        camera_states_by_stream={'cam_00': [
+            TimedCameraState('cam_00', 0.0, CameraIntrinsics(500, 500, 8, 8), CameraPose(np.eye(4, dtype=np.float32))),
+            TimedCameraState('cam_00', 0.1, CameraIntrinsics(500, 500, 8, 8), CameraPose(np.eye(4, dtype=np.float32))),
+        ]},
+        pointmaps_by_frame={
+            'cam_00:0': {'points': pts0, 'confidence': np.ones((16, 16), dtype=np.float32)},
+            'cam_00:1': {'points': pts1, 'confidence': np.ones((16, 16), dtype=np.float32)},
+        },
+        depthmaps_by_frame={},
+        metadata={'world_frame': {'type': 'ground_plane_z_up'}},
+    )
+    keypoints0 = np.zeros((17, 3), dtype=np.float32)
+    keypoints1 = np.zeros((17, 3), dtype=np.float32)
+    for keypoints in (keypoints0, keypoints1):
+        keypoints[11] = np.asarray([7.5, 9.0, 1.0], dtype=np.float32)
+        keypoints[12] = np.asarray([8.5, 9.0, 1.0], dtype=np.float32)
+        keypoints[15] = np.asarray([7.2, 13.0, 1.0], dtype=np.float32)
+        keypoints[16] = np.asarray([8.8, 13.0, 1.0], dtype=np.float32)
+    humans = HumanArtifact(
+        run_id='smooth', stage_name='humans', save_dir=tmp_path / 'humans_smooth',
+        humans=[
+            HumanState('human_main', frame0, np.asarray([5, 5, 11, 15], dtype=np.float32), None, keypoints0, None, {'valid': True, 'transl': np.asarray([8.0, 9.0, 4.0], dtype=np.float32)}, 0.95, {'track_ids': [], 'detection_id': 'hum0'}),
+            HumanState('human_main', frame1, np.asarray([5, 5, 11, 15], dtype=np.float32), None, keypoints1, None, {'valid': True, 'transl': np.asarray([8.0, 9.0, 4.0], dtype=np.float32)}, 0.95, {'track_ids': [], 'detection_id': 'hum1'}),
+        ],
+        frame_index={'cam_00:0': ['human_main'], 'cam_00:1': ['human_main']},
+    )
+    humans.mask_arrays = {'hum0': np.pad(np.ones((10, 6), dtype=bool), ((5, 1), (5, 5))), 'hum1': np.pad(np.ones((10, 6), dtype=bool), ((5, 1), (5, 5)))}
+    assembler = SingleVideoSceneAssembler(human_anchor_temporal_alpha=0.5, human_anchor_search_radius_px=2.0, human_foot_search_radius_px=2.0)
+    scene_artifact = assembler.assemble(
+        run_id='smooth', save_dir=tmp_path / 'scene_smooth', geometry_artifact=geometry,
+        track_artifact=TrackArtifact(run_id='smooth', stage_name='tracking', save_dir=tmp_path / 'tracking_smooth', track_payloads_by_stream={'cam_00': {'frame_indices': np.asarray([0, 1], dtype=np.int32), 'points_xy': np.zeros((2, 0, 2), dtype=np.float32), 'visibility': np.zeros((2, 0), dtype=bool)}}, selected_frames=[frame0, frame1]),
+        human_artifact=humans,
+    )
+    ent = scene_artifact.dynamic_entities['humans'][0]
+    z0 = float(ent['centers_3d'][0][2])
+    z1 = float(ent['centers_3d'][1][2])
+    assert abs(z0 - 1.0) < 0.2
+    assert 1.4 < z1 < 1.8  # smoothed between raw values 1.0 and 2.2

@@ -31,9 +31,17 @@ class SingleVideoSceneAssembler:
     max_sprite_world_height: float = 2.80
     dynamic_foreground_quantile: float = 0.35
     min_dynamic_region_points: int = 12
+    human_smpl_root_anchor: bool = True
+    human_anchor_temporal_alpha: float = 0.60
+    human_ground_contact_strength: float = 1.00
+    human_anchor_search_radius_px: float = 10.0
+    human_foot_search_radius_px: float = 14.0
+    min_human_anchor_points: int = 6
+    min_human_foot_points: int = 4
 
     def __post_init__(self) -> None:
         self._image_size_cache: dict[str, tuple[int, int]] = {}
+        self._human_anchor_cache: dict[tuple[int, int, int], dict[tuple[str, int, str], dict[str, Any]]] = {}
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -73,6 +81,248 @@ class SingleVideoSceneAssembler:
         if not states:
             return None
         return min(states, key=lambda s: (abs(float(s.time_sec) - float(frame_ref.timestamp_sec)), abs(float(s.time_sec) - float(frame_ref.timestamp_sec))))
+
+    def _world_frame_floor_z(self, geometry_artifact) -> float | None:
+        world_frame = dict((getattr(geometry_artifact, 'metadata', {}) or {}).get('world_frame', {}) or {})
+        if str(world_frame.get('type', '')).lower() != 'ground_plane_z_up':
+            return None
+        return 0.0
+
+    def _point_payload_for_frame(self, frame_ref: FrameRef, geometry_artifact) -> dict[str, Any] | None:
+        if geometry_artifact is None:
+            return None
+        return (geometry_artifact.pointmaps_by_frame or {}).get(self._frame_key(frame_ref.stream_id, frame_ref.frame_idx))
+
+    @staticmethod
+    def _visible_keypoint_xy(keypoints_2d: np.ndarray | None, idx: int) -> np.ndarray | None:
+        if keypoints_2d is None:
+            return None
+        kpts = np.asarray(keypoints_2d, dtype=np.float32)
+        if idx >= kpts.shape[0] or float(kpts[idx, 2]) <= 0.05:
+            return None
+        return np.asarray(kpts[idx, :2], dtype=np.float32)
+
+    def _sample_local_world_points(
+        self,
+        frame_ref: FrameRef,
+        xy_image: np.ndarray,
+        geometry_artifact,
+        *,
+        radius_px: float,
+        bbox_xyxy: np.ndarray | None = None,
+        mask: np.ndarray | None = None,
+        min_points: int = 1,
+    ) -> np.ndarray:
+        payload = self._point_payload_for_frame(frame_ref, geometry_artifact)
+        if payload is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        pts = np.asarray(payload.get('points'), dtype=np.float32)
+        if pts.ndim != 3 or pts.shape[-1] != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        h, w = pts.shape[:2]
+        frame_key = self._frame_key(frame_ref.stream_id, frame_ref.frame_idx)
+        image_shape = self._image_shape_for_frame(frame_key, geometry_artifact)
+        if image_shape is None:
+            image_shape = (h, w)
+        scale_x = float(w) / max(float(image_shape[1]), 1.0)
+        scale_y = float(h) / max(float(image_shape[0]), 1.0)
+        xy = np.asarray(xy_image, dtype=np.float32).copy()
+        xy[0] *= scale_x
+        xy[1] *= scale_y
+        radius_x = max(1.0, float(radius_px) * scale_x)
+        radius_y = max(1.0, float(radius_px) * scale_y)
+        yy, xx = np.mgrid[0:h, 0:w]
+        region = (((xx - float(xy[0])) / radius_x) ** 2 + ((yy - float(xy[1])) / radius_y) ** 2) <= 1.0
+        if bbox_xyxy is not None:
+            region &= self._scaled_bbox_mask(np.asarray(bbox_xyxy, dtype=np.float32), image_shape, (h, w))
+        if mask is not None:
+            region &= self._resize_mask(np.asarray(mask, dtype=bool), (h, w))
+        valid = region & np.isfinite(pts).all(axis=2)
+        conf = payload.get('confidence')
+        if conf is not None and np.asarray(conf).shape == valid.shape and np.any(valid):
+            conf_arr = np.asarray(conf, dtype=np.float32)
+            conf_vals = conf_arr[valid]
+            conf_threshold = float(np.nanpercentile(conf_vals, 35.0)) if conf_vals.size else 0.0
+            valid &= conf_arr >= conf_threshold
+        if int(np.count_nonzero(valid)) < int(min_points):
+            valid = region & np.isfinite(pts).all(axis=2)
+        if not np.any(valid):
+            return np.zeros((0, 3), dtype=np.float32)
+        region_pts = pts[valid].reshape(-1, 3).astype(np.float32)
+        state = self._camera_state_for_frame(geometry_artifact, frame_ref)
+        if state is not None and region_pts.shape[0] >= max(4, min_points):
+            cam_center = np.asarray(state.pose.T_world_cam, dtype=np.float32)[:3, 3]
+            distances = np.linalg.norm(region_pts - cam_center[None, :], axis=1)
+            if distances.size:
+                near_thresh = float(np.quantile(distances, self.dynamic_foreground_quantile))
+                near_mask = distances <= near_thresh
+                if int(np.count_nonzero(near_mask)) >= max(4, min_points):
+                    region_pts = region_pts[near_mask]
+        return region_pts
+
+    def _robust_local_world_center(self, *args, **kwargs) -> np.ndarray | None:
+        pts = self._sample_local_world_points(*args, **kwargs)
+        if pts.shape[0] == 0:
+            return None
+        return np.nanmedian(pts, axis=0).astype(np.float32)
+
+    def _human_root_anchor_xy(self, state: Any) -> tuple[np.ndarray, str]:
+        kpts = getattr(state, 'keypoints_2d', None)
+        left_hip = self._visible_keypoint_xy(kpts, 11)
+        right_hip = self._visible_keypoint_xy(kpts, 12)
+        if left_hip is not None and right_hip is not None:
+            return ((left_hip + right_hip) * 0.5).astype(np.float32), 'smpl_hips'
+        if left_hip is not None:
+            return left_hip.astype(np.float32), 'smpl_left_hip'
+        if right_hip is not None:
+            return right_hip.astype(np.float32), 'smpl_right_hip'
+        smpl = getattr(state, 'smpl_params', None) or {}
+        transl = np.asarray(smpl.get('transl', np.zeros((3,), dtype=np.float32)), dtype=np.float32)
+        if bool(smpl.get('valid', False)) and transl.shape[0] >= 2 and np.all(np.isfinite(transl[:2])):
+            return transl[:2].astype(np.float32), 'smpl_transl'
+        return self._center_xyxy(np.asarray(state.bbox_xyxy, dtype=np.float32)), 'bbox_center'
+
+    def _human_foot_anchor_xys(self, state: Any) -> list[tuple[np.ndarray, str]]:
+        anchors: list[tuple[np.ndarray, str]] = []
+        kpts = getattr(state, 'keypoints_2d', None)
+        left_ankle = self._visible_keypoint_xy(kpts, 15)
+        right_ankle = self._visible_keypoint_xy(kpts, 16)
+        if left_ankle is not None:
+            anchors.append((left_ankle.astype(np.float32), 'left_ankle'))
+        if right_ankle is not None:
+            anchors.append((right_ankle.astype(np.float32), 'right_ankle'))
+        if anchors:
+            return anchors
+        bbox = np.asarray(state.bbox_xyxy, dtype=np.float32)
+        x1, y1, x2, y2 = bbox.tolist()
+        return [
+            (np.asarray([(x1 + x2) * 0.5, y2], dtype=np.float32), 'bbox_bottom_center'),
+            (np.asarray([x1 + 0.25 * (x2 - x1), y2], dtype=np.float32), 'bbox_bottom_left'),
+            (np.asarray([x2 - 0.25 * (x2 - x1), y2], dtype=np.float32), 'bbox_bottom_right'),
+        ]
+
+    def _human_mask_for_state(self, state: Any, source_artifact) -> np.ndarray | None:
+        if source_artifact is None or not hasattr(source_artifact, 'mask_arrays'):
+            return None
+        attrs = getattr(state, 'attributes', {}) or {}
+        det_id = attrs.get('detection_id', getattr(state, 'human_id', getattr(state, 'object_id', None)))
+        if det_id is None:
+            return None
+        return source_artifact.mask_arrays.get(det_id)
+
+    def _human_smpl_world_anchor(self, state: Any, geometry_artifact, source_artifact) -> dict[str, Any] | None:
+        smpl = getattr(state, 'smpl_params', None) or {}
+        if not self.human_smpl_root_anchor or not bool(smpl.get('valid', False)):
+            return None
+        mask = self._human_mask_for_state(state, source_artifact)
+        pelvis_xy, pelvis_source = self._human_root_anchor_xy(state)
+        pelvis_world = self._robust_local_world_center(
+            state.frame_ref,
+            pelvis_xy,
+            geometry_artifact,
+            radius_px=self.human_anchor_search_radius_px,
+            bbox_xyxy=np.asarray(state.bbox_xyxy, dtype=np.float32),
+            mask=None if mask is None else np.asarray(mask, dtype=bool),
+            min_points=self.min_human_anchor_points,
+        )
+        foot_points: list[np.ndarray] = []
+        foot_sources: list[str] = []
+        for foot_xy, foot_source in self._human_foot_anchor_xys(state):
+            pts = self._sample_local_world_points(
+                state.frame_ref,
+                foot_xy,
+                geometry_artifact,
+                radius_px=self.human_foot_search_radius_px,
+                bbox_xyxy=np.asarray(state.bbox_xyxy, dtype=np.float32),
+                mask=None if mask is None else np.asarray(mask, dtype=bool),
+                min_points=self.min_human_foot_points,
+            )
+            if pts.shape[0]:
+                foot_points.append(np.nanmedian(pts, axis=0).astype(np.float32))
+                foot_sources.append(foot_source)
+        if pelvis_world is None and not foot_points:
+            return None
+        if pelvis_world is None:
+            pelvis_world = np.nanmedian(np.stack(foot_points, axis=0), axis=0).astype(np.float32)
+        grounded = pelvis_world.astype(np.float32).copy()
+        floor_z = self._world_frame_floor_z(geometry_artifact)
+        median_foot_z = None
+        if foot_points and floor_z is not None:
+            median_foot_z = float(np.median(np.asarray(foot_points, dtype=np.float32)[:, 2]))
+            grounded[2] = float(grounded[2]) - self.human_ground_contact_strength * (median_foot_z - float(floor_z))
+        return {
+            'center_xyz': grounded.astype(np.float32),
+            'raw_center_xyz': pelvis_world.astype(np.float32).tolist(),
+            'pelvis_xy': pelvis_xy.astype(np.float32).tolist(),
+            'pelvis_source': pelvis_source,
+            'foot_points_xyz': [np.asarray(p, dtype=np.float32).tolist() for p in foot_points],
+            'foot_sources': foot_sources,
+            'median_foot_z': median_foot_z,
+            'source': 'smpl_root_grounded' if foot_points else 'smpl_root',
+        }
+
+    def _human_anchor_cache_for(self, source_artifact, track_artifact, geometry_artifact) -> dict[tuple[str, int, str], dict[str, Any]]:
+        key = (id(source_artifact), id(track_artifact), id(geometry_artifact))
+        cached = self._human_anchor_cache.get(key)
+        if cached is not None:
+            return cached
+        cached = {}
+        if source_artifact is None:
+            self._human_anchor_cache[key] = cached
+            return cached
+        grouped: dict[str, list[Any]] = {}
+        for state in list(getattr(source_artifact, 'humans', []) or []):
+            grouped.setdefault(str(getattr(state, 'human_id', '')), []).append(state)
+        alpha = float(np.clip(self.human_anchor_temporal_alpha, 0.0, 1.0))
+        for human_id, seq in grouped.items():
+            seq = sorted(seq, key=lambda s: (s.frame_ref.stream_id, int(s.frame_ref.frame_idx)))
+            prev_smooth: np.ndarray | None = None
+            for state in seq:
+                smpl_info = self._human_smpl_world_anchor(state, geometry_artifact, source_artifact)
+                support_world = self._track_world_position(state.frame_ref.stream_id, state.frame_ref.frame_idx, [int(t) for t in (getattr(state, 'attributes', {}) or {}).get('track_ids', [])], track_artifact, geometry_artifact)
+                region_world = None
+                if support_world is None or not np.all(np.isfinite(support_world)):
+                    mask = self._human_mask_for_state(state, source_artifact)
+                    region_world = self._region_world_position(state.frame_ref, np.asarray(state.bbox_xyxy, dtype=np.float32), None if mask is None else np.asarray(mask, dtype=bool), geometry_artifact)
+                raw_world = None
+                source = 'none'
+                detail: dict[str, Any] = {'human_id': human_id}
+                if smpl_info is not None and np.all(np.isfinite(np.asarray(smpl_info['center_xyz'], dtype=np.float32))):
+                    raw_world = np.asarray(smpl_info['center_xyz'], dtype=np.float32)
+                    source = str(smpl_info['source'])
+                    detail.update(smpl_info)
+                elif support_world is not None and np.all(np.isfinite(support_world)):
+                    raw_world = np.asarray(support_world, dtype=np.float32)
+                    source = 'geometry_support_tracks'
+                elif region_world is not None and np.all(np.isfinite(region_world)):
+                    raw_world = np.asarray(region_world, dtype=np.float32)
+                    source = 'geometry_region_fallback'
+                smooth_world = None
+                if raw_world is not None:
+                    if prev_smooth is None or not np.all(np.isfinite(prev_smooth)):
+                        smooth_world = raw_world.astype(np.float32)
+                    else:
+                        smooth_world = ((1.0 - alpha) * prev_smooth + alpha * raw_world).astype(np.float32)
+                    prev_smooth = smooth_world
+                elif prev_smooth is not None:
+                    smooth_world = prev_smooth.astype(np.float32)
+                    source = 'temporal_hold'
+                if smooth_world is not None:
+                    detail.update({
+                        'raw_world_xyz': None if raw_world is None else np.asarray(raw_world, dtype=np.float32).tolist(),
+                        'smoothed_world_xyz': np.asarray(smooth_world, dtype=np.float32).tolist(),
+                        'anchor_source': source,
+                    })
+                    attrs = getattr(state, 'attributes', {})
+                    if isinstance(attrs, dict):
+                        attrs['human_world_anchor_xyz'] = detail['smoothed_world_xyz']
+                        attrs['human_world_anchor_source'] = source
+                        attrs['human_world_anchor_raw_xyz'] = detail['raw_world_xyz']
+                        if 'pelvis_xy' in detail:
+                            attrs['smpl_root_anchor_xy'] = detail['pelvis_xy']
+                    cached[(state.frame_ref.stream_id, int(state.frame_ref.frame_idx), human_id)] = detail
+        self._human_anchor_cache[key] = cached
+        return cached
 
     def _dynamic_mask_for_frame(self, frame_key: str, geometry_shape: tuple[int, int], human_artifact, object_artifact) -> np.ndarray:
         mask = np.zeros(geometry_shape, dtype=bool)
@@ -192,6 +442,16 @@ class SingleVideoSceneAssembler:
         return np.nanmedian(region_pts, axis=0).astype(np.float32)
 
     def _state_world_position(self, state: Any, kind: str, track_artifact, geometry_artifact, source_artifact=None) -> np.ndarray | None:
+        if kind == 'humans' and source_artifact is not None:
+            human_id = str(getattr(state, 'human_id', ''))
+            if human_id:
+                detail = self._human_anchor_cache_for(source_artifact, track_artifact, geometry_artifact).get((state.frame_ref.stream_id, int(state.frame_ref.frame_idx), human_id))
+                if detail is not None:
+                    smoothed = detail.get('smoothed_world_xyz')
+                    if smoothed is not None:
+                        arr = np.asarray(smoothed, dtype=np.float32)
+                        if np.all(np.isfinite(arr)):
+                            return arr
         attrs = getattr(state, "attributes", {}) or {}
         support_ids = [int(t) for t in attrs.get("track_ids", [])]
         world = self._track_world_position(state.frame_ref.stream_id, state.frame_ref.frame_idx, support_ids, track_artifact, geometry_artifact)
@@ -424,6 +684,7 @@ class SingleVideoSceneAssembler:
             times = []
             centers_2d = []
             centers_3d = []
+            center_sources = []
             support_counts = []
             labels = []
             confs = []
@@ -438,6 +699,7 @@ class SingleVideoSceneAssembler:
                 times.append(float(state.frame_ref.timestamp_sec))
                 centers_2d.append(self._center_xyxy(state.bbox_xyxy).tolist())
                 centers_3d.append(None if world is None else world.astype(np.float32).tolist())
+                center_sources.append(str(attrs.get('human_world_anchor_source', 'geometry_support_tracks' if support_ids else 'geometry_region_fallback')) if kind == 'humans' else ('geometry_support_tracks' if support_ids else 'geometry_region_fallback'))
                 support_counts.append(int(attrs.get("support_track_count", 0)))
                 labels.append(getattr(state, "category", "person" if kind == "humans" else "object"))
                 conf = float(getattr(state, "confidence", 0.0))
@@ -468,6 +730,7 @@ class SingleVideoSceneAssembler:
                 "times_sec": times,
                 "centers_2d": centers_2d,
                 "centers_3d": centers_3d,
+                "center_sources": center_sources,
                 "anchor_xyz": anchor,
                 "support_counts": support_counts,
                 "support_track_ids": sorted(support_ids_union),

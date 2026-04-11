@@ -354,6 +354,7 @@ class Room4DPipeline:
                 'xy': np.asarray(xy, dtype=np.float32).tolist(),
                 'world_xyz': np.asarray(world, dtype=np.float32).tolist(),
                 'confidence': float(getattr(human, 'confidence', 0.0)),
+                'anchor_source': str((getattr(human, 'attributes', {}) or {}).get('human_world_anchor_source', 'unknown')),
             })
         artifact.metadata['projected_centers_by_frame'] = projected_by_frame
 
