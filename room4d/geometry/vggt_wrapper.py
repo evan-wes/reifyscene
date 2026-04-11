@@ -7,12 +7,15 @@ installed locally.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from PIL import Image
+from rich.progress import track
 
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from room4d.geometry.base import GeometryInitializer
@@ -61,6 +64,9 @@ class VGGTInitializer(GeometryInitializer):
         self.debug_shapes = bool(self.cfg.get("debug_shapes", False))
         self.save_depth_pngs = bool(self.cfg.get("save_depth_pngs", False))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        resize_max_dim = self.cfg.get("resize_max_dim")
+        self.resize_max_dim = None if resize_max_dim in (None, 0) else int(resize_max_dim)
+        self.cpu_threads = self.cfg.get("cpu_threads")
 
         self._is_loaded = False
         self._model: Any | None = None
@@ -68,6 +74,36 @@ class VGGTInitializer(GeometryInitializer):
         self._pose_encoding_to_extri_intri = None
         self._unproject_depth_map_to_point_map = None
         self._backend_error: Exception | None = None
+
+    @contextmanager
+    def _patched_torch_load_for_cpu_deserialize(self):
+        """Temporarily patch torch.load so weights deserialize on CPU first.
+
+        This keeps checkpoint loading off CUDA even when the requested execution
+        device is a GPU, reducing peak VRAM usage during model initialization.
+        The fully constructed model is moved to ``self.device`` afterwards.
+        """
+        original_torch_load = torch.load
+
+        def _cpu_safe_torch_load(*args, **kwargs):
+            map_location = kwargs.get("map_location", None)
+            if map_location is None and len(args) >= 2:
+                map_location = args[1]
+
+            if map_location == "cuda":
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, str) and map_location.startswith("cuda"):
+                kwargs["map_location"] = torch.device("cpu")
+            elif isinstance(map_location, torch.device) and map_location.type == "cuda":
+                kwargs["map_location"] = torch.device("cpu")
+
+            return original_torch_load(*args, **kwargs)
+
+        torch.load = _cpu_safe_torch_load
+        try:
+            yield
+        finally:
+            torch.load = original_torch_load
 
     def _load_backend_components(self) -> None:
         """Import the official VGGT modules lazily."""
@@ -96,13 +132,25 @@ class VGGTInitializer(GeometryInitializer):
             return
 
         try:
+            if self.cpu_threads is not None and not self.device.startswith("cuda"):
+                try:
+                    torch.set_num_threads(max(1, int(self.cpu_threads)))
+                except Exception:
+                    pass
+                try:
+                    torch.set_num_interop_threads(max(1, int(self.cpu_threads) // 2))
+                except Exception:
+                    pass
             self._load_backend_components()
-            if self.checkpoint_path:
-                model = self._VGGT()
-                state_dict = torch.load(self.checkpoint_path, map_location="cpu")
-                model.load_state_dict(state_dict)
-            else:
-                model = self._VGGT.from_pretrained(self.hf_model_id)
+            with self._patched_torch_load_for_cpu_deserialize():
+                if self.checkpoint_path:
+                    model = self._VGGT()
+                    state_dict = torch.load(self.checkpoint_path, map_location="cpu")
+                    model.load_state_dict(state_dict)
+                else:
+                    model = self._VGGT.from_pretrained(self.hf_model_id)
+            if hasattr(model, "cpu"):
+                model = model.cpu()
             model = model.to(self.device)
             model.eval()
             self._model = model
@@ -145,6 +193,8 @@ class VGGTInitializer(GeometryInitializer):
         frames: list[FrameRef],
         ingest_artifact,
         target_root: Path,
+        *,
+        resize_max_dim: int | None = None,
     ) -> tuple[list[Path], list[str]]:
         """Decode and save selected frames to disk for VGGT preprocessing."""
         if ingest_artifact is None:
@@ -153,16 +203,38 @@ class VGGTInitializer(GeometryInitializer):
         stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
         image_paths: list[Path] = []
         notes: list[str] = []
+        applied_resize = self.resize_max_dim if resize_max_dim is None else resize_max_dim
+        applied_resize = None if applied_resize in (None, 0) else int(applied_resize)
+        resized_any = False
 
         target_root.mkdir(parents=True, exist_ok=True)
-        for idx, frame in enumerate(frames):
+        for old_png in target_root.glob("*.png"):
+            old_png.unlink()
+        frame_iter = enumerate(frames)
+        if self.debug_shapes:
+            frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing frames")
+        for idx, frame in frame_iter:
             stream = stream_lookup[frame.stream_id]
             image = self.decoder.get_frame(stream, frame.frame_idx)
+            pil_image = Image.fromarray(image)
+            if applied_resize is not None:
+                width, height = pil_image.size
+                max_dim = max(width, height)
+                if max_dim > applied_resize:
+                    scale = float(applied_resize) / float(max_dim)
+                    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+                    pil_image = pil_image.resize(new_size, resample=Image.BILINEAR)
+                    resized_any = True
             out_path = target_root / f"{idx:04d}_{frame.stream_id}_{frame.frame_idx:06d}.png"
-            Image.fromarray(image).save(out_path)
+            pil_image.save(out_path)
             image_paths.append(out_path)
 
         notes.append(f"Materialized VGGT inputs under cache: {target_root}")
+        if applied_resize is not None:
+            if resized_any:
+                notes.append(f"Materialized images were resized to max_dim={applied_resize} before backend execution.")
+            else:
+                notes.append(f"Materialized images fit within resize_max_dim={applied_resize}; no resize was needed.")
         return image_paths, notes
 
     def _numpyify(self, value: Any) -> Any:
@@ -174,6 +246,17 @@ class VGGTInitializer(GeometryInitializer):
         if isinstance(value, (list, tuple)):
             return type(value)(self._numpyify(v) for v in value)
         return value
+
+    def _promote_camera_prediction_precision(self, predictions: dict[str, Any]) -> dict[str, Any]:
+        """Promote camera-related tensors to float32 before linalg-heavy decoding."""
+        promoted = predictions
+        for key in ("pose_enc", "extrinsic", "intrinsic"):
+            value = predictions.get(key)
+            if isinstance(value, torch.Tensor) and value.dtype in (torch.float16, torch.bfloat16):
+                if promoted is predictions:
+                    promoted = dict(predictions)
+                promoted[key] = value.float()
+        return promoted
 
     def _debug_describe_value(
         self,
@@ -276,6 +359,16 @@ class VGGTInitializer(GeometryInitializer):
             distortion_model="brown",
             distortion_params=np.zeros(4, dtype=float),
         )
+
+
+    def release_resources(self) -> None:
+        self._model = None
+        self._torch = None
+        self._VGGT = None
+        self._load_and_preprocess_images = None
+        self._cache_dir = None
+        self._is_loaded = False
+        self._backend_error = None
 
     def _normalize_per_frame_array(self, value: Any, *, item_ndim: int, num_frames: int) -> Any:
         """Normalize model outputs to an explicit per-frame leading dimension.
@@ -444,7 +537,7 @@ class VGGTInitializer(GeometryInitializer):
             notes=notes,
             metadata={
                 "debug_shapes": self.debug_shapes,
-                "save_depth_pngs": self.save_depth_pngs,
+                "save_depth_pngs": False,
                 "save_debug_assets": bool(self.debug_shapes),
                 "save_camera_json": bool(self.debug_shapes),
                 "save_pointcloud_plys": bool(self.debug_shapes),
@@ -526,7 +619,7 @@ class VGGTInitializer(GeometryInitializer):
             notes=notes,
             metadata={
                 "debug_shapes": self.debug_shapes,
-                "save_depth_pngs": self.save_depth_pngs,
+                "save_depth_pngs": False,
                 "save_debug_assets": bool(self.debug_shapes),
                 "save_camera_json": bool(self.debug_shapes),
                 "save_pointcloud_plys": bool(self.debug_shapes),
@@ -576,6 +669,8 @@ class VGGTInitializer(GeometryInitializer):
                 "VGGT returned a tuple instead of the expected prediction dictionary; "
                 "update the adapter if the upstream API changed."
             )
+
+        predictions = self._promote_camera_prediction_precision(predictions)
 
         if "pose_enc" in predictions and ("extrinsic" not in predictions or "intrinsic" not in predictions):
             extrinsic, intrinsic = self._pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])

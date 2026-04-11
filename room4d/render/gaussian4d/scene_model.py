@@ -1,12 +1,12 @@
-"""Dynamic Gaussian scene representation."""
+"""Renderable layered-scene model for Gaussian backends."""
 
-class Gaussian4DScene:
-    """Container for a dynamic Gaussian scene model."""
+from __future__ import annotations
+
+from room4d.render.base import RenderSceneModel
+
+
+class Gaussian4DScene(RenderSceneModel):
+    """Container for a layered static/dynamic scene contract."""
 
     def __init__(self, cfg: dict | None = None) -> None:
-        """Store renderer configuration."""
-        self.cfg = cfg or {}
-
-    def initialize_from_optimization(self, opt_artifact) -> None:
-        """Initialize scene state from an optimization artifact."""
-        return None
+        super().__init__(cfg=cfg or {}, contract_name="layered_scene_v1")

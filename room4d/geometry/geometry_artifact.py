@@ -8,7 +8,8 @@ from typing import Any
 import shutil
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
+from rich.progress import track
 
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
@@ -47,6 +48,12 @@ class GeometryArtifact(BaseArtifact):
     def num_selected_frames(self) -> int:
         """Return the number of frames selected for initialization."""
         return len(self.selected_frames)
+
+    def _progress_iter(self, iterable, *, total: int | None = None, description: str = ""):
+        enabled = bool(self.metadata.get('save_depth_pngs', False) or self.metadata.get('save_debug_assets', False) or self.metadata.get('save_debug_html', False))
+        if not enabled:
+            return iterable
+        return track(iterable, total=total, description=description)
 
     def _sanitize_key(self, key: str) -> str:
         return key.replace(':', '__').replace('/', '_')
@@ -175,8 +182,46 @@ class GeometryArtifact(BaseArtifact):
         A_inv[:3, :3] = A[:3, :3].T
         return A @ T @ A_inv
 
-    @staticmethod
+
+    @classmethod
+    def _points_to_debug_basis(cls, points: np.ndarray) -> np.ndarray:
+        """Transform points into the default debug visualization basis.
+
+        Class-level callers do not have artifact metadata available, so they
+        preserve the historical Z-up visualization transform. Instance-level
+        exports use ``_points_to_debug_basis_instance`` so already-canonical
+        Z-up scenes are not rotated a second time.
+        """
+        return cls._points_to_z_up(points)
+
+    def _debug_basis_matrix(self) -> np.ndarray:
+        world_frame = dict((self.metadata or {}).get('world_frame', {}) or {})
+        if str(world_frame.get('type', '')).lower() == 'ground_plane_z_up':
+            return np.eye(3, dtype=np.float32)
+        return self._z_up_transform_matrix()
+
+    def _points_to_debug_basis_instance(self, points: np.ndarray) -> np.ndarray:
+        arr = np.asarray(points, dtype=np.float32)
+        rot = self._debug_basis_matrix()
+        if arr.ndim >= 1 and arr.shape[-1] == 3:
+            return np.einsum('ij,...j->...i', rot, arr)
+        if arr.ndim >= 1 and arr.shape[0] == 3:
+            return np.einsum('ij,j...->i...', rot, arr)
+        raise ValueError(f'Could not transform point array with shape {arr.shape} to debug basis.')
+
+    def _pose_to_debug_basis_instance(self, T_world_cam: np.ndarray) -> np.ndarray:
+        T = np.asarray(T_world_cam, dtype=np.float32)
+        if T.shape != (4, 4):
+            raise ValueError(f'Expected 4x4 pose matrix, got shape {T.shape}.')
+        A = np.eye(4, dtype=np.float32)
+        A[:3, :3] = self._debug_basis_matrix()
+        A_inv = np.eye(4, dtype=np.float32)
+        A_inv[:3, :3] = A[:3, :3].T
+        return A @ T @ A_inv
+
+    @classmethod
     def _sample_point_cloud(
+        cls,
         points: np.ndarray,
         rgb: np.ndarray | None = None,
         *,
@@ -192,7 +237,7 @@ class GeometryArtifact(BaseArtifact):
         RGB image is resized to the point-map resolution before flattening so the
         boolean validity mask lines up with the color array.
         """
-        point_arr = GeometryArtifact._points_to_z_up(GeometryArtifact._ensure_hwc_points(points))
+        point_arr = cls._points_to_debug_basis(cls._ensure_hwc_points(points))
         h, w, _ = point_arr.shape
         pts = point_arr.reshape(-1, 3)
         valid = np.isfinite(pts).all(axis=1)
@@ -260,7 +305,7 @@ class GeometryArtifact(BaseArtifact):
         if not source_map:
             return copied
         ensure_dir(image_dir)
-        for frame_key, source in source_map.items():
+        for frame_key, source in self._progress_iter(source_map.items(), total=len(source_map), description="[cyan]Geometry · copying debug RGB"):
             src = Path(source)
             if not src.exists():
                 continue
@@ -283,10 +328,96 @@ class GeometryArtifact(BaseArtifact):
                 best_dt = dt
         return best
 
+    def _world_frame_overlay_samples(self) -> list[FrameRef]:
+        frames = list(self.selected_frames or [])
+        if len(frames) <= 6:
+            return frames
+        idx = np.linspace(0, len(frames) - 1, 6).round().astype(int).tolist()
+        return [frames[i] for i in idx]
+
+    @staticmethod
+    def _draw_line_on_image(image: np.ndarray, p0: tuple[float, float], p1: tuple[float, float], color: tuple[int, int, int]) -> np.ndarray:
+        img = Image.fromarray(np.asarray(image, dtype=np.uint8)).convert('RGB')
+        draw = ImageDraw.Draw(img)
+        draw.line([p0, p1], fill=color, width=3)
+        return np.asarray(img, dtype=np.uint8)
+
+    def _world_frame_overlay(self, rgb: np.ndarray, frame: FrameRef, state: TimedCameraState) -> np.ndarray:
+        img = Image.fromarray(np.asarray(rgb, dtype=np.uint8)).convert('RGB')
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        intr = state.intrinsics
+        Twc = np.asarray(state.pose.T_world_cam, dtype=np.float32)
+        Rcw = Twc[:3, :3].T
+        n_world = np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
+        n_cam = Rcw @ n_world
+        K = np.asarray([[float(intr.fx), 0.0, float(intr.cx)], [0.0, float(intr.fy), float(intr.cy)], [0.0, 0.0, 1.0]], dtype=np.float32)
+        try:
+            line = np.linalg.inv(K).T @ n_cam
+        except np.linalg.LinAlgError:
+            line = None
+        if line is not None and np.linalg.norm(line[:2]) > 1e-8:
+            a, b, c = [float(v) for v in line.tolist()]
+            pts = []
+            for x in (0.0, float(w - 1)):
+                if abs(b) > 1e-6:
+                    y = -(a * x + c) / b
+                    if -h <= y <= 2 * h:
+                        pts.append((x, y))
+            for y in (0.0, float(h - 1)):
+                if abs(a) > 1e-6:
+                    x = -(b * y + c) / a
+                    if -w <= x <= 2 * w:
+                        pts.append((x, y))
+            uniq = []
+            for p in pts:
+                if not any(abs(p[0]-q[0]) < 1e-3 and abs(p[1]-q[1]) < 1e-3 for q in uniq):
+                    uniq.append(p)
+            if len(uniq) >= 2:
+                draw.line([uniq[0], uniq[1]], fill=(255, 200, 0), width=3)
+        up_cam = Rcw @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
+        if abs(float(up_cam[2])) > 1e-6:
+            vanishing = K @ up_cam
+            vx = float(vanishing[0] / vanishing[2])
+            vy = float(vanishing[1] / vanishing[2])
+            cx = float(w * 0.5)
+            cy = float(h * 0.5)
+            t = 0.18
+            ex = cx + (vx - cx) * t
+            ey = cy + (vy - cy) * t
+            draw.line([(cx, cy), (ex, ey)], fill=(0, 255, 255), width=3)
+            draw.text((cx + 6, cy + 6), 'world +Z', fill=(0, 255, 255))
+        world_frame = dict((self.metadata or {}).get('world_frame', {}) or {})
+        draw.rectangle((8, 8, 300, 68), fill=(0, 0, 0))
+        draw.text((14, 14), f"ground inlier={float(world_frame.get('inlier_ratio', 0.0)):.3f}", fill=(255, 255, 255))
+        draw.text((14, 34), f"chosen score={float(world_frame.get('chosen_score', 0.0)):.3f}", fill=(255, 255, 255))
+        draw.text((14, 54), 'horizon=yellow  +Z=cyan', fill=(255, 255, 255))
+        return np.asarray(img, dtype=np.uint8)
+
+    def _export_world_frame_diagnostics(self, image_index: dict[str, str]) -> dict[str, Any]:
+        world_frame = dict((self.metadata or {}).get('world_frame', {}) or {})
+        if not world_frame:
+            return {}
+        write_json(self.save_dir / 'ground_plane_diagnostics.json', world_frame)
+        overlay_dir = ensure_dir(self.save_dir / 'world_frame_overlays')
+        overlay_index: dict[str, str] = {}
+        for frame in self._progress_iter(self._world_frame_overlay_samples(), total=len(self._world_frame_overlay_samples()), description='[cyan]Geometry · world-frame overlays'):
+            frame_key = f'{frame.stream_id}:{int(frame.frame_idx)}'
+            image_name = image_index.get(frame_key)
+            state = self._find_state_for_frame(frame)
+            if image_name is None or state is None:
+                continue
+            rgb = np.asarray(Image.open(self.save_dir / 'images' / image_name).convert('RGB'))
+            overlay = self._world_frame_overlay(rgb, frame, state)
+            out_name = f"{self._sanitize_key(frame_key)}.png"
+            Image.fromarray(overlay).save(overlay_dir / out_name)
+            overlay_index[frame_key] = out_name
+        return {'ground_plane_diagnostics': 'ground_plane_diagnostics.json', 'world_frame_overlay_index': overlay_index}
+
     def _build_camera_records(self) -> list[dict[str, Any]]:
         """Create per-frame camera records for JSON export."""
         records: list[dict[str, Any]] = []
-        for frame in self.selected_frames:
+        for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting cameras"):
             state = self._find_state_for_frame(frame)
             if state is None:
                 continue
@@ -298,7 +429,7 @@ class GeometryArtifact(BaseArtifact):
                     'frame_idx': frame.frame_idx,
                     'timestamp_sec': frame.timestamp_sec,
                     'intrinsics': self._intrinsics_to_dict(state.intrinsics),
-                    'T_world_cam': self._pose_to_z_up(state.pose.T_world_cam).astype(float).tolist(),
+                    'T_world_cam': self._pose_to_debug_basis_instance(state.pose.T_world_cam).astype(float).tolist(),
                 }
             )
         return records
@@ -318,11 +449,14 @@ class GeometryArtifact(BaseArtifact):
             write_json(self.save_dir / 'cameras.json', {'frames': camera_records})
             exported['camera_json'] = 'cameras.json'
 
+        world_frame_exports = self._export_world_frame_diagnostics(image_index) if image_index else {}
+        exported.update(world_frame_exports)
+
         pointcloud_index: dict[str, str] = {}
         if self.metadata.get('save_pointcloud_plys', False):
             pointcloud_dir = ensure_dir(self.save_dir / 'pointclouds')
             max_points = int(self.metadata.get('debug_max_points', 5000))
-            for frame in self.selected_frames:
+            for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting point clouds"):
                 frame_key = f"{frame.stream_id}:{frame.frame_idx}"
                 payload = self.pointmaps_by_frame.get(frame_key)
                 if not payload:
@@ -331,12 +465,33 @@ class GeometryArtifact(BaseArtifact):
                 rgb = None
                 if img_name is not None:
                     rgb = np.asarray(Image.open(self.save_dir / 'images' / img_name).convert('RGB'))
-                pts, cols = self._sample_point_cloud(
-                    payload.get('points'),
-                    rgb=rgb,
-                    max_points=max_points,
-                    confidence=payload.get('confidence'),
-                )
+                point_arr = self._points_to_debug_basis_instance(self._ensure_hwc_points(payload.get('points')))
+                pts = point_arr.reshape(-1, 3)
+                valid = np.isfinite(pts).all(axis=1)
+                conf = payload.get('confidence')
+                if conf is not None:
+                    conf_arr = np.asarray(conf).reshape(-1)
+                    if conf_arr.shape[0] == pts.shape[0]:
+                        valid &= np.isfinite(conf_arr)
+                        valid &= conf_arr > 0
+                cols = None
+                if rgb is not None:
+                    rgb_arr = np.asarray(rgb)
+                    h, w = point_arr.shape[:2]
+                    if rgb_arr.ndim == 3 and rgb_arr.shape[-1] == 3:
+                        if rgb_arr.shape[:2] != (h, w):
+                            rgb_arr = np.asarray(Image.fromarray(rgb_arr.astype(np.uint8)).resize((w, h), resample=Image.BILINEAR))
+                        cols = rgb_arr.reshape(-1, 3)[valid]
+                pts = pts[valid]
+                if pts.shape[0] > max_points:
+                    stride = max(1, int(np.ceil(pts.shape[0] / max_points)))
+                    pts = pts[::stride]
+                    if cols is not None:
+                        cols = cols[::stride]
+                pts = pts.astype(np.float32)
+                if cols is not None:
+                    cols = cols.astype(np.uint8)
+
                 out_name = f"{self._sanitize_key(frame_key)}.ply"
                 self._write_ascii_ply(pointcloud_dir / out_name, pts, cols)
                 pointcloud_index[frame_key] = out_name
@@ -361,7 +516,7 @@ class GeometryArtifact(BaseArtifact):
 
         frame_specs: list[dict[str, Any]] = []
         max_points = int(self.metadata.get('debug_max_points', 5000))
-        for frame in self.selected_frames:
+        for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · building debug viewer"):
             frame_key = f"{frame.stream_id}:{frame.frame_idx}"
             image_name = image_index.get(frame_key)
             depth_payload = self.depthmaps_by_frame.get(frame_key)
@@ -403,7 +558,7 @@ class GeometryArtifact(BaseArtifact):
                     'marker': marker,
                     'camera_state': None if state is None else {
                         'time_sec': state.time_sec,
-                        'T_world_cam': self._pose_to_z_up(state.pose.T_world_cam).astype(float).tolist(),
+                        'T_world_cam': self._pose_to_debug_basis_instance(state.pose.T_world_cam).astype(float).tolist(),
                     },
                 }
             )

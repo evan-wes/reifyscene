@@ -37,10 +37,15 @@ vision = [
   "torch>=2.2",
   "torchvision>=0.17",
   "Pillow>=10.0",
-  "huggingface_hub>=0.23",
+  "huggingface_hub[cli]>=0.23",
 ]
 geometry = [
   "scipy>=1.13",
+]
+vggt_long = [
+  "pypose>=0.7",
+  "trimesh>=4.0",
+  "matplotlib>=3.8",
 ]
 
 [project.scripts]
