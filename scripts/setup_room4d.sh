@@ -13,6 +13,8 @@ set -euo pipefail
 #   third_party/co-tracker and installed into the active environment
 # - optional VGGT-Long from the official repo at a pinned commit, cloned into
 #   third_party/VGGT-Long and installed into the active environment
+# - optional calibration dependencies: pycolmap pinned to a COLMAP release,
+#   plus hloc cloned into third_party/Hierarchical-Localization at a pinned tag
 #
 # Environment behavior:
 # - By default, this script expects to use a conda environment.
@@ -37,6 +39,11 @@ COTRACKER_COMMIT="82e02e8029753ad4ef13cf06be7f4fc5facdda4d"
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
+HLOC_REPO="https://github.com/cvg/Hierarchical-Localization.git"
+HLOC_TAG="v1.4"
+COLMAP_UPSTREAM_TAG="3.13.0"
+PYCOLMAP_VERSION="3.13.0"
+
 REQUIRED_GXX_MAJOR=9
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 # ------------------------------------------------------------------------------
@@ -55,6 +62,7 @@ INSTALL_VGGT_LONG=0
 INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
+INSTALL_CALIBRATION=1
 FORCE_VGGT_LONG_WEIGHTS=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,6 +70,7 @@ THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 VGGT_DIR="${THIRD_PARTY_DIR}/vggt"
 COTRACKER_DIR="${THIRD_PARTY_DIR}/co-tracker"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
+HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
 VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
 VGGT_LONG_WEIGHTS_STAMP="${VGGT_LONG_WEIGHTS_DIR}/.room4d_download_complete"
 VGGT_LONG_WEIGHTS_MIN_MB="${VGGT_LONG_WEIGHTS_MIN_MB:-8000}"
@@ -92,6 +101,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_VISION=0; shift ;;
     --no-geometry)
       INSTALL_GEOMETRY=0; shift ;;
+    --no-calibration)
+      INSTALL_CALIBRATION=0; shift ;;
     -h|--help)
       cat <<'EOF'
 Usage: scripts/setup_room4d.sh [options]
@@ -112,6 +123,7 @@ Install options:
   --with-dev              Install dev tools (pytest, ruff, mypy)
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
+  --no-calibration        Skip calibration extras and hloc install
 
 Behavior:
   - Default mode is conda-only.
@@ -521,11 +533,66 @@ install_vggt_long_requirements() {
   fi
 }
 
+smoke_test_python_module() {
+  local label="$1"
+  local module_name="$2"
+  local dist_name="${3:-$2}"
+  local extra_path="${4:-}"
+
+  python - "$label" "$module_name" "$dist_name" "$extra_path" <<'PYCODE'
+import importlib
+import importlib.metadata as metadata
+import sys
+
+label, module_name, dist_name, extra_path = sys.argv[1:5]
+if extra_path:
+    sys.path.insert(0, extra_path)
+module = importlib.import_module(module_name)
+try:
+    version = metadata.version(dist_name)
+except Exception:
+    version = getattr(module, '__version__', 'unknown')
+location = getattr(module, '__file__', None)
+if location is None:
+    path = getattr(module, '__path__', None)
+    if path:
+        try:
+            location = next(iter(path))
+        except Exception:
+            location = '<namespace>'
+print(f"[smoke-test] OK {label}: module={module_name} version={version} path={location or '<unknown>'}")
+PYCODE
+}
+
+run_post_install_smoke_tests() {
+  echo
+  echo "Running post-install smoke tests..."
+  smoke_test_python_module "room4d" "room4d" "room4d"
+
+  if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
+    smoke_test_python_module "detectron2" "detectron2" "detectron2"
+  fi
+  if [[ $INSTALL_VGGT -eq 1 ]]; then
+    smoke_test_python_module "VGGT" "vggt" "vggt"
+  fi
+  if [[ $INSTALL_COTRACKER -eq 1 ]]; then
+    smoke_test_python_module "CoTracker" "cotracker" "cotracker"
+  fi
+  if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
+    smoke_test_python_module "pycolmap" "pycolmap" "pycolmap"
+    smoke_test_python_module "hloc" "hloc" "hloc"
+  fi
+  if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
+    smoke_test_python_module "VGGT-Long" "vggt_long" "vggt-long" "${VGGT_LONG_DIR}"
+  fi
+}
+
 setup_python_env
 
 EXTRAS=()
 [[ $INSTALL_VISION -eq 1 ]] && EXTRAS+=(vision)
 [[ $INSTALL_GEOMETRY -eq 1 ]] && EXTRAS+=(geometry)
+[[ $INSTALL_CALIBRATION -eq 1 ]] && EXTRAS+=(calibration)
 [[ $INSTALL_VGGT_LONG -eq 1 ]] && EXTRAS+=(vggt_long)
 [[ $INSTALL_DEV -eq 1 ]] && EXTRAS+=(dev)
 
@@ -554,6 +621,15 @@ if [[ $INSTALL_COTRACKER -eq 1 ]]; then
   clone_or_update_checkout "${COTRACKER_REPO}" "${COTRACKER_DIR}" "${COTRACKER_COMMIT}"
   echo "Installing CoTracker from ${COTRACKER_DIR}..."
   python -m pip install -e "${COTRACKER_DIR}"
+fi
+
+if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
+  clone_or_update_checkout "${HLOC_REPO}" "${HLOC_DIR}" "${HLOC_TAG}"
+  if [[ -f "${HLOC_DIR}/.gitmodules" ]]; then
+    git -C "${HLOC_DIR}" submodule update --init --recursive
+  fi
+  echo "Installing hloc from ${HLOC_DIR} (tag ${HLOC_TAG})..."
+  python -m pip install -e "${HLOC_DIR}"
 fi
 
 if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
@@ -585,6 +661,8 @@ EOF
   MAX_JOBS="${MAX_JOBS:-4}" python -m pip install --no-build-isolation -e "${VGGT_LONG_DIR}"
 fi
 
+run_post_install_smoke_tests
+
 cat <<EOF
 
 Setup complete.
@@ -599,11 +677,17 @@ Installed:
 $( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}" )
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
+$( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
+$( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
 
 Notes:
 - third_party/ should be gitignored so external source checkouts are never tracked.
 - .room4d_cache/ should be gitignored too.
+- Calibration mode is pinned to hloc ${HLOC_TAG} and pycolmap ${PYCOLMAP_VERSION}
+  (aligned with upstream COLMAP ${COLMAP_UPSTREAM_TAG}).
+- Post-install smoke tests verify the third-party repos and pinned Python packages
+  this script installs directly into the active environment.
 - For Intel RealSense SDK / pyrealsense2 on Ubuntu, see:
     scripts/setup_realsense_sdk.sh
 - For a first RGB-only camera test without RealSense SDK, you can use:

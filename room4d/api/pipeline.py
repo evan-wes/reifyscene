@@ -8,6 +8,7 @@ import numpy as np
 from typing import Any
 
 from room4d.common.io import read_yaml
+from room4d.calibration.runner import CalibrationRunner
 from room4d.common.types import FrameRef, HumanState, ObjectState
 from room4d.common.paths import ensure_dir
 from room4d.common.memory import release_memory
@@ -100,6 +101,7 @@ class Room4DPipeline:
         self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
         self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
+        self.calibration_runner = CalibrationRunner(self.cfg.get("calibration", {}), decoder=self.decoder)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':
@@ -125,6 +127,18 @@ class Room4DPipeline:
 
     def _stamp_stage_metadata(self, artifact, stage_name: str, *, video_paths: list[str]) -> None:
         apply_stage_compatibility_metadata(artifact, self.cfg, stage_name, video_paths)
+
+
+    def calibrate(self, video_paths: list[str]) -> Any:
+        """Run phase-1 static-frame calibration on one or more input videos."""
+        artifact = self.calibration_runner.run(
+            run_id=self.cfg.get('run_id', 'dev'),
+            save_dir=self._stage_dir('calibration'),
+            video_paths=video_paths,
+        )
+        self._stamp_stage_metadata(artifact, 'calibration', video_paths=[str(Path(p).expanduser().resolve()) for p in video_paths])
+        artifact.save()
+        return artifact
 
     def preprocess(self, video_paths: list[str]) -> IngestArtifact:
         """Build an ingest artifact from raw video paths.
