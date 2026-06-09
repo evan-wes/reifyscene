@@ -57,6 +57,9 @@ CUDA_TOOLKIT_CHANNEL="nvidia/label/cuda-12.8.1"
 # that cuML actually runs a GPU kernel on this card; bump this if it fails.
 RAPIDS_RELEASE="25.02"
 
+# Deps Shape of Motion imports but does NOT list in its requirements.txt.
+SOM_EXTRA_PIP="tyro open3d"
+
 # gsplat is built from source for sm_120. Pin a ref once a build is confirmed.
 GSPLAT_REPO="https://github.com/nerfstudio-project/gsplat.git"
 GSPLAT_REF="v1.5.3"   # built cleanly from source for sm_120 on 2026-06-09 (CUDA 12.8, g++ 13)
@@ -291,6 +294,37 @@ install_som_requirements() {
 
   echo "Installing Shape of Motion requirements (RAPIDS -> cu12 ${RAPIDS_RELEASE})..."
   python -m pip install -r "${patched}"
+
+  # Deps that Shape of Motion imports at runtime but forgot to pin in
+  # requirements.txt (run_training.py needs tyro; viz/IO needs open3d).
+  echo "Installing SoM runtime deps missing from upstream requirements..."
+  python -m pip install ${SOM_EXTRA_PIP}
+}
+
+apply_som_patches() {
+  # Shape of Motion targets torch 2.1; torch >=2.11 (needed for sm_120) is
+  # stricter about indexing a CUDA tensor with a CPU index. cuML returns cluster
+  # labels on CPU, but the points/centers are on CUDA. Put the label tensors on
+  # the points' device, which fixes the whole device-mismatch class in
+  # motion-basis init (the per-cluster center reduction AND the returned labels
+  # consumed by the caller). The sed patterns only match the UNPATCHED form, so
+  # re-running is a no-op (idempotent).
+  local f="${SOM_DIR}/flow3d/init_utils.py"
+  [[ -f "${f}" ]] || return 0
+  echo "Applying Shape of Motion torch-device patches to $(basename "${f}")..."
+  sed -i \
+    -e 's/means_canonical\[torch\.tensor(labels == i)\]/means_canonical[torch.tensor(labels == i, device=means_canonical.device)]/' \
+    -e 's/return sampled_centers, num_bases, torch\.tensor(labels)/return sampled_centers, num_bases, torch.tensor(labels, device=means_canonical.device)/' \
+    "${f}"
+
+  # gsplat >=1.4 returns per-gaussian screen-space radii as (C, G, 2); SoM's
+  # densification expects a scalar radius (C, G). Collapse the trailing dim
+  # before it's used as a visibility mask. Guarded for idempotency.
+  local t="${SOM_DIR}/flow3d/trainer.py"
+  if [[ -f "${t}" ]] && ! grep -q "_current_radii = _current_radii.amax" "${t}"; then
+    echo "Patching $(basename "${t}") for gsplat radii shape (C,G,2)->(C,G)..."
+    sed -i 's|^\( *\)sel = _current_radii > 0|\1if _current_radii.dim() == 3:  # gsplat>=1.4 radii (C,G,2) -> (C,G)\n\1    _current_radii = _current_radii.amax(dim=-1)\n\1sel = _current_radii > 0|' "${t}"
+  fi
 }
 
 install_gsplat() {
@@ -357,6 +391,7 @@ ensure_modern_conda_compilers
 
 if [[ ${INSTALL_SOM} -eq 1 ]]; then
   clone_or_update_checkout "${SOM_REPO}" "${SOM_DIR}" "${SOM_COMMIT}"
+  apply_som_patches
   install_som_requirements
   install_gsplat
 fi
