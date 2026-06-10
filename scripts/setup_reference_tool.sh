@@ -61,12 +61,14 @@ RAPIDS_RELEASE="25.02"
 # Pinned to the versions verified working on 2026-06-09.
 SOM_EXTRA_PIP="tyro==1.0.13 open3d==0.19.0"
 
-# gsplat is built from source for sm_120 at the pinned ref below. Pinned to the
-# immutable commit SHA (tag v1.5.3 at pin time) — tags are mutable and a
-# re-pointed tag would execute different build code on the next setup run.
+# gsplat is built from source for sm_120 at the pinned ref below. Pinned to an
+# immutable commit SHA — tags are mutable and a re-pointed tag would execute
+# different build code on the next setup run. NOTE: this is the main-branch
+# commit that was ACTUALLY built and validated on this machine (2026-06-09,
+# CUDA 12.8, g++ 13) and that produced the recorded paper-windmill baseline;
+# it reports __version__ 1.5.3 like the v1.5.3 tag but is a few commits ahead.
 GSPLAT_REPO="https://github.com/nerfstudio-project/gsplat.git"
-GSPLAT_REF="937e29912570c372bed6747a5c9bf85fed877bae"   # = v1.5.3; built cleanly for sm_120 on 2026-06-09 (CUDA 12.8, g++ 13)
-GSPLAT_VERSION="1.5.3"    # __version__ reported by the pinned ref (used by the reinstall guard)
+GSPLAT_REF="4e52698e45eaaed929ed3a5065e96a688d085df6"
 GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 
 # CUDA 12.8 (and torch's nvcc host-compiler check) rejects g++ >= 14, so the
@@ -153,8 +155,14 @@ clone_or_update_checkout() {
     echo "Cloning ${repo_url} into ${dest_dir}..."
     git clone "${repo_url}" "${dest_dir}"
   fi
-  echo "Fetching updates in ${dest_dir}..."
-  git -C "${dest_dir}" fetch origin
+  # Skip the network fetch when the pinned ref is already resolvable locally —
+  # keeps re-runs working offline (the pin is immutable, nothing to update).
+  if git -C "${dest_dir}" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    echo "Pinned ref ${ref} already present in ${dest_dir} — skipping fetch."
+  else
+    echo "Fetching updates in ${dest_dir}..."
+    git -C "${dest_dir}" fetch origin
+  fi
   # Restore tracked files before checkout: this script sed-patches the tree in
   # place, and a pin bump over a dirty tree either fails the checkout or
   # silently carries stale old-pin patches into the new tree. Restoring makes
@@ -342,10 +350,14 @@ require_patched() {
   # sed -i exits 0 even when zero lines match, so every patch must be proven
   # by its sentinel — otherwise a changed upstream (pin bump, dirty checkout)
   # would ship unpatched code that fails late on GPU or, worse for a
-  # benchmark tool, runs subtly wrong.
-  local file="$1" sentinel="$2" what="$3"
-  if ! grep -q "${sentinel}" "${file}"; then
-    echo "PATCH FAILED: ${what} did not land in ${file}." >&2
+  # benchmark tool, runs subtly wrong. min_count matters when several edits
+  # share a sentinel string: requiring the exact occurrence count catches the
+  # case where only SOME of the edits landed.
+  local file="$1" sentinel="$2" what="$3" min_count="${4:-1}"
+  local found
+  found="$(grep -c "${sentinel}" "${file}" || true)"
+  if [[ "${found}" -lt "${min_count}" ]]; then
+    echo "PATCH FAILED: ${what} did not (fully) land in ${file} (${found}/${min_count} sentinels)." >&2
     echo "The pinned SoM commit's code no longer matches the sed pattern —" >&2
     echo "update apply_som_patches for the new pin before proceeding." >&2
     exit 1
@@ -375,7 +387,9 @@ apply_som_patches() {
     -e 's/means_canonical\[torch\.tensor(labels == i)\]/means_canonical[torch.tensor(labels == i, device=means_canonical.device)]/' \
     -e 's/return sampled_centers, num_bases, torch\.tensor(labels)/return sampled_centers, num_bases, torch.tensor(labels, device=means_canonical.device)/' \
     "${f}"
-  require_patched "${f}" "device=means_canonical.device" "torch device-index patch"
+  # Two independent sed edits share this sentinel — require BOTH occurrences
+  # so a partial landing (upstream drifted one line but not the other) fails.
+  require_patched "${f}" "device=means_canonical.device" "torch device-index patch" 2
 
   # gsplat >=1.4 returns per-gaussian screen-space radii as (C, G, 2); SoM's
   # densification expects a scalar radius (C, G). Collapse the trailing dim
@@ -390,18 +404,34 @@ apply_som_patches() {
 install_gsplat() {
   # Idempotency guard: the from-source CUDA build is the single most expensive
   # step in this installer (minutes at MAX_JOBS=4), and pip's wheel cache does
-  # not help VCS builds — skip when the pinned version is already importable.
-  if python -c "import gsplat; assert gsplat.__version__ == '${GSPLAT_VERSION}'" 2>/dev/null; then
-    echo "gsplat ${GSPLAT_VERSION} already installed — skipping source build."
+  # not help VCS builds — skip when the pinned COMMIT is already installed.
+  # The comparison must be the VCS SHA from pip's direct_url.json, NOT
+  # __version__: different gsplat commits report the same version string, so a
+  # version check can never correct a wrong-SHA install.
+  local installed_sha
+  installed_sha="$(python - <<'PY' 2>/dev/null || true
+import json
+from importlib.metadata import distribution
+try:
+    dist = distribution("gsplat")
+    url_text = dist.read_text("direct_url.json")
+    print(json.loads(url_text)["vcs_info"]["commit_id"] if url_text else "")
+except Exception:
+    print("")
+PY
+)"
+  if [[ "${installed_sha}" == "${GSPLAT_REF}" ]]; then
+    echo "gsplat already installed at pinned commit ${GSPLAT_REF:0:12} — skipping source build."
     return
   fi
+  [[ -n "${installed_sha}" ]] && echo "gsplat installed at ${installed_sha:0:12}, pin is ${GSPLAT_REF:0:12} — rebuilding."
   local spec="git+${GSPLAT_REPO}"
   [[ -n "${GSPLAT_REF}" ]] && spec="${spec}@${GSPLAT_REF}"
   echo "Building gsplat from source for sm_120 (TORCH_CUDA_ARCH_LIST=${GSPLAT_ARCH_LIST})..."
   CUDA_HOME="${CUDA_HOME}" \
   TORCH_CUDA_ARCH_LIST="${GSPLAT_ARCH_LIST}" \
   MAX_JOBS="${MAX_JOBS:-4}" \
-    python -m pip install --no-build-isolation "${spec}"
+    python -m pip install --no-build-isolation --force-reinstall --no-deps "${spec}"
 }
 
 run_smoke_tests() {

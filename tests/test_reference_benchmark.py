@@ -73,11 +73,11 @@ def _make_iphone_sequence(root: Path) -> Path:
     return root
 
 
-def _make_completed_run(root: Path) -> Path:
-    """Run dir that training_completed() accepts (sentinel + checkpoint)."""
+def _make_completed_run(root: Path, epochs: str = "default") -> Path:
+    """Run dir that completed_epochs() accepts (sentinel + checkpoint)."""
     (root / "checkpoints").mkdir(parents=True, exist_ok=True)
     (root / "checkpoints" / "last.ckpt").write_text("ckpt")
-    (root / rb.TRAINING_COMPLETE_SENTINEL).touch()
+    (root / rb.TRAINING_COMPLETE_SENTINEL).write_text(epochs + "\n")
     return root
 
 
@@ -331,22 +331,32 @@ def test_benchmark_reuses_completed_run_and_requires_results_dir(
     assert "reusing completed run" in capsys.readouterr().out
 
 
-def test_training_completed_requires_proof_not_just_checkpoint(tmp_path: Path) -> None:
+def test_completed_epochs_requires_proof_and_records_schedule(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
     (run_dir / "checkpoints" / "last.ckpt").write_text("ckpt")
     # A bare checkpoint is NOT completion — SoM writes one at epoch 0.
-    assert rb.training_completed(run_dir) is False
-    # Sentinel proves completion.
-    (run_dir / rb.TRAINING_COMPLETE_SENTINEL).touch()
-    assert rb.training_completed(run_dir) is True
+    assert rb.completed_epochs(run_dir) is None
+    # Sentinel proves completion AND records the schedule (a smoke run can
+    # never be mistaken for a full baseline).
+    (run_dir / rb.TRAINING_COMPLETE_SENTINEL).write_text("5\n")
+    assert rb.completed_epochs(run_dir) == "5"
+    # Empty/legacy sentinel -> default schedule.
+    (run_dir / rb.TRAINING_COMPLETE_SENTINEL).write_text("")
+    assert rb.completed_epochs(run_dir) == "default"
     # Pre-sentinel runs: cfg.yaml num_epochs + final-epoch videos dir.
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     (legacy / "cfg.yaml").write_text("work_dir: x\nnum_epochs: 500\nbatch_size: 8\n")
-    assert rb.training_completed(legacy) is False  # no videos yet
+    assert rb.completed_epochs(legacy) is None  # no videos yet
     (legacy / "videos" / "epoch_0499").mkdir(parents=True)
-    assert rb.training_completed(legacy) is True
+    assert rb.completed_epochs(legacy) == "default"  # 500 = SoM default
+    # Non-default legacy schedule reports its actual epoch count.
+    short = tmp_path / "short"
+    short.mkdir()
+    (short / "cfg.yaml").write_text("num_epochs: 37\n")
+    (short / "videos" / "epoch_0036").mkdir(parents=True)
+    assert rb.completed_epochs(short) == "37"
 
 
 def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
@@ -372,18 +382,76 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()  # written post-train
 
     # --retrain clears prior outputs before training (SoM would otherwise
-    # auto-resume and train ~0 epochs against a finished run).
+    # auto-resume and train ~0 epochs against a finished run) — including the
+    # previous run's result artifacts, which must not survive a retrain.
     run_dir2 = _make_completed_run(tmp_path / "run2")
     (run_dir2 / "results").mkdir()
     (run_dir2 / "videos" / "epoch_0499").mkdir(parents=True)
     stale = run_dir2 / "results" / "stale.txt"
     stale.write_text("old")
+    stale_json = run_dir2 / "reference_benchmark.json"
+    stale_json.write_text("{}")
     calls.clear()
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir2, som_dir, retrain=True))
     assert not stale.exists()
+    assert not stale_json.exists()
     assert not (run_dir2 / "videos").exists()
     assert any("run_training.py" in part for call in calls for part in call)
+
+
+def test_benchmark_epoch_schedule_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+
+    # Reuse with a DIFFERENT schedule than the run completed with -> abort
+    # (a 5-epoch smoke result must never be published as a full baseline,
+    # and vice versa).
+    full_run = _make_completed_run(tmp_path / "full")
+    (full_run / "results").mkdir()
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, full_run, som_dir, num_epochs=5))
+    assert "completed with epochs=default" in str(exc.value)
+    assert "epochs=5 was requested" in str(exc.value)
+    assert not calls  # no training, no eval — hard abort
+
+    # Resume of an interrupted run with an explicit --num-epochs -> abort
+    # (SoM resumes its saved schedule; a smaller value trains 0 epochs and
+    # would then be stamped complete).
+    interrupted = tmp_path / "interrupted"
+    (interrupted / "checkpoints").mkdir(parents=True)
+    (interrupted / "checkpoints" / "last.ckpt").write_text("ckpt")
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, interrupted, som_dir, num_epochs=50))
+    assert "use --retrain" in str(exc.value)
+    assert not calls
+
+
+def test_run_training_sentinel_not_written_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_run(cmd, **kwargs):  # noqa: ANN001
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(
+        rb, "subprocess",
+        SimpleNamespace(run=failing_run, PIPE=subprocess.PIPE,
+                        STDOUT=subprocess.STDOUT, DEVNULL=subprocess.DEVNULL,
+                        CalledProcessError=subprocess.CalledProcessError),
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    with pytest.raises(subprocess.CalledProcessError):
+        rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None)
+    # A failed training (OOM, Ctrl-C) must never stamp the run complete.
+    assert not (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()
 
 
 def test_benchmark_happy_path_writes_contract_json(
@@ -412,6 +480,7 @@ def test_benchmark_happy_path_writes_contract_json(
     assert result["method"] == "shape-of-motion"
     assert result["method_commit"] == "deadbeef+dirty"
     assert result["sequence"] == "paper-windmill"  # defaults to data-dir basename
+    assert result["epochs"] == "default"  # schedule recorded in the artifact
     assert result["metrics"] == EXPECTED_METRICS
     assert result["videos"]["rgb"].endswith("epoch_0499/rgbs.mp4")
     assert result["env"] == {"torch": "2.11.0+cu128"}
@@ -427,7 +496,8 @@ def test_run_training_command_construction_and_sentinel(
 
     rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None)
     assert "--num-epochs" not in calls[0]
-    assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()
+    sentinel = run_dir / rb.TRAINING_COMPLETE_SENTINEL
+    assert sentinel.read_text().strip() == "default"
 
     rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, 5)
     cmd = calls[1]
@@ -435,6 +505,8 @@ def test_run_training_command_construction_and_sentinel(
     assert cmd[idx + 1] == "5"
     # tyro subcommand args must come AFTER the optional flag
     assert cmd.index("data:iphone") > idx
+    # ... and the sentinel records the schedule it completed with
+    assert sentinel.read_text().strip() == "5"
 
 
 def test_best_effort_helpers_degrade_gracefully(
@@ -477,6 +549,33 @@ def test_compare_nan_metric_renders_dash_and_no_winner(
     )
     assert "—" in row  # NaN renders as missing
     assert not row.rstrip().endswith("som")  # and no winner is declared
+
+    # Infinity has the same wrong-winner failure shape as NaN (json.loads
+    # accepts the literal; inf passes a NaN-only guard and always "wins").
+    c = tmp_path / "c.json"
+    c.write_text(
+        '{"schema": "%s", "method": "room4d", "sequence": "s",'
+        ' "metrics": {"masked_mpsnr": Infinity}}' % rb.SCHEMA
+    )
+    rb.compare(str(c), str(b))
+    row = next(
+        line for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("masked_mpsnr")
+    )
+    assert "—" in row
+    assert not row.rstrip().endswith("room4d")
+
+
+def test_metric_patterns_handle_scientific_notation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # '([0-9.]+)' would truncate 8.21e-05 to 8.21 — a 100,000x silent error.
+    output = "mean NV mPSNR: 19.53\nmean 3D tracking EPE: 8.21e-05\n"
+    _patch_eval_subprocess(monkeypatch, output)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    metrics, _ = rb.run_eval("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, "s")
+    assert metrics["track3d_epe"] == pytest.approx(8.21e-05)
 
 
 def test_compare_shows_unknown_metrics_with_undefined_direction(

@@ -58,16 +58,19 @@ TRAINING_COMPLETE_SENTINEL = ".room4d_training_complete"
 
 # evaluate_iphone.py prints "mean <name>: <float>" lines; these patterns are
 # stable at the pinned SoM commit (see setup_reference_tool.sh SOM_COMMIT).
+# The value group accepts scientific notation — '([0-9.]+)' would silently
+# truncate '8.21e-05' to 8.21, a 100,000x error in a recorded metric.
+_FLOAT = r"([-+0-9.eE]+)"
 METRIC_PATTERNS: dict[str, str] = {
-    "masked_mpsnr": r"mean NV mPSNR:\s*([0-9.]+)",
-    "masked_mssim": r"mean NV mSSIM:\s*([0-9.]+)",
-    "masked_mlpips": r"mean NV mLPIPS:\s*([0-9.]+)",
-    "track3d_epe": r"mean 3D tracking EPE:\s*([0-9.]+)",
-    "track3d_pck_10cm": r"mean 3D tracking PCK \(10cm\):\s*([0-9.]+)",
-    "track3d_pck_5cm": r"mean 3D tracking PCK \(5cm\):\s*([0-9.]+)",
-    "track2d_aj": r"mean 2D tracking AJ:\s*([0-9.]+)",
-    "track2d_avg_pck": r"mean 2D tracking avg PCK:\s*([0-9.]+)",
-    "track2d_occ_acc": r"mean 2D tracking occlusion accuracy:\s*([0-9.]+)",
+    "masked_mpsnr": rf"mean NV mPSNR:\s*{_FLOAT}",
+    "masked_mssim": rf"mean NV mSSIM:\s*{_FLOAT}",
+    "masked_mlpips": rf"mean NV mLPIPS:\s*{_FLOAT}",
+    "track3d_epe": rf"mean 3D tracking EPE:\s*{_FLOAT}",
+    "track3d_pck_10cm": rf"mean 3D tracking PCK \(10cm\):\s*{_FLOAT}",
+    "track3d_pck_5cm": rf"mean 3D tracking PCK \(5cm\):\s*{_FLOAT}",
+    "track2d_aj": rf"mean 2D tracking AJ:\s*{_FLOAT}",
+    "track2d_avg_pck": rf"mean 2D tracking avg PCK:\s*{_FLOAT}",
+    "track2d_occ_acc": rf"mean 2D tracking occlusion accuracy:\s*{_FLOAT}",
 }
 
 # Direction of "better" per metric, used by --compare output.
@@ -147,26 +150,38 @@ def validate_iphone_sequence(data_dir: Path) -> None:
         )
 
 
-def training_completed(run_dir: Path) -> bool:
-    """True only when a prior training run demonstrably ran to completion.
+def _epochs_label(num_epochs: int | None) -> str:
+    """Canonical label for a training schedule ('default' = SoM's built-in)."""
+    return "default" if num_epochs is None else str(num_epochs)
+
+
+def completed_epochs(run_dir: Path) -> str | None:
+    """The epoch label a completed run was trained with, or None if incomplete.
 
     SoM writes checkpoints/last.ckpt at initialization and every 200 steps,
     so an interrupted run leaves a checkpoint plus stale results/ behind —
     reusing those would silently present a half-trained model as the
     reference baseline. Completion is proven by either:
-    - the sentinel this wrapper writes after run_training exits 0, or
-    - (runs predating the sentinel) the final-epoch video dir existing,
-      with the epoch count read from the run's own cfg.yaml.
+    - the sentinel this wrapper writes after run_training exits 0 (its body
+      records the epoch schedule, so a 5-epoch smoke run can never be reused
+      as a full baseline), or
+    - (runs predating the sentinel) the final-epoch video dir existing, with
+      the epoch count read from the run's own cfg.yaml — reported as the
+      label of the schedule the run actually used.
     """
-    if (run_dir / TRAINING_COMPLETE_SENTINEL).exists():
-        return True
+    sentinel = run_dir / TRAINING_COMPLETE_SENTINEL
+    if sentinel.exists():
+        return sentinel.read_text().strip() or "default"
     cfg = run_dir / "cfg.yaml"
     if cfg.is_file():
         match = re.search(r"^num_epochs:\s*(\d+)", cfg.read_text(), re.M)
         if match:
-            final_epoch = int(match.group(1)) - 1
-            return (run_dir / "videos" / f"epoch_{final_epoch:04d}").is_dir()
-    return False
+            epochs = int(match.group(1))
+            if (run_dir / "videos" / f"epoch_{epochs - 1:04d}").is_dir():
+                # 500 is SoM's default schedule; label accordingly so reuse
+                # against a default-schedule request matches.
+                return "default" if epochs == 500 else str(epochs)
+    return None
 
 
 def clear_run_state(run_dir: Path) -> None:
@@ -175,9 +190,14 @@ def clear_run_state(run_dir: Path) -> None:
     SoM auto-resumes from checkpoints in the work dir (init_from_checkpoint
     reads the saved epoch and trains range(start_epoch, num_epochs)), so
     without this a --retrain against a finished run trains ~0 epochs and
-    re-scores the old renders while looking like a fresh run.
+    re-scores the old renders while looking like a fresh run. Prior result
+    artifacts are cleared too — a crashed retrain must not leave the OLD
+    run's reference_benchmark.json looking current.
     """
-    for entry in ("checkpoints", "results", "videos", TRAINING_COMPLETE_SENTINEL):
+    for entry in (
+        "checkpoints", "results", "videos",
+        TRAINING_COMPLETE_SENTINEL, "reference_benchmark.json", "benchmark_eval.log",
+    ):
         path = run_dir / entry
         if path.is_dir():
             shutil.rmtree(path)
@@ -200,7 +220,9 @@ def run_training(
     print(f"[train] {' '.join(cmd)}", flush=True)
     start = time.monotonic()
     subprocess.run(cmd, cwd=som_dir, check=True)
-    (run_dir / TRAINING_COMPLETE_SENTINEL).touch()
+    # Written only on success (check=True raises first) and records the
+    # schedule, so completion claims are schedule-specific.
+    (run_dir / TRAINING_COMPLETE_SENTINEL).write_text(_epochs_label(num_epochs) + "\n")
     return (time.monotonic() - start) / 60.0
 
 
@@ -230,10 +252,16 @@ def run_eval(
     metrics: dict[str, float] = {}
     for key, pattern in METRIC_PATTERNS.items():
         match = re.search(pattern, output)
-        if match:
-            metrics[key] = float(match.group(1))
-        else:
+        if not match:
             print(f"[warn] metric not found in eval output: {key}", flush=True)
+            continue
+        try:
+            metrics[key] = float(match.group(1))
+        except ValueError:
+            print(
+                f"[warn] unparseable value for {key}: {match.group(1)!r}",
+                flush=True,
+            )
     if not any(k.startswith("masked_") for k in metrics):
         sys.exit(
             "No novel-view metrics parsed from eval output — the print format "
@@ -305,18 +333,37 @@ def benchmark(args: argparse.Namespace) -> None:
     conda = find_conda()
 
     train_minutes: float | None = None
+    requested = _epochs_label(args.num_epochs)
+    recorded = completed_epochs(run_dir)
     if args.retrain:
         print("[train] --retrain: clearing checkpoints/results/videos", flush=True)
         clear_run_state(run_dir)
         train_minutes = run_training(
             conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
         )
-    elif training_completed(run_dir):
-        print(f"[train] reusing completed run ({run_dir})", flush=True)
+    elif recorded is not None:
+        if recorded != requested:
+            sys.exit(
+                f"{run_dir} completed with epochs={recorded}, but epochs="
+                f"{requested} was requested. Reusing would mislabel the result "
+                "(and SoM resume would train 0 epochs). Use --retrain, or a "
+                "different --run-dir."
+            )
+        print(f"[train] reusing completed run ({run_dir}, epochs={recorded})", flush=True)
     else:
         if (run_dir / "checkpoints" / "last.ckpt").exists():
             # Checkpoint without completion proof = interrupted run. SoM will
-            # auto-resume from it, which is the desired behavior here.
+            # auto-resume from it — but only toward the schedule already in
+            # the run's cfg.yaml. An explicit --num-epochs on a resume is
+            # ambiguous (smaller values train 0 epochs and would then be
+            # stamped complete), so require --retrain for that.
+            if args.num_epochs is not None:
+                sys.exit(
+                    f"{run_dir} holds an interrupted run; resuming ignores "
+                    "--num-epochs (SoM continues its saved schedule) and a "
+                    "smaller value would train 0 epochs yet be stamped "
+                    "complete. Drop --num-epochs to resume, or use --retrain."
+                )
             print("[train] incomplete run detected — resuming training", flush=True)
         train_minutes = run_training(
             conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
@@ -339,6 +386,7 @@ def benchmark(args: argparse.Namespace) -> None:
         "dataset_format": "iphone",
         "data_dir": str(data_dir),
         "run_dir": str(run_dir),
+        "epochs": completed_epochs(run_dir) or requested,
         "metrics": metrics,
         "videos": {"rgb": latest_rgb_video(run_dir)},
         "env": capture_env_versions(conda, args.conda_env),
@@ -350,6 +398,7 @@ def benchmark(args: argparse.Namespace) -> None:
         if args.output
         else run_dir / "reference_benchmark.json"
     )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2) + "\n")
 
     print(f"\nReference benchmark written to: {out_path}\n")
@@ -388,7 +437,14 @@ def compare(path_a: str, path_b: str) -> None:
     print(f"  {'metric':<{width}}  {name_a:>14}  {name_b:>14}  {'better':>8}")
 
     def _usable(v) -> bool:
-        return isinstance(v, (int, float)) and not math.isnan(v)
+        # json.loads accepts NaN AND Infinity literals; bool is an int
+        # subclass. Any of them would silently win/lose a direction
+        # comparison, so only finite real numbers count.
+        return (
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+        )
 
     for key in keys:
         va, vb = metrics_a.get(key), metrics_b.get(key)

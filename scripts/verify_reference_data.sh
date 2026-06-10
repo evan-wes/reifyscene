@@ -101,7 +101,12 @@ if [[ ${missing} -ne 0 ]]; then
   exit 1
 fi
 
-echo "RESULT: OK — sequence looks complete."
+if [[ "${DATASET}" == "nvidia" ]]; then
+  echo "RESULT: OK — minimal nvidia layout present (only rgb/ is checked;"
+  echo "full nvidia support in the benchmark wrapper is tracked in TODOS.md)."
+else
+  echo "RESULT: OK — sequence looks complete."
+fi
 echo "Use with Shape of Motion:"
 echo "  cd third_party/shape-of-motion"
 echo "  python run_training.py --work-dir <OUT> data:${DATASET} --data.data-dir ${SEQ_DIR}"

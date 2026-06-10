@@ -3,9 +3,10 @@
 # Platform: Linux/x86_64 | Python 3.11.15 | torch 2.11.0+cu130 (cuda 13.0)
 # Excludes editable installs and gsplat (owned by the setup scripts).
 # Install: handled by the setup scripts by default; --unlocked re-resolves.
-# RAPIDS wheels need: --extra-index-url https://pypi.nvidia.com
-# torch +cuXXX builds need their pytorch index ONLY on a fresh env where
-# torch is not yet installed (the setup scripts install torch first).
+# Index notes: RAPIDS wheels need --extra-index-url https://pypi.nvidia.com;
+# torch +cuXXX builds need the matching pytorch index when the lock itself
+# installs torch (setup_room4d.sh passes both; setup_reference_tool.sh
+# installs torch from its pinned index before the lock runs).
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0

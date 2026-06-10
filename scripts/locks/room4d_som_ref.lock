@@ -3,9 +3,10 @@
 # Platform: Linux/x86_64 | Python 3.10.20 | torch 2.11.0+cu128 (cuda 12.8)
 # Excludes editable installs and gsplat (owned by the setup scripts).
 # Install: handled by the setup scripts by default; --unlocked re-resolves.
-# RAPIDS wheels need: --extra-index-url https://pypi.nvidia.com
-# torch +cuXXX builds need their pytorch index ONLY on a fresh env where
-# torch is not yet installed (the setup scripts install torch first).
+# Index notes: RAPIDS wheels need --extra-index-url https://pypi.nvidia.com;
+# torch +cuXXX builds need the matching pytorch index when the lock itself
+# installs torch (setup_room4d.sh passes both; setup_reference_tool.sh
+# installs torch from its pinned index before the lock runs).
 absl-py==2.4.0
 addict==2.4.0
 aiohappyeyeballs==2.6.2
@@ -70,7 +71,6 @@ frozenlist==1.8.0
 fsspec==2026.4.0
 geopandas==1.1.3
 grpcio==1.81.0
-gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@4e52698e45eaaed929ed3a5065e96a688d085df6
 holoviews==1.22.1
 idna==3.18
 ImageIO==2.37.3
