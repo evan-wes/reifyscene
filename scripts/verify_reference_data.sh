@@ -83,13 +83,14 @@ for f in "${required_files[@]}"; do
   fi
 done
 
-# iPhone: the preprocessed depth/covisible used for training/eval must exist.
+# iPhone: the preprocessed tracks used for training must exist. (scene_depth.npy
+# is NOT checked — it only exists for depth_type=monst3r; shipped sequences use
+# aligned_depth_anything_colmap/ instead.)
 if [[ "${DATASET}" == "iphone" ]]; then
-  if [[ -e "${SEQ_DIR}/flow3d_preprocessed/scene_depth.npy" ]]; then
-    echo "  [ok]   file flow3d_preprocessed/scene_depth.npy"
+  if [[ -d "${SEQ_DIR}/flow3d_preprocessed/2d_tracks" ]]; then
+    echo "  [ok]   dir  flow3d_preprocessed/2d_tracks/"
   else
-    echo "  [warn] flow3d_preprocessed/scene_depth.npy not found"
-    echo "         (training expects SoM's preprocessed depth; re-check the download)"
+    echo "  [MISS] dir  flow3d_preprocessed/2d_tracks/"
     missing=1
   fi
 fi
