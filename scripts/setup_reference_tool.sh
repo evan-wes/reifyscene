@@ -58,11 +58,15 @@ CUDA_TOOLKIT_CHANNEL="nvidia/label/cuda-12.8.1"
 RAPIDS_RELEASE="25.02"
 
 # Deps Shape of Motion imports but does NOT list in its requirements.txt.
-SOM_EXTRA_PIP="tyro open3d"
+# Pinned to the versions verified working on 2026-06-09.
+SOM_EXTRA_PIP="tyro==1.0.13 open3d==0.19.0"
 
-# gsplat is built from source for sm_120. Pin a ref once a build is confirmed.
+# gsplat is built from source for sm_120 at the pinned ref below. Pinned to the
+# immutable commit SHA (tag v1.5.3 at pin time) — tags are mutable and a
+# re-pointed tag would execute different build code on the next setup run.
 GSPLAT_REPO="https://github.com/nerfstudio-project/gsplat.git"
-GSPLAT_REF="v1.5.3"   # built cleanly from source for sm_120 on 2026-06-09 (CUDA 12.8, g++ 13)
+GSPLAT_REF="937e29912570c372bed6747a5c9bf85fed877bae"   # = v1.5.3; built cleanly for sm_120 on 2026-06-09 (CUDA 12.8, g++ 13)
+GSPLAT_VERSION="1.5.3"    # __version__ reported by the pinned ref (used by the reinstall guard)
 GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 
 # CUDA 12.8 (and torch's nvcc host-compiler check) rejects g++ >= 14, so the
@@ -75,13 +79,16 @@ PINNED_PYTHON="${PINNED_PYTHON:-3.10}"
 # Config
 # ------------------------------------------------------------------------------
 
+# Must match DEFAULT_CONDA_ENV in scripts/run_reference_benchmark.py.
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-room4d_som_ref}"
 INSTALL_SOM=1
 INSTALL_MOSCA=0
+UNLOCKED=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 SOM_DIR="${THIRD_PARTY_DIR}/shape-of-motion"
+LOCK_FILE="${ROOT_DIR}/scripts/locks/room4d_som_ref.lock"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -91,6 +98,8 @@ while [[ $# -gt 0 ]]; do
       PINNED_PYTHON="$2"; shift 2 ;;
     --no-shape-of-motion)
       INSTALL_SOM=0; shift ;;
+    --unlocked)
+      UNLOCKED=1; shift ;;
     --with-mosca)
       INSTALL_MOSCA=1; shift ;;
     -h|--help)
@@ -104,6 +113,9 @@ Options:
   --conda-env NAME        Conda env to create/use (default: room4d_som_ref)
   --python VERSION        Python version if the env must be created (default: 3.10)
   --no-shape-of-motion    Skip the Shape of Motion install
+  --unlocked              Resolve dependencies fresh instead of installing from
+                          scripts/locks/room4d_som_ref.lock (regenerate locks
+                          with scripts/gen_env_locks.sh)
   --with-mosca            (NOT YET IMPLEMENTED) set up MoSca — errors out
 
 Behavior:
@@ -143,6 +155,12 @@ clone_or_update_checkout() {
   fi
   echo "Fetching updates in ${dest_dir}..."
   git -C "${dest_dir}" fetch origin
+  # Restore tracked files before checkout: this script sed-patches the tree in
+  # place, and a pin bump over a dirty tree either fails the checkout or
+  # silently carries stale old-pin patches into the new tree. Restoring makes
+  # every run deterministic — patches are reapplied fresh afterwards.
+  echo "Restoring tracked files in ${dest_dir} (patches are reapplied after checkout)..."
+  git -C "${dest_dir}" checkout -- .
   echo "Checking out ${ref} in ${dest_dir}..."
   git -C "${dest_dir}" checkout "${ref}"
 }
@@ -280,25 +298,58 @@ PY
 }
 
 install_som_requirements() {
-  # Generate a patched requirements file from upstream so we track its deps,
-  # but (a) drop the stale torch extra-index (torch is installed separately) and
-  # (b) move RAPIDS from cu11/24.6 to a Blackwell-capable cu12 release.
+  # Lockfile path (default when the lock exists): replay the exact pip tree of
+  # the known-good env — no dependency resolution at all. The lock excludes
+  # editable installs and gsplat (built from source separately); torch is
+  # already installed at the pinned cu128 build, so its lock line is a no-op.
+  # Regenerate with scripts/gen_env_locks.sh after deliberate upgrades.
+  if [[ ${UNLOCKED} -eq 0 && -f "${LOCK_FILE}" ]]; then
+    echo "Installing reference env from lockfile ${LOCK_FILE} (use --unlocked to re-resolve)..."
+    python -m pip install -r "${LOCK_FILE}" --extra-index-url https://pypi.nvidia.com
+    return
+  fi
+  [[ ${UNLOCKED} -eq 0 ]] && echo "No lockfile at ${LOCK_FILE} — falling back to fresh resolution."
+
+  # Fresh-resolution path: generate a patched requirements file from upstream
+  # so we track its deps, but (a) drop ALL index lines (torch is installed
+  # separately; the NVIDIA index is scoped to the RAPIDS install below so it
+  # cannot influence unrelated packages) and (b) split out RAPIDS, moving it
+  # from cu11/24.6 to a Blackwell-capable cu12 release.
   local upstream="${SOM_DIR}/requirements.txt"
   local patched="${SOM_DIR}/requirements.room4d.txt"
+  local rapids="${SOM_DIR}/requirements.room4d-rapids.txt"
   [[ -f "${upstream}" ]] || { echo "Missing ${upstream}" >&2; exit 1; }
 
   sed -E \
-    -e '/download\.pytorch\.org\/whl\/cu[0-9]+/d' \
-    -e "s/-cu11==24\.6\.\*/-cu12==${RAPIDS_RELEASE}.*/g" \
+    -e '/--extra-index-url/d' \
+    -e '/-cu11==24\.6\.\*/d' \
     "${upstream}" > "${patched}"
+  sed -nE "s/(.*)-cu11==24\.6\.\*/\1-cu12==${RAPIDS_RELEASE}.*/p" "${upstream}" > "${rapids}"
 
-  echo "Installing Shape of Motion requirements (RAPIDS -> cu12 ${RAPIDS_RELEASE})..."
+  echo "Installing Shape of Motion requirements (PyPI only)..."
   python -m pip install -r "${patched}"
+
+  echo "Installing RAPIDS (cu12 ${RAPIDS_RELEASE}) from the NVIDIA index..."
+  python -m pip install -r "${rapids}" --extra-index-url https://pypi.nvidia.com
 
   # Deps that Shape of Motion imports at runtime but forgot to pin in
   # requirements.txt (run_training.py needs tyro; viz/IO needs open3d).
   echo "Installing SoM runtime deps missing from upstream requirements..."
   python -m pip install ${SOM_EXTRA_PIP}
+}
+
+require_patched() {
+  # sed -i exits 0 even when zero lines match, so every patch must be proven
+  # by its sentinel — otherwise a changed upstream (pin bump, dirty checkout)
+  # would ship unpatched code that fails late on GPU or, worse for a
+  # benchmark tool, runs subtly wrong.
+  local file="$1" sentinel="$2" what="$3"
+  if ! grep -q "${sentinel}" "${file}"; then
+    echo "PATCH FAILED: ${what} did not land in ${file}." >&2
+    echo "The pinned SoM commit's code no longer matches the sed pattern —" >&2
+    echo "update apply_som_patches for the new pin before proceeding." >&2
+    exit 1
+  fi
 }
 
 apply_som_patches() {
@@ -308,26 +359,42 @@ apply_som_patches() {
   # the points' device, which fixes the whole device-mismatch class in
   # motion-basis init (the per-cluster center reduction AND the returned labels
   # consumed by the caller). The sed patterns only match the UNPATCHED form, so
-  # re-running is a no-op (idempotent).
+  # re-running is a no-op (idempotent); require_patched proves each patch landed.
   local f="${SOM_DIR}/flow3d/init_utils.py"
-  [[ -f "${f}" ]] || return 0
+  local t="${SOM_DIR}/flow3d/trainer.py"
+  for required in "${f}" "${t}"; do
+    if [[ ! -f "${required}" ]]; then
+      echo "Expected patch target missing: ${required}" >&2
+      echo "The SoM checkout at ${SOM_DIR} does not match the pinned commit layout." >&2
+      exit 1
+    fi
+  done
+
   echo "Applying Shape of Motion torch-device patches to $(basename "${f}")..."
   sed -i \
     -e 's/means_canonical\[torch\.tensor(labels == i)\]/means_canonical[torch.tensor(labels == i, device=means_canonical.device)]/' \
     -e 's/return sampled_centers, num_bases, torch\.tensor(labels)/return sampled_centers, num_bases, torch.tensor(labels, device=means_canonical.device)/' \
     "${f}"
+  require_patched "${f}" "device=means_canonical.device" "torch device-index patch"
 
   # gsplat >=1.4 returns per-gaussian screen-space radii as (C, G, 2); SoM's
   # densification expects a scalar radius (C, G). Collapse the trailing dim
-  # before it's used as a visibility mask. Guarded for idempotency.
-  local t="${SOM_DIR}/flow3d/trainer.py"
-  if [[ -f "${t}" ]] && ! grep -q "_current_radii = _current_radii.amax" "${t}"; then
+  # before it's used as a visibility mask.
+  if ! grep -q "_current_radii = _current_radii.amax" "${t}"; then
     echo "Patching $(basename "${t}") for gsplat radii shape (C,G,2)->(C,G)..."
     sed -i 's|^\( *\)sel = _current_radii > 0|\1if _current_radii.dim() == 3:  # gsplat>=1.4 radii (C,G,2) -> (C,G)\n\1    _current_radii = _current_radii.amax(dim=-1)\n\1sel = _current_radii > 0|' "${t}"
   fi
+  require_patched "${t}" "_current_radii = _current_radii.amax" "gsplat radii patch"
 }
 
 install_gsplat() {
+  # Idempotency guard: the from-source CUDA build is the single most expensive
+  # step in this installer (minutes at MAX_JOBS=4), and pip's wheel cache does
+  # not help VCS builds — skip when the pinned version is already importable.
+  if python -c "import gsplat; assert gsplat.__version__ == '${GSPLAT_VERSION}'" 2>/dev/null; then
+    echo "gsplat ${GSPLAT_VERSION} already installed — skipping source build."
+    return
+  fi
   local spec="git+${GSPLAT_REPO}"
   [[ -n "${GSPLAT_REF}" ]] && spec="${spec}@${GSPLAT_REF}"
   echo "Building gsplat from source for sm_120 (TORCH_CUDA_ARCH_LIST=${GSPLAT_ARCH_LIST})..."
@@ -340,15 +407,25 @@ install_gsplat() {
 run_smoke_tests() {
   echo
   echo "Running post-install smoke tests..."
-  python - <<'PY'
+  # The cuML and gsplat sections only apply when the SoM stack was installed;
+  # with --no-shape-of-motion only the torch check runs (RAPIDS/gsplat are
+  # never installed on that path, so requiring them would always fail).
+  SMOKE_INSTALL_SOM="${INSTALL_SOM}" python - <<'PY'
+import os
 import sys
 import numpy as np
 
-# 1) torch on sm_120
+install_som = os.environ.get("SMOKE_INSTALL_SOM") == "1"
+
+# 1) torch on sm_120 (.item() forces device sync, proving the kernel ran)
 import torch
 assert torch.cuda.is_available()
-x = (torch.randn(1024, 1024, device="cuda") @ torch.randn(1024, 1024, device="cuda")).sum().item()
+(torch.randn(1024, 1024, device="cuda") @ torch.randn(1024, 1024, device="cuda")).sum().item()
 print(f"[smoke] torch GPU matmul OK ({torch.__version__}, {torch.cuda.get_device_name(0)})")
+
+if not install_som:
+    print("[smoke] SoM stack not installed (--no-shape-of-motion) — skipping cuML/gsplat checks.")
+    sys.exit(0)
 
 # 2) cuML actually runs a GPU kernel on this card (validates RAPIDS sm_120)
 try:
@@ -361,12 +438,26 @@ except Exception as e:
     print("           -> bump RAPIDS_RELEASE to a Blackwell/sm_120-capable version.")
     sys.exit(1)
 
-# 3) gsplat imports and rasterizes a trivial scene
+# 3) gsplat rasterizes a trivial scene — exercises the sm_120 CUDA kernels the
+# source build exists for (an import-only check would pass a broken build).
 try:
     import gsplat
-    print(f"[smoke] gsplat import OK ({getattr(gsplat,'__version__','?')})")
+    n = 64
+    means = torch.randn(n, 3, device="cuda")
+    quats = torch.randn(n, 4, device="cuda")
+    quats = quats / quats.norm(dim=-1, keepdim=True)
+    scales = torch.rand(n, 3, device="cuda") * 0.1
+    opacities = torch.rand(n, device="cuda")
+    colors = torch.rand(n, 3, device="cuda")
+    viewmat = torch.eye(4, device="cuda")[None]
+    K = torch.tensor([[[100.0, 0, 64], [0, 100.0, 64], [0, 0, 1]]], device="cuda")
+    rgb, alpha, _ = gsplat.rasterization(
+        means, quats, scales, opacities, colors, viewmat, K, 128, 128
+    )
+    assert rgb.shape == (1, 128, 128, 3)
+    print(f"[smoke] gsplat rasterization OK ({getattr(gsplat,'__version__','?')}, output {tuple(rgb.shape)})")
 except Exception as e:
-    print(f"[smoke][FAIL] gsplat import: {type(e).__name__}: {str(e)[:200]}")
+    print(f"[smoke][FAIL] gsplat rasterization: {type(e).__name__}: {str(e)[:200]}")
     sys.exit(1)
 PY
 }
@@ -413,11 +504,15 @@ $( [[ ${INSTALL_SOM} -eq 1 ]] && echo "- Shape of Motion deps (RAPIDS cu12 ${RAP
 $( [[ ${INSTALL_SOM} -eq 1 ]] && echo "- gsplat from source (sm_120)" )
 
 Next:
+$( [[ ${INSTALL_SOM} -eq 1 ]] && cat <<'SOMEOF'
 - Datasets are NOT downloaded by this script. Get the authors' PROCESSED
   iPhone (DyCheck) and NVIDIA Dynamic Scenes data (Google Drive links in the
-  Shape of Motion README), then:
-    cd ${SOM_DIR}
-    python run_training.py --work-dir <OUT> data:iphone --data.data-dir <SEQ>
+  Shape of Motion README), validate with scripts/verify_reference_data.sh,
+  then benchmark with scripts/run_reference_benchmark.py.
+SOMEOF
+)
 - third_party/ is gitignored; pins live in this script.
+- Dependency lock: $( [[ ${UNLOCKED} -eq 0 && -f "${LOCK_FILE}" ]] && echo "installed from ${LOCK_FILE}" || echo "freshly resolved (no lock used)" ).
+  Regenerate locks after deliberate upgrades: scripts/gen_env_locks.sh
 - MoSca is the planned second reference tool (--with-mosca, not yet implemented).
 EOF

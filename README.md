@@ -125,8 +125,13 @@ scripts/setup_reference_tool.sh            # creates conda env room4d_som_ref
 
 This installs an sm_120-capable torch (cu128), a matching CUDA toolkit,
 Shape of Motion at a pinned commit (with small patches for modern torch/gsplat,
-applied reproducibly), and gsplat built from source. Safety guards refuse to
-target the `room4d` or `base` envs.
+applied reproducibly and verified by sentinel checks), and gsplat built from
+source at a pinned commit. Safety guards refuse to target the `room4d` or
+`base` envs.
+
+Both project envs install their pip trees from full lockfiles in
+`scripts/locks/` by default (pass `--unlocked` to re-resolve; regenerate after
+deliberate upgrades with `scripts/gen_env_locks.sh`).
 
 ### Data
 
@@ -146,10 +151,13 @@ python scripts/run_reference_benchmark.py \
   --run-dir  /path/to/runs/paper-windmill-full
 ```
 
-Trains Shape of Motion (skipped automatically when the run dir already holds a
-checkpoint; `--retrain` forces), evaluates, and writes a normalized
+Trains Shape of Motion, evaluates, and writes a normalized
 `reference_benchmark.json` (`reference_benchmark_v1` schema: masked
 mPSNR/mSSIM/mLPIPS, 2D/3D tracking metrics, env versions, video paths).
+Run handling: a run dir whose training demonstrably completed (completion
+sentinel, or final-epoch videos for older runs) is reused; an interrupted run
+resumes training; `--retrain` clears checkpoints/results/videos and starts
+from scratch.
 
 ### Compare
 
@@ -157,10 +165,12 @@ mPSNR/mSSIM/mLPIPS, 2D/3D tracking metrics, env versions, video paths).
 python scripts/run_reference_benchmark.py --compare room4d.json reference.json
 ```
 
-Prints a side-by-side table with per-metric better-direction. The
-`reference_benchmark_v1` schema is the contract that room4d's own renderer
-evaluation emits against, so any two results on the same sequence can be
-scored with one command.
+Prints a side-by-side table with per-metric better-direction (unknown metrics
+are shown with an undefined direction rather than dropped). The
+`reference_benchmark_v1` schema is the contract room4d's own renderer
+evaluation **will emit** when the real renderer lands (today `room4d/eval/`
+computes raw PSNR only — the emitter is tracked in TODOS.md), so any two
+results on the same sequence can be scored with one command.
 
 Reference baseline on DyCheck iPhone `paper-windmill` (RTX 5090, 500 epochs,
 ~69 min): masked mPSNR 19.53 / mSSIM 0.559 / mLPIPS 0.198, 3D-track PCK@10cm

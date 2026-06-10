@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -46,8 +47,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOM_DIR = REPO_ROOT / "third_party" / "shape-of-motion"
+# Must match the CONDA_ENV_NAME default in scripts/setup_reference_tool.sh.
 DEFAULT_CONDA_ENV = "room4d_som_ref"
 SCHEMA = "reference_benchmark_v1"
+# Written into the run dir by this wrapper after run_training exits 0. SoM
+# itself writes checkpoints/last.ckpt at epoch 0 and every 200 steps, so a
+# bare checkpoint does NOT prove training completed — only this sentinel
+# (or final-epoch video detection, for runs predating it) does.
+TRAINING_COMPLETE_SENTINEL = ".room4d_training_complete"
 
 # evaluate_iphone.py prints "mean <name>: <float>" lines; these patterns are
 # stable at the pinned SoM commit (see setup_reference_tool.sh SOM_COMMIT).
@@ -76,14 +83,32 @@ HIGHER_IS_BETTER = {
     "track2d_occ_acc": True,
 }
 
-IPHONE_REQUIRED_DIRS = ["rgb", "depth", "camera", "splits", "flow3d_preprocessed"]
+# Required layout verified against the pinned SoM commit (579753e):
+# - the iphone dataloader opens dataset.json, extra.json, splits/{train,val}.json
+#   unconditionally, plus flow3d_preprocessed/2d_tracks for every depth type;
+# - evaluate_iphone.py additionally needs flow3d_preprocessed/colmap/scale.npy,
+#   flow3d_preprocessed/covisible/ and keypoint/ — checked here so a missing
+#   eval input fails BEFORE spending ~an hour training, not after.
 # NOTE: flow3d_preprocessed/scene_depth.npy is intentionally NOT required —
 # it only exists for depth_type="monst3r"; the shipped sequences use
-# aligned_depth_anything_colmap/. 2d_tracks/ is needed for every depth type.
+# aligned_depth_anything_colmap/. metadata.json ships with the data but is
+# referenced nowhere in SoM, so it is not required.
+IPHONE_REQUIRED_DIRS = [
+    "rgb",
+    "depth",
+    "camera",
+    "splits",
+    "flow3d_preprocessed",
+    "flow3d_preprocessed/2d_tracks",
+    "flow3d_preprocessed/covisible",
+    "keypoint",
+]
 IPHONE_REQUIRED_FILES = [
     "dataset.json",
+    "extra.json",
     "splits/train.json",
-    "flow3d_preprocessed/2d_tracks",
+    "splits/val.json",
+    "flow3d_preprocessed/colmap/scale.npy",
 ]
 
 
@@ -109,10 +134,10 @@ def validate_iphone_sequence(data_dir: Path) -> None:
     problems = []
     for d in IPHONE_REQUIRED_DIRS:
         if not (data_dir / d).is_dir():
-            problems.append(f"missing dir:  {d}/")
+            problems.append(f"missing dir:   {d}/")
     for f in IPHONE_REQUIRED_FILES:
         if not (data_dir / f).exists():
-            problems.append(f"missing file: {f}")
+            problems.append(f"missing entry: {f}")
     if problems:
         listing = "\n  ".join(problems)
         sys.exit(
@@ -120,6 +145,44 @@ def validate_iphone_sequence(data_dir: Path) -> None:
             f"sequence:\n  {listing}\n"
             "Re-check the download (see scripts/verify_reference_data.sh)."
         )
+
+
+def training_completed(run_dir: Path) -> bool:
+    """True only when a prior training run demonstrably ran to completion.
+
+    SoM writes checkpoints/last.ckpt at initialization and every 200 steps,
+    so an interrupted run leaves a checkpoint plus stale results/ behind —
+    reusing those would silently present a half-trained model as the
+    reference baseline. Completion is proven by either:
+    - the sentinel this wrapper writes after run_training exits 0, or
+    - (runs predating the sentinel) the final-epoch video dir existing,
+      with the epoch count read from the run's own cfg.yaml.
+    """
+    if (run_dir / TRAINING_COMPLETE_SENTINEL).exists():
+        return True
+    cfg = run_dir / "cfg.yaml"
+    if cfg.is_file():
+        match = re.search(r"^num_epochs:\s*(\d+)", cfg.read_text(), re.M)
+        if match:
+            final_epoch = int(match.group(1)) - 1
+            return (run_dir / "videos" / f"epoch_{final_epoch:04d}").is_dir()
+    return False
+
+
+def clear_run_state(run_dir: Path) -> None:
+    """Remove training outputs so --retrain actually retrains.
+
+    SoM auto-resumes from checkpoints in the work dir (init_from_checkpoint
+    reads the saved epoch and trains range(start_epoch, num_epochs)), so
+    without this a --retrain against a finished run trains ~0 epochs and
+    re-scores the old renders while looking like a fresh run.
+    """
+    for entry in ("checkpoints", "results", "videos", TRAINING_COMPLETE_SENTINEL):
+        path = run_dir / entry
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
 
 
 def run_training(
@@ -137,6 +200,7 @@ def run_training(
     print(f"[train] {' '.join(cmd)}", flush=True)
     start = time.monotonic()
     subprocess.run(cmd, cwd=som_dir, check=True)
+    (run_dir / TRAINING_COMPLETE_SENTINEL).touch()
     return (time.monotonic() - start) / 60.0
 
 
@@ -203,12 +267,24 @@ def latest_rgb_video(run_dir: Path) -> str | None:
 
 
 def som_pinned_commit(som_dir: Path) -> str:
+    """HEAD of the vendored checkout, with '+dirty' when the tree is patched.
+
+    setup_reference_tool.sh deliberately sed-patches the checkout (device
+    placement, gsplat radii), so a bare SHA would claim pristine-upstream
+    provenance for results produced by modified code.
+    """
     try:
-        return subprocess.run(
+        sha = subprocess.run(
             ["git", "-C", str(som_dir), "rev-parse", "HEAD"],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             check=True,
         ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(som_dir), "status", "--porcelain"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=True,
+        ).stdout.strip()
+        return f"{sha}+dirty" if status else sha
     except Exception:  # noqa: BLE001
         return "unknown"
 
@@ -228,11 +304,20 @@ def benchmark(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     conda = find_conda()
 
-    checkpoint = run_dir / "checkpoints" / "last.ckpt"
     train_minutes: float | None = None
-    if checkpoint.exists() and not args.retrain:
-        print(f"[train] reusing existing run ({checkpoint})", flush=True)
+    if args.retrain:
+        print("[train] --retrain: clearing checkpoints/results/videos", flush=True)
+        clear_run_state(run_dir)
+        train_minutes = run_training(
+            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
+        )
+    elif training_completed(run_dir):
+        print(f"[train] reusing completed run ({run_dir})", flush=True)
     else:
+        if (run_dir / "checkpoints" / "last.ckpt").exists():
+            # Checkpoint without completion proof = interrupted run. SoM will
+            # auto-resume from it, which is the desired behavior here.
+            print("[train] incomplete run detected — resuming training", flush=True)
         train_minutes = run_training(
             conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
         )
@@ -260,7 +345,11 @@ def benchmark(args: argparse.Namespace) -> None:
         "train_minutes": round(train_minutes, 1) if train_minutes is not None else None,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    out_path = Path(args.output) if args.output else run_dir / "reference_benchmark.json"
+    out_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else run_dir / "reference_benchmark.json"
+    )
     out_path.write_text(json.dumps(result, indent=2) + "\n")
 
     print(f"\nReference benchmark written to: {out_path}\n")
@@ -287,31 +376,46 @@ def compare(path_a: str, path_b: str) -> None:
             flush=True,
         )
 
-    keys = [k for k in METRIC_PATTERNS if k in a.get("metrics", {}) or k in b.get("metrics", {})]
+    # Union of both sides' metrics: known keys first (in canonical order),
+    # then any method-specific extras — dropped keys would silently hide a
+    # mismatch between two methods' emitters.
+    metrics_a, metrics_b = a.get("metrics", {}), b.get("metrics", {})
+    known = [k for k in METRIC_PATTERNS if k in metrics_a or k in metrics_b]
+    extras = sorted((set(metrics_a) | set(metrics_b)) - set(known))
+    keys = known + extras
     width = max(len(k) for k in keys) if keys else 10
     print(f"\nSequence: {seq}")
     print(f"  {'metric':<{width}}  {name_a:>14}  {name_b:>14}  {'better':>8}")
+
+    def _usable(v) -> bool:
+        return isinstance(v, (int, float)) and not math.isnan(v)
+
     for key in keys:
-        va = a.get("metrics", {}).get(key)
-        vb = b.get("metrics", {}).get(key)
-        sa = f"{va:.4f}" if va is not None else "—"
-        sb = f"{vb:.4f}" if vb is not None else "—"
+        va, vb = metrics_a.get(key), metrics_b.get(key)
+        sa = f"{va:.4f}" if _usable(va) else "—"
+        sb = f"{vb:.4f}" if _usable(vb) else "—"
         better = ""
-        if va is not None and vb is not None and va != vb:
-            hib = HIGHER_IS_BETTER.get(key, True)
-            better = name_a if (va > vb) == hib else name_b
+        if _usable(va) and _usable(vb) and va != vb:
+            if key in HIGHER_IS_BETTER:
+                better = name_a if (va > vb) == HIGHER_IS_BETTER[key] else name_b
+            else:
+                better = "?"  # unknown metric — direction not defined
         print(f"  {key:<{width}}  {sa:>14}  {sb:>14}  {better:>8}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-dir", help="Processed sequence dir (iPhone/DyCheck format)")
-    parser.add_argument("--run-dir", help="Training/eval output dir (reused when it has a checkpoint)")
+    parser.add_argument("--run-dir", help="Training/eval output dir (reused when training completed there)")
     parser.add_argument("--seq-name", help="Sequence name (default: data-dir basename)")
     parser.add_argument("--som-dir", default=str(DEFAULT_SOM_DIR), help="Shape of Motion checkout")
     parser.add_argument("--conda-env", default=DEFAULT_CONDA_ENV, help="Reference conda env name")
     parser.add_argument("--num-epochs", type=int, help="Override training epochs (smoke runs)")
-    parser.add_argument("--retrain", action="store_true", help="Train even if a checkpoint exists")
+    parser.add_argument(
+        "--retrain", action="store_true",
+        help="Clear checkpoints/results/videos and train from scratch (a plain "
+        "re-run RESUMES an incomplete run instead)",
+    )
     parser.add_argument("--output", help="Write the result JSON here instead of run-dir")
     parser.add_argument(
         "--compare", nargs=2, metavar=("A.json", "B.json"),

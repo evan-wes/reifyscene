@@ -49,13 +49,22 @@ if [[ ! -d "${SEQ_DIR}" ]]; then
   exit 1
 fi
 
-# Required entries per dataset, matching flow3d/data/*_dataset.py expectations.
+# Required entries per dataset. The iphone lists MUST stay aligned with
+# IPHONE_REQUIRED_DIRS / IPHONE_REQUIRED_FILES in run_reference_benchmark.py
+# (tests/test_reference_benchmark.py checks both validators against the same
+# fixture). Verified against the pinned SoM commit: the dataloader opens
+# dataset.json, extra.json, splits/{train,val}.json unconditionally, and
+# evaluate_iphone.py needs colmap/scale.npy, covisible/ and keypoint/.
+# metadata.json ships with the data but SoM never reads it — not required.
 required_dirs=()
 required_files=()
 case "${DATASET}" in
   iphone)
-    required_dirs=(rgb depth camera splits flow3d_preprocessed)
-    required_files=(dataset.json metadata.json splits/train.json)
+    required_dirs=(rgb depth camera splits flow3d_preprocessed
+                   flow3d_preprocessed/2d_tracks flow3d_preprocessed/covisible
+                   keypoint)
+    required_files=(dataset.json extra.json splits/train.json splits/val.json
+                    flow3d_preprocessed/colmap/scale.npy)
     ;;
   nvidia)
     required_dirs=(rgb)
@@ -83,21 +92,12 @@ for f in "${required_files[@]}"; do
   fi
 done
 
-# iPhone: the preprocessed tracks used for training must exist. (scene_depth.npy
-# is NOT checked — it only exists for depth_type=monst3r; shipped sequences use
-# aligned_depth_anything_colmap/ instead.)
-if [[ "${DATASET}" == "iphone" ]]; then
-  if [[ -d "${SEQ_DIR}/flow3d_preprocessed/2d_tracks" ]]; then
-    echo "  [ok]   dir  flow3d_preprocessed/2d_tracks/"
-  else
-    echo "  [MISS] dir  flow3d_preprocessed/2d_tracks/"
-    missing=1
-  fi
-fi
+# (scene_depth.npy is intentionally NOT checked — it only exists for
+# depth_type=monst3r; shipped sequences use aligned_depth_anything_colmap/.)
 
 echo
 if [[ ${missing} -ne 0 ]]; then
-  echo "RESULT: INCOMPLETE — see [MISS]/[warn] above. Re-download the sequence folder." >&2
+  echo "RESULT: INCOMPLETE — see [MISS] above. Re-download the sequence folder." >&2
   exit 1
 fi
 
