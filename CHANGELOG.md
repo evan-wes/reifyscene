@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 (loose variant), and this project uses a 4-digit `MAJOR.MINOR.PATCH.MICRO`
 version scheme (versioned in `pyproject.toml`).
 
+## [0.1.2.0] - 2026-06-10
+
+### Added
+- Native-gsplat render module (design-doc Track 2, step 7). `GaussianRasterizer`
+  is now a real gsplat wrapper (eye/target/up → OpenCV viewmat, legacy framing
+  intrinsics preserved so existing camera paths look the same), `Gaussian4DScene`
+  materializes the scene contract as device-resident `GaussianCloud` tensors,
+  and `Gaussian4DTrainer` orchestrates real GPU renders of the static, dynamic,
+  and full Gaussian layers. The debug viewers (triptych frames, layer dumps,
+  both HTML players) and the `RenderArtifact` contract are preserved unchanged.
+- `tests/test_gsplat_rasterizer.py`: viewmat/projection/intrinsics sanity on
+  CPU plus GPU rasterization tests — centered-blob coordinate sanity
+  (checkpoint 0 of the renderer ladder), depth values, empty-cloud handling,
+  cloud concat, and depth-ordered occlusion.
+
+### Changed
+- Removed every fake render path: the per-Gaussian NumPy splatting loop, the
+  hand-rolled projection, the sprite-billboard compositor and observation-bank
+  selection, the per-source static re-splatting, and the blur/sharpen
+  "NeRF refinement". There is no CPU fallback — rendering hard-requires gsplat
+  and CUDA with an error pointing at `scripts/setup_room4d.sh`. Dynamic
+  entities render as their template Gaussians until trained Gaussians and
+  motion bases land (steps 9–10).
+- `OfflineHighQualityTrainer` and the `quality_mode` split are gone; the
+  `offline_high_quality` and `gaussian_layered` backend names remain as
+  registry aliases for the one gsplat renderer. The only surviving quality
+  knob is `render_scale` supersampling. Render configs (`configs/base.yaml`,
+  `configs/render/render.yaml`, single-video runner presets) drop the fake
+  knobs (`offline_high_quality` block, sprite/`nerf_refinement` settings,
+  `dynamic_point_budget`, `use_gpu_projection`, render `cpu_threads`).
+- `scripts/setup_room4d.sh` builds gsplat by default (`--no-gsplat` to skip)
+  now that the renderer requires it.
+
 ## [0.1.1.1] - 2026-06-10
 
 ### Added

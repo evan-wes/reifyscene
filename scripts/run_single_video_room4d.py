@@ -156,35 +156,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
 
     render_cfg = cfg.setdefault('render', {})
     render_presets = {
-        'lowmem': {'width': 800, 'height': 450, 'point_limit': 10000, 'dynamic_point_budget': 180, 'frame_stride': 1, 'max_frames_per_path': 32},
-        'balanced': {'width': 960, 'height': 540, 'point_limit': 16000, 'dynamic_point_budget': 300, 'frame_stride': 1, 'max_frames_per_path': 48},
-        'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'dynamic_point_budget': 600, 'frame_stride': 1, 'max_frames_per_path': None},
+        'lowmem': {'width': 800, 'height': 450, 'point_limit': 10000, 'frame_stride': 1, 'max_frames_per_path': 32},
+        'balanced': {'width': 960, 'height': 540, 'point_limit': 16000, 'frame_stride': 1, 'max_frames_per_path': 48},
+        'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'frame_stride': 1, 'max_frames_per_path': None},
     }
     render_preset = render_presets.get((rec or {}).get('profile', 'lowmem'), render_presets['lowmem'])
-    render_cfg.setdefault('backend_name', 'gaussian_layered')
-    render_cfg.setdefault('quality_mode', 'realtime')
+    render_cfg.setdefault('backend_name', 'gaussian4d')
     render_cfg.setdefault('debug_triptych', True)
-    render_cfg.setdefault('offline_high_quality', {
-        'render_scale': 2,
-        'filter_radius': 1.1,
-        'detail_strength': 0.12,
-        'nerf_refinement': {
-            'enabled': True,
-            'blend_weight': 0.28,
-            'detail_strength': 0.18,
-            'sharpen_radius': 1.1,
-            'max_dynamic_boost': 0.45,
-        },
-    })
+    render_cfg.setdefault('render_scale', 1)
     render_cfg.setdefault('width', render_preset['width'])
     render_cfg.setdefault('height', render_preset['height'])
     render_cfg.setdefault('point_limit', render_preset['point_limit'])
-    render_cfg.setdefault('dynamic_point_budget', render_preset['dynamic_point_budget'])
     render_cfg.setdefault('frame_stride', render_preset['frame_stride'])
     render_cfg.setdefault('max_frames_per_path', render_preset['max_frames_per_path'])
-    render_cfg.setdefault('cpu_threads', int(cpu_threads if cpu_threads is not None else rec.get('cpu_threads', 2) if rec else 2))
-    render_cfg.setdefault('device', 'cuda' if ((cfg['objects'].get('device') == 'cuda') or (cfg['humans'].get('device') == 'cuda')) else 'cpu')
-    render_cfg.setdefault('use_gpu_projection', True)
+    # The renderer is gsplat-backed and GPU-only; there is no CPU render path.
+    render_cfg.setdefault('device', 'cuda')
     render_cfg.setdefault('enabled_paths', {
         'orbit': True,
         'overhead': True,

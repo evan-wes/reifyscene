@@ -66,46 +66,22 @@ scene:
   min_human_foot_points: 4
 
 render:
-  backend_name: gaussian_layered
-  quality_mode: realtime
-  device: auto
+  backend_name: gaussian4d
+  device: cuda
   width: 800
   height: 450
   point_limit: 10000
-  dynamic_point_budget: 180
   max_dynamic_entities_per_kind: 3
   frame_stride: 1
   max_frames_per_path: 32
   debug_triptych: true
-  use_gpu_projection: true
+  render_scale: 1
   enabled_paths:
     orbit: true
     overhead: false
     replay: false
     follow_human: false
     follow_object: false
-  offline_high_quality:
-    render_scale: 2
-    filter_radius: 1.1
-    detail_strength: 0.12
-    static_source_count: 3
-    static_source_point_budget: 7000
-    dynamic_sprite_scale: 1.0
-    dynamic_sprite_sharpen: 0.4
-    dynamic_sprite_min_alpha: 12
-    dynamic_sprite_alpha_blur: 0.9
-    dynamic_soft_depth_margin: 0.08
-    dynamic_soft_depth_scale: 0.18
-    dynamic_observation_bank_size: 3
-    dynamic_temporal_switch_penalty: 0.18
-    dynamic_view_weight: 0.35
-    gaussian_fill_weight: 0.35
-    nerf_refinement:
-      enabled: true
-      blend_weight: 0.28
-      detail_strength: 0.18
-      sharpen_radius: 1.1
-      max_dynamic_boost: 0.45
 
 evaluation:
   reprojection_error_p90_px_max: 24.0
