@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 (loose variant), and this project uses a 4-digit `MAJOR.MINOR.PATCH.MICRO`
 version scheme (versioned in `pyproject.toml`).
 
+## [0.1.1.1] - 2026-06-10
+
+### Added
+- `--with-gsplat` option in `scripts/setup_room4d.sh` (Track 2 milestone-0):
+  builds gsplat from source for sm_120 in the main `room4d` env, pinned to the
+  same Blackwell-proven commit as the reference env, with SHA-verified
+  idempotency (the rebuild is skipped only when the installed VCS commit
+  matches the pin) and a post-install smoke test that rasterizes a trivial
+  scene on the GPU. First verified build of that pin against CUDA 13.0
+  (torch 2.11 +cu130); the reference env had only proven it on CUDA 12.8.
+- Cleanup of gsplat's leaked top-level packages after install: the pinned
+  wheel ships `tests` and `experimental` into site-packages (upstream
+  packaging bug), and the leaked `tests` shadows the repo's own tests package
+  and breaks pytest collection. The installer now removes every top-level
+  package gsplat's RECORD claims outside its own namespace.
+- `jaxtyping` and `ninja` are installed alongside gsplat: they are its only
+  declared deps not already in the locked tree (gsplat itself is installed
+  `--no-deps` so its torch/numpy declarations cannot fight the lock), and
+  without them the env fails `pip check`.
+
+### Changed
+- CUDA-toolkit and compiler helper messages in `scripts/setup_room4d.sh` no
+  longer claim to be VGGT-Long-specific; the helpers now serve any CUDA
+  extension build (VGGT-Long, gsplat).
+
 ## [0.1.1.0] - 2026-06-10
 
 ### Added

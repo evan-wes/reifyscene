@@ -44,6 +44,14 @@ HLOC_TAG="v1.4"
 COLMAP_UPSTREAM_TAG="3.13.0"
 PYCOLMAP_VERSION="3.13.0"
 
+# gsplat is built from source for sm_120 (no prebuilt wheel exists for this
+# torch/CUDA line). Pinned to the same Blackwell-proven commit as
+# setup_reference_tool.sh; the reference env built it against CUDA 12.8 —
+# this env builds the same ref against CUDA 13.0.
+GSPLAT_REPO="https://github.com/nerfstudio-project/gsplat.git"
+GSPLAT_REF="4e52698e45eaaed929ed3a5065e96a688d085df6"
+GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
+
 REQUIRED_GXX_MAJOR=9
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 # ------------------------------------------------------------------------------
@@ -67,6 +75,7 @@ INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
 INSTALL_COTRACKER=0
 INSTALL_VGGT_LONG=0
+INSTALL_GSPLAT=0
 INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
@@ -101,6 +110,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_COTRACKER=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
+    --with-gsplat)
+      INSTALL_GSPLAT=1; shift ;;
     --force-vggt-long-weights)
       FORCE_VGGT_LONG_WEIGHTS=1; shift ;;
     --with-dev)
@@ -128,6 +139,7 @@ Install options:
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
+  --with-gsplat           Build gsplat from source for sm_120 at pinned commit
   --force-vggt-long-weights
                           Re-download VGGT-Long weights even if already present
   --with-dev              Install dev tools (pytest, ruff, mypy)
@@ -270,7 +282,7 @@ ensure_cuda_toolkit_for_torch_extensions() {
   fi
 
   if [[ $USE_VENV -eq 1 ]]; then
-    echo "VGGT-Long editable install needs a CUDA toolkit with nvcc, but none was detected." >&2
+    echo "This install step needs a CUDA toolkit with nvcc, but none was detected." >&2
     echo "In --use-venv mode the setup script does not install CUDA automatically." >&2
     echo "Either install a local CUDA toolkit manually and set CUDA_HOME, or use a conda env." >&2
     exit 1
@@ -285,7 +297,7 @@ ensure_cuda_toolkit_for_torch_extensions() {
   torch_cuda="$(detect_torch_cuda_version | tr -d '[:space:]')"
   if [[ -z "${torch_cuda}" ]]; then
     echo "Could not determine torch.version.cuda from the active environment." >&2
-    echo "Make sure torch is installed before requesting VGGT-Long setup." >&2
+    echo "Make sure torch is installed before requesting CUDA-extension builds." >&2
     exit 1
   fi
 
@@ -299,7 +311,7 @@ ensure_cuda_toolkit_for_torch_extensions() {
   local installed=0
   local channel
   for channel in "${channels[@]}"; do
-    echo "Attempting to install CUDA toolkit for VGGT-Long from conda channel: ${channel}"
+    echo "Attempting to install CUDA toolkit from conda channel: ${channel}"
     if run_conda_install_relaxed -y -c "${channel}" cuda-toolkit; then
       installed=1
       break
@@ -377,6 +389,77 @@ download_vggt_long_weights_if_needed() {
   touch "${VGGT_LONG_WEIGHTS_STAMP}"
 }
 
+remove_gsplat_leaked_top_level_packages() {
+  # The pinned gsplat wheel ships top-level `tests` and `experimental`
+  # packages into site-packages (upstream packaging bug). The leaked `tests`
+  # shadows this repo's own tests package and breaks pytest collection, so
+  # remove every top-level package gsplat's RECORD claims outside its own
+  # namespace. Deleting RECORD-listed files makes a later pip uninstall warn
+  # about missing files; that is harmless.
+  python - <<'PY'
+import shutil
+import sysconfig
+from importlib.metadata import distribution
+from pathlib import Path
+
+site = Path(sysconfig.get_paths()["purelib"])
+files = distribution("gsplat").files or []
+removed = set()
+for f in files:
+    top = f.parts[0]
+    if top.startswith("gsplat") or top.startswith("."):
+        continue
+    target = site / top
+    if target.exists():
+        shutil.rmtree(target) if target.is_dir() else target.unlink()
+        removed.add(top)
+if removed:
+    print(f"Removed gsplat-leaked top-level packages: {sorted(removed)}")
+PY
+}
+
+install_gsplat() {
+  # gsplat is installed with --no-deps below so its torch/numpy declarations
+  # cannot fight the locked tree. Its only declared deps not already in the
+  # lock are jaxtyping and ninja — install them explicitly, or the env fails
+  # `pip check` after every gsplat install. ninja also parallelizes the CUDA
+  # source build.
+  python -m pip install ninja jaxtyping
+
+  # Idempotency guard: the from-source CUDA build is the single most expensive
+  # step in this installer (minutes at MAX_JOBS=4), and pip's wheel cache does
+  # not help VCS builds — skip when the pinned COMMIT is already installed.
+  # The comparison must be the VCS SHA from pip's direct_url.json, NOT
+  # __version__: different gsplat commits report the same version string, so a
+  # version check can never correct a wrong-SHA install.
+  local installed_sha
+  installed_sha="$(python - <<'PY' 2>/dev/null || true
+import json
+from importlib.metadata import distribution
+try:
+    dist = distribution("gsplat")
+    url_text = dist.read_text("direct_url.json")
+    print(json.loads(url_text)["vcs_info"]["commit_id"] if url_text else "")
+except Exception:
+    print("")
+PY
+)"
+  if [[ "${installed_sha}" == "${GSPLAT_REF}" ]]; then
+    echo "gsplat already installed at pinned commit ${GSPLAT_REF:0:12} — skipping source build."
+    remove_gsplat_leaked_top_level_packages
+    return
+  fi
+  [[ -n "${installed_sha}" ]] && echo "gsplat installed at ${installed_sha:0:12}, pin is ${GSPLAT_REF:0:12} — rebuilding."
+  local spec="git+${GSPLAT_REPO}"
+  [[ -n "${GSPLAT_REF}" ]] && spec="${spec}@${GSPLAT_REF}"
+  echo "Building gsplat from source for sm_120 (TORCH_CUDA_ARCH_LIST=${GSPLAT_ARCH_LIST})..."
+  CUDA_HOME="${CUDA_HOME}" \
+  TORCH_CUDA_ARCH_LIST="${GSPLAT_ARCH_LIST}" \
+  MAX_JOBS="${MAX_JOBS:-4}" \
+    python -m pip install --no-build-isolation --force-reinstall --no-deps "${spec}"
+  remove_gsplat_leaked_top_level_packages
+}
+
 ensure_modern_conda_compilers() {
   if [[ $USE_VENV -eq 1 ]]; then
     local current_compiler="${CXX:-c++}"
@@ -384,7 +467,7 @@ ensure_modern_conda_compilers() {
     current_major="$(compiler_major_version "${current_compiler}")"
 
     if [[ -z "${current_major}" || "${current_major}" -lt "${REQUIRED_GXX_MAJOR}" ]]; then
-      echo "VGGT-Long requires GCC/G++ ${REQUIRED_GXX_MAJOR}+." >&2
+      echo "PyTorch CUDA-extension builds require GCC/G++ ${REQUIRED_GXX_MAJOR}+." >&2
       echo "Current compiler: ${current_compiler}" >&2
       echo "Detected version: $("${current_compiler}" --version 2>/dev/null | head -n 1 || echo unknown)" >&2
       echo "When using --use-venv, please provide a newer system compiler manually." >&2
@@ -424,7 +507,7 @@ ensure_modern_conda_compilers() {
     return
   fi
 
-  echo "Current compiler is too old for VGGT-Long/PyTorch extension builds."
+  echo "Current compiler is too old for PyTorch CUDA-extension builds."
   echo "Installing newer conda compilers into env '${CONDA_DEFAULT_ENV:-unknown}'..."
   run_conda_install_relaxed -y -c conda-forge \
     "gcc_linux-64=${CONDA_GCC_VERSION}" \
@@ -577,6 +660,32 @@ print(f"[smoke-test] OK {label}: module={module_name} version={version} path={lo
 PYCODE
 }
 
+smoke_test_gsplat_rasterization() {
+  # An import-only check would pass a broken build — rasterize a trivial scene
+  # so the sm_120 CUDA kernels the source build exists for actually execute.
+  python - <<'PYCODE'
+import torch
+import gsplat
+
+assert torch.cuda.is_available(), "gsplat smoke test needs a CUDA device"
+n = 64
+means = torch.randn(n, 3, device="cuda")
+quats = torch.randn(n, 4, device="cuda")
+quats = quats / quats.norm(dim=-1, keepdim=True)
+scales = torch.rand(n, 3, device="cuda") * 0.1
+opacities = torch.rand(n, device="cuda")
+colors = torch.rand(n, 3, device="cuda")
+viewmat = torch.eye(4, device="cuda")[None]
+K = torch.tensor([[[100.0, 0, 64], [0, 100.0, 64], [0, 0, 1]]], device="cuda")
+rgb, alpha, _ = gsplat.rasterization(
+    means, quats, scales, opacities, colors, viewmat, K, 128, 128
+)
+assert rgb.shape == (1, 128, 128, 3), f"unexpected output shape {tuple(rgb.shape)}"
+version = getattr(gsplat, "__version__", "unknown")
+print(f"[smoke-test] OK gsplat rasterization: version={version} output={tuple(rgb.shape)}")
+PYCODE
+}
+
 run_post_install_smoke_tests() {
   echo
   echo "Running post-install smoke tests..."
@@ -597,6 +706,9 @@ run_post_install_smoke_tests() {
   fi
   if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
     smoke_test_python_module "VGGT-Long" "vggt_long" "vggt-long" "${VGGT_LONG_DIR}"
+  fi
+  if [[ $INSTALL_GSPLAT -eq 1 ]]; then
+    smoke_test_gsplat_rasterization
   fi
 }
 
@@ -686,6 +798,12 @@ EOF
   MAX_JOBS="${MAX_JOBS:-4}" python -m pip install --no-build-isolation -e "${VGGT_LONG_DIR}"
 fi
 
+if [[ $INSTALL_GSPLAT -eq 1 ]]; then
+  ensure_modern_conda_compilers
+  ensure_cuda_toolkit_for_torch_extensions
+  install_gsplat
+fi
+
 run_post_install_smoke_tests
 
 cat <<EOF
@@ -705,6 +823,7 @@ $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_C
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
+$( [[ $INSTALL_GSPLAT -eq 1 ]] && echo "- gsplat built from source for sm_120 at commit ${GSPLAT_REF}" )
 
 Notes:
 - third_party/ should be gitignored so external source checkouts are never tracked.
