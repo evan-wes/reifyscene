@@ -54,6 +54,14 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-}"
 USE_VENV=0
+UNLOCKED=0
+
+# Full pip-layer lockfile (see scripts/gen_env_locks.sh). Installed before the
+# editable room4d install so the transitive dependency tree replays the
+# known-good snapshot instead of re-resolving. torch +cu130 wheels only exist
+# on the pytorch index, so the lock install needs it on a fresh env.
+ROOM4D_LOCK_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/locks/room4d.lock"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
 INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
@@ -103,6 +111,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_GEOMETRY=0; shift ;;
     --no-calibration)
       INSTALL_CALIBRATION=0; shift ;;
+    --unlocked)
+      UNLOCKED=1; shift ;;
     -h|--help)
       cat <<'EOF'
 Usage: scripts/setup_room4d.sh [options]
@@ -124,6 +134,9 @@ Install options:
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
   --no-calibration        Skip calibration extras and hloc install
+  --unlocked              Resolve dependencies fresh instead of installing the
+                          pinned tree from scripts/locks/room4d.lock
+                          (regenerate locks with scripts/gen_env_locks.sh)
 
 Behavior:
   - Default mode is conda-only.
@@ -588,6 +601,18 @@ run_post_install_smoke_tests() {
 }
 
 setup_python_env
+
+# Install the locked pip tree first (default when the lock exists): the
+# editable room4d install below then finds every dependency already satisfied
+# at the exact known-good version instead of re-resolving ranges.
+if [[ $UNLOCKED -eq 0 && -f "${ROOM4D_LOCK_FILE}" ]]; then
+  echo "Installing pinned dependency tree from ${ROOM4D_LOCK_FILE} (use --unlocked to re-resolve)..."
+  python -m pip install -r "${ROOM4D_LOCK_FILE}" \
+    --extra-index-url "${TORCH_INDEX_URL}" \
+    --extra-index-url "https://pypi.nvidia.com"
+elif [[ $UNLOCKED -eq 0 ]]; then
+  echo "No lockfile at ${ROOM4D_LOCK_FILE} — falling back to fresh resolution."
+fi
 
 EXTRAS=()
 [[ $INSTALL_VISION -eq 1 ]] && EXTRAS+=(vision)

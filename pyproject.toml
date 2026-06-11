@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "room4d"
-version = "0.1.0"
+# Canonical version lives in the VERSION file (single source of truth, read
+# by the tag workflows and gstack tooling); setuptools reads it at build time.
+dynamic = ["version"]
 description = "Prototype room-scale 4D reconstruction pipeline scaffold."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,6 +58,9 @@ room4d = "room4d.cli.main:app"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -27,3 +27,4 @@ third_party/
 
 # Internal cache
 .room4d_cache
+.claude/
