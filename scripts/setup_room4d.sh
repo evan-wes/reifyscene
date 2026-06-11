@@ -75,7 +75,7 @@ INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
 INSTALL_COTRACKER=0
 INSTALL_VGGT_LONG=0
-INSTALL_GSPLAT=0
+INSTALL_GSPLAT=1
 INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
@@ -112,6 +112,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
       INSTALL_GSPLAT=1; shift ;;
+    --no-gsplat)
+      INSTALL_GSPLAT=0; shift ;;
     --force-vggt-long-weights)
       FORCE_VGGT_LONG_WEIGHTS=1; shift ;;
     --with-dev)
@@ -140,6 +142,8 @@ Install options:
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
+                          (default: on — the room4d renderer requires it)
+  --no-gsplat             Skip the gsplat source build
   --force-vggt-long-weights
                           Re-download VGGT-Long weights even if already present
   --with-dev              Install dev tools (pytest, ruff, mypy)

@@ -5,7 +5,7 @@ from pathlib import Path
 from room4d.eval.benchmark_runner import BenchmarkRunner
 from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
-from tests.test_scene_render import _make_frame
+from tests.test_scene_render import _make_frame, requires_gsplat
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, HumanState, TimedCameraState
 from room4d.geometry.geometry_artifact import GeometryArtifact
 from room4d.perception.humans.human_artifact import HumanArtifact
@@ -14,6 +14,7 @@ from room4d.tracking.track_artifact import TrackArtifact
 import numpy as np
 
 
+@requires_gsplat
 def test_benchmark_runner_writes_reports(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
     frame1 = FrameRef(stream_id='cam_00', frame_idx=1, timestamp_sec=0.1)

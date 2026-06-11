@@ -3,7 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
+
+from room4d.render.gaussian4d.rasterizer import gsplat_available
+
+requires_gsplat = pytest.mark.skipif(
+    not gsplat_available(), reason="rendering tests need gsplat and a CUDA device"
+)
 
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from room4d.geometry.geometry_artifact import GeometryArtifact
@@ -28,6 +35,7 @@ def _make_frame(tmp_path: Path, name: str) -> str:
     return str(path)
 
 
+@requires_gsplat
 def test_scene_assembly_and_render(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
     frame1 = FrameRef(stream_id='cam_00', frame_idx=2, timestamp_sec=0.2)
@@ -218,6 +226,7 @@ def test_camera_paths_use_z_up_debug_frame() -> None:
     assert np.allclose(radii, radii[0])
 
 
+@requires_gsplat
 def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
     frame1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
@@ -241,7 +250,6 @@ def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
         'frame_stride': 2,
         'max_frames_per_path': 1,
         'point_limit': 100,
-        'dynamic_point_budget': 20,
     })
     artifact = trainer.fit(scene_model, save_dir=tmp_path / 'render_cfg')
     assert set(artifact.path_index.keys()) == {'orbit'}
@@ -249,7 +257,8 @@ def test_render_respects_enabled_paths_and_limits(tmp_path: Path) -> None:
 
 
 
-def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> None:
+@requires_gsplat
+def test_legacy_backend_alias_writes_debug_triptych(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
     frame1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
     static_img = _make_frame(tmp_path, 'hq_static')
@@ -302,30 +311,26 @@ def test_offline_high_quality_backend_writes_debug_triptych(tmp_path: Path) -> N
 
     scene_model = Gaussian4DScene()
     scene_model.initialize_from_scene(loaded_scene)
+    # 'offline_high_quality' is a legacy alias kept so older run configs keep
+    # resolving; it builds the same gsplat-backed renderer.
     renderer = build_renderer({
         'backend_name': 'offline_high_quality',
         'width': 160,
         'height': 90,
+        'render_scale': 2,
         'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
-        'offline_high_quality': {
-            'render_scale': 2,
-            'static_source_count': 1,
-            'static_source_point_budget': 64,
-            'dynamic_sprite_scale': 1.0,
-            'gaussian_fill_weight': 0.2,
-            'nerf_refinement': {'enabled': True},
-        },
     })
     artifact = renderer.fit(scene_model, save_dir=tmp_path / 'render_hq')
     assert artifact.scene_state['backend_name'] == 'offline_high_quality'
-    assert artifact.scene_state['quality_mode'] == 'offline_high_quality'
-    assert artifact.scene_state['offline_high_quality']['nerf_refinement_enabled'] is True
+    assert artifact.scene_state['rasterizer'] == 'gsplat'
+    assert artifact.scene_state['render_scale'] == 2
     assert artifact.debug_player_html == 'novel_view_debug_player.html'
     assert (tmp_path / 'render_hq' / 'novel_view_debug_player.html').exists()
     assert 'orbit' in artifact.layer_path_index
     assert all(artifact.layer_path_index['orbit'][key] for key in ('full', 'static_only', 'dynamic_only', 'triptych'))
 
-def test_offline_high_quality_dynamic_sprites_use_writable_alpha(tmp_path: Path) -> None:
+@requires_gsplat
+def test_dynamic_entities_render_as_template_gaussians(tmp_path: Path) -> None:
     frame0 = FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0)
     sprite_rgba = np.zeros((16, 12, 4), dtype=np.uint8)
     sprite_rgba[..., 0] = 220
@@ -388,20 +393,20 @@ def test_offline_high_quality_dynamic_sprites_use_writable_alpha(tmp_path: Path)
     scene_model = Gaussian4DScene()
     scene_model.initialize_from_scene(scene_artifact)
     renderer = build_renderer({
-        'backend_name': 'offline_high_quality',
+        'backend_name': 'gaussian4d',
         'width': 160,
         'height': 90,
         'enabled_paths': {'orbit': True, 'overhead': False, 'replay': False, 'follow_human': False, 'follow_object': False},
-        'offline_high_quality': {
-            'render_scale': 1,
-            'dynamic_sprite_min_alpha': 12,
-            'nerf_refinement': {'enabled': False},
-        },
     })
     artifact = renderer.fit(scene_model, save_dir=tmp_path / 'render_sprite')
     assert artifact.path_index['orbit']
     frame_img = np.asarray(Image.open(tmp_path / 'render_sprite' / artifact.path_index['orbit'][0]))
     assert frame_img.sum() > 0
+    # The dynamic entity must be visible in the dynamic-only debug layer
+    # (template Gaussians via gsplat; sprite observations are ignored).
+    dynamic_rel = artifact.layer_path_index['orbit']['dynamic_only'][0]
+    dynamic_img = np.asarray(Image.open(tmp_path / 'render_sprite' / dynamic_rel))
+    assert dynamic_img.sum() > 0
 
 
 def test_scene_assembler_estimates_dynamic_center_from_masked_point_region(tmp_path: Path) -> None:
@@ -475,10 +480,9 @@ def test_dynamic_layer_selection_prefers_render_priority(tmp_path: Path) -> None
         },
     )
     trainer = Gaussian4DTrainer({'max_dynamic_entities_per_kind': 1})
-    selected = trainer._select_dynamic_layers(scene_artifact, 0.0, np.asarray([0.0, 0.0, 0.0], dtype=np.float32), np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
+    selected = trainer._select_dynamic_layers(scene_artifact, 0.0)
     assert len(selected) == 1
     assert selected[0]['entity_id'] == 'dancer'
-    assert 'observation_bank' in selected[0]
 
 
 def test_human_smpl_pelvis_anchor_overrides_bad_support_track(tmp_path: Path) -> None:
