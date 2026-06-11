@@ -31,10 +31,16 @@ version scheme (versioned in `pyproject.toml`).
 - First reference baseline recorded on DyCheck `paper-windmill` (RTX 5090,
   500 epochs, ~69 min): masked mPSNR 19.53 / mSSIM 0.559 / mLPIPS 0.198 —
   consistent with the published Shape of Motion results.
-- Unit tests for the benchmark tool (101 tests total): metric parsing,
+- Unit tests for the benchmark tool (104 tests total): metric parsing,
   compare-mode edge cases (NaN, unknown metrics), run-completion semantics,
   validator parity between the bash and Python checkers, and installer safety
   guards.
+- Release-tag automation: `tag-on-version-bump.yml` (annotated `v<version>`
+  tag on every develop version bump) and `tag-on-release.yml`
+  (`release-v<version>` tag + GitHub Release on develop→main merges). The
+  canonical version now lives in a `VERSION` file, with `pyproject.toml`
+  reading it at build time via setuptools dynamic metadata — one source of
+  truth, standard workflows unmodified.
 
 ### Fixed
 - Benchmark runs interrupted mid-training are no longer mistaken for
