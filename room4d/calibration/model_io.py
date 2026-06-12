@@ -74,7 +74,7 @@ def _parse_camera_model(model: str, params: list[float]) -> CameraIntrinsics:
     return CameraIntrinsics(fx=fx, fy=fy, cx=cx, cy=cy, distortion_model=model.lower(), distortion_params=np.asarray(params[4:], dtype=np.float32) if len(params) > 4 else None)
 
 
-def _qvec_to_rotmat(qvec: np.ndarray) -> np.ndarray:
+def qvec_to_rotmat(qvec: np.ndarray) -> np.ndarray:
     qw, qx, qy, qz = qvec.astype(np.float64)
     return np.asarray([
         [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
@@ -96,7 +96,7 @@ def timed_camera_from_image_record(image_name: str, record: dict[str, Any], imag
     frame_ref = image_name_to_frame_ref(image_name, image_manifest)
     qvec = np.asarray(record["qvec"], dtype=np.float64)
     tvec = np.asarray(record["tvec"], dtype=np.float64)
-    R_cw = _qvec_to_rotmat(qvec)
+    R_cw = qvec_to_rotmat(qvec)
     T_cw = np.eye(4, dtype=np.float64)
     T_cw[:3, :3] = R_cw
     T_cw[:3, 3] = tvec
@@ -225,3 +225,8 @@ def parse_colmap_text_model(model_dir: str | Path) -> ParsedColmapModel:
         connected_components=connected_components,
         reprojection_stats=reprojection_stats,
     )
+
+
+# Backwards-compatible alias (qvec_to_rotmat became public API once
+# gt_scoring and its tests needed it).
+_qvec_to_rotmat = qvec_to_rotmat

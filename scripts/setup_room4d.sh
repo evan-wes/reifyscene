@@ -187,6 +187,15 @@ clone_or_update_checkout() {
   echo "Fetching updates in ${dest_dir}..."
   git -C "${dest_dir}" fetch origin
 
+  # Restore tracked files before checkout: this script deliberately patches
+  # vendored trees after checkout (hloc pycolmap compat, VGGT-Long download
+  # script), and a dirty tree would make the next ref change abort with
+  # "local changes would be overwritten". Patches are reapplied fresh below,
+  # so restoring here keeps every run deterministic (same pattern as
+  # setup_reference_tool.sh).
+  echo "Restoring tracked files in ${dest_dir} (patches are reapplied after checkout)..."
+  git -C "${dest_dir}" checkout -- . 2>/dev/null || true
+
   echo "Checking out ${ref} in ${dest_dir}..."
   git -C "${dest_dir}" checkout "${ref}"
 }
@@ -707,6 +716,22 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
     smoke_test_python_module "pycolmap" "pycolmap" "pycolmap"
     smoke_test_python_module "hloc" "hloc" "hloc"
+    # The hloc patches above set specific fields on pycolmap option objects;
+    # a pycolmap bump that renames them would otherwise only fail (or
+    # silently no-op) at the first real calibration run.
+    echo "Smoke-testing pycolmap option fields used by the hloc patches..."
+    python - <<'PYEOF'
+import pycolmap
+ro = pycolmap.ImageReaderOptions()
+ro.camera_model = "SIMPLE_PINHOLE"
+ro.camera_params = "500,320,240"
+tv = pycolmap.TwoViewGeometryOptions()
+tv.ransac.max_num_trials = 20000
+tv.ransac.min_inlier_ratio = 0.1
+ip = pycolmap.IncrementalPipelineOptions()
+ip.mergedict({"ba_refine_focal_length": False, "ba_refine_extra_params": False})
+print("pycolmap option fields OK")
+PYEOF
   fi
   if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
     smoke_test_python_module "VGGT-Long" "vggt_long" "vggt-long" "${VGGT_LONG_DIR}"
@@ -771,6 +796,69 @@ if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
   fi
   echo "Installing hloc from ${HLOC_DIR} (tag ${HLOC_TAG})..."
   python -m pip install -e "${HLOC_DIR}"
+
+  # Patch hloc for pycolmap >= 3.10 API drift (the pinned hloc tag predates
+  # it): import_images renamed image_list->image_names and requires an
+  # ImageReaderOptions instance; verify_matches moved its RANSAC kwargs into
+  # TwoViewGeometryOptions; incremental_mapping requires
+  # IncrementalPipelineOptions; all three require str paths. Idempotent:
+  # each replacement is skipped when already applied, and a missing anchor
+  # fails LOUDLY instead of silently shipping an unpatched tree.
+  echo "Patching hloc for pycolmap >= 3.10 API drift..."
+  python - "${HLOC_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+hloc_dir = Path(sys.argv[1])
+PATCHES = [
+    (hloc_dir / "hloc" / "reconstruction.py", """    with pycolmap.ostream():
+        pycolmap.import_images(database_path, image_dir, camera_mode,
+                               image_list=image_list or [],
+                               options=options)""", """    with pycolmap.ostream():
+        # room4d patch (applied by scripts/setup_room4d.sh): pycolmap >= 3.10
+        # renamed the image_list kwarg to image_names and requires an
+        # ImageReaderOptions instance (dicts are no longer accepted); paths
+        # must be str.
+        reader_options = pycolmap.ImageReaderOptions()
+        for key, value in (options or {}).items():
+            setattr(reader_options, key, value)
+        pycolmap.import_images(str(database_path), str(image_dir), camera_mode,
+                               image_names=image_list or [],
+                               options=reader_options)"""),
+    (hloc_dir / "hloc" / "reconstruction.py", """            reconstructions = pycolmap.incremental_mapping(
+                database_path, image_dir, models_path, options=options)""", """            # room4d patch (applied by scripts/setup_room4d.sh): pycolmap
+            # >= 3.10 requires IncrementalPipelineOptions and str paths.
+            mapper_options_obj = pycolmap.IncrementalPipelineOptions()
+            if options:
+                mapper_options_obj.mergedict(options)
+            reconstructions = pycolmap.incremental_mapping(
+                str(database_path), str(image_dir), str(models_path),
+                options=mapper_options_obj)"""),
+    (hloc_dir / "hloc" / "triangulation.py", """    with OutputCapture(verbose):
+        with pycolmap.ostream():
+            pycolmap.verify_matches(
+                database_path, pairs_path,
+                max_num_trials=20000, min_inlier_ratio=0.1)""", """    with OutputCapture(verbose):
+        with pycolmap.ostream():
+            # room4d patch (applied by scripts/setup_room4d.sh): pycolmap
+            # >= 3.10 moved the RANSAC kwargs into TwoViewGeometryOptions
+            # and requires str paths.
+            options = pycolmap.TwoViewGeometryOptions()
+            options.ransac.max_num_trials = 20000
+            options.ransac.min_inlier_ratio = 0.1
+            pycolmap.verify_matches(str(database_path), str(pairs_path),
+                                    options=options)"""),
+]
+for path, old, new in PATCHES:
+    src = path.read_text()
+    if new in src:
+        continue  # already patched
+    if old not in src:
+        sys.exit(f"hloc patch anchor not found in {path} -- upstream "
+                 "drifted; update the patch in setup_room4d.sh")
+    path.write_text(src.replace(old, new))
+    print(f"  patched {path.name}")
+PYEOF
 fi
 
 if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
