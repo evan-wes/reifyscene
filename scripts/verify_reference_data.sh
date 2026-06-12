@@ -49,13 +49,19 @@ if [[ ! -d "${SEQ_DIR}" ]]; then
   exit 1
 fi
 
-# Required entries per dataset. The iphone lists MUST stay aligned with
-# IPHONE_REQUIRED_DIRS / IPHONE_REQUIRED_FILES in run_reference_benchmark.py
+# Required entries per dataset. These lists MUST stay aligned with the
+# *_REQUIRED_DIRS / *_REQUIRED_FILES lists in run_reference_benchmark.py
 # (tests/test_reference_benchmark.py checks both validators against the same
-# fixture). Verified against the pinned SoM commit: the dataloader opens
-# dataset.json, extra.json, splits/{train,val}.json unconditionally, and
-# evaluate_iphone.py needs colmap/scale.npy, covisible/ and keypoint/.
-# metadata.json ships with the data but SoM never reads it — not required.
+# fixture). Verified against the pinned SoM commit:
+#   - iphone: the dataloader opens dataset.json, extra.json,
+#     splits/{train,val}.json unconditionally, and evaluate_iphone.py needs
+#     colmap/scale.npy, covisible/ and keypoint/. metadata.json ships with
+#     the data but SoM never reads it — not required.
+#   - nvidia: the dataloader hardcodes factor=2, so training opens the 2x
+#     variants (plus rgb/1x for the intrinsics rescale); depth and 2d_tracks
+#     feed the train split, covisible/2x/val the val split's masked metrics.
+#     dataset.json/scene.json/colmap/ ship with the data but the nvidia
+#     loader never reads them — not required.
 required_dirs=()
 required_files=()
 case "${DATASET}" in
@@ -67,8 +73,11 @@ case "${DATASET}" in
                     flow3d_preprocessed/colmap/scale.npy)
     ;;
   nvidia)
-    required_dirs=(rgb)
-    required_files=()
+    required_dirs=(rgb/1x rgb/2x camera splits depth/2x
+                   flow3d_preprocessed/2d_tracks/2x
+                   flow3d_preprocessed/track_anything/2x
+                   covisible/2x/val)
+    required_files=(splits/train.json splits/val.json)
     ;;
   *)
     echo "Unknown --dataset '${DATASET}' (expected: iphone | nvidia)." >&2
@@ -95,18 +104,52 @@ done
 # (scene_depth.npy is intentionally NOT checked — it only exists for
 # depth_type=monst3r; shipped sequences use aligned_depth_anything_colmap/.)
 
+# nvidia content checks (mirroring validate_sequence in
+# run_reference_benchmark.py): an empty val split trains for hours then
+# yields no metrics, and the dataloader loads RANDOM pairwise track files
+# per batch, so a partial download passes layout checks yet crashes
+# mid-training. Both are detectable up front.
+if [[ "${DATASET}" == "nvidia" && ${missing} -eq 0 ]]; then
+  python3 - "${SEQ_DIR}" <<'PY' || missing=1
+import json, os, sys
+
+seq = sys.argv[1]
+
+def frame_names(split_file):
+    try:
+        with open(os.path.join(seq, "splits", split_file)) as f:
+            split = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return split.get("frame_names", []) if isinstance(split, dict) else None
+
+ok = True
+val, train = frame_names("val.json"), frame_names("train.json")
+if val is None or train is None:
+    print("  [MISS] splits/{val,train}.json unreadable or not a JSON object")
+    ok = False
+elif not val:
+    print("  [MISS] splits/val.json frame_names is empty (no val split -> no metrics)")
+    ok = False
+if train:
+    tracks = os.path.join(seq, "flow3d_preprocessed", "2d_tracks", "2x")
+    have = len(os.listdir(tracks))
+    want = len(train) ** 2
+    if have < want:
+        print(f"  [MISS] 2d_tracks/2x holds {have} files, expected {want}"
+              " (len(train)^2 pairwise tracks) - partial download")
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+
 echo
 if [[ ${missing} -ne 0 ]]; then
   echo "RESULT: INCOMPLETE — see [MISS] above. Re-download the sequence folder." >&2
   exit 1
 fi
 
-if [[ "${DATASET}" == "nvidia" ]]; then
-  echo "RESULT: OK — minimal nvidia layout present (only rgb/ is checked;"
-  echo "full nvidia support in the benchmark wrapper is tracked in TODOS.md)."
-else
-  echo "RESULT: OK — sequence looks complete."
-fi
+echo "RESULT: OK — sequence looks complete."
 echo "Use with Shape of Motion:"
 echo "  cd third_party/shape-of-motion"
 echo "  python run_training.py --work-dir <OUT> data:${DATASET} --data.data-dir ${SEQ_DIR}"
