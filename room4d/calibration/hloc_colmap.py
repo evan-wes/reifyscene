@@ -15,6 +15,19 @@ class HlocColmapSfMRunner:
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
         self.cfg = cfg or {}
 
+    def _image_options(self) -> dict[str, Any]:
+        image_options: dict[str, Any] = {}
+        if self.cfg.get("camera_model"):
+            image_options["camera_model"] = str(self.cfg["camera_model"])
+        if self.cfg.get("camera_params"):
+            # Known-intrinsics protocol (gt_scoring D4): hloc applies
+            # image_options GLOBALLY — one camera for the entire import —
+            # so this only expresses rigs whose cameras share intrinsics.
+            # Per-camera injection needs per-folder imports or COLMAP DB
+            # writes (post-spike work, see the calibration design doc).
+            image_options["camera_params"] = str(self.cfg["camera_params"])
+        return image_options
+
     def _camera_mode(self, pycolmap) -> Any:
         mode_name = str(self.cfg.get("camera_mode", "PER_FOLDER")).upper()
         return getattr(pycolmap.CameraMode, mode_name, pycolmap.CameraMode.AUTO)
@@ -54,9 +67,7 @@ class HlocColmapSfMRunner:
         features = extract_features.main(feature_conf, image_dir, hloc_dir)
         matches = match_features.main(matcher_conf, sfm_pairs, feature_conf["output"], hloc_dir)
 
-        image_options: dict[str, Any] = {}
-        if self.cfg.get("camera_model"):
-            image_options["camera_model"] = str(self.cfg["camera_model"])
+        image_options = self._image_options()
         mapper_options = dict(self.cfg.get("mapper_options", {}))
         if self.cfg.get("fix_intrinsics", False):
             mapper_options.setdefault("ba_refine_focal_length", False)

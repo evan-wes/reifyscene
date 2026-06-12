@@ -7,6 +7,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.4.0] - 2026-06-12
+
+### Added
+- Calibration GT scoring (calibration arc M0-minimal; design decisions
+  D2–D12): `scripts/score_calibration_gt.py` collects dataset frames with
+  their ground-truth poses, runs the existing hloc+COLMAP SfM, and scores
+  the recovered extrinsics. PRIMARY metrics are gauge-free pairwise
+  relative errors (per-pair rotation geodesic, dual-anchor baseline
+  direction, normalized baseline ratio) — same-position pairs are reported
+  separately as registration repeatability so they cannot flatter the
+  headline numbers; SECONDARY is Sim(3)-APE on camera centers with
+  conditioning guards (GT and estimate sides). Fragmentation is a result,
+  not an error: the largest alignable component is scored with coverage
+  reported. First real numbers: Balloon1 cross-camera pairwise rotation
+  error mean 0.176° (free intrinsics) / 0.136° (known-intrinsics
+  protocol); paper-windmill 1.89° across 3 cameras against ARKit odometry.
+- Known-intrinsics protocol: `--fix-intrinsics` injects shared GT
+  intrinsics into COLMAP (`camera_params` passthrough in the SfM runner)
+  and disables refinement; refuses per-camera intrinsics (hloc applies
+  image options globally — DyCheck's per-frame ARKit focal drift correctly
+  triggers the refusal). The score artifact records recovered intrinsics,
+  the effective camera mode, and verifies the injection actually held
+  (`intrinsics_match_injected`) so a silent failure can't masquerade as a
+  fixed-intrinsics result.
+- GT manifest contract: the frame collector writes `gt_manifest.json`
+  (image filename → GT pose) at collection time, next to — never inside —
+  the image dir; the scorer joins blindly, so correspondence can't drift.
+  Re-collections purge stale images (hloc sweeps every file in the dir).
+- Pose math is oracle-proven: hand-rolled Umeyama Sim(3) + geodesic errors
+  pinned against evo v1.36.5 fixtures, with 0°/180° clamps, reflection
+  handling, and small-N degradation guards.
+- hloc compatibility patches for pycolmap ≥ 3.10 in `setup_room4d.sh`
+  (import_images options object + kwarg rename, verify_matches RANSAC
+  options, incremental_mapping pipeline options; idempotent with loud
+  anchor-miss failure), plus vendored-tree restore before ref checkout and
+  a setup smoke test of the exact patched option fields. Collected frames
+  are copied, never symlinked (pycolmap ≥ 3.13 resolves symlinks during
+  import, desyncing database names from hloc feature keys).
+
+### Tests
+- 33 new unit tests in `tests/test_gt_scoring.py`: evo-oracle alignment
+  fixtures, gauge-invariance and per-camera error localization, degenerate
+  and estimate-collapse flagging, adapter schema guards against real
+  Balloon1 data, manifest round-trip + purge, CLI end-to-end through a
+  mock SfM model in both intrinsics modes, and the exact injection
+  payload.
+
 ## [0.1.3.1] - 2026-06-12
 
 ### Fixed
