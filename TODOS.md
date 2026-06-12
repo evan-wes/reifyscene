@@ -2,51 +2,24 @@
 
 ## Reference Comparison Tool
 
-### Proper resume handling in run_reference_benchmark.py
+### Shared data-dir cache race between concurrent runs of one sequence
 
-**What:** Make resume of an interrupted run recall the original schedule
-(read cfg.yaml's `num_epochs` and pass it explicitly), and refuse to stamp
-the completion sentinel when a resume trained zero epochs.
+**What:** SoM's dataloader writes caches into the DATA dir
+(`flow3d_preprocessed/cache/scene_norm_dict.pth`), so two concurrent
+benchmarks of the same sequence into *different* run dirs race
+writer-vs-reader on that file (torch.load of a half-written file crashes;
+worst case the val split normalizes with the other process's transform —
+silently skewed metrics). The run-dir flock (v0.1.3.1) does not cover this.
+Also: the data dir must be writable, which nothing documents or validates.
 
-**Why:** Verified during the dataset-backends ship review: SoM never re-reads
-cfg.yaml — resume trains `range(ckpt_epoch, cli num_epochs)` with the CLI
-default of 500. A plain resume of an interrupted smoke run silently retargets
-to 500 epochs, and a resume whose checkpoint epoch exceeds the requested
-schedule trains 0 epochs, exits 0, and gets stamped complete — publishing
-mid-training metrics as a finished baseline. The wrapper's guard text was
-corrected (2026-06-11) but the underlying semantics remain.
+**Why:** Residual risk split out of the lockfile work — the run-dir lock
+covers same-run-dir contention but not same-data-dir contention.
 
-**Context:** Found by the /ship red-team review of feature/dataset-backends.
-The interim guard: explicit `--num-epochs` on a resume aborts with a
-corrected message recommending --retrain.
-
-**Effort:** S-M
-**Priority:** P1
-**Depends on:** None
-
-### Lockfile guard against concurrent runs sharing a run dir
-
-**What:** Take an exclusive lockfile (or pidfile) in the run dir for the
-duration of training + harvest in `run_reference_benchmark.py`; exit early
-with a clear message when held.
-
-**Why:** Two simultaneous invocations against the same run dir interleave
-checkpoints and TensorBoard event files; the nvidia harvest's max-step
-selection would then mix the two runs' scalars nondeterministically into a
-plausible-looking but corrupt result.
-
-**Context:** Found by the /ship red-team review of feature/dataset-backends.
-Plausible solo-workflow accident (forgotten background run + re-run in a new
-shell); recovery is --retrain. The harvest now aborts when val/* scalars
-disagree on their final step (mixed-run detector), but prevention needs the
-lock. Related: SoM's dataloader also writes caches into the DATA dir
-(`flow3d_preprocessed/cache/scene_norm_dict.pth`), so two concurrent runs of
-the same sequence into different run dirs race on that file too — a run-dir
-lock alone won't cover it (and the data dir must be writable, which nothing
-documents).
+**Context:** Found by the /ship adversarial review of
+feature/dataset-backends; deferred when the run-dir lock shipped.
 
 **Effort:** S
-**Priority:** P2
+**Priority:** P3
 **Depends on:** None
 
 ### Score hloc+COLMAP calibration against dataset GT extrinsics
@@ -87,6 +60,36 @@ lands (design doc Track 2).
 **Depends on:** room4d gsplat renderer (Track 2)
 
 ## Completed
+
+### Proper resume handling in run_reference_benchmark.py
+
+**What:** Make resume of an interrupted run recall the original schedule and
+refuse zero-epoch completion stamps.
+
+**How it landed:** Resume reads cfg.yaml's `num_epochs` and passes it back
+explicitly (SoM never re-reads it); a missing schedule fails closed; the
+checkpoint's epoch is read via the reference env (`weights_only=True`,
+120s timeout) and a resume with zero epochs left aborts before training.
+`--num-epochs 500` and plain runs share the canonical `default` label; the
+sentinel is written atomically; resumed runs record
+`resumed`/`resumed_from_epoch` in the result JSON. GPU-verified (cfg-bump
+resume trained 2→4 and stamped "4").
+
+**Completed:** v0.1.3.1 (2026-06-12)
+
+### Lockfile guard against concurrent runs sharing a run dir
+
+**What:** Exclusive per-run-dir lock for the duration of training + harvest.
+
+**How it landed:** `fcntl.flock` held on an fd for the wrapper's lifetime —
+kernel-owned, releases on any death (kill -9 included), no PID/reclaim
+protocol to race (the hand-rolled O_EXCL+PID design was rejected in review
+for TOCTOU reclaim races). The training child inherits the fd via
+`pass_fds`, so an orphaned trainer keeps the run dir locked until it exits.
+Live-verified: held lock refuses a second invocation; released lock
+proceeds. Residual same-data-dir cache race split into its own P3 entry.
+
+**Completed:** v0.1.3.1 (2026-06-12)
 
 ### Download NVIDIA Dynamic Scenes dataset + extend benchmark wrapper
 

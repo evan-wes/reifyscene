@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 (loose variant), and this project uses a 4-digit `MAJOR.MINOR.PATCH.MICRO`
 version scheme (versioned in `pyproject.toml`).
 
+## [0.1.3.1] - 2026-06-12
+
+### Fixed
+- Resuming an interrupted reference-benchmark run now recalls the schedule
+  recorded in the run's `cfg.yaml` and passes it back to Shape of Motion
+  explicitly — SoM itself never re-reads it, so a plain resume previously
+  retargeted any interrupted run toward the default 500-epoch schedule
+  (a 5-epoch smoke run would silently become a 500-epoch run). A run whose
+  `cfg.yaml` is missing now refuses to resume rather than guessing.
+- A resume whose checkpoint is already at or past its recorded schedule
+  aborts up front (the checkpoint's epoch is read via the reference env)
+  instead of letting SoM train zero epochs, exit 0, and get stamped as a
+  completed baseline carrying mid-training metrics.
+- Benchmark invocations now hold an exclusive kernel lock (`fcntl.flock`)
+  on their run dir for the duration of training + eval, so a forgotten
+  concurrent run is refused instead of interleaving checkpoints and
+  TensorBoard event files into plausible-looking corrupt metrics. The lock
+  releases on any process death (`kill -9` included) and is inherited by
+  the training child, so an orphaned trainer keeps the run dir protected
+  until it actually exits.
+- An explicit `--num-epochs 500` and a plain run now share one schedule
+  label (`default`), so alternating between them can no longer trigger a
+  spurious schedule-mismatch abort against the same run dir.
+- The completion sentinel is written atomically (a crash mid-write can no
+  longer leave an empty sentinel that reads as a completed default-schedule
+  run), and resumed runs record `resumed`/`resumed_from_epoch` in the
+  result JSON so a segment-only `train_minutes` can't masquerade as the
+  full training cost.
+- The checkpoint-epoch reader uses `weights_only=True` only (SoM
+  checkpoints are plain tensor dicts; the pickle fallback was unnecessary
+  code-execution surface) and times out rather than wedging the pipeline
+  on a hung `conda run`.
+
+### Tests
+- 15 new unit tests: schedule recall (explicit and default), zero-epoch
+  abort boundary (`>=` equality), fail-closed missing schedule, flock
+  exclusivity/release-on-death/contention-abort behavior, label
+  canonicalization, resume provenance fields, fresh-run-dir passthrough,
+  and checkpoint-reader degradation paths.
+
 ## [0.1.3.0] - 2026-06-11
 
 ### Added
