@@ -2,6 +2,26 @@
 
 ## Reference Comparison Tool
 
+### Post-spike: calibration M0 hardening + M1 baseline batch
+
+**What:** Conditional on S1's CONTINUE verdict: fingerprinted SfM reuse +
+copied flock for `score_calibration_gt.py` (design D8/D12 — copy the ~20
+lines, do NOT import from the wrapper, which must stay stdlib-anywhere);
+per-camera GT-intrinsics injection for Panoptic (per-folder imports or
+COLMAP DB writes — hloc's `image_options` is global, D12); batch runner
+over certified wide-baseline configurations with the overlap-certification
+report (M1).
+
+**Why:** The deferred half of the eng-reviewed M0/M1 scope; deliberately
+gated so a kill verdict strands nothing.
+
+**Context:** Design doc M0-HARDENING + M1 sections. **If S1 returns KILL,
+delete this entry** (that condition is the point of it).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** S1 spike verdict (see the M0-minimal + S1 entry below)
+
 ### Shared data-dir cache race between concurrent runs of one sequence
 
 **What:** SoM's dataloader writes caches into the DATA dir
@@ -22,22 +42,29 @@ feature/dataset-backends; deferred when the run-dir lock shipped.
 **Priority:** P3
 **Depends on:** None
 
-### Score hloc+COLMAP calibration against dataset GT extrinsics
+### Calibration arc: M0-minimal GT scorer + S1 kyotovision spike
 
-**What:** Run the phase-1 calibration (`room4d/calibration/`) on DyCheck/NVIDIA
-sequences and score recovered extrinsics against the datasets' ground-truth
-camera poses.
+**What:** (a) M0-minimal — `room4d/calibration/gt_scoring.py` +
+`scripts/score_calibration_gt.py`: score recovered extrinsics against
+dataset GT with pairwise-relative errors (primary) and guarded Sim(3) APE
+(secondary). (b) S1 — standalone spike: run the kyotovision IROS'22
+moving-person calibration code on CMU Panoptic wide-baseline subsets,
+score with M0-minimal, deliver an explicit kill/continue verdict for the
+calibration arc.
 
-**Why:** Both benchmark datasets ship GT extrinsics, which turns the calibration
-stage from "feels stubbed" into something with a real correctness test, for free.
+**Why:** M0 turns the calibration stage's correctness into a number; S1 is
+the kill gate for the pipeline-as-rig-calibrator vision (entity bridges vs
+static SfM) — cheap to falsify before any deeper investment.
 
-**Context:** Deferred from plan (design doc "bonus" item) at ship time of the
-reference comparison tool. Needs pose-error metrics (rotation/translation deltas
-after alignment) and, for NVIDIA, the dataset download above.
+**Context:** Full decision record (D2–D12, incl. outside-voice round) in
+`a private design note`.
+S1 needs the Panoptic toolbox download + kyotovision checkout. A Panoptic
+PASS validates wide-baseline only, NOT disjoint-FOV (no public GT exists
+for that regime — own-rig captures later).
 
-**Effort:** M
+**Effort:** M0-minimal S (built 2026-06-12); S1 M (downloads + runs + memo)
 **Priority:** P1
-**Depends on:** None (NVIDIA Balloon1 + Jumping downloaded and verified 2026-06-11; DyCheck worked already)
+**Depends on:** None
 
 ## Renderer (Track 2)
 
