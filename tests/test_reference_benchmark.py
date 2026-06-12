@@ -10,12 +10,14 @@ guard rails.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -586,6 +588,11 @@ def test_benchmark_nvidia_happy_path_writes_contract_json(
     # never evaluate_iphone.py
     assert len(calls) == 1
     assert not any("evaluate_iphone" in part for part in calls[0])
+    # the run lock is released on the happy path too (file persists)
+    os.close(rb.acquire_run_lock(run_dir))
+    # not a resumed run -> provenance fields say so
+    assert result["resumed"] is False
+    assert result["resumed_from_epoch"] is None
     # the summary table must print the nvidia extras too — the old
     # `for key in METRIC_PATTERNS` loop silently dropped fg_/bg_ rows
     out = capsys.readouterr().out
@@ -791,6 +798,265 @@ def test_benchmark_reuses_completed_run_and_requires_results_dir(
     assert "reusing completed run" in capsys.readouterr().out
 
 
+def test_trained_num_epochs_parses_cfg(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    assert rb.trained_num_epochs(run) is None  # no cfg.yaml
+    (run / "cfg.yaml").write_text("work_dir: x\nbatch_size: 8\n")
+    assert rb.trained_num_epochs(run) is None  # no num_epochs key
+    (run / "cfg.yaml").write_text("work_dir: x\nnum_epochs: 1000\nbatch_size: 8\n")
+    assert rb.trained_num_epochs(run) == 1000
+    if os.geteuid() != 0:  # root ignores file modes
+        (run / "cfg.yaml").chmod(0)
+        assert rb.trained_num_epochs(run) is None  # unreadable -> None, loudly
+        assert "[warn] could not read" in capsys.readouterr().out
+        (run / "cfg.yaml").chmod(0o644)
+
+
+def test_checkpoint_epoch_parses_and_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ckpt = tmp_path / "last.ckpt"
+    calls = _patch_eval_subprocess(monkeypatch, "700\n")
+    assert rb.checkpoint_epoch("conda", "ref_env", ckpt) == 700
+    assert calls[0][:5] == ["conda", "run", "--no-capture-output", "-n", "ref_env"]
+    assert calls[0][-1] == str(ckpt)
+    _patch_eval_subprocess(monkeypatch, "", returncode=1)
+    assert rb.checkpoint_epoch("conda", "ref_env", ckpt) is None
+    _patch_eval_subprocess(monkeypatch, "not a number\n")
+    assert rb.checkpoint_epoch("conda", "ref_env", ckpt) is None
+    # rc 0 with empty stdout (snippet printed nothing) -> the IndexError leg
+    _patch_eval_subprocess(monkeypatch, "")
+    assert rb.checkpoint_epoch("conda", "ref_env", ckpt) is None
+    # the snippet itself must stay valid python (only runs in the ref env)
+    compile(rb._CKPT_EPOCH_SNIPPET, "<ckpt-epoch>", "exec")
+
+
+def _make_interrupted_run(root: Path, cfg_epochs: int | None) -> Path:
+    """Run dir with a checkpoint but no completion sentinel."""
+    (root / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (root / "checkpoints" / "last.ckpt").write_text("ckpt")
+    if cfg_epochs is not None:
+        (root / "cfg.yaml").write_text(f"work_dir: x\nnum_epochs: {cfg_epochs}\n")
+    return root
+
+
+def test_resume_recalls_recorded_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SoM never re-reads cfg.yaml, so the wrapper must pass the recorded
+    # schedule back explicitly — a plain resume of an interrupted 1000-epoch
+    # run previously retargeted to the default 500.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+    monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 300)
+
+    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=1000)
+    with pytest.raises(SystemExit):  # fake training produces no results/
+        rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
+    train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
+    idx = train_cmd.index("--num-epochs")
+    assert train_cmd[idx + 1] == "1000"
+    # sentinel records the recalled schedule, not 'default'
+    assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).read_text().strip() == "1000"
+    assert "resuming from epoch 300 toward its recorded 1000-epoch schedule" in capsys.readouterr().out
+
+    # a recorded default schedule resumes WITHOUT --num-epochs so the
+    # sentinel label stays 'default' and later default-reuse matches
+    calls.clear()
+    run_dir2 = _make_interrupted_run(tmp_path / "run2", cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
+    with pytest.raises(SystemExit):
+        rb.benchmark(_benchmark_args(seq, run_dir2, som_dir))
+    train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
+    assert "--num-epochs" not in train_cmd
+    assert (run_dir2 / rb.TRAINING_COMPLETE_SENTINEL).read_text().strip() == "default"
+
+
+def test_resume_refuses_zero_epoch_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Checkpoint epoch >= recorded schedule -> range(ckpt, schedule) is empty:
+    # SoM would exit 0 having trained nothing and the run would be stamped
+    # complete with mid-training metrics. Must abort BEFORE training.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+    monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 700)
+
+    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=500)
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
+    assert "already >= its recorded 500-epoch schedule" in str(exc.value)
+    assert "train zero epochs" in str(exc.value)
+    assert not any("run_training.py" in " ".join(c) for c in calls)
+    assert not (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()
+    os.close(rb.acquire_run_lock(run_dir))  # lock released on abort
+
+    # equality boundary: the "finished but died before being stamped" case
+    # the error message itself names — a >= -> > regression must not slip
+    monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 500)
+    run_dir2 = _make_interrupted_run(tmp_path / "run2", cfg_epochs=500)
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, run_dir2, som_dir))
+    assert "already >= its recorded 500-epoch schedule" in str(exc.value)
+
+    # one epoch left -> resumes (training invoked)
+    monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 499)
+    run_dir3 = _make_interrupted_run(tmp_path / "run3", cfg_epochs=500)
+    with pytest.raises(SystemExit):  # fake training -> no results/
+        rb.benchmark(_benchmark_args(seq, run_dir3, som_dir))
+    assert any("run_training.py" in " ".join(c) for c in calls)
+
+
+def test_run_lock_excludes_holders_and_releases_on_death(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = run_dir / rb.RUN_LOCK_NAME
+
+    # exclusive while held: a second acquire (separate fd, flock treats it
+    # independently even in-process) is refused with the holder's pid
+    fd = rb.acquire_run_lock(run_dir)
+    assert lock_path.read_text().strip() == str(os.getpid())
+    with pytest.raises(SystemExit) as exc:
+        rb.acquire_run_lock(run_dir)
+    assert "locked by another running benchmark" in str(exc.value)
+    assert str(os.getpid()) in str(exc.value)
+
+    # releasing the fd releases the flock; the FILE persists by design
+    # (unlinking would detach waiters from the locked inode)
+    os.close(fd)
+    assert lock_path.exists()
+    os.close(rb.acquire_run_lock(run_dir))
+
+    # the kernel releases the flock on process death — no reclaim protocol,
+    # so a kill -9 can never wedge the run dir
+    subprocess.run(
+        [sys.executable, "-c",
+         "import fcntl, os, sys\n"
+         "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR)\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n",
+         str(lock_path)],
+        check=True,
+    )
+    os.close(rb.acquire_run_lock(run_dir))  # holder died -> acquirable
+
+    # stale file content is diagnostics only — never blocks acquisition
+    lock_path.write_text("999999\n")
+    os.close(rb.acquire_run_lock(run_dir))
+
+
+def test_benchmark_aborts_on_held_lock_without_breaking_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Contention abort must leave the HOLDER's flock fully intact.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    holder_fd = os.open(run_dir / rb.RUN_LOCK_NAME, os.O_CREAT | os.O_RDWR)
+    fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
+        assert "locked by another running benchmark" in str(exc.value)
+        # the holder's flock survived the abort: a fresh acquire still fails
+        with pytest.raises(SystemExit):
+            rb.acquire_run_lock(run_dir)
+    finally:
+        os.close(holder_fd)
+
+
+def test_epochs_label_canonicalizes_explicit_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # '500' and 'default' name the SAME schedule; two labels for it would
+    # make an explicit --num-epochs 500 rerun spuriously abort against a
+    # resumed run's 'default' sentinel.
+    assert rb._epochs_label(None) == "default"
+    assert rb._epochs_label(rb.SOM_DEFAULT_EPOCHS) == "default"
+    assert rb._epochs_label(5) == "5"
+
+    # end to end: a 'default' sentinel satisfies an explicit-500 request
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+    run_dir = _make_completed_run(tmp_path / "run")  # sentinel 'default'
+    (run_dir / "results").mkdir()
+    out_path = tmp_path / "out.json"
+    rb.benchmark(_benchmark_args(
+        seq, run_dir, som_dir, num_epochs=rb.SOM_DEFAULT_EPOCHS, output=str(out_path)
+    ))
+    assert "reusing completed run" in capsys.readouterr().out
+    assert json.loads(out_path.read_text())["epochs"] == "default"
+
+
+def test_resumed_run_records_provenance_in_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # train_minutes on a resumed run covers only the final segment; the
+    # resume fields keep the artifact honest about that.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+    monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 300)
+    monkeypatch.setattr(rb, "som_pinned_commit", lambda p: "deadbeef")
+    monkeypatch.setattr(rb, "capture_env_versions", lambda c, e: {})
+
+    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=500)
+    (run_dir / "results").mkdir()  # renders from the dead segment persist
+    out_path = tmp_path / "out.json"
+    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, output=str(out_path)))
+    result = json.loads(out_path.read_text())
+    assert result["resumed"] is True
+    assert result["resumed_from_epoch"] == 300
+    assert result["epochs"] == "default"
+
+
+def test_benchmark_fresh_run_dir_trains_with_requested_epochs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No checkpoint at all -> the resume machinery stays out of the way and
+    # the requested schedule passes straight through to training.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
+
+    run_dir = tmp_path / "fresh"
+    with pytest.raises(SystemExit):  # fake training -> no results/
+        rb.benchmark(_benchmark_args(seq, run_dir, som_dir, num_epochs=5))
+    train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
+    idx = train_cmd.index("--num-epochs")
+    assert train_cmd[idx + 1] == "5"
+    assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).read_text().strip() == "5"
+
+
 def test_completed_epochs_requires_proof_and_records_schedule(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
@@ -832,14 +1098,29 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
 
     # Interrupted run (checkpoint, no completion proof) -> training RESUMES
     # rather than being skipped; fake training produces no results/ -> exit.
-    run_dir = tmp_path / "run"
-    (run_dir / "checkpoints").mkdir(parents=True)
-    (run_dir / "checkpoints" / "last.ckpt").write_text("ckpt")
+    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
-    assert "incomplete run detected — resuming toward SoM's" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # a default-schedule resume passes no flag (label stays 'default')
+    train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
+    assert "--num-epochs" not in train_cmd
+    # the fake subprocess output is unparseable as a checkpoint epoch, so
+    # the pre-check degrades to a warning and the resume proceeds
+    assert "could not read the checkpoint's epoch" in out
+    assert "incomplete run detected — resuming from epoch ?" in out
+    os.close(rb.acquire_run_lock(run_dir))  # lock released on exit
     assert any("run_training.py" in part for call in calls for part in call)
     assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()  # written post-train
+
+    # an interrupted run with NO recorded schedule fails CLOSED — guessing
+    # could silently retarget the run toward the wrong schedule
+    calls.clear()
+    run_dir_nocfg = _make_interrupted_run(tmp_path / "run-nocfg", cfg_epochs=None)
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, run_dir_nocfg, som_dir))
+    assert "missing or records no schedule" in str(exc.value)
+    assert not any("run_training.py" in " ".join(c) for c in calls)
 
     # --retrain clears prior outputs before training (SoM would otherwise
     # auto-resume and train ~0 epochs against a finished run) — including the
@@ -893,12 +1174,11 @@ def test_benchmark_epoch_schedule_guards(
     assert "epochs=5 was requested" in str(exc.value)
     assert not calls  # no training, no eval — hard abort
 
-    # Resume of an interrupted run with an explicit --num-epochs -> abort
-    # (SoM resumes its saved schedule; a smaller value trains 0 epochs and
-    # would then be stamped complete).
-    interrupted = tmp_path / "interrupted"
-    (interrupted / "checkpoints").mkdir(parents=True)
-    (interrupted / "checkpoints" / "last.ckpt").write_text("ckpt")
+    # Resume of an interrupted run with an explicit --num-epochs -> abort:
+    # resume recalls the recorded schedule from cfg.yaml, so an explicit
+    # value is ambiguous (zero-epoch stamping is prevented separately by
+    # the checkpoint-epoch pre-check).
+    interrupted = _make_interrupted_run(tmp_path / "interrupted", cfg_epochs=None)
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, interrupted, som_dir, num_epochs=50))
     assert "--retrain" in str(exc.value)
@@ -979,13 +1259,19 @@ def test_run_training_command_construction_and_sentinel(
     assert cmd[idx + 1] == "5"
     # tyro subcommand args must come AFTER the optional flag
     assert cmd.index("data:iphone") > idx
-    # ... and the sentinel records the schedule it completed with
+    # ... and the sentinel records the schedule it completed with, written
+    # atomically (no temp residue)
     assert sentinel.read_text().strip() == "5"
+    assert not (run_dir / (rb.TRAINING_COMPLETE_SENTINEL + ".tmp")).exists()
+
+    # an explicit 500 IS SoM's default schedule — one canonical label
+    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, 500, "iphone")
+    assert sentinel.read_text().strip() == "default"
 
     # the dataset flag selects the tyro data subcommand
     rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None, "nvidia")
-    assert "data:nvidia" in calls[2]
-    assert "data:iphone" not in calls[2]
+    assert "data:nvidia" in calls[3]
+    assert "data:iphone" not in calls[3]
 
 
 def test_best_effort_helpers_degrade_gracefully(

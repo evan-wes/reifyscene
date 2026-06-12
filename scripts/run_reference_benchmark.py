@@ -9,8 +9,10 @@ be compared against.
 
 Pipeline:
   1. validate the sequence directory layout (--dataset iphone|nvidia)
-  2. train Shape of Motion in the reference env (skipped when the run dir
-     already holds a checkpoint; --retrain forces)
+  2. train Shape of Motion in the reference env under an exclusive run-dir
+     lock (skipped only when the run dir proves completion — sentinel or
+     final-epoch videos; an interrupted run resumes toward the schedule
+     recorded in its cfg.yaml; --retrain starts over)
   3. collect metrics — iphone: run evaluate_iphone.py and parse its stdout;
      nvidia: SoM ships no evaluate_nvidia.py, so read the trainer's
      final-epoch ``val/*`` scalars from the run dir's TensorBoard event files.
@@ -46,6 +48,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -260,9 +263,41 @@ def _split_frame_names(data_dir: Path, split_file: str) -> list[str]:
     return split.get("frame_names", [])
 
 
+# SoM's built-in num_epochs (run_training.py TrainConfig) — the schedule a
+# run trains toward when no --num-epochs is passed.
+SOM_DEFAULT_EPOCHS = 500
+
+
 def _epochs_label(num_epochs: int | None) -> str:
-    """Canonical label for a training schedule ('default' = SoM's built-in)."""
-    return "default" if num_epochs is None else str(num_epochs)
+    """Canonical label for a training schedule ('default' = SoM's built-in).
+
+    An explicit --num-epochs 500 and a plain run train the SAME schedule, so
+    they must share one label — otherwise a resume (which stamps 'default')
+    followed by an explicit-500 rerun would spuriously abort on a schedule
+    mismatch that doesn't exist.
+    """
+    if num_epochs is None or num_epochs == SOM_DEFAULT_EPOCHS:
+        return "default"
+    return str(num_epochs)
+
+
+def trained_num_epochs(run_dir: Path) -> int | None:
+    """The schedule a run dir's cfg.yaml records, or None when unavailable.
+
+    cfg.yaml is the only durable record of an interrupted run's schedule:
+    SoM writes it at training start and never re-reads it, so resume must
+    recall the value from here and pass it back explicitly.
+    """
+    cfg = run_dir / "cfg.yaml"
+    if not cfg.is_file():
+        return None
+    try:
+        text = cfg.read_text()
+    except OSError as exc:
+        print(f"[warn] could not read {cfg}: {exc}", flush=True)
+        return None
+    match = re.search(r"^num_epochs:\s*(\d+)", text, re.M)
+    return int(match.group(1)) if match else None
 
 
 def completed_epochs(run_dir: Path) -> str | None:
@@ -282,15 +317,11 @@ def completed_epochs(run_dir: Path) -> str | None:
     sentinel = run_dir / TRAINING_COMPLETE_SENTINEL
     if sentinel.exists():
         return sentinel.read_text().strip() or "default"
-    cfg = run_dir / "cfg.yaml"
-    if cfg.is_file():
-        match = re.search(r"^num_epochs:\s*(\d+)", cfg.read_text(), re.M)
-        if match:
-            epochs = int(match.group(1))
-            if (run_dir / "videos" / f"epoch_{epochs - 1:04d}").is_dir():
-                # 500 is SoM's default schedule; label accordingly so reuse
-                # against a default-schedule request matches.
-                return "default" if epochs == 500 else str(epochs)
+    epochs = trained_num_epochs(run_dir)
+    if epochs is not None and (run_dir / "videos" / f"epoch_{epochs - 1:04d}").is_dir():
+        # Label SoM's default schedule accordingly so reuse against a
+        # default-schedule request matches.
+        return "default" if epochs == SOM_DEFAULT_EPOCHS else str(epochs)
     return None
 
 
@@ -325,9 +356,46 @@ def clear_run_state(run_dir: Path) -> None:
         event_file.unlink()
 
 
+RUN_LOCK_NAME = ".room4d_benchmark.lock"
+
+
+def acquire_run_lock(run_dir: Path) -> int:
+    """Exclusive per-run-dir flock; exits when another process holds it.
+
+    Two concurrent invocations sharing a run dir interleave checkpoints and
+    TensorBoard event files into plausible-looking corruption (the harvest's
+    same-step check detects it only after the fact). The lock is an
+    fcntl.flock on the returned fd — kernel-owned, so it releases on ANY
+    process death (kill -9 included) with no PID-liveness or stale-reclaim
+    protocol to race. The training child inherits the fd (pass_fds), so an
+    orphaned trainer keeps the run dir locked until it actually exits. The
+    lock FILE persists on disk (never unlinked — unlinking would detach
+    waiters from the locked inode); its PID content is diagnostics only.
+    """
+    lock_path = run_dir / RUN_LOCK_NAME
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = ""
+        try:
+            holder = lock_path.read_text().strip()
+        except OSError:
+            pass
+        os.close(fd)
+        sys.exit(
+            f"{lock_path} is locked by another running benchmark"
+            + (f" (pid {holder})" if holder else "")
+            + " — wait for it to finish or use a different --run-dir."
+        )
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
 def run_training(
     conda: str, env: str, som_dir: Path, data_dir: Path, run_dir: Path,
-    num_epochs: int | None, dataset: str,
+    num_epochs: int | None, dataset: str, lock_fd: int | None = None,
 ) -> float:
     """Train SoM on the sequence; returns wall-clock minutes."""
     cmd = conda_run_cmd(
@@ -339,10 +407,18 @@ def run_training(
     cmd += [f"data:{dataset}", "--data.data-dir", str(data_dir)]
     print(f"[train] {' '.join(cmd)}", flush=True)
     start = time.monotonic()
-    subprocess.run(cmd, cwd=som_dir, check=True)
+    # The child inherits the run lock's fd: if the wrapper dies (kill -9)
+    # the orphaned trainer keeps the run dir locked until it exits, so a
+    # second invocation cannot interleave with it.
+    extra = {"pass_fds": (lock_fd,)} if lock_fd is not None else {}
+    subprocess.run(cmd, cwd=som_dir, check=True, **extra)
     # Written only on success (check=True raises first) and records the
-    # schedule, so completion claims are schedule-specific.
-    (run_dir / TRAINING_COMPLETE_SENTINEL).write_text(_epochs_label(num_epochs) + "\n")
+    # schedule, so completion claims are schedule-specific. Atomic replace:
+    # a crash mid-write must not leave an empty sentinel that reads as a
+    # completed default-schedule run.
+    sentinel_tmp = run_dir / (TRAINING_COMPLETE_SENTINEL + ".tmp")
+    sentinel_tmp.write_text(_epochs_label(num_epochs) + "\n")
+    os.replace(sentinel_tmp, run_dir / TRAINING_COMPLETE_SENTINEL)
     return (time.monotonic() - start) / 60.0
 
 
@@ -389,6 +465,39 @@ def run_eval(
             f"{run_dir / 'benchmark_eval.log'}"
         )
     return metrics, output
+
+
+# Runs inside the reference env (torch lives there, not in the caller's env).
+# weights_only=True only: SoM checkpoints are plain dicts of tensors/ints
+# (trainer.save_checkpoint), and a weights_only=False fallback would hand
+# pickle code-execution to anything dropped into a run dir.
+_CKPT_EPOCH_SNIPPET = """\
+import sys, torch
+ckpt = torch.load(sys.argv[1], map_location="cpu", weights_only=True)
+print(int(ckpt["epoch"]))
+"""
+
+
+def checkpoint_epoch(conda: str, env: str, ckpt: Path) -> int | None:
+    """The epoch a SoM checkpoint was saved at, or None when unreadable.
+
+    SoM resumes training from this value (trainer.init_from_checkpoint), so
+    it is what decides whether a resume has any epochs left to train.
+    """
+    try:
+        proc = subprocess.run(
+            conda_run_cmd(conda, env, "python", "-c", _CKPT_EPOCH_SNIPPET, str(ckpt)),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=120,  # a metadata read must not wedge the pipeline
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int((proc.stdout or "").strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return None
 
 
 # Runs inside the reference env (tensorboard is a SoM dependency there).
@@ -557,6 +666,22 @@ def benchmark(args: argparse.Namespace) -> None:
         )
     validate_sequence(data_dir, args.dataset)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    lock_fd = acquire_run_lock(run_dir)
+    try:
+        _locked_benchmark(args, data_dir, run_dir, som_dir, seq_name, lock_fd)
+    finally:
+        # sys.exit paths unwind through here too. Closing the fd releases
+        # the flock (the kernel also releases it on any death) — the lock
+        # FILE stays on disk by design.
+        os.close(lock_fd)
+
+
+def _locked_benchmark(
+    args: argparse.Namespace, data_dir: Path, run_dir: Path, som_dir: Path,
+    seq_name: str, lock_fd: int,
+) -> None:
+    """The run-dir-mutating part of benchmark(); caller holds the run lock."""
     conda = find_conda()
 
     if not args.retrain:
@@ -574,6 +699,8 @@ def benchmark(args: argparse.Namespace) -> None:
             )
 
     train_minutes: float | None = None
+    resumed = False
+    resumed_from_epoch: int | None = None
     requested = _epochs_label(args.num_epochs)
     recorded = completed_epochs(run_dir)
     if args.retrain:
@@ -585,7 +712,7 @@ def benchmark(args: argparse.Namespace) -> None:
         clear_run_state(run_dir)
         train_minutes = run_training(
             conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs,
-            args.dataset,
+            args.dataset, lock_fd,
         )
     elif recorded is not None:
         if recorded != requested:
@@ -597,34 +724,68 @@ def benchmark(args: argparse.Namespace) -> None:
             )
         print(f"[train] reusing completed run ({run_dir}, epochs={recorded})", flush=True)
     else:
-        if (run_dir / "checkpoints" / "last.ckpt").exists():
+        epochs_for_training = args.num_epochs
+        ckpt_path = run_dir / "checkpoints" / "last.ckpt"
+        if ckpt_path.exists():
             # Checkpoint without completion proof = interrupted run. SoM
             # resumes from the checkpoint's epoch toward whatever schedule
-            # THIS invocation requests — cfg.yaml is written but never
-            # re-read (run_training.py trains range(ckpt_epoch, num_epochs)
-            # with the CLI/default value). An explicit --num-epochs at or
-            # below the checkpoint's epoch would train 0 epochs yet be
-            # stamped complete, so require --retrain for that. Proper resume
-            # handling (recall the original schedule, refuse zero-epoch
-            # stamps) is tracked in TODOS.md.
+            # THIS invocation passes — cfg.yaml is written but never re-read
+            # (run_training.py trains range(ckpt_epoch, num_epochs) with the
+            # CLI/default value) — so the wrapper recalls the recorded
+            # schedule itself and pre-checks the checkpoint epoch against
+            # it: a resume with zero epochs left must never be stamped
+            # complete.
             if args.num_epochs is not None:
                 sys.exit(
-                    f"{run_dir} holds an interrupted run. SoM resumes from "
-                    "the checkpoint's epoch toward the schedule THIS "
-                    "invocation requests (the original --num-epochs is not "
-                    "recalled), so a value at or below the checkpoint's "
-                    "epoch would train 0 epochs yet be stamped complete. "
-                    "Use --retrain for a clean run of the requested schedule."
+                    f"{run_dir} holds an interrupted run; resume recalls its "
+                    "recorded schedule from cfg.yaml, so an explicit "
+                    "--num-epochs is ambiguous. Drop --num-epochs to resume, "
+                    "or use --retrain for a clean run of the requested "
+                    "schedule."
+                )
+            schedule = trained_num_epochs(run_dir)
+            if schedule is None:
+                # Fail CLOSED: guessing a schedule could silently retarget
+                # the run (e.g. an interrupted 1000-epoch run resumed toward
+                # an assumed 500 ships as a completed 'default' baseline).
+                sys.exit(
+                    f"{run_dir} holds an interrupted run but its cfg.yaml is "
+                    "missing or records no schedule — cannot tell what the "
+                    "run was training toward. Use --retrain for a clean run."
+                )
+            ckpt_epoch = checkpoint_epoch(conda, args.conda_env, ckpt_path)
+            if ckpt_epoch is None:
+                print(
+                    "[warn] could not read the checkpoint's epoch — resume "
+                    "proceeds unchecked. If SoM also fails to load it, the "
+                    "checkpoint is likely corrupt (a killed torch.save); "
+                    "recover with --retrain.",
+                    flush=True,
+                )
+            elif ckpt_epoch >= schedule:
+                sys.exit(
+                    f"{run_dir} checkpoint is at epoch {ckpt_epoch}, already "
+                    f">= its recorded {schedule}-epoch schedule — resuming "
+                    "would train zero epochs yet stamp the run complete. The "
+                    "run likely finished training but died before being "
+                    "stamped; use --retrain for a clean run, or a different "
+                    "--run-dir."
                 )
             print(
-                "[train] incomplete run detected — resuming toward SoM's "
-                "default 500-epoch schedule (the interrupted run's original "
-                "--num-epochs is NOT recalled; use --retrain to start over)",
+                "[train] incomplete run detected — resuming from epoch "
+                f"{'?' if ckpt_epoch is None else ckpt_epoch} toward its "
+                f"recorded {schedule}-epoch schedule",
                 flush=True,
             )
+            resumed = True
+            resumed_from_epoch = ckpt_epoch
+            # The recalled schedule is passed back explicitly; passing None
+            # for SoM's built-in value keeps the training command minimal
+            # (_epochs_label folds 500 and None into 'default' either way).
+            epochs_for_training = None if schedule == SOM_DEFAULT_EPOCHS else schedule
         train_minutes = run_training(
-            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs,
-            args.dataset,
+            conda, args.conda_env, som_dir, data_dir, run_dir,
+            epochs_for_training, args.dataset, lock_fd,
         )
 
     # Written by the validator during final-epoch validation for BOTH formats
@@ -663,6 +824,10 @@ def benchmark(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "videos": {"rgb": latest_rgb_video(run_dir)},
         "env": capture_env_versions(conda, args.conda_env),
+        # When resumed, train_minutes covers only the final segment — the
+        # resume fields keep the provenance honest.
+        "resumed": resumed,
+        "resumed_from_epoch": resumed_from_epoch,
         "train_minutes": round(train_minutes, 1) if train_minutes is not None else None,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
