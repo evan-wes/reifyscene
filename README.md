@@ -141,23 +141,44 @@ extracted sequence with:
 
 ```bash
 scripts/verify_reference_data.sh --dataset iphone --seq-dir /path/to/paper-windmill
+scripts/verify_reference_data.sh --dataset nvidia --seq-dir /path/to/Balloon1
 ```
+
+For nvidia sequences the check is deep: full directory layout, a non-empty
+val split (an empty one trains for hours and yields no metrics), and the
+complete N² pairwise track set (the dataloader reads random pairs per batch,
+so a partial download would otherwise crash mid-training).
 
 ### Benchmark
 
 ```bash
+# DyCheck iPhone sequence (default: --dataset iphone)
 python scripts/run_reference_benchmark.py \
   --data-dir /path/to/iphone/paper-windmill \
   --run-dir  /path/to/runs/paper-windmill-full
+
+# NVIDIA Dynamic Scenes sequence
+python scripts/run_reference_benchmark.py --dataset nvidia \
+  --data-dir /path/to/nvidia/Balloon1 \
+  --run-dir  /path/to/runs/balloon1-full
 ```
 
 Trains Shape of Motion, evaluates, and writes a normalized
 `reference_benchmark.json` (`reference_benchmark_v1` schema: masked
-mPSNR/mSSIM/mLPIPS, 2D/3D tracking metrics, env versions, video paths).
+mPSNR/mSSIM/mLPIPS, 2D/3D tracking metrics where the dataset's eval provides
+them, env versions, video paths). The metric source differs per dataset:
+iphone runs SoM's `evaluate_iphone.py`; SoM ships no `evaluate_nvidia.py`, so
+nvidia metrics are harvested from the trainer's final-epoch `val/*`
+TensorBoard scalars (same covisibility-masked novel-view quantities, plus
+`fg_`/`bg_` splits). Each result records its eval protocol in an `eval` block
+(source and resolution factor — nvidia trains/evaluates at the dataloader's
+hardcoded 2x, iphone at 1x).
 Run handling: a run dir whose training demonstrably completed (completion
-sentinel, or final-epoch videos for older runs) is reused; an interrupted run
-resumes training; `--retrain` clears checkpoints/results/videos and starts
-from scratch.
+sentinel, or final-epoch videos for older runs) is reused — but only for the
+sequence it was trained on (reusing it with a different `--data-dir` aborts);
+an interrupted run resumes training toward SoM's default 500-epoch schedule;
+`--retrain` clears all prior run state (checkpoints, results, videos,
+TensorBoard event files) and starts from scratch.
 
 ### Compare
 
@@ -166,7 +187,9 @@ python scripts/run_reference_benchmark.py --compare room4d.json reference.json
 ```
 
 Prints a side-by-side table with per-metric better-direction (unknown metrics
-are shown with an undefined direction rather than dropped). The
+are shown with an undefined direction rather than dropped), and warns when
+the two results' sequences or eval protocols differ (e.g. nvidia's 2x vs
+iphone's 1x) instead of silently declaring winners on incomparable numbers. The
 `reference_benchmark_v1` schema is the contract room4d's own renderer
 evaluation **will emit** when the real renderer lands (today `room4d/eval/`
 computes raw PSNR only — the emitter is tracked in TODOS.md), so any two
