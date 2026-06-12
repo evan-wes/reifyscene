@@ -209,3 +209,46 @@ Reference baseline on DyCheck iPhone `paper-windmill` (RTX 5090, 500 epochs,
 
 MoSca as a second (pose-free) reference is deliberately deferred;
 `--with-mosca` in the setup script errors until that port is scoped.
+
+## Calibration GT scoring
+
+Both benchmark datasets ship ground-truth camera poses, so the hloc+COLMAP
+calibration stage (`room4d/calibration/`) can be scored against them
+directly — no reference training run needed:
+
+```bash
+# NVIDIA static rig (default: 5 timesteps per camera)
+python scripts/score_calibration_gt.py --dataset nvidia \
+  --data-dir /path/to/nvidia/Balloon1 \
+  --run-dir  /path/to/runs/balloon1-calib
+
+# Known-intrinsics protocol: inject the shared GT intrinsics into COLMAP
+# and disable refinement (refuses rigs whose intrinsics differ per camera,
+# e.g. DyCheck's per-frame ARKit focals)
+python scripts/score_calibration_gt.py --dataset nvidia --fix-intrinsics \
+  --data-dir /path/to/nvidia/Balloon1 \
+  --run-dir  /path/to/runs/balloon1-calib-fixed
+```
+
+`--dataset iphone` scores a DyCheck capture the same way (24 frames sampled
+along the trajectory by default). The scorer runs in the main `room4d` env
+(calibration extras install by default in `scripts/setup_room4d.sh`, which
+also patches the vendored hloc for pycolmap >= 3.10; `--no-calibration`
+skips them).
+
+The collector copies the selected frames into the run dir and writes
+`gt_manifest.json` (image filename → GT pose) beside the image dir; after
+SfM the scorer joins recovered poses against that manifest and writes
+`calibration_gt_score.json` (`calibration_gt_score_v1` schema). Primary
+metrics are gauge-free pairwise-relative errors (per-pair rotation
+geodesic, baseline direction, baseline ratio); Sim(3)-aligned APE on camera
+centers is secondary, guarded for ill-conditioned rigs, because fitting 7
+DOF to a handful of cameras absorbs a flattering share of the true error.
+Fragmented reconstructions are scored on their largest alignable component
+with coverage reported, and `--fix-intrinsics` runs record whether the
+injection actually held (`intrinsics_match_injected`), so a silent
+fallback can't pose as a fixed-intrinsics result.
+
+Measured so far: Balloon1 cross-camera pairwise rotation error mean 0.176°
+(free intrinsics) / 0.136° (known-intrinsics protocol); DyCheck
+`paper-windmill` 1.89° across 3 cameras against ARKit odometry.
