@@ -41,11 +41,12 @@ version scheme (canonical version in the `VERSION` file, read by
   on a hung `conda run`.
 
 ### Tests
-- 15 new unit tests: schedule recall (explicit and default), zero-epoch
-  abort boundary (`>=` equality), fail-closed missing schedule, flock
-  exclusivity/release-on-death/contention-abort behavior, label
-  canonicalization, resume provenance fields, fresh-run-dir passthrough,
-  and checkpoint-reader degradation paths.
+- 9 new unit tests (plus extended scenarios in 6 existing ones): schedule
+  recall (explicit and default), zero-epoch abort boundary (`>=` equality),
+  fail-closed missing schedule, flock exclusivity/release-on-death/
+  contention-abort behavior, label canonicalization, resume provenance
+  fields, fresh-run-dir passthrough, and checkpoint-reader degradation
+  paths.
 
 ## [0.1.3.0] - 2026-06-11
 
