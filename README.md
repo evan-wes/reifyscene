@@ -176,9 +176,17 @@ hardcoded 2x, iphone at 1x).
 Run handling: a run dir whose training demonstrably completed (completion
 sentinel, or final-epoch videos for older runs) is reused — but only for the
 sequence it was trained on (reusing it with a different `--data-dir` aborts);
-an interrupted run resumes training toward SoM's default 500-epoch schedule;
-`--retrain` clears all prior run state (checkpoints, results, videos,
-TensorBoard event files) and starts from scratch.
+an interrupted run resumes toward the schedule recorded in its `cfg.yaml`
+(recalled and passed back explicitly — SoM itself never re-reads it), and a
+resume whose checkpoint is already at or past that schedule aborts rather
+than stamping a zero-epoch run complete; `--retrain` clears all prior run
+state (checkpoints, results, videos, TensorBoard event files) and starts
+from scratch. Each invocation holds an exclusive kernel lock (`fcntl.flock`)
+on `.room4d_benchmark.lock` in its run dir, so a forgotten concurrent run
+can't interleave checkpoints and event files into corrupt metrics. The lock
+releases on any process death (`kill -9` included), and the training child
+inherits it — an orphaned trainer keeps the run dir locked until it exits.
+The lock file itself persists on disk; its contents are diagnostics only.
 
 ### Compare
 
