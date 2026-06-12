@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 (loose variant), and this project uses a 4-digit `MAJOR.MINOR.PATCH.MICRO`
 version scheme (versioned in `pyproject.toml`).
 
+## [0.1.3.0] - 2026-06-11
+
+### Added
+- NVIDIA Dynamic Scenes dataset backend for the reference benchmark:
+  `scripts/run_reference_benchmark.py --dataset {iphone,nvidia}` selects the
+  layout validation, the Shape of Motion `data:nvidia` training subcommand,
+  and the eval path. SoM ships no `evaluate_nvidia.py`, so nvidia metrics are
+  harvested from the trainer's final-epoch `val/*` TensorBoard scalars
+  (covisibility-masked novel-view metrics, mapped onto the same
+  `masked_mpsnr`/`masked_mssim`/`masked_mlpips` schema keys, plus
+  `fg_`/`bg_` splits). Proven end-to-end on real GPU with a 5-epoch smoke
+  run on the Jumping scene (masked mPSNR 18.69, all nine metrics emitted).
+- Deep download verification for nvidia sequences in both validators
+  (`verify_reference_data.sh` and the wrapper): full layout
+  (`rgb/{1x,2x}`, `camera/`, `depth/2x`, masks, tracks, `covisible/2x/val`),
+  a non-empty val split (an empty one would train for hours and yield no
+  metrics), and the complete N² pairwise track set (the dataloader loads
+  random pairs per batch, so a partial download would crash mid-training).
+- Result JSONs now record the evaluation protocol (`eval` block: source and
+  resolution factor — nvidia trains/evaluates at the dataloader's hardcoded
+  2x, iphone at 1x), and `--compare` warns when two results' protocols
+  differ instead of silently declaring winners on incomparable numbers.
+
+### Fixed
+- Reusing a completed run dir with the wrong `--data-dir` now aborts instead
+  of silently relabeling the old run's metrics as the new sequence (the run
+  dir's `cfg.yaml` records what it was trained on).
+- `--retrain` also clears TensorBoard event files, the stale `cfg.yaml`, and
+  SoM's per-invocation `code/` backups — a stale event file would otherwise
+  outrank the new run's scalars in the nvidia harvest, since a retrain
+  restarts `global_step` at 0.
+- The nvidia harvest rejects mixed-run event files (val scalars disagreeing
+  on their final step) and skips non-finite scalar values rather than
+  recording NaN/Inf as a baseline metric.
+- Corrected the interrupted-run guard's false claim that SoM "continues its
+  saved schedule" on resume — SoM never re-reads `cfg.yaml`; resume trains
+  toward the CLI/default 500-epoch schedule (proper resume handling is
+  tracked in TODOS.md).
+- `--num-epochs` values below 1 are rejected up front (SoM would accept
+  them, pay the full dataset-load cost, train zero epochs, and exit 0).
+
+### Tests
+- 24 new unit tests: nvidia layout/content validation, TensorBoard harvest
+  mapping and error paths, provenance and mixed-run guards, compare-side
+  protocol warnings and fg/bg metric directions, and mutation-style
+  bash↔python validator parity (each required entry deleted in turn must
+  fail both validators).
+
 ## [0.1.2.0] - 2026-06-10
 
 ### Added
