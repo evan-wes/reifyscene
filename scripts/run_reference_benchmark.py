@@ -8,10 +8,16 @@ normalized ``reference_benchmark.json`` that room4d's own renderer results can
 be compared against.
 
 Pipeline:
-  1. validate the sequence directory layout (iPhone/DyCheck format)
+  1. validate the sequence directory layout (--dataset iphone|nvidia)
   2. train Shape of Motion in the reference env (skipped when the run dir
      already holds a checkpoint; --retrain forces)
-  3. run its evaluation script and parse the printed metrics
+  3. collect metrics — iphone: run evaluate_iphone.py and parse its stdout;
+     nvidia: SoM ships no evaluate_nvidia.py, so read the trainer's
+     final-epoch ``val/*`` scalars from the run dir's TensorBoard event files.
+     NOTE the protocols differ: iphone eval scores 1x renders against 1x
+     covisible masks, while the nvidia dataloader is hardcoded to factor=2
+     (half resolution). The result JSON records this in its ``eval`` block so
+     a future emitter can detect a protocol mismatch before comparing.
   4. write ``reference_benchmark.json`` into the run directory
 
 The JSON schema (``reference_benchmark_v1``) is the comparison contract:
@@ -26,6 +32,12 @@ Examples:
   python scripts/run_reference_benchmark.py \
     --data-dir .../iphone/paper-windmill \
     --run-dir  .../runs/paper-windmill-full
+
+  # NVIDIA Dynamic Scenes sequence (monocular protocol: trains on camera 0,
+  # scores novel views on held-out cameras 1-3)
+  python scripts/run_reference_benchmark.py --dataset nvidia \
+    --data-dir .../nvidia/Balloon1 \
+    --run-dir  .../runs/balloon1-full
 
   # compare two results (e.g. room4d vs the reference)
   python scripts/run_reference_benchmark.py --compare room4d.json reference.json
@@ -73,6 +85,27 @@ METRIC_PATTERNS: dict[str, str] = {
     "track2d_occ_acc": rf"mean 2D tracking occlusion accuracy:\s*{_FLOAT}",
 }
 
+# SoM has no evaluate_nvidia.py; for --dataset nvidia the metrics come from
+# the training-time validator instead, which run_training.py always invokes at
+# the final epoch and logs only to TensorBoard event files in the work dir.
+# Tag -> schema key. val/psnr|ssim|lpips map onto the masked_m* keys because
+# they measure the same quantity as evaluate_iphone.py's "mean NV m*" lines:
+# covisibility-masked novel-view metrics over the val split, computed with the
+# same flow3d.metrics classes (the validator multiplies covisible_masks into
+# valid_mask, and the nvidia val split loads covisible/2x/val/). fg_/bg_
+# variants split that by the track_anything dynamic-object mask.
+NVIDIA_TB_METRICS: dict[str, str] = {
+    "val/psnr": "masked_mpsnr",
+    "val/ssim": "masked_mssim",
+    "val/lpips": "masked_mlpips",
+    "val/fg_psnr": "fg_psnr",
+    "val/fg_ssim": "fg_ssim",
+    "val/fg_lpips": "fg_lpips",
+    "val/bg_psnr": "bg_psnr",
+    "val/bg_ssim": "bg_ssim",
+    "val/bg_lpips": "bg_lpips",
+}
+
 # Direction of "better" per metric, used by --compare output.
 HIGHER_IS_BETTER = {
     "masked_mpsnr": True,
@@ -84,6 +117,12 @@ HIGHER_IS_BETTER = {
     "track2d_aj": True,
     "track2d_avg_pck": True,
     "track2d_occ_acc": True,
+    "fg_psnr": True,
+    "fg_ssim": True,
+    "fg_lpips": False,
+    "bg_psnr": True,
+    "bg_ssim": True,
+    "bg_lpips": False,
 }
 
 # Required layout verified against the pinned SoM commit (579753e):
@@ -114,6 +153,32 @@ IPHONE_REQUIRED_FILES = [
     "flow3d_preprocessed/colmap/scale.npy",
 ]
 
+# Verified against the pinned SoM nvidia dataloader and the downloaded
+# Balloon1/Jumping scenes. The dataloader hardcodes factor=2, so the 2x
+# variants are what training opens (plus rgb/1x for the intrinsics rescale);
+# depth and 2d_tracks are train-split inputs, covisible/2x/val is what the
+# val split loads for masked metrics. dataset.json/scene.json/colmap/ ship
+# with the data but the nvidia loader never reads them — not required.
+NVIDIA_REQUIRED_DIRS = [
+    "rgb/1x",
+    "rgb/2x",
+    "camera",
+    "splits",
+    "depth/2x",
+    "flow3d_preprocessed/2d_tracks/2x",
+    "flow3d_preprocessed/track_anything/2x",
+    "covisible/2x/val",
+]
+NVIDIA_REQUIRED_FILES = [
+    "splits/train.json",
+    "splits/val.json",
+]
+
+DATASET_LAYOUTS = {
+    "iphone": ("iPhone/DyCheck", IPHONE_REQUIRED_DIRS, IPHONE_REQUIRED_FILES),
+    "nvidia": ("NVIDIA Dynamic Scenes", NVIDIA_REQUIRED_DIRS, NVIDIA_REQUIRED_FILES),
+}
+
 
 def find_conda() -> str:
     """Locate the conda executable without requiring an activated shell."""
@@ -133,21 +198,66 @@ def conda_run_cmd(conda: str, env: str, *args: str) -> list[str]:
     return [conda, "run", "--no-capture-output", "-n", env, *args]
 
 
-def validate_iphone_sequence(data_dir: Path) -> None:
+def validate_sequence(data_dir: Path, dataset: str) -> None:
+    label, required_dirs, required_files = DATASET_LAYOUTS[dataset]
     problems = []
-    for d in IPHONE_REQUIRED_DIRS:
+    for d in required_dirs:
         if not (data_dir / d).is_dir():
             problems.append(f"missing dir:   {d}/")
-    for f in IPHONE_REQUIRED_FILES:
+    for f in required_files:
         if not (data_dir / f).exists():
             problems.append(f"missing entry: {f}")
     if problems:
         listing = "\n  ".join(problems)
         sys.exit(
-            f"Sequence at {data_dir} does not look like a processed iPhone/DyCheck "
+            f"Sequence at {data_dir} does not look like a processed {label} "
             f"sequence:\n  {listing}\n"
             "Re-check the download (see scripts/verify_reference_data.sh)."
         )
+    if dataset == "nvidia":
+        # SoM's has_validation is content-gated, not existence-gated: an
+        # empty val split trains fine but never logs val/* scalars, so the
+        # harvest would fail only AFTER the full training spend.
+        val_frames = _split_frame_names(data_dir, "val.json")
+        if not val_frames:
+            sys.exit(
+                f"{data_dir / 'splits/val.json'} has an empty frame_names "
+                "list — with no val split SoM logs no val/* metrics, and the "
+                "benchmark would only fail after the full training run."
+            )
+        # The dataloader lazily np.loads pairwise track files for RANDOM
+        # frame pairs per batch, so a partial download passes startup and
+        # crashes mid-training at an arbitrary epoch. The full N^2 set is
+        # checkable up front with one listdir + set membership.
+        train_frames = _split_frame_names(data_dir, "train.json")
+        tracks_dir = data_dir / "flow3d_preprocessed" / "2d_tracks" / "2x"
+        present = {p.name for p in tracks_dir.iterdir()}
+        missing_pairs = [
+            f"{fi}_{fj}.npy"
+            for fi in train_frames
+            for fj in train_frames
+            if f"{fi}_{fj}.npy" not in present
+        ]
+        if missing_pairs:
+            sys.exit(
+                f"{tracks_dir} is missing {len(missing_pairs)} of "
+                f"{len(train_frames) ** 2} pairwise track files (e.g. "
+                f"{missing_pairs[0]}) — the dataloader loads RANDOM pairs "
+                "per batch, so training would crash mid-run. Re-download "
+                "the sequence."
+            )
+
+
+def _split_frame_names(data_dir: Path, split_file: str) -> list[str]:
+    """frame_names from splits/<split_file>, exiting on malformed content."""
+    path = data_dir / "splits" / split_file
+    try:
+        split = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        sys.exit(f"{path} is unreadable or invalid JSON: {exc}")
+    if not isinstance(split, dict):
+        sys.exit(f"{path} top level is not an object — re-download the sequence.")
+    return split.get("frame_names", [])
 
 
 def _epochs_label(num_epochs: int | None) -> str:
@@ -196,6 +306,11 @@ def clear_run_state(run_dir: Path) -> None:
     """
     for entry in (
         "checkpoints", "results", "videos",
+        # cfg.yaml is the OLD run's record; run_training rewrites it only
+        # after the long dataset load, so leaving it would false-positive the
+        # provenance guard if a retrain dies during load. code/ is SoM's
+        # per-invocation source backup — unbounded disk growth across retrains.
+        "cfg.yaml", "code",
         TRAINING_COMPLETE_SENTINEL, "reference_benchmark.json", "benchmark_eval.log",
     ):
         path = run_dir / entry
@@ -203,11 +318,16 @@ def clear_run_state(run_dir: Path) -> None:
             shutil.rmtree(path)
         elif path.exists():
             path.unlink()
+    # TensorBoard event files too: a retrain restarts global_step at 0, so a
+    # stale event file's final step would outrank the new run's and the
+    # nvidia metric harvest would resurrect the OLD run's val/* values.
+    for event_file in run_dir.glob("events.out.tfevents.*"):
+        event_file.unlink()
 
 
 def run_training(
     conda: str, env: str, som_dir: Path, data_dir: Path, run_dir: Path,
-    num_epochs: int | None,
+    num_epochs: int | None, dataset: str,
 ) -> float:
     """Train SoM on the sequence; returns wall-clock minutes."""
     cmd = conda_run_cmd(
@@ -216,7 +336,7 @@ def run_training(
     )
     if num_epochs is not None:
         cmd += ["--num-epochs", str(num_epochs)]
-    cmd += ["data:iphone", "--data.data-dir", str(data_dir)]
+    cmd += [f"data:{dataset}", "--data.data-dir", str(data_dir)]
     print(f"[train] {' '.join(cmd)}", flush=True)
     start = time.monotonic()
     subprocess.run(cmd, cwd=som_dir, check=True)
@@ -271,6 +391,88 @@ def run_eval(
     return metrics, output
 
 
+# Runs inside the reference env (tensorboard is a SoM dependency there).
+# Prints one JSON object mapping every scalar tag to its highest-step event —
+# train/* tags included, for provenance in benchmark_eval.log. size_guidance
+# scalars=0 keeps ALL events; the default caps at 10k per tag and the cap
+# discards a RANDOM subsample, which could silently drop the final-epoch one.
+_TB_HARVEST_SNIPPET = """\
+import json, sys
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+acc = EventAccumulator(sys.argv[1], size_guidance={"scalars": 0})
+acc.Reload()
+out = {}
+for tag in acc.Tags()["scalars"]:
+    last = max(acc.Scalars(tag), key=lambda e: e.step)
+    out[tag] = {"value": last.value, "step": last.step}
+print(json.dumps(out))
+"""
+
+
+def harvest_nvidia_metrics(conda: str, env: str, run_dir: Path) -> dict[str, float]:
+    """Final-epoch val metrics from the run dir's TensorBoard event files.
+
+    The highest step per tag is the final-epoch value: run_training.py always
+    validates at epoch == num_epochs - 1, and clear_run_state removes event
+    files on --retrain so a stale file can never outrank the current run.
+    EventAccumulator merges every event file in the dir, which is what makes
+    resumed runs (one event file per process) read correctly.
+    """
+    cmd = conda_run_cmd(
+        conda, env, "python", "-c", _TB_HARVEST_SNIPPET, str(run_dir)
+    )
+    print(f"[eval] harvesting TensorBoard scalars from {run_dir}", flush=True)
+    proc = subprocess.run(
+        cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    log = stdout + (f"\n--- stderr ---\n{stderr}" if stderr else "")
+    (run_dir / "benchmark_eval.log").write_text(log)
+    if proc.returncode != 0:
+        tail = "\n".join((stderr or stdout).splitlines()[-25:])
+        sys.exit(f"TensorBoard harvest failed (exit {proc.returncode}). Tail:\n{tail}")
+    try:
+        tags = json.loads(stdout.splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        sys.exit(
+            "TensorBoard harvest printed no JSON — see "
+            f"{run_dir / 'benchmark_eval.log'}"
+        )
+
+    # The validator logs all val/* scalars in one log_dict call at a single
+    # global_step, so a step disagreement means the event files mix more than
+    # one training run (e.g. two processes shared the run dir) — plausible-
+    # looking but corrupt numbers that nothing downstream could detect.
+    steps = {tag: tags[tag]["step"] for tag in NVIDIA_TB_METRICS if tag in tags}
+    if len(set(steps.values())) > 1:
+        sys.exit(
+            f"val/* scalars disagree on their final step ({steps}) — the "
+            "event files mix more than one training run. Use --retrain to "
+            "clear the run dir."
+        )
+
+    metrics: dict[str, float] = {}
+    for tag, key in NVIDIA_TB_METRICS.items():
+        if tag not in tags:
+            print(f"[warn] scalar tag not found in event files: {tag}", flush=True)
+            continue
+        value = float(tags[tag]["value"])
+        if not math.isfinite(value):
+            # A NaN/Inf scalar (degenerate validation) must not be recorded
+            # as the baseline: json.dumps would emit a non-RFC literal that
+            # compare() then renders as missing anyway. Treat as absent.
+            print(f"[warn] non-finite value for {tag}: {value!r}", flush=True)
+            continue
+        metrics[key] = value
+    if not any(k.startswith("masked_") for k in metrics):
+        sys.exit(
+            "No val/* scalars found in the TensorBoard event files — training "
+            "may not have reached its final-epoch validation (or the val split "
+            f"is empty). See {run_dir / 'benchmark_eval.log'}"
+        )
+    return metrics
+
+
 def capture_env_versions(conda: str, env: str) -> dict[str, str]:
     snippet = (
         "import json, torch, gsplat; "
@@ -292,6 +494,31 @@ def capture_env_versions(conda: str, env: str) -> dict[str, str]:
 def latest_rgb_video(run_dir: Path) -> str | None:
     candidates = sorted(run_dir.glob("videos/epoch_*/rgbs.mp4"))
     return str(candidates[-1]) if candidates else None
+
+
+def trained_data_dir(run_dir: Path) -> str | None:
+    """The data.data-dir a run dir was trained against, from its cfg.yaml.
+
+    SoM writes cfg.yaml at training start; ``data_dir`` is nested under the
+    ``data:`` block (the only indented data_dir key — work_dir is top-level).
+    None when no cfg.yaml exists (pre-training run dir) or the key is absent.
+    """
+    cfg = run_dir / "cfg.yaml"
+    if not cfg.is_file():
+        return None
+    try:
+        text = cfg.read_text()
+    except OSError as exc:
+        print(f"[warn] could not read {cfg}: {exc} — provenance check skipped", flush=True)
+        return None
+    match = re.search(r"^\s+data_dir:\s*(.+)$", text, re.M)
+    if not match:
+        # Fail OPEN but never silently: a cfg.yaml format change must not
+        # quietly disarm the run-relabeling protection.
+        print(f"[warn] no data_dir key in {cfg} — provenance check skipped", flush=True)
+        return None
+    # yaml.dump quotes paths containing special characters
+    return match.group(1).strip().strip("'\"")
 
 
 def som_pinned_commit(som_dir: Path) -> str:
@@ -328,18 +555,37 @@ def benchmark(args: argparse.Namespace) -> None:
             f"Shape of Motion checkout not found at {som_dir}. "
             "Run scripts/setup_reference_tool.sh first."
         )
-    validate_iphone_sequence(data_dir)
+    validate_sequence(data_dir, args.dataset)
     run_dir.mkdir(parents=True, exist_ok=True)
     conda = find_conda()
+
+    if not args.retrain:
+        # A run dir only proves metrics for the sequence it was trained on.
+        # Without this, reusing a finished run with the wrong --data-dir (or
+        # --dataset) would silently relabel its metrics as the new sequence —
+        # the harvest path reads only the run dir and could never notice.
+        recorded_data_dir = trained_data_dir(run_dir)
+        if recorded_data_dir is not None and Path(recorded_data_dir) != data_dir:
+            sys.exit(
+                f"{run_dir} was trained on {recorded_data_dir}, but --data-dir "
+                f"is {data_dir}. Reusing would relabel that run's metrics as "
+                "this sequence. Use a different --run-dir, or --retrain to "
+                "overwrite."
+            )
 
     train_minutes: float | None = None
     requested = _epochs_label(args.num_epochs)
     recorded = completed_epochs(run_dir)
     if args.retrain:
-        print("[train] --retrain: clearing checkpoints/results/videos", flush=True)
+        print(
+            "[train] --retrain: clearing checkpoints/results/videos, event "
+            "files, and prior benchmark artifacts",
+            flush=True,
+        )
         clear_run_state(run_dir)
         train_minutes = run_training(
-            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
+            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs,
+            args.dataset,
         )
     elif recorded is not None:
         if recorded != requested:
@@ -352,23 +598,37 @@ def benchmark(args: argparse.Namespace) -> None:
         print(f"[train] reusing completed run ({run_dir}, epochs={recorded})", flush=True)
     else:
         if (run_dir / "checkpoints" / "last.ckpt").exists():
-            # Checkpoint without completion proof = interrupted run. SoM will
-            # auto-resume from it — but only toward the schedule already in
-            # the run's cfg.yaml. An explicit --num-epochs on a resume is
-            # ambiguous (smaller values train 0 epochs and would then be
-            # stamped complete), so require --retrain for that.
+            # Checkpoint without completion proof = interrupted run. SoM
+            # resumes from the checkpoint's epoch toward whatever schedule
+            # THIS invocation requests — cfg.yaml is written but never
+            # re-read (run_training.py trains range(ckpt_epoch, num_epochs)
+            # with the CLI/default value). An explicit --num-epochs at or
+            # below the checkpoint's epoch would train 0 epochs yet be
+            # stamped complete, so require --retrain for that. Proper resume
+            # handling (recall the original schedule, refuse zero-epoch
+            # stamps) is tracked in TODOS.md.
             if args.num_epochs is not None:
                 sys.exit(
-                    f"{run_dir} holds an interrupted run; resuming ignores "
-                    "--num-epochs (SoM continues its saved schedule) and a "
-                    "smaller value would train 0 epochs yet be stamped "
-                    "complete. Drop --num-epochs to resume, or use --retrain."
+                    f"{run_dir} holds an interrupted run. SoM resumes from "
+                    "the checkpoint's epoch toward the schedule THIS "
+                    "invocation requests (the original --num-epochs is not "
+                    "recalled), so a value at or below the checkpoint's "
+                    "epoch would train 0 epochs yet be stamped complete. "
+                    "Use --retrain for a clean run of the requested schedule."
                 )
-            print("[train] incomplete run detected — resuming training", flush=True)
+            print(
+                "[train] incomplete run detected — resuming toward SoM's "
+                "default 500-epoch schedule (the interrupted run's original "
+                "--num-epochs is NOT recalled; use --retrain to start over)",
+                flush=True,
+            )
         train_minutes = run_training(
-            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs
+            conda, args.conda_env, som_dir, data_dir, run_dir, args.num_epochs,
+            args.dataset,
         )
 
+    # Written by the validator during final-epoch validation for BOTH formats
+    # (evaluate_iphone.py additionally reads the renders from it).
     results_dir = run_dir / "results"
     if not results_dir.is_dir():
         sys.exit(
@@ -376,14 +636,27 @@ def benchmark(args: argparse.Namespace) -> None:
             "(interrupted run?). Re-run with --retrain."
         )
 
-    metrics, _ = run_eval(conda, args.conda_env, som_dir, data_dir, run_dir, seq_name)
+    if args.dataset == "nvidia":
+        metrics = harvest_nvidia_metrics(conda, args.conda_env, run_dir)
+    else:
+        metrics, _ = run_eval(
+            conda, args.conda_env, som_dir, data_dir, run_dir, seq_name
+        )
 
     result = {
         "schema": SCHEMA,
         "method": "shape-of-motion",
         "method_commit": som_pinned_commit(som_dir),
         "sequence": seq_name,
-        "dataset_format": "iphone",
+        "dataset_format": args.dataset,
+        # Protocols differ per format; recorded so a cross-emitter compare
+        # can detect a mismatch (nvidia: SoM's dataloader hardcodes factor=2,
+        # half resolution; iphone: evaluate_iphone.py scores at 1x).
+        "eval": (
+            {"source": "training-validator-tensorboard", "resolution_factor": 2}
+            if args.dataset == "nvidia"
+            else {"source": "evaluate_iphone", "resolution_factor": 1}
+        ),
         "data_dir": str(data_dir),
         "run_dir": str(run_dir),
         "epochs": completed_epochs(run_dir) or requested,
@@ -403,7 +676,9 @@ def benchmark(args: argparse.Namespace) -> None:
 
     print(f"\nReference benchmark written to: {out_path}\n")
     width = max(len(k) for k in metrics)
-    for key in METRIC_PATTERNS:
+    # Canonical order first, then format-specific extras (nvidia fg_/bg_ keys).
+    ordered = list(METRIC_PATTERNS) + [k for k in metrics if k not in METRIC_PATTERNS]
+    for key in ordered:
         if key in metrics:
             arrow = "↑" if HIGHER_IS_BETTER.get(key, True) else "↓"
             print(f"  {key:<{width}}  {metrics[key]:>10.4f}  {arrow}")
@@ -422,6 +697,14 @@ def compare(path_a: str, path_b: str) -> None:
     if b.get("sequence") != seq:
         print(
             f"[warn] comparing different sequences: {seq} vs {b.get('sequence')}",
+            flush=True,
+        )
+    # Same keys, different measurement protocol (e.g. nvidia validator at 2x
+    # vs iphone eval at 1x) -> winner verdicts on incomparable numbers.
+    if a.get("eval") != b.get("eval"):
+        print(
+            f"[warn] comparing different eval protocols: {a.get('eval')} vs "
+            f"{b.get('eval')} — metric values are not directly comparable",
             flush=True,
         )
 
@@ -461,7 +744,11 @@ def compare(path_a: str, path_b: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--data-dir", help="Processed sequence dir (iPhone/DyCheck format)")
+    parser.add_argument("--data-dir", help="Processed sequence dir (see --dataset for the expected format)")
+    parser.add_argument(
+        "--dataset", choices=sorted(DATASET_LAYOUTS), default="iphone",
+        help="Processed dataset format of --data-dir (default: iphone)",
+    )
     parser.add_argument("--run-dir", help="Training/eval output dir (reused when training completed there)")
     parser.add_argument("--seq-name", help="Sequence name (default: data-dir basename)")
     parser.add_argument("--som-dir", default=str(DEFAULT_SOM_DIR), help="Shape of Motion checkout")
@@ -484,6 +771,8 @@ def main() -> None:
         return
     if not args.data_dir or not args.run_dir:
         parser.error("--data-dir and --run-dir are required (unless using --compare)")
+    if args.num_epochs is not None and args.num_epochs < 1:
+        parser.error("--num-epochs must be >= 1")
     benchmark(args)
 
 

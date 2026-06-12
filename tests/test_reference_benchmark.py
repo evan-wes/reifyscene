@@ -3,15 +3,18 @@
 Subprocess-orchestration paths (Shape of Motion training, real conda eval,
 env-version capture against the reference env) are integration-scope and run
 manually on GPU hardware. These tests cover the stdlib-only logic: metric
-parsing, compare-mode direction handling, sequence-layout validation, conda
-discovery fallbacks, and the CLI guard rails.
+parsing, the nvidia TensorBoard-harvest mapping, compare-mode direction
+handling, sequence-layout validation, conda discovery fallbacks, and the CLI
+guard rails.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -56,21 +59,58 @@ EXPECTED_METRICS = {
     "track2d_occ_acc": 0.8841,
 }
 
+# What the _TB_HARVEST_SNIPPET prints: every scalar tag mapped to its
+# highest-step event. train/* tags ride along for provenance and must be
+# ignored by the val/* mapping.
+SAMPLE_TB_TAGS = {
+    "train/loss": {"value": 0.012, "step": 11900},
+    "val/psnr": {"value": 23.41, "step": 11900},
+    "val/ssim": {"value": 0.71, "step": 11900},
+    "val/lpips": {"value": 0.21, "step": 11900},
+    "val/fg_psnr": {"value": 21.05, "step": 11900},
+    "val/fg_ssim": {"value": 0.65, "step": 11900},
+    "val/fg_lpips": {"value": 0.30, "step": 11900},
+    "val/bg_psnr": {"value": 24.2, "step": 11900},
+    "val/bg_ssim": {"value": 0.74, "step": 11900},
+    "val/bg_lpips": {"value": 0.19, "step": 11900},
+}
+SAMPLE_TB_OUTPUT = json.dumps(SAMPLE_TB_TAGS) + "\n"
 
-def _make_iphone_sequence(root: Path) -> Path:
-    """Create the minimal layout both validators accept.
+EXPECTED_NVIDIA_METRICS = {
+    "masked_mpsnr": 23.41,
+    "masked_mssim": 0.71,
+    "masked_mlpips": 0.21,
+    "fg_psnr": 21.05,
+    "fg_ssim": 0.65,
+    "fg_lpips": 0.30,
+    "bg_psnr": 24.2,
+    "bg_ssim": 0.74,
+    "bg_lpips": 0.19,
+}
+
+
+def _make_sequence(root: Path, dataset: str) -> Path:
+    """Create the minimal layout both validators accept for a dataset.
 
     Built generically from the module's own lists so the fixture cannot drift
-    from the Python validator; the bash-validator parity test then holds the
+    from the Python validator; the bash-validator parity tests then hold the
     two validators together via this same fixture.
     """
-    for d in rb.IPHONE_REQUIRED_DIRS:
+    _, required_dirs, required_files = rb.DATASET_LAYOUTS[dataset]
+    for d in required_dirs:
         (root / d).mkdir(parents=True, exist_ok=True)
-    for f in rb.IPHONE_REQUIRED_FILES:
+    for f in required_files:
         target = root / f
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}")
+    if dataset == "nvidia":
+        # the nvidia validator additionally requires a non-empty val split
+        (root / "splits" / "val.json").write_text('{"frame_names": ["1_00000"]}')
     return root
+
+
+def _make_iphone_sequence(root: Path) -> Path:
+    return _make_sequence(root, "iphone")
 
 
 def _make_completed_run(root: Path, epochs: str = "default") -> Path:
@@ -88,13 +128,15 @@ def _write_benchmark_json(
     return path
 
 
-def _patch_eval_subprocess(monkeypatch: pytest.MonkeyPatch, output: str, returncode: int = 0) -> list[list[str]]:
+def _patch_eval_subprocess(
+    monkeypatch: pytest.MonkeyPatch, output: str, returncode: int = 0, stderr: str = ""
+) -> list[list[str]]:
     """Replace the module's subprocess with a fake whose run() returns canned output."""
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run loosely
         calls.append(list(cmd))
-        return SimpleNamespace(stdout=output, returncode=returncode)
+        return SimpleNamespace(stdout=output, returncode=returncode, stderr=stderr)
 
     monkeypatch.setattr(
         rb,
@@ -116,8 +158,11 @@ def test_metric_patterns_parse_realistic_eval_output() -> None:
         if (match := re.search(pattern, SAMPLE_EVAL_OUTPUT))
     }
     assert parsed == EXPECTED_METRICS
-    # every parsed metric must have a comparison direction (compare-mode contract)
-    assert set(rb.HIGHER_IS_BETTER) == set(rb.METRIC_PATTERNS)
+    # every emittable metric must have a comparison direction (compare-mode
+    # contract) — both the iphone-parsed keys and the nvidia-harvested ones
+    assert set(rb.HIGHER_IS_BETTER) == (
+        set(rb.METRIC_PATTERNS) | set(rb.NVIDIA_TB_METRICS.values())
+    )
 
 
 def test_run_eval_parses_metrics_writes_log_and_warns(
@@ -154,6 +199,399 @@ def test_run_eval_error_paths_exit_with_context(tmp_path: Path, monkeypatch: pyt
     with pytest.raises(SystemExit) as exc:
         rb.run_eval("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, "seq")
     assert "No novel-view metrics parsed" in str(exc.value)
+
+
+def test_harvest_nvidia_metrics_maps_tags_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_TB_OUTPUT, stderr="TF not found\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    metrics = rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert metrics == EXPECTED_NVIDIA_METRICS
+    # the snippet runs in the reference env against the run dir
+    cmd = calls[0]
+    assert cmd[:5] == ["conda", "run", "--no-capture-output", "-n", "ref_env"]
+    assert cmd[-1] == str(run_dir)
+    assert "-c" in cmd
+    # raw tags (train/* included) and stderr land in the log for provenance
+    log = (run_dir / "benchmark_eval.log").read_text()
+    assert "train/loss" in log
+    assert "TF not found" in log
+
+
+def test_harvest_nvidia_metrics_warns_on_missing_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # fg/bg tags absent (e.g. a bg-free model) -> warn and continue; the
+    # masked_* trio present keeps the result usable.
+    partial = {t: v for t, v in SAMPLE_TB_TAGS.items() if not t.startswith("val/fg")}
+    _patch_eval_subprocess(monkeypatch, json.dumps(partial) + "\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    metrics = rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert metrics["masked_mpsnr"] == 23.41
+    assert "fg_psnr" not in metrics
+    assert metrics["bg_psnr"] == 24.2
+    out = capsys.readouterr().out
+    assert "[warn] scalar tag not found in event files: val/fg_psnr" in out
+
+
+def test_harvest_nvidia_metrics_error_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    # snippet crash -> SystemExit with the stderr tail; log still written
+    _patch_eval_subprocess(monkeypatch, "", returncode=1, stderr="ImportError: tensorboard\n")
+    with pytest.raises(SystemExit) as exc:
+        rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert "exit 1" in str(exc.value)
+    assert "ImportError: tensorboard" in str(exc.value)
+    assert "ImportError" in (run_dir / "benchmark_eval.log").read_text()
+
+    # zero exit but non-JSON stdout -> parse guard
+    _patch_eval_subprocess(monkeypatch, "no json here\n")
+    with pytest.raises(SystemExit) as exc:
+        rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert "printed no JSON" in str(exc.value)
+
+    # valid JSON but no val/* tags (validation never ran) -> hard abort,
+    # an empty-metrics benchmark JSON must never be written
+    _patch_eval_subprocess(monkeypatch, json.dumps({"train/loss": {"value": 0.1, "step": 5}}) + "\n")
+    with pytest.raises(SystemExit) as exc:
+        rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert "No val/* scalars" in str(exc.value)
+
+
+def test_tb_harvest_snippet_is_valid_python() -> None:
+    # The snippet only ever executes inside the reference conda env via
+    # `python -c`; compile() catches syntax errors at unit-test time so a
+    # future edit can't ship a snippet that only fails mid-benchmark on GPU.
+    compile(rb._TB_HARVEST_SNIPPET, "<tb-harvest>", "exec")
+
+
+def test_harvest_nvidia_metrics_tolerates_noise_before_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # conda run can prepend banner lines to stdout; only the LAST line is the
+    # snippet's JSON object.
+    _patch_eval_subprocess(monkeypatch, "conda banner\nanother line\n" + SAMPLE_TB_OUTPUT)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assert rb.harvest_nvidia_metrics("conda", "ref_env", run_dir) == EXPECTED_NVIDIA_METRICS
+
+
+def test_harvest_nvidia_metrics_skips_non_finite_scalars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A NaN/Inf val/* scalar (degenerate validation) must not be recorded as
+    # the baseline — json.dumps would emit a non-RFC literal into the
+    # comparison artifact. Mirrors the compare-side NaN hardening.
+    tags = dict(SAMPLE_TB_TAGS)
+    tags["val/psnr"] = {"value": float("nan"), "step": 11900}
+    tags["val/fg_psnr"] = {"value": float("inf"), "step": 11900}
+    _patch_eval_subprocess(monkeypatch, json.dumps(tags) + "\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    metrics = rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert "masked_mpsnr" not in metrics
+    assert "fg_psnr" not in metrics
+    assert metrics["masked_mssim"] == 0.71  # finite values still harvested
+    assert all(math.isfinite(v) for v in metrics.values())
+    out = capsys.readouterr().out
+    assert "non-finite value for val/psnr" in out
+
+
+def test_validate_nvidia_sequence_rejects_empty_val_split(tmp_path: Path) -> None:
+    # SoM's has_validation is content-gated: an empty val split would train
+    # for hours and only then fail the harvest with no val/* scalars.
+    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    (seq / "splits" / "val.json").write_text('{"frame_names": []}')
+    with pytest.raises(SystemExit) as exc:
+        rb.validate_sequence(seq, "nvidia")
+    assert "empty frame_names" in str(exc.value)
+
+
+def test_validate_nvidia_sequence_detects_partial_pairwise_download(tmp_path: Path) -> None:
+    # The dataloader np.loads pairwise tracks for RANDOM frame pairs per
+    # batch — a partial download passes layout checks then crashes at an
+    # arbitrary epoch. The validator must check the full N^2 set.
+    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    (seq / "splits" / "train.json").write_text('{"frame_names": ["0_00000", "0_00001"]}')
+    tracks = seq / "flow3d_preprocessed" / "2d_tracks" / "2x"
+    for pair in ("0_00000_0_00000", "0_00000_0_00001", "0_00001_0_00000"):
+        (tracks / f"{pair}.npy").write_bytes(b"")
+    with pytest.raises(SystemExit) as exc:
+        rb.validate_sequence(seq, "nvidia")
+    assert "missing 1 of 4 pairwise track files" in str(exc.value)
+    assert "0_00001_0_00001.npy" in str(exc.value)
+    # completing the set passes
+    (tracks / "0_00001_0_00001.npy").write_bytes(b"")
+    assert rb.validate_sequence(seq, "nvidia") is None
+
+
+def test_validate_nvidia_sequence_rejects_malformed_split(tmp_path: Path) -> None:
+    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    (seq / "splits" / "val.json").write_text('["not", "an", "object"]')
+    with pytest.raises(SystemExit) as exc:
+        rb.validate_sequence(seq, "nvidia")
+    assert "not an object" in str(exc.value)
+
+
+def test_harvest_nvidia_metrics_aborts_on_mixed_run_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # All val/* scalars are logged in one log_dict call at a single step; a
+    # disagreement means the event files mix two training runs (shared run
+    # dir) and the harvested numbers would be plausible-looking corruption.
+    tags = {tag: dict(event) for tag, event in SAMPLE_TB_TAGS.items()}
+    tags["val/ssim"]["step"] = 400
+    _patch_eval_subprocess(monkeypatch, json.dumps(tags) + "\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        rb.harvest_nvidia_metrics("conda", "ref_env", run_dir)
+    assert "mix more than one training run" in str(exc.value)
+
+
+def test_compare_warns_on_eval_protocol_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    nvidia_eval = {"source": "training-validator-tensorboard", "resolution_factor": 2}
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps({
+        "schema": rb.SCHEMA, "method": "shape-of-motion", "sequence": "Jumping",
+        "metrics": {"masked_mpsnr": 18.7}, "eval": nvidia_eval,
+    }))
+    b = _write_benchmark_json(tmp_path / "b.json", "room4d", "Jumping", {"masked_mpsnr": 19.0})
+    rb.compare(str(a), str(b))
+    assert "comparing different eval protocols" in capsys.readouterr().out
+
+    # identical protocols stay silent
+    c = tmp_path / "c.json"
+    c.write_text(json.dumps({
+        "schema": rb.SCHEMA, "method": "room4d", "sequence": "Jumping",
+        "metrics": {"masked_mpsnr": 19.0}, "eval": nvidia_eval,
+    }))
+    rb.compare(str(a), str(c))
+    assert "eval protocols" not in capsys.readouterr().out
+
+
+def test_trained_data_dir_parsing_and_drift_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    assert rb.trained_data_dir(run) is None  # no cfg.yaml -> guard disarmed
+    # yaml.dump quotes paths with special characters
+    (run / "cfg.yaml").write_text("work_dir: x\ndata:\n  data_dir: '/with spaces/seq'\n")
+    assert rb.trained_data_dir(run) == "/with spaces/seq"
+    # a cfg.yaml without the key must warn, never silently disarm
+    (run / "cfg.yaml").write_text("work_dir: x\nnothing: here\n")
+    assert rb.trained_data_dir(run) is None
+    assert "no data_dir key" in capsys.readouterr().out
+
+
+def test_bash_validator_nvidia_content_checks(tmp_path: Path) -> None:
+    """Parity for the content-level checks: empty val split and partial
+    pairwise downloads must fail the bash validator too, not just Python."""
+    seq = _make_sequence(tmp_path / "empty-val", "nvidia")
+    (seq / "splits" / "val.json").write_text('{"frame_names": []}')
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SCRIPT), "--dataset", "nvidia", "--seq-dir", str(seq)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 1
+    assert "frame_names is empty" in proc.stdout
+
+    partial = _make_sequence(tmp_path / "partial", "nvidia")
+    (partial / "splits" / "train.json").write_text('{"frame_names": ["0_00000", "0_00001"]}')
+    (partial / "flow3d_preprocessed/2d_tracks/2x/0_00000_0_00000.npy").write_bytes(b"")
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SCRIPT), "--dataset", "nvidia", "--seq-dir", str(partial)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 1
+    assert "partial download" in proc.stdout
+
+    for fi in ("0_00000", "0_00001"):
+        for fj in ("0_00000", "0_00001"):
+            (partial / f"flow3d_preprocessed/2d_tracks/2x/{fi}_{fj}.npy").write_bytes(b"")
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SCRIPT), "--dataset", "nvidia", "--seq-dir", str(partial)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_main_rejects_non_positive_num_epochs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # SoM would accept 0/negative, pay the full dataset-load cost, train an
+    # empty epoch range, and get stamped complete.
+    seq = _make_iphone_sequence(tmp_path / "seq")
+    for bad in ("0", "-3"):
+        monkeypatch.setattr(
+            rb.sys, "argv",
+            ["run_reference_benchmark.py", "--data-dir", str(seq),
+             "--run-dir", str(tmp_path / "run"), "--num-epochs", bad],
+        )
+        with pytest.raises(SystemExit) as exc:
+            rb.main()
+        assert exc.value.code == 2
+    assert "--num-epochs must be >= 1" in capsys.readouterr().err
+
+
+def test_benchmark_reuse_rejects_mismatched_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run dir only proves metrics for the sequence it was trained on; the
+    # nvidia harvest reads only the run dir, so reusing it with the wrong
+    # --data-dir would silently relabel old metrics as the new sequence.
+    seq = _make_sequence(tmp_path / "Jumping", "nvidia")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    run_dir = _make_completed_run(tmp_path / "run")
+    (run_dir / "results").mkdir()
+    (run_dir / "cfg.yaml").write_text(
+        "work_dir: /elsewhere\ndata:\n  data_dir: /trained/on/Balloon1\nnum_epochs: 500\n"
+    )
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+
+    with pytest.raises(SystemExit) as exc:
+        rb.benchmark(_benchmark_args(seq, run_dir, som_dir, dataset="nvidia"))
+    assert "was trained on /trained/on/Balloon1" in str(exc.value)
+    # --retrain is the explicit override: state is cleared, training restarts
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_TB_OUTPUT)
+    with pytest.raises(SystemExit):  # fake training produces no results/
+        rb.benchmark(_benchmark_args(seq, run_dir, som_dir, dataset="nvidia", retrain=True))
+    assert any("run_training.py" in part for call in calls for part in call)
+
+
+@pytest.mark.parametrize("dataset", ["iphone", "nvidia"])
+def test_bash_validator_fails_when_any_required_entry_missing(
+    tmp_path: Path, dataset: str
+) -> None:
+    """Mutation-style parity: the fixture is Python-list-derived, so the plain
+    parity tests can't catch the bash list silently becoming a SUBSET of the
+    Python list. Deleting each required entry one at a time and demanding a
+    bash failure closes that drift direction."""
+    _, required_dirs, required_files = rb.DATASET_LAYOUTS[dataset]
+    for i, entry in enumerate([*required_dirs, *required_files]):
+        seq = _make_sequence(tmp_path / f"{dataset}-{i}", dataset)
+        target = seq / entry
+        shutil.rmtree(target) if target.is_dir() else target.unlink()
+        proc = subprocess.run(
+            ["bash", str(VERIFY_SCRIPT), "--dataset", dataset, "--seq-dir", str(seq)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 1, f"bash validator passed without {entry!r}"
+        assert "[MISS]" in proc.stdout
+
+
+def test_compare_nvidia_results_uses_fg_bg_directions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fg_/bg_ keys must get REAL winner verdicts (not '?'), with the
+    # direction values exercised behaviorally: flipping fg_lpips to
+    # higher-is-better would award the wrong method here.
+    a = _write_benchmark_json(
+        tmp_path / "room4d.json", "room4d", "Balloon1",
+        {"masked_mpsnr": 20.0, "fg_lpips": 0.20, "bg_psnr": 25.0},
+    )
+    b = _write_benchmark_json(
+        tmp_path / "ref.json", "shape-of-motion", "Balloon1",
+        {"masked_mpsnr": 19.0, "fg_lpips": 0.30, "bg_psnr": 26.0},
+    )
+    rb.compare(str(a), str(b))
+    rows = {
+        line.split()[0]: line.rstrip()
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith(("masked_", "fg_", "bg_"))
+    }
+    assert rows["fg_lpips"].endswith("room4d")  # lower lpips wins
+    assert rows["bg_psnr"].endswith("shape-of-motion")  # higher psnr wins
+    assert not rows["fg_lpips"].endswith("?")  # known direction, never '?'
+
+
+def test_main_accepts_dataset_nvidia_and_rejects_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Through REAL argv (not a Namespace): --dataset nvidia must parse and
+    # dispatch benchmark() with the nvidia validator — proven by reaching the
+    # SoM-checkout guard with a layout only the nvidia validator accepts.
+    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    monkeypatch.setattr(
+        rb.sys, "argv",
+        [
+            "run_reference_benchmark.py",
+            "--dataset", "nvidia",
+            "--data-dir", str(seq),
+            "--run-dir", str(tmp_path / "run"),
+            "--som-dir", str(tmp_path / "no-such-checkout"),
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        rb.main()
+    assert "Shape of Motion checkout not found" in str(exc.value)
+
+    # an unknown dataset is an argparse choices error (exit code 2)
+    monkeypatch.setattr(
+        rb.sys, "argv",
+        ["run_reference_benchmark.py", "--dataset", "bogus",
+         "--data-dir", str(seq), "--run-dir", str(tmp_path / "run")],
+    )
+    with pytest.raises(SystemExit) as exc:
+        rb.main()
+    assert exc.value.code == 2
+    assert "invalid choice: 'bogus'" in capsys.readouterr().err
+
+
+def test_benchmark_nvidia_happy_path_writes_contract_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    som_dir = tmp_path / "som"
+    som_dir.mkdir()
+    run_dir = _make_completed_run(tmp_path / "run")
+    (run_dir / "results").mkdir()
+    video = run_dir / "videos" / "epoch_0499"
+    video.mkdir(parents=True)
+    (video / "rgbs.mp4").write_bytes(b"")
+    fake_conda = tmp_path / "conda"
+    fake_conda.write_text("")
+    monkeypatch.setenv("CONDA_EXE", str(fake_conda))
+    calls = _patch_eval_subprocess(monkeypatch, SAMPLE_TB_OUTPUT)
+    monkeypatch.setattr(rb, "som_pinned_commit", lambda p: "deadbeef")
+    monkeypatch.setattr(rb, "capture_env_versions", lambda c, e: {})
+
+    out_path = tmp_path / "out.json"
+    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, dataset="nvidia", output=str(out_path)))
+
+    result = json.loads(out_path.read_text())
+    assert result["schema"] == rb.SCHEMA
+    assert result["dataset_format"] == "nvidia"
+    assert result["sequence"] == "Balloon1"
+    assert result["metrics"] == EXPECTED_NVIDIA_METRICS
+    # the 2x protocol is disclosed so a future emitter can detect mismatch
+    assert result["eval"] == {
+        "source": "training-validator-tensorboard",
+        "resolution_factor": 2,
+    }
+    # completed run reused -> the only subprocess call is the TB harvest,
+    # never evaluate_iphone.py
+    assert len(calls) == 1
+    assert not any("evaluate_iphone" in part for part in calls[0])
+    # the summary table must print the nvidia extras too — the old
+    # `for key in METRIC_PATTERNS` loop silently dropped fg_/bg_ rows
+    out = capsys.readouterr().out
+    assert re.search(r"masked_mpsnr\s+23\.4100\s+↑", out)
+    assert re.search(r"fg_lpips\s+0\.3000\s+↓", out)
+    assert re.search(r"bg_psnr\s+24\.2000\s+↑", out)
 
 
 def test_compare_via_main_direction_tie_and_missing_values(
@@ -208,18 +646,19 @@ def test_compare_warns_on_sequence_mismatch_without_metrics(
     assert "metric" in out
 
 
-def test_validate_iphone_sequence_accepts_complete_layout(tmp_path: Path) -> None:
-    seq = _make_iphone_sequence(tmp_path / "paper-windmill")
-    assert rb.validate_iphone_sequence(seq) is None
+def test_validate_sequence_accepts_complete_layouts(tmp_path: Path) -> None:
+    assert rb.validate_sequence(_make_sequence(tmp_path / "pw", "iphone"), "iphone") is None
+    assert rb.validate_sequence(_make_sequence(tmp_path / "b1", "nvidia"), "nvidia") is None
 
 
-def test_validate_iphone_sequence_exits_listing_missing_entries(tmp_path: Path) -> None:
+def test_validate_sequence_exits_listing_missing_entries(tmp_path: Path) -> None:
     seq = tmp_path / "broken"
     (seq / "rgb").mkdir(parents=True)
     (seq / "dataset.json").write_text("{}")
     with pytest.raises(SystemExit) as exc:
-        rb.validate_iphone_sequence(seq)
+        rb.validate_sequence(seq, "iphone")
     msg = str(exc.value)
+    assert "iPhone/DyCheck" in msg
     assert "missing dir:   depth/" in msg
     assert "missing dir:   splits/" in msg
     assert "missing dir:   keypoint/" in msg
@@ -229,6 +668,26 @@ def test_validate_iphone_sequence_exits_listing_missing_entries(tmp_path: Path) 
     assert "missing entry: flow3d_preprocessed/colmap/scale.npy" in msg
     assert "missing dir:   rgb/" not in msg  # present entries are not flagged
     assert "missing entry: dataset.json" not in msg
+
+
+def test_validate_nvidia_sequence_requires_2x_and_val_assets(tmp_path: Path) -> None:
+    # A bare rgb/ (the old placeholder check) must no longer pass: the
+    # dataloader needs the factor-2 pyramid, per-frame cameras, depth,
+    # masks, tracks, and the val covisible masks.
+    seq = tmp_path / "shallow"
+    (seq / "rgb").mkdir(parents=True)
+    with pytest.raises(SystemExit) as exc:
+        rb.validate_sequence(seq, "nvidia")
+    msg = str(exc.value)
+    assert "NVIDIA Dynamic Scenes" in msg
+    assert "missing dir:   rgb/1x/" in msg
+    assert "missing dir:   rgb/2x/" in msg
+    assert "missing dir:   depth/2x/" in msg
+    assert "missing dir:   flow3d_preprocessed/2d_tracks/2x/" in msg
+    assert "missing dir:   flow3d_preprocessed/track_anything/2x/" in msg
+    assert "missing dir:   covisible/2x/val/" in msg
+    assert "missing entry: splits/train.json" in msg
+    assert "missing entry: splits/val.json" in msg
 
 
 def test_find_conda_resolution_order_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,6 +766,7 @@ def _benchmark_args(seq: Path, run_dir: Path, som_dir: Path, **overrides) -> Nam
         num_epochs=None,
         retrain=False,
         output=None,
+        dataset="iphone",
     )
     base.update(overrides)
     return Namespace(**base)
@@ -377,7 +837,7 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     (run_dir / "checkpoints" / "last.ckpt").write_text("ckpt")
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
-    assert "incomplete run detected — resuming training" in capsys.readouterr().out
+    assert "incomplete run detected — resuming toward SoM's" in capsys.readouterr().out
     assert any("run_training.py" in part for call in calls for part in call)
     assert (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()  # written post-train
 
@@ -391,12 +851,23 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     stale.write_text("old")
     stale_json = run_dir2 / "reference_benchmark.json"
     stale_json.write_text("{}")
+    # Stale event files would outrank the retrained run's scalars in the
+    # nvidia harvest (a retrain restarts global_step at 0); a stale cfg.yaml
+    # would false-positive the provenance guard if the retrain dies during
+    # dataset load; code/ is SoM's per-invocation source backup (disk leak).
+    stale_events = run_dir2 / "events.out.tfevents.1700000000.host.1.0"
+    stale_events.write_bytes(b"")
+    (run_dir2 / "cfg.yaml").write_text("data:\n  data_dir: /old/sequence\n")
+    (run_dir2 / "code" / "2026-01-01").mkdir(parents=True)
     calls.clear()
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir2, som_dir, retrain=True))
     assert not stale.exists()
     assert not stale_json.exists()
     assert not (run_dir2 / "videos").exists()
+    assert not stale_events.exists()
+    assert not (run_dir2 / "cfg.yaml").exists()
+    assert not (run_dir2 / "code").exists()
     assert any("run_training.py" in part for call in calls for part in call)
 
 
@@ -430,7 +901,9 @@ def test_benchmark_epoch_schedule_guards(
     (interrupted / "checkpoints" / "last.ckpt").write_text("ckpt")
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, interrupted, som_dir, num_epochs=50))
-    assert "use --retrain" in str(exc.value)
+    assert "--retrain" in str(exc.value)
+    # the message must not repeat the old false claim about saved schedules
+    assert "saved schedule" not in str(exc.value)
     assert not calls
 
 
@@ -449,7 +922,7 @@ def test_run_training_sentinel_not_written_on_failure(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     with pytest.raises(subprocess.CalledProcessError):
-        rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None)
+        rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None, "iphone")
     # A failed training (OOM, Ctrl-C) must never stamp the run complete.
     assert not (run_dir / rb.TRAINING_COMPLETE_SENTINEL).exists()
 
@@ -481,6 +954,7 @@ def test_benchmark_happy_path_writes_contract_json(
     assert result["method_commit"] == "deadbeef+dirty"
     assert result["sequence"] == "paper-windmill"  # defaults to data-dir basename
     assert result["epochs"] == "default"  # schedule recorded in the artifact
+    assert result["eval"] == {"source": "evaluate_iphone", "resolution_factor": 1}
     assert result["metrics"] == EXPECTED_METRICS
     assert result["videos"]["rgb"].endswith("epoch_0499/rgbs.mp4")
     assert result["env"] == {"torch": "2.11.0+cu128"}
@@ -494,12 +968,12 @@ def test_run_training_command_construction_and_sentinel(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None)
+    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None, "iphone")
     assert "--num-epochs" not in calls[0]
     sentinel = run_dir / rb.TRAINING_COMPLETE_SENTINEL
     assert sentinel.read_text().strip() == "default"
 
-    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, 5)
+    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, 5, "iphone")
     cmd = calls[1]
     idx = cmd.index("--num-epochs")
     assert cmd[idx + 1] == "5"
@@ -507,6 +981,11 @@ def test_run_training_command_construction_and_sentinel(
     assert cmd.index("data:iphone") > idx
     # ... and the sentinel records the schedule it completed with
     assert sentinel.read_text().strip() == "5"
+
+    # the dataset flag selects the tyro data subcommand
+    rb.run_training("conda", "ref_env", tmp_path / "som", tmp_path / "data", run_dir, None, "nvidia")
+    assert "data:nvidia" in calls[2]
+    assert "data:iphone" not in calls[2]
 
 
 def test_best_effort_helpers_degrade_gracefully(
@@ -628,13 +1107,37 @@ def test_bash_validator_parity_and_exit_codes(tmp_path: Path) -> None:
     assert "[MISS]" in proc.stdout
     # exit 0: the SAME fixture the Python validator accepts (parity)
     seq = _make_iphone_sequence(tmp_path / "seq")
-    rb.validate_iphone_sequence(seq)  # python side accepts
+    rb.validate_sequence(seq, "iphone")  # python side accepts
     proc = subprocess.run(
         ["bash", str(VERIFY_SCRIPT), "--dataset", "iphone", "--seq-dir", str(seq)],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "RESULT: OK" in proc.stdout
+
+
+def test_bash_validator_nvidia_parity(tmp_path: Path) -> None:
+    """Same parity contract for the nvidia layout — and the old rgb-only
+    placeholder check must be gone (a bare rgb/ dir now fails)."""
+    shallow = tmp_path / "shallow"
+    (shallow / "rgb").mkdir(parents=True)
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SCRIPT), "--dataset", "nvidia", "--seq-dir", str(shallow)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 1
+    assert "[MISS]" in proc.stdout
+
+    seq = _make_sequence(tmp_path / "seq", "nvidia")
+    rb.validate_sequence(seq, "nvidia")  # python side accepts
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SCRIPT), "--dataset", "nvidia", "--seq-dir", str(seq)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "RESULT: OK" in proc.stdout
+    assert "TODOS.md" not in proc.stdout  # placeholder caveat retired
+    assert "data:nvidia" in proc.stdout  # usage hint names the right subcommand
 
 
 @pytest.mark.parametrize(
