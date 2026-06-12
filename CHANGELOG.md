@@ -4,7 +4,8 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 (loose variant), and this project uses a 4-digit `MAJOR.MINOR.PATCH.MICRO`
-version scheme (versioned in `pyproject.toml`).
+version scheme (canonical version in the `VERSION` file, read by
+`pyproject.toml` at build time).
 
 ## [0.1.3.1] - 2026-06-12
 
