@@ -85,25 +85,17 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
   proven on paper-windmill (the proper static regime — Balloon1's train camera
   is a single static view). Static structure reconstructs sharply on train +
   held-out views; PSNR is motion-capped (~22/~20 dB) until the PR-4 dynamic
-  branch. Checkpoint-2 masked-mPSNR-vs-SoM scoring is the next item (PR 3).
-
-### Emit reference_benchmark_v1 from room4d's renderer evaluation
-
-**What:** Make room4d's renderer eval (`room4d/eval/rendering_metrics.py`) emit
-the `reference_benchmark_v1` JSON (masked mPSNR/mSSIM/mLPIPS + tracking
-metrics) so `run_reference_benchmark.py --compare` can score room4d against
-the Shape of Motion baseline.
-
-**Why:** The schema is the comparison contract; until room4d emits it, the
-documented cross-method compare flow has only one real emitter.
-
-**Context:** room4d's RenderingMetrics computes raw PSNR only today (no SSIM/
-LPIPS/co-visibility masking). Adopt the schema when the real gsplat renderer
-lands (design doc Track 2).
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** room4d gsplat renderer (Track 2)
+  branch.
+- **PR 3 landed (v0.1.7.0):** covisibility-masked NVS benchmark (DyCheck
+  protocol). Eval reorganized into co-located `<stage>/eval/` + a cross-cutting
+  `eval/metrics/` (shared masked `MaskedPSNR/SSIM/LPIPS`, ported from SoM) +
+  `eval/benchmarks/covisibility_masked_novel_view_synthesis/` (schema + compare
+  + README, the single source of truth for `reference_benchmark_v1`).
+  `run_render_proof.py train` emits the record over the val split and
+  `--compare`s vs SoM. First numbers (room4d static vs SoM dynamic,
+  paper-windmill, 419 val frames): masked mPSNR 18.51 vs 19.53 — the residual
+  gap is motion, closed by PR 4. (Satisfies the former "emit
+  reference_benchmark_v1" P2 item.)
 
 ## Completed
 

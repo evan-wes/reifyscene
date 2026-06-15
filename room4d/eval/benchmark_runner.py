@@ -7,9 +7,9 @@ from typing import Any
 
 from room4d.common.io import write_json
 from room4d.common.paths import ensure_dir
-from room4d.eval.geometry_metrics import GeometryMetrics
-from room4d.eval.rendering_metrics import RenderingMetrics
-from room4d.eval.tracking_metrics import TrackingMetrics
+from room4d.geometry.eval.geometry_metrics import GeometryMetrics
+from room4d.render.eval.rendering_metrics import RenderingMetrics
+from room4d.tracking.eval.tracking_metrics import TrackingMetrics
 
 
 class BenchmarkRunner:

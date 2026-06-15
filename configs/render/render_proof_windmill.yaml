@@ -68,3 +68,12 @@ render_proof:
   eval:
     save_panels: true
     checkpoint1_psnr_min: 24.0
+
+  benchmark:                  # covisibility-masked NVS (DyCheck protocol) vs SoM
+    enabled: true
+    eval_split: val
+    max_eval_frames: null     # null = all val frames (matches SoM); cap for smoke
+    dataset_format: iphone
+    method_name: room4d
+    lpips_net: alex
+    compare_to: null          # path to a SoM reference_benchmark.json (or --compare-to)

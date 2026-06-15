@@ -33,7 +33,13 @@ from PIL import Image, ImageDraw
 
 from room4d.common.io import read_yaml
 from room4d.common.types import FrameRef
+from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
+    build_record,
+    compare,
+    write_record,
+)
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from room4d.render.eval.novel_view import score_masked_novel_views
 from room4d.render.gaussian4d.densify import DensifyConfig
 from room4d.render.gaussian4d.gaussian_field import GaussianField
 from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
@@ -200,9 +206,58 @@ def cmd_train(args) -> None:
     for cam in ds["train_cameras"]:
         for t in ds.get("eval_train_times", [ds["seed_time"]]):
             _eval_and_panel(cam, t, "checkpoint1", summary["checkpoint1_train_view"])
+    # Held-out cameras don't all share the same timestep, so pick a valid val
+    # time per camera (eval_time if it exists for that camera, else its first).
+    val_times_by_cam: dict[str, list[int]] = {}
+    for cam, t in backend.split_frames("val"):
+        val_times_by_cam.setdefault(str(cam), []).append(int(t))
     print("Checkpoint 2 (held-out novel-view):")
     for cam in ds["eval_cameras"]:
-        _eval_and_panel(cam, ds["eval_time"], "checkpoint2", summary["checkpoint2_novel_view"])
+        times = val_times_by_cam.get(str(cam), [])
+        if not times:
+            continue
+        t = ds["eval_time"] if ds["eval_time"] in times else times[0]
+        _eval_and_panel(cam, t, "checkpoint2", summary["checkpoint2_novel_view"])
+
+    # Covisibility-masked NVS benchmark (DyCheck protocol) over the full val split.
+    bm = cfg.get("benchmark", {}) or {}
+    if bm.get("enabled", True):
+        eval_split = bm.get("eval_split", "val")
+        val_specs = backend.split_frames(eval_split)
+        if bm.get("max_eval_frames"):
+            val_specs = val_specs[: int(bm["max_eval_frames"])]
+        print(f"Benchmark: covisibility-masked NVS over {len(val_specs)} {eval_split} frames...")
+
+        def _val_views():
+            for cam, t in val_specs:
+                name = backend.frame_name(cam, int(t))
+                intrinsics, t_world_cam, (width, height) = backend.load_camera(name)
+                camera = RenderCamera.from_world_cam(t_world_cam, intrinsics, width, height)
+                gt = torch.as_tensor(backend.load_rgb(name), dtype=torch.float32, device=device) / 255.0
+                mask = torch.as_tensor(backend.load_covisible(name, eval_split), device=device)
+                yield camera, gt, mask
+
+        metrics = score_masked_novel_views(
+            rasterizer, field.to_cloud(), _val_views(), device=device, lpips_net=bm.get("lpips_net", "alex")
+        )
+        record = build_record(
+            method=bm.get("method_name", "room4d"),
+            sequence=Path(args.dataset_root).name,
+            dataset_format=bm.get("dataset_format", "iphone"),
+            metrics=metrics,
+            eval={"source": "room4d_render_proof", "resolution_factor": ds["factor"]},
+            extra={"run_dir": str(out_dir), "iters": iters, "num_gaussians": field.num_gaussians},
+        )
+        bench_path = write_record(record, out_dir / "reference_benchmark.json")
+        summary["benchmark"] = {k: metrics[k] for k in ("masked_mpsnr", "masked_mssim", "masked_mlpips", "num_views")}
+        print(
+            f"  masked mPSNR={metrics['masked_mpsnr']:.4f}  mSSIM={metrics['masked_mssim']:.4f}  "
+            f"mLPIPS={metrics['masked_mlpips']:.4f}  (n={metrics['num_views']})"
+        )
+        print(f"  reference_benchmark_v1 -> {bench_path}")
+        compare_to = args.compare_to or bm.get("compare_to")
+        if compare_to:
+            compare(compare_to, bench_path)
 
     (out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"summary -> {out_dir / 'train_summary.json'}")
@@ -233,6 +288,7 @@ def main() -> None:
     tr.add_argument("--iters", type=int, default=None, help="override trainer.iters (smoke)")
     tr.add_argument("--device", default=None)
     tr.add_argument("--out-dir", default="train_out")
+    tr.add_argument("--compare-to", default=None, help="SoM reference_benchmark.json to --compare against")
     tr.set_defaults(func=cmd_train)
 
     args = parser.parse_args()
