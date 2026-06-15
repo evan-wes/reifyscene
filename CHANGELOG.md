@@ -7,6 +7,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.5.0] - 2026-06-15
+
+### Added
+- Renderer Track 2 step 8 + Checkpoint 0 (coordinate sanity). Stands up
+  borrowed dataset geometry flowing through room4d's real contracts into a
+  pluggable rasterizer, validated by rendering at real cameras.
+- `Rasterizer` abstract base class with `GsplatRasterizer` as the first
+  pluggable backend, plus a `build_rasterizer(cfg)` factory
+  (`room4d/render/gaussian4d/rasterizer.py`). gsplat is no longer welded into
+  the renderer — it sits behind an enforced contract, mirroring the
+  `GeometryInitializer`/`PointTracker` backend pattern, so the splatting kernel
+  is swappable. A new `RenderCamera` (with `from_look_at` and `from_world_cam`
+  constructors) is the backend-agnostic camera the rasterizer renders from,
+  carrying a real world-to-camera matrix + intrinsics (previously the
+  rasterizer synthesized intrinsics and only accepted procedural look-at
+  cameras).
+- `DatasetGeometryInitializer` (`room4d/geometry/dataset_wrapper.py`): reads
+  pre-computed DyCheck-format camera poses/intrinsics/depth from disk and emits
+  a standard `GeometryArtifact`, bypassing on-the-fly SfM/VGGT. One backend
+  handles both NVIDIA Dynamic Scenes (Balloon1) and DyCheck iPhone
+  (paper-windmill). Camera convention matches the Shape-of-Motion loader
+  (`w2c = [R | -R p]`; `T_world_cam = inv(w2c)`). Selectable via
+  `--geometry-backend-name dataset`.
+- `seed_cloud_from_geometry` (`room4d/render/gaussian4d/seed.py`): backprojects
+  per-frame metric depth + RGB into a single colored `GaussianCloud` in the
+  world frame — the untrained seed for the renderer.
+- `scripts/run_render_proof.py`: the render-proof harness. Checkpoint 0 loads a
+  sequence through the dataset backend, seeds a point-cloud splat from one
+  view's depth, renders at real dataset cameras, and writes GT-vs-render
+  side-by-side panels. On Balloon1 (seed cam 0): the same-view reconstruction
+  and all three held-out cameras render recognizably and correctly placed —
+  coordinate conventions validated before any training time.
+
+### Changed
+- `Gaussian4DTrainer` now constructs its rasterizer via `build_rasterizer` and
+  renders through `RenderCamera`; flythrough behavior is unchanged.
+
+### Tests
+- New `tests/test_dataset_geometry.py`: dataset pose-convention (camera center
+  == position; `T_world_cam = inv(w2c)`), factor-scaled intrinsics,
+  `GeometryArtifact` construction, and the seed backprojection math (identity +
+  translated pose), all CPU-only.
+- `tests/test_gsplat_rasterizer.py`: migrated to the `RenderCamera` contract;
+  added a `from_world_cam` coordinate-convention guard (known 3D point →
+  principal point) and a `build_rasterizer` factory test.
+
 ## [0.1.4.0] - 2026-06-12
 
 ### Added

@@ -68,6 +68,17 @@ for that regime — own-rig captures later).
 
 ## Renderer (Track 2)
 
+Action plan / decision record: `evan-renderer-track-completion-design-20260614-2256.md`
+(gstack project docs). Sequence: PR 1 (dataset geometry backend + Rasterizer
+ABC + Checkpoint 0) → PR 2 (static Gaussian trainer + Checkpoints 1–2) → PR 3
+(reference_benchmark_v1 eval, below) → PR 4 (dynamic branch + Checkpoint 3) →
+PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
+
+- **PR 1 landed (v0.1.5.0):** `Rasterizer` ABC + `GsplatRasterizer` backend,
+  `DatasetGeometryInitializer`, `seed_cloud_from_geometry`,
+  `scripts/run_render_proof.py`. Checkpoint 0 (coordinate sanity) PASSES on
+  Balloon1. The trainer is still render-only — PR 2 builds the optimizer.
+
 ### Emit reference_benchmark_v1 from room4d's renderer evaluation
 
 **What:** Make room4d's renderer eval (`room4d/eval/rendering_metrics.py`) emit
