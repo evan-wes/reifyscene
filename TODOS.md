@@ -77,7 +77,15 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
 - **PR 1 landed (v0.1.5.0):** `Rasterizer` ABC + `GsplatRasterizer` backend,
   `DatasetGeometryInitializer`, `seed_cloud_from_geometry`,
   `scripts/run_render_proof.py`. Checkpoint 0 (coordinate sanity) PASSES on
-  Balloon1. The trainer is still render-only — PR 2 builds the optimizer.
+  Balloon1.
+- **PR 2 landed (v0.1.6.0):** static Gaussian trainer — `GaussianField`,
+  `DensificationController` (our clone/split/prune, gsplat thresholds ported),
+  `StaticGaussianTrainer` (Adam + L1/D-SSIM), `Rasterizer.rasterize()`
+  differentiable path, `run_render_proof.py train` mode, config files. Trainer
+  proven on paper-windmill (the proper static regime — Balloon1's train camera
+  is a single static view). Static structure reconstructs sharply on train +
+  held-out views; PSNR is motion-capped (~22/~20 dB) until the PR-4 dynamic
+  branch. Checkpoint-2 masked-mPSNR-vs-SoM scoring is the next item (PR 3).
 
 ### Emit reference_benchmark_v1 from room4d's renderer evaluation
 
