@@ -7,6 +7,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.7.0] - 2026-06-15
+
+### Added
+- Co-visibility-masked novel-view-synthesis benchmark (Renderer Track 2, PR 3) —
+  the DyCheck masked-metric protocol, so room4d's renderer is scored against the
+  Shape-of-Motion baseline on identical sequences. First numbers (room4d static
+  vs SoM dynamic on paper-windmill, all 419 val frames): masked mPSNR 18.51 vs
+  19.53, mSSIM 0.448 vs 0.559, mLPIPS 0.234 vs 0.198 — a static model lands ~1 dB
+  behind on mPSNR (the masked region is mostly static background) with the larger
+  gaps on SSIM/LPIPS from un-reconstructable motion, the gap PR 4 closes.
+- `room4d/eval/metrics/image.py` — shared, stage-agnostic masked image metrics
+  `MaskedPSNR`/`MaskedSSIM`/`MaskedLPIPS`, ported verbatim from Shape-of-Motion's
+  `flow3d/metrics.py` (which follows DyCheck) so the numbers are byte-comparable
+  to the SoM/published baselines. Uses only torch + torchmetrics.
+- `room4d/eval/benchmarks/covisibility_masked_novel_view_synthesis/` — the
+  benchmark package: `schema.py` (the `reference_benchmark_v1` record contract —
+  now the single source of truth), `compare.py`, and a `README.md` documenting
+  the DyCheck protocol, datasets, record format, and caveats.
+- `room4d/render/eval/novel_view.py` — render-stage evaluator: renders a trained
+  Gaussian field at held-out cameras and accumulates the masked metrics.
+- `run_render_proof.py train` now emits a `reference_benchmark_v1` record over the
+  val split and can `--compare-to` a SoM baseline; `DatasetGeometryInitializer`
+  gained `load_covisible(...)`. New `benchmark:` config section (both render-proof
+  configs) exposes the eval split, frame cap, LPIPS net, and compare target.
+
+### Changed
+- Evaluation reorganized for scale: per-stage metrics moved from a flat
+  `room4d/eval/*_metrics.py` into co-located `room4d/<stage>/eval/` packages
+  (render/geometry/tracking/sync/graph), `room4d/eval/` now holds only the
+  cross-cutting layer (shared `metrics/`, `benchmarks/`, and the
+  `benchmark_runner` orchestrator). `git mv` preserves history; no behavior change.
+- `scripts/run_reference_benchmark.py` imports the `reference_benchmark_v1` schema
+  + `compare()` from the benchmark package instead of defining them inline
+  (de-duplication — both emitters share one contract).
+
+### Tests
+- New `tests/test_nvs_benchmark.py` (7 CPU tests): masked PSNR (incl. that the
+  mask excludes corrupted regions), masked SSIM, and the schema build/load/validate
+  + compare-on-schema-mismatch behavior. All existing eval tests pass through the
+  migrated import paths.
+
 ## [0.1.6.0] - 2026-06-15
 
 ### Added
