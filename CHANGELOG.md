@@ -7,6 +7,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.8.0] - 2026-06-15
+
+### Added
+- Dynamic Gaussian branch (Renderer Track 2, PR 4) — the Shape-of-Motion SE(3)
+  motion model, ported onto room4d's contracts. The renderer now handles motion;
+  Checkpoint 3 passes. On paper-windmill the dynamic branch lifts masked NV
+  mPSNR to **20.71** (from the static 18.51, +2.2 dB at the same factor 2) and
+  beats the SoM baseline on all three masked metrics (mPSNR 20.71 vs 19.53,
+  mSSIM 0.661 vs 0.559, mLPIPS 0.178 vs 0.198 — SoM scored at factor 1, a noted
+  resolution caveat). Dynamic train-view PSNR is 25.4 dB (vs the static model's
+  motion-capped ~22) — the moving windmill is reconstructed, not ghosted.
+- Deformation model (our code, ported recipe): `render/gaussian4d/transforms.py`
+  (6D-rotation + gradient-stable quaternion helpers, replacing `roma`),
+  `motion.py` (`MotionBases` — K low-dim SE(3) bases over T frames),
+  `dynamic_field.py` (`DynamicGaussianField` with softmax `motion_coefs` + warp,
+  and `DynamicScene` that materializes the warped fg + static bg at a frame,
+  plus the per-Gaussian `entity_id` channel: fg = 1, bg = 0).
+- `dynamic_trainer.py` (`DynamicGaussianTrainer`): samples (camera, time, gt),
+  renders the warped scene, optimizes with photometric L1 + D-SSIM + temporal
+  motion-bases smoothness. `run_render_proof.py dynamic` mode +
+  `configs/render/render_proof_windmill_dynamic.yaml`;
+  `render/eval/novel_view.py` gains `score_masked_dynamic_views`.
+- `scripts/borrow_som_motion_init.py` + `render/gaussian4d/motion_init.py` — the
+  `MotionInitializer` seam. Today's only backend loads a bundle dumped by running
+  SoM's track-based init (cuML clustering + Procrustes) in the reference env — a
+  **stopgap**; a native room4d motion initializer is tracked follow-up work, as
+  is dynamic densification (v1 trains the fixed-size borrowed init).
+
+### Tests
+- New `tests/test_dynamic.py` (7 CPU tests): 6D↔rotmat and rotmat→quat
+  round-trips, quaternion product, identity/pure-translation warps, the combined
+  scene + entity_id channel, and the borrowed-init bundle loader.
+
 ## [0.1.7.0] - 2026-06-15
 
 ### Added
