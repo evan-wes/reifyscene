@@ -7,6 +7,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.6.0] - 2026-06-15
+
+### Added
+- Static Gaussian splatting trainer (Renderer Track 2, PR 2). Turns the PR-1
+  depth-backprojection seed into a trained static Gaussian field, scored on
+  train and held-out views. The renderer now optimizes a scene rather than only
+  materializing one.
+- `Rasterizer` ABC extended with a differentiable training path: `rasterize()`
+  returns grad-bearing rgb/alpha/depth plus densification telemetry
+  (`means2d`/`radii`) as a `RasterOutput`; `render()` is now a no-grad numpy
+  convenience built on it (one gsplat call site). The trainer/densification
+  depend only on this contract — gsplat is never imported outside the backend.
+- `GaussianField(nn.Module)` (`render/gaussian4d/gaussian_field.py`): the
+  trainable scene in the standard 3DGS parameterization (log-scales,
+  logit-opacities, sigmoid RGB color; SH is a future lever), seeded via
+  `from_cloud`.
+- `DensificationController` (`render/gaussian4d/densify.py`): our own adaptive
+  density control — clone / split / prune / opacity-reset with Adam-state
+  surgery — operating on the rasterizer's telemetry (so it is backend-agnostic),
+  with thresholds ported from gsplat's validated `DefaultStrategy` and a
+  `max_gaussians` safety cap. The NDC `means2d` gradient is rescaled to pixel
+  units so the ported `grad2d_threshold` applies in the right space.
+- `StaticGaussianTrainer` (`render/gaussian4d/gaussian_trainer.py`): Adam with
+  per-group learning rates (means LR exponentially decayed), an L1 + D-SSIM
+  photometric loss (self-contained torch SSIM, no new dependency), and the
+  densification schedule. Plain PSNR/SSIM eval (masked-vs-SoM scoring is PR 3).
+- `run_render_proof.py train` mode (Checkpoints 1 & 2) plus
+  `configs/render/render_proof.yaml` and `configs/render/render_proof_windmill.yaml`
+  exposing every trainer/densify/seed knob; the CLI overrides only per-run
+  paths. Multi-frame seeding (`seed_times`) supports moving monocular cameras.
+- Validated: trains end-to-end on the 5090. On DyCheck paper-windmill (a moving
+  monocular camera — the proper static-training regime; Balloon1's train camera
+  is a single static rig view) the static structure reconstructs sharply on
+  both the train view and a held-out camera that contributed no gradient.
+  Train/novel PSNR plateaus at ~22/~20 dB because a static model cannot fit the
+  scene's motion — the dynamic branch (PR 4) is what lifts it.
+
+### Changed
+- `RasterOutput` carries render width/height so the controller can rescale the
+  NDC means2d gradient.
+
+### Tests
+- New `tests/test_gaussian_trainer.py` (7 CPU tests): field activations
+  round-trip; SSIM/PSNR sanity; and the densification Adam-state surgery
+  end-to-end — clone grows the field+optimizer, split consumes parents,
+  low-opacity prune, and the `max_gaussians` cap — each asserting the optimizer
+  still steps on the resized parameters.
+
 ## [0.1.5.0] - 2026-06-15
 
 ### Added
