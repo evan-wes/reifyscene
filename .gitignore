@@ -20,6 +20,8 @@ datasets/
 
 # Render-proof / checkpoint render outputs
 checkpoint0_*/
+train_out/
+*_train_out/
 render_proof/
 *_render_proof/
 

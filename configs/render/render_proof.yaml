@@ -1,0 +1,67 @@
+# Render-proof / static Gaussian trainer config (Track 2, Checkpoints 0-2).
+# Every knob is toggleable here; the run_render_proof.py CLI only overrides
+# per-run paths (--dataset-root, --out-dir) and quick smoke values (--iters).
+render_proof:
+  device: cuda
+
+  dataset:
+    factor: 2                 # use rgb/depth {factor}x
+    split: train
+    train_cameras: ["0"]      # camera(s) whose frames we train on
+    eval_cameras: ["1", "2", "3"]   # held-out novel-view cameras
+    seed_time: 0              # timestep whose depth seeds the cloud
+    seed_times: null          # null = [seed_time]; a list seeds a moving camera across views
+    train_times: null         # null = all times for train_cameras; or a list
+    max_train_views: null     # optional cap on number of train views
+    eval_time: 0              # timestep to score novel views at
+    eval_train_times: [0]     # train-camera timesteps to score (Checkpoint 1)
+
+  seed:
+    pixel_stride: 1
+    scale_mult: 1.5
+    scale_min: 1.0e-5
+    scale_max: 0.05
+    max_points: 1500000
+    opacity: 0.9
+    depth_near: 0.001
+    depth_far: null
+
+  rasterizer:
+    rasterizer_backend: gsplat
+    absgrad: false
+
+  trainer:
+    iters: 7000
+    color_model: rgb          # rgb now; sh is a future quality lever
+    lambda_l1: 0.8
+    lambda_ssim: 0.2
+    lr_means: 1.6e-4
+    lr_means_final: 1.6e-6
+    lr_scales: 5.0e-3
+    lr_quats: 1.0e-3
+    lr_opacities: 5.0e-2
+    lr_colors: 2.5e-3
+    means_lr_decay_steps: 7000
+    random_seed: 0
+    log_every: 200
+
+  densify:                    # ported from gsplat DefaultStrategy (3DGS recipe)
+    enabled: true
+    start_iter: 500
+    stop_iter: 5000
+    refine_every: 100
+    reset_opacity_every: 3000
+    pause_refine_after_reset: 0
+    grad2d_threshold: 0.0002
+    grow_scale3d: 0.01
+    prune_opacity: 0.005
+    prune_scale3d: 0.1
+    split_count: 2
+    split_scale_divider: 1.6
+    reset_opacity_value: 0.01
+    absgrad: false
+    scene_extent: null        # null = auto (2x 90th-pct radius of the seed)
+
+  eval:
+    save_panels: true
+    checkpoint1_psnr_min: 24.0  # train-view convergence gate (motion-limited)

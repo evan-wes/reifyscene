@@ -1,20 +1,24 @@
 """Render-proof harness for the room4d Gaussian renderer (Track 2).
 
-Checkpoint 0 (coordinate sanity): load a DyCheck-format sequence's poses/depth
-through the real DatasetGeometryInitializer -> GeometryArtifact, seed an
-untrained colored point-cloud splat from one (or more) views' depth, then
-render at real dataset cameras and write GT-vs-render side-by-side panels.
+Two modes:
 
-PASS = the render is recognizable and correctly placed (not mirrored, flipped,
-or wrong-scale). The seed-camera target is a same-view reconstruction round-trip;
-a held-out camera target is the real extrinsic/world-frame convention test.
+  checkpoint0  Coordinate sanity. Seed an untrained colored point-cloud splat
+               from one view's depth and render at real dataset cameras; write
+               GT-vs-render panels. PASS = recognizable, correctly placed.
 
-Example (NVIDIA Balloon1, factor 2, seed cam0@t0, render cam0@t0 + cam1@t0):
+  train        Static Gaussian training (Checkpoints 1 & 2). Seed -> train the
+               GaussianField (Adam + L1/D-SSIM + densification) -> render train
+               and held-out views, report PSNR/SSIM, write panels. All knobs
+               come from a config file (configs/render/render_proof.yaml).
 
-    python scripts/run_render_proof.py \
-        --dataset-root ../data/shape_of_motion/nvidia/Balloon1 \
-        --factor 2 --seed-frames 0:0 --render-targets 0:0,1:0 \
-        --out-dir checkpoint0_balloon1
+Examples:
+    python scripts/run_render_proof.py checkpoint0 \
+        --dataset-root .../Balloon1 --factor 2 \
+        --seed-frames 0:0 --render-targets 0:0,1:0,2:0,3:0 --out-dir ck0
+
+    python scripts/run_render_proof.py train \
+        --dataset-root .../Balloon1 --config configs/render/render_proof.yaml \
+        --iters 7000 --out-dir ck1_balloon1
 """
 
 from __future__ import annotations
@@ -24,16 +28,22 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image, ImageDraw
 
+from room4d.common.io import read_yaml
 from room4d.common.types import FrameRef
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from room4d.render.gaussian4d.densify import DensifyConfig
+from room4d.render.gaussian4d.gaussian_field import GaussianField
+from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
 from room4d.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 from room4d.render.gaussian4d.seed import seed_cloud_from_geometry
 
 
+# -- shared helpers -------------------------------------------------------
+
 def _parse_frames(spec: str) -> list[tuple[str, int]]:
-    """Parse "cam:time,cam:time" into [(camera_id, time_id), ...]."""
     out: list[tuple[str, int]] = []
     for token in spec.split(","):
         token = token.strip()
@@ -48,9 +58,7 @@ def _psnr(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(np.float64) / 255.0
     b = b.astype(np.float64) / 255.0
     mse = float(np.mean((a - b) ** 2))
-    if mse <= 1e-12:
-        return 99.0
-    return float(-10.0 * np.log10(mse))
+    return 99.0 if mse <= 1e-12 else float(-10.0 * np.log10(mse))
 
 
 def _label(img: Image.Image, text: str) -> Image.Image:
@@ -60,91 +68,175 @@ def _label(img: Image.Image, text: str) -> Image.Image:
     return img
 
 
-def _panel(gt: np.ndarray, render: np.ndarray, title: str, psnr: float, coverage: float) -> Image.Image:
+def _panel(gt: np.ndarray, render: np.ndarray, title: str, metrics: str) -> Image.Image:
     diff = np.abs(gt.astype(np.int16) - render.astype(np.int16)).clip(0, 255).astype(np.uint8)
     gt_img = _label(Image.fromarray(gt), "GT")
-    render_img = _label(Image.fromarray(render), f"render psnr={psnr:.1f} cov={coverage:.2f}")
+    render_img = _label(Image.fromarray(render), metrics)
     diff_img = _label(Image.fromarray(diff), "|diff|")
-    h = gt.shape[0]
-    sep = np.full((h, 4, 3), 255, dtype=np.uint8)
+    sep = np.full((gt.shape[0], 4, 3), 255, dtype=np.uint8)
     strip = np.hstack([np.asarray(gt_img), sep, np.asarray(render_img), sep, np.asarray(diff_img)])
-    out = Image.fromarray(strip)
-    return _label(out, title)
+    return _label(Image.fromarray(strip), title)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="room4d render-proof Checkpoint 0 (coordinate sanity)")
-    parser.add_argument("--dataset-root", required=True, help="DyCheck-format sequence directory")
-    parser.add_argument("--factor", type=int, default=2, help="resolution downsample factor (rgb/depth {factor}x)")
-    parser.add_argument("--split", default="train")
-    parser.add_argument("--seed-frames", default="0:0", help='"cam:time,..." views to backproject for the seed cloud')
-    parser.add_argument("--render-targets", default="0:0,1:0", help='"cam:time,..." cameras to render + compare')
-    parser.add_argument("--pixel-stride", type=int, default=1, help="subsample stride when backprojecting depth")
-    parser.add_argument("--scale-mult", type=float, default=1.5, help="splat radius multiplier (pixel footprint)")
-    parser.add_argument("--max-points", type=int, default=1_500_000)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--out-dir", default="checkpoint0_out")
-    args = parser.parse_args()
+def _load_view(backend: DatasetGeometryInitializer, cam: str, time_id: int, device: str):
+    """Return (RenderCamera, gt_tensor[H,W,3] in [0,1], gt_uint8[H,W,3])."""
+    name = backend.frame_name(cam, time_id)
+    intrinsics, t_world_cam, (width, height) = backend.load_camera(name)
+    camera = RenderCamera.from_world_cam(t_world_cam, intrinsics, width, height)
+    gt_u8 = backend.load_rgb(name)
+    gt = torch.as_tensor(gt_u8, dtype=torch.float32, device=device) / 255.0
+    return camera, gt, gt_u8
 
+
+# -- checkpoint 0 ---------------------------------------------------------
+
+def cmd_checkpoint0(args) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     backend = DatasetGeometryInitializer(
         {"dataset_root": args.dataset_root, "factor": args.factor, "split": args.split}
     )
 
-    # Seed: build a GeometryArtifact over the seed frames and backproject depth.
     seed_specs = _parse_frames(args.seed_frames)
-    seed_frame_refs = [
-        FrameRef(stream_id=cam, frame_idx=time_id, timestamp_sec=float(time_id))
-        for cam, time_id in seed_specs
-    ]
-    geometry = backend.initialize(seed_frame_refs)
-    rgb_by_frame = {
-        f"{cam}:{time_id}": backend.load_rgb(backend.frame_name(cam, time_id))
-        for cam, time_id in seed_specs
-    }
+    seed_refs = [FrameRef(stream_id=c, frame_idx=t, timestamp_sec=float(t)) for c, t in seed_specs]
+    geometry = backend.initialize(seed_refs)
+    rgb_by_frame = {f"{c}:{t}": backend.load_rgb(backend.frame_name(c, t)) for c, t in seed_specs}
     cloud = seed_cloud_from_geometry(
-        geometry,
-        rgb_by_frame,
-        device=args.device,
-        pixel_stride=args.pixel_stride,
-        max_points=args.max_points,
-        scale_mult=args.scale_mult,
+        geometry, rgb_by_frame, device=args.device,
+        pixel_stride=args.pixel_stride, max_points=args.max_points, scale_mult=args.scale_mult,
     )
     print(f"seed cloud: {len(cloud)} gaussians from {len(seed_specs)} view(s) {seed_specs}")
 
     rasterizer = build_rasterizer({"device": args.device})
-
-    seed_keys = {f"{cam}:{time_id}" for cam, time_id in seed_specs}
-    summary = {
-        "dataset_root": str(args.dataset_root),
-        "factor": args.factor,
-        "seed_frames": args.seed_frames,
-        "num_seed_gaussians": len(cloud),
-        "targets": [],
-    }
+    seed_keys = {f"{c}:{t}" for c, t in seed_specs}
+    summary = {"mode": "checkpoint0", "num_seed_gaussians": len(cloud), "targets": []}
     for cam, time_id in _parse_frames(args.render_targets):
-        name = backend.frame_name(cam, time_id)
-        intrinsics, t_world_cam, (width, height) = backend.load_camera(name)
-        camera = RenderCamera.from_world_cam(t_world_cam, intrinsics, width, height)
+        camera, _gt_t, gt_u8 = _load_view(backend, cam, time_id, args.device)
         out = rasterizer.render(cloud, camera)
-        render_rgb = np.clip(out["rgb"] * 255.0, 0, 255).astype(np.uint8)
-        gt_rgb = backend.load_rgb(name)
+        render_u8 = np.clip(out["rgb"] * 255.0, 0, 255).astype(np.uint8)
         coverage = float(np.mean(out["alpha"] > 0.5))
-        psnr = _psnr(gt_rgb, render_rgb)
+        psnr = _psnr(gt_u8, render_u8)
         kind = "reconstruction" if f"{cam}:{time_id}" in seed_keys else "novel-view"
         title = f"cam{cam} t{time_id} [{kind}]"
-        panel = _panel(gt_rgb, render_rgb, title, psnr, coverage)
-        panel_path = out_dir / f"checkpoint0_cam{cam}_t{time_id}.png"
-        panel.save(panel_path)
-        print(f"  {title}: psnr={psnr:.2f} dB  coverage={coverage:.3f}  -> {panel_path}")
-        summary["targets"].append(
-            {"camera": cam, "time": time_id, "kind": kind, "psnr": psnr, "coverage": coverage, "panel": str(panel_path)}
+        _panel(gt_u8, render_u8, title, f"render psnr={psnr:.1f} cov={coverage:.2f}").save(
+            out_dir / f"checkpoint0_cam{cam}_t{time_id}.png"
         )
-
+        print(f"  {title}: psnr={psnr:.2f} dB  coverage={coverage:.3f}")
+        summary["targets"].append({"camera": cam, "time": time_id, "kind": kind, "psnr": psnr, "coverage": coverage})
     (out_dir / "checkpoint0_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"summary -> {out_dir / 'checkpoint0_summary.json'}")
+
+
+# -- train (Checkpoints 1 & 2) -------------------------------------------
+
+def cmd_train(args) -> None:
+    cfg = read_yaml(args.config)["render_proof"]
+    ds, device = cfg["dataset"], (args.device or cfg.get("device", "cuda"))
+    iters = args.iters or cfg["trainer"]["iters"]
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    backend = DatasetGeometryInitializer(
+        {"dataset_root": args.dataset_root, "factor": ds["factor"], "split": ds["split"]}
+    )
+
+    # Seed the field from the train camera(s) at one or more seed times. A
+    # moving monocular camera (e.g. paper-windmill) needs several seed views to
+    # cover the scene; a static rig camera needs only one.
+    seed_times = ds.get("seed_times") or [ds["seed_time"]]
+    seed_specs = [(cam, int(t)) for cam in ds["train_cameras"] for t in seed_times]
+    seed_refs = [FrameRef(stream_id=c, frame_idx=t, timestamp_sec=float(t)) for c, t in seed_specs]
+    geometry = backend.initialize(seed_refs)
+    rgb_by_frame = {f"{c}:{t}": backend.load_rgb(backend.frame_name(c, t)) for c, t in seed_specs}
+    seed_cloud = seed_cloud_from_geometry(geometry, rgb_by_frame, device=device, **cfg["seed"])
+    field = GaussianField.from_cloud(seed_cloud, color_model=cfg["trainer"]["color_model"])
+    print(f"seed cloud: {len(seed_cloud)} gaussians; training {iters} iters on {device}")
+
+    # Training views: train_cameras x train_times.
+    train_times = ds["train_times"]
+    if train_times is None:
+        train_set = set(ds["train_cameras"])
+        train_times = sorted({t for c, t in backend.split_frames(ds["split"]) if c in train_set})
+    if ds.get("max_train_views"):
+        train_times = train_times[: int(ds["max_train_views"])]
+    train_views = []
+    for cam in ds["train_cameras"]:
+        for t in train_times:
+            camera, gt, _u8 = _load_view(backend, cam, int(t), device)
+            train_views.append((camera, gt))
+    print(f"train views: {len(train_views)} ({len(ds['train_cameras'])} cam x {len(train_times)} times)")
+
+    train_cfg = TrainConfig.from_cfg({**cfg["trainer"], "iters": iters})
+    densify_cfg = DensifyConfig.from_cfg(cfg["densify"])
+    rasterizer = build_rasterizer({**cfg["rasterizer"], "device": device})
+    trainer = StaticGaussianTrainer(field, train_cfg, densify_cfg, device=device, rasterizer=rasterizer)
+
+    def _log(record: dict) -> None:
+        msg = f"  iter {record['step']:>6}  loss={record['loss']:.4f}  psnr={record['psnr']:.2f}  N={record['num_gaussians']}"
+        if "densify" in record:
+            d = record["densify"]
+            msg += f"  [+{d['cloned']}c/{d['split']}s -{d['pruned']}p]"
+        print(msg)
+
+    trainer.fit(train_views, on_log=_log)
+
+    # Checkpoint 1 (train-view) + Checkpoint 2 (held-out novel-view).
+    summary = {"mode": "train", "iters": iters, "final_gaussians": field.num_gaussians,
+               "checkpoint1_train_view": [], "checkpoint2_novel_view": []}
+
+    def _eval_and_panel(cam: str, time_id: int, tag: str, store: list) -> None:
+        camera, gt, gt_u8 = _load_view(backend, cam, int(time_id), device)
+        res = trainer.evaluate([(camera, gt)])[0]
+        render_u8 = np.clip(res["rgb"] * 255.0, 0, 255).astype(np.uint8)
+        title = f"cam{cam} t{time_id} [{tag}]"
+        if cfg["eval"].get("save_panels", True):
+            _panel(gt_u8, render_u8, title, f"psnr={res['psnr']:.2f} ssim={res['ssim']:.3f}").save(
+                out_dir / f"{tag}_cam{cam}_t{time_id}.png"
+            )
+        print(f"  {title}: psnr={res['psnr']:.2f} dB  ssim={res['ssim']:.3f}")
+        store.append({"camera": cam, "time": int(time_id), "psnr": res["psnr"], "ssim": res["ssim"]})
+
+    print("Checkpoint 1 (train-view):")
+    for cam in ds["train_cameras"]:
+        for t in ds.get("eval_train_times", [ds["seed_time"]]):
+            _eval_and_panel(cam, t, "checkpoint1", summary["checkpoint1_train_view"])
+    print("Checkpoint 2 (held-out novel-view):")
+    for cam in ds["eval_cameras"]:
+        _eval_and_panel(cam, ds["eval_time"], "checkpoint2", summary["checkpoint2_novel_view"])
+
+    (out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"summary -> {out_dir / 'train_summary.json'}")
+
+
+# -- cli ------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="room4d render-proof harness (Track 2)")
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    c0 = sub.add_parser("checkpoint0", help="coordinate sanity (untrained splat)")
+    c0.add_argument("--dataset-root", required=True)
+    c0.add_argument("--factor", type=int, default=2)
+    c0.add_argument("--split", default="train")
+    c0.add_argument("--seed-frames", default="0:0")
+    c0.add_argument("--render-targets", default="0:0,1:0,2:0,3:0")
+    c0.add_argument("--pixel-stride", type=int, default=1)
+    c0.add_argument("--scale-mult", type=float, default=1.5)
+    c0.add_argument("--max-points", type=int, default=1_500_000)
+    c0.add_argument("--device", default="cuda")
+    c0.add_argument("--out-dir", default="checkpoint0_out")
+    c0.set_defaults(func=cmd_checkpoint0)
+
+    tr = sub.add_parser("train", help="static Gaussian training (Checkpoints 1 & 2)")
+    tr.add_argument("--dataset-root", required=True)
+    tr.add_argument("--config", default="configs/render/render_proof.yaml")
+    tr.add_argument("--iters", type=int, default=None, help="override trainer.iters (smoke)")
+    tr.add_argument("--device", default=None)
+    tr.add_argument("--out-dir", default="train_out")
+    tr.set_defaults(func=cmd_train)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":

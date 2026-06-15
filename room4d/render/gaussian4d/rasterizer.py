@@ -236,13 +236,37 @@ class GaussianCloud:
         )
 
 
+@dataclass
+class RasterOutput:
+    """Differentiable rasterization result + densification telemetry.
+
+    ``rgb``/``alpha``/``depth`` are on-device torch tensors that carry grad when
+    rasterized with ``with_telemetry=True``. ``means2d`` is the screen-space
+    projected means tensor whose ``.grad`` (populated after ``backward()`` when
+    ``retain_grad`` was set) drives adaptive density control; ``radii`` is the
+    per-Gaussian screen radius. These two are the telemetry any rasterizer
+    backend must surface so the trainer's densification never touches gsplat
+    internals. Shapes follow the unpacked single-camera convention: ``means2d``
+    is ``(1, N, 2)`` (gradient-bearing), ``radii`` is ``(1, N)`` or ``(1, N, 2)``.
+    """
+
+    rgb: Any  # (H, W, 3)
+    alpha: Any  # (H, W)
+    depth: Any  # (H, W)
+    means2d: Any = None  # (1, N, 2) screen-space means in [-1, 1] NDC (grad source)
+    radii: Any = None  # (1, N) or (1, N, 2) screen radii
+    width: int = 0  # render width (needed to rescale the NDC means2d gradient)
+    height: int = 0
+
+
 class Rasterizer(abc.ABC):
-    """Pluggable contract for rasterizing GaussianClouds to image canvases.
+    """Pluggable contract for rasterizing Gaussians to image canvases.
 
     Backends are selected via ``build_rasterizer``; gsplat is the first one.
     The trainer and render-proof depend on this interface, not on gsplat
-    directly, so the splatting kernel stays swappable. PR 2 extends the contract
-    with a differentiable training path + densification telemetry.
+    directly, so the splatting kernel stays swappable. ``rasterize`` is the
+    differentiable core (training + telemetry); ``render`` is a no-grad numpy
+    convenience built on top of it (flythrough / render-proof preview).
     """
 
     backend_name = "base"
@@ -251,22 +275,32 @@ class Rasterizer(abc.ABC):
         self.device = device
 
     @abc.abstractmethod
+    def rasterize(
+        self,
+        means: Any,
+        quats: Any,
+        scales: Any,
+        opacities: Any,
+        colors: Any,
+        camera: RenderCamera,
+        *,
+        with_telemetry: bool = False,
+    ) -> RasterOutput:
+        """Differentiably rasterize activated Gaussian params from a camera.
+
+        ``means`` (N,3), ``quats`` (N,4), ``scales`` (N,3, world units),
+        ``opacities`` (N,) in [0,1], ``colors`` (N,3) in [0,1]. When
+        ``with_telemetry`` is True the result carries grad-ready ``means2d``
+        (with ``retain_grad``) and ``radii`` for densification.
+        """
+        raise NotImplementedError
+
     def render(self, cloud: GaussianCloud, camera: RenderCamera) -> dict[str, np.ndarray]:
-        """Render a cloud from a resolved camera to float32 canvases.
+        """No-grad render of a GaussianCloud to float32 canvases.
 
         Returns rgb (H, W, 3) in [0, 1], alpha (H, W) in [0, 1], and depth
         (H, W) with +inf where nothing splatted.
         """
-        raise NotImplementedError
-
-
-class GsplatRasterizer(Rasterizer):
-    """Rasterize GaussianClouds with gsplat's CUDA EWA splatting (first backend)."""
-
-    backend_name = "gsplat"
-
-    def render(self, cloud: GaussianCloud, camera: RenderCamera) -> dict[str, np.ndarray]:
-        require_gsplat()
         width, height = int(camera.width), int(camera.height)
         if len(cloud) == 0:
             return {
@@ -274,27 +308,69 @@ class GsplatRasterizer(Rasterizer):
                 "alpha": np.zeros((height, width), dtype=np.float32),
                 "depth": np.full((height, width), np.inf, dtype=np.float32),
             }
-        viewmat = torch.as_tensor(camera.viewmat, dtype=torch.float32, device=self.device)[None]
-        K = torch.as_tensor(camera.K, dtype=torch.float32, device=self.device)[None]
         with torch.no_grad():
-            rendered, alphas, _ = gsplat.rasterization(
-                cloud.means,
-                cloud.quats,
-                cloud.scales,
-                cloud.opacities,
-                cloud.colors,
-                viewmat,
-                K,
-                width,
-                height,
-                render_mode="RGB+ED",
+            out = self.rasterize(
+                cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera
             )
-        out = rendered[0]
-        rgb = out[..., :3].clamp(0.0, 1.0).float().cpu().numpy()
-        depth = out[..., 3].float().cpu().numpy()
-        alpha = alphas[0, ..., 0].clamp(0.0, 1.0).float().cpu().numpy()
+        rgb = out.rgb.clamp(0.0, 1.0).float().cpu().numpy()
+        depth = out.depth.float().cpu().numpy()
+        alpha = out.alpha.clamp(0.0, 1.0).float().cpu().numpy()
         depth = np.where(alpha > 1e-4, depth, np.inf).astype(np.float32)
         return {"rgb": rgb, "alpha": alpha, "depth": depth}
+
+
+class GsplatRasterizer(Rasterizer):
+    """Rasterize Gaussians with gsplat's CUDA EWA splatting (first backend)."""
+
+    backend_name = "gsplat"
+
+    def __init__(self, device: str = "cuda", absgrad: bool = False) -> None:
+        super().__init__(device)
+        # absgrad=False matches the ported gsplat DefaultStrategy thresholds.
+        self.absgrad = bool(absgrad)
+
+    def rasterize(
+        self,
+        means: Any,
+        quats: Any,
+        scales: Any,
+        opacities: Any,
+        colors: Any,
+        camera: RenderCamera,
+        *,
+        with_telemetry: bool = False,
+    ) -> RasterOutput:
+        require_gsplat()
+        viewmats = torch.as_tensor(camera.viewmat, dtype=torch.float32, device=self.device).reshape(1, 4, 4)
+        Ks = torch.as_tensor(camera.K, dtype=torch.float32, device=self.device).reshape(1, 3, 3)
+        width, height = int(camera.width), int(camera.height)
+        render_colors, render_alphas, info = gsplat.rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=viewmats,
+            Ks=Ks,
+            width=width,
+            height=height,
+            render_mode="RGB+ED",
+            packed=False,
+            absgrad=self.absgrad,
+        )
+        means2d = info.get("means2d")
+        if with_telemetry and means2d is not None and getattr(means2d, "requires_grad", False):
+            means2d.retain_grad()
+        img = render_colors[0]
+        return RasterOutput(
+            rgb=img[..., :3],
+            alpha=render_alphas[0, ..., 0],
+            depth=img[..., 3],
+            means2d=means2d,
+            radii=info.get("radii"),
+            width=width,
+            height=height,
+        )
 
 
 _RASTERIZERS: dict[str, type[Rasterizer]] = {
@@ -312,4 +388,7 @@ def build_rasterizer(cfg: dict | None = None) -> Rasterizer:
         raise ValueError(
             f"Unknown rasterizer backend '{name}'. Supported backends: {sorted(_RASTERIZERS)}"
         )
-    return backend_cls(device=device)
+    rasterizer = backend_cls(device=device)
+    if "absgrad" in cfg and hasattr(rasterizer, "absgrad"):
+        rasterizer.absgrad = bool(cfg["absgrad"])
+    return rasterizer
