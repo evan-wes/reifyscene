@@ -22,6 +22,8 @@ datasets/
 checkpoint0_*/
 train_out/
 *_train_out/
+dynamic_out/
+*_dynamic_out/
 render_proof/
 *_render_proof/
 

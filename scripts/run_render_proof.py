@@ -39,10 +39,12 @@ from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
     write_record,
 )
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.render.eval.novel_view import score_masked_novel_views
+from room4d.render.eval.novel_view import score_masked_dynamic_views, score_masked_novel_views
 from room4d.render.gaussian4d.densify import DensifyConfig
+from room4d.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
 from room4d.render.gaussian4d.gaussian_field import GaussianField
 from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
+from room4d.render.gaussian4d.motion_init import load_borrowed_init
 from room4d.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 from room4d.render.gaussian4d.seed import seed_cloud_from_geometry
 
@@ -265,6 +267,95 @@ def cmd_train(args) -> None:
 
 # -- cli ------------------------------------------------------------------
 
+def cmd_dynamic(args) -> None:
+    cfg = read_yaml(args.config)["render_proof"]
+    ds = cfg["dataset"]
+    device = args.device or cfg.get("device", "cuda")
+    iters = args.iters or cfg["dynamic"]["iters"]
+    factor = int(ds["factor"])
+    k_scale = 1.0 / factor  # borrowed cameras are full-res (factor 1)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    scene, cams = load_borrowed_init(args.init, device=device)
+    print(
+        f"borrowed init: fg={scene.fg.num_gaussians} bg={scene.bg.num_gaussians if scene.bg else 0} "
+        f"bases={scene.fg.num_bases} frames={scene.num_frames}"
+    )
+    backend = DatasetGeometryInitializer({"dataset_root": args.dataset_root, "factor": factor, "split": "train"})
+    rasterizer = build_rasterizer({"device": device})
+
+    def _view(cam):
+        gt_u8 = backend.load_rgb(cam.frame_name)
+        height, width = gt_u8.shape[:2]
+        camera = cam.render_camera(width, height, k_scale=k_scale)
+        gt = torch.as_tensor(gt_u8, dtype=torch.float32, device=device) / 255.0
+        return camera, gt, gt_u8
+
+    train_views = [(_view(cam)[0], _view(cam)[1], cam.time_id) for cam in cams["train"]]
+    print(f"train views: {len(train_views)}; training {iters} iters")
+
+    train_cfg = DynamicTrainConfig.from_cfg({**cfg["dynamic"], "iters": iters})
+    trainer = DynamicGaussianTrainer(scene, train_cfg, device=device, rasterizer=rasterizer)
+    trainer.fit(train_views, on_log=lambda r: print(f"  iter {r['step']:>6}  loss={r['loss']:.4f}  psnr={r['psnr']:.2f}"))
+
+    summary = {"mode": "dynamic", "iters": iters, "final_gaussians": scene.num_gaussians, "checkpoint3": []}
+
+    def _panel_for(cam, tag):
+        camera, gt, gt_u8 = _view(cam)
+        pred = trainer.render_at(camera, cam.time_id)
+        render_u8 = np.clip(pred.cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+        psnr = _psnr(gt_u8, render_u8)
+        _panel(gt_u8, render_u8, f"{cam.frame_name} [{tag}]", f"psnr={psnr:.2f}").save(
+            out_dir / f"checkpoint3_{tag}_{cam.frame_name}.png"
+        )
+        print(f"  {tag} {cam.frame_name}: psnr={psnr:.2f} dB")
+        summary["checkpoint3"].append({"frame": cam.frame_name, "kind": tag, "psnr": psnr})
+
+    print("Checkpoint 3 (dynamic train-view + held-out):")
+    _panel_for(cams["train"][0], "train")
+    for cam in cams["val"][:2]:
+        _panel_for(cam, "novel")
+
+    bm = cfg.get("benchmark", {}) or {}
+    if bm.get("enabled", True):
+        val_cams = cams["val"]
+        if bm.get("max_eval_frames"):
+            val_cams = val_cams[: int(bm["max_eval_frames"])]
+        print(f"Benchmark: covisibility-masked NVS over {len(val_cams)} val frames...")
+
+        def _val_views():
+            for cam in val_cams:
+                gt_u8 = backend.load_rgb(cam.frame_name)
+                height, width = gt_u8.shape[:2]
+                camera = cam.render_camera(width, height, k_scale=k_scale)
+                gt = torch.as_tensor(gt_u8, dtype=torch.float32, device=device) / 255.0
+                mask = torch.as_tensor(backend.load_covisible(cam.frame_name, "val"), device=device)
+                yield camera, gt, mask, cam.time_id
+
+        metrics = score_masked_dynamic_views(rasterizer, scene, _val_views(), device=device, lpips_net=bm.get("lpips_net", "alex"))
+        record = build_record(
+            method=bm.get("method_name", "room4d-dynamic"),
+            sequence=Path(args.dataset_root).name,
+            dataset_format=bm.get("dataset_format", "iphone"),
+            metrics=metrics,
+            eval={"source": "room4d_render_proof_dynamic", "resolution_factor": factor},
+            extra={"run_dir": str(out_dir), "iters": iters, "num_gaussians": scene.num_gaussians},
+        )
+        bench_path = write_record(record, out_dir / "reference_benchmark.json")
+        summary["benchmark"] = {k: metrics[k] for k in ("masked_mpsnr", "masked_mssim", "masked_mlpips", "num_views")}
+        print(
+            f"  masked mPSNR={metrics['masked_mpsnr']:.4f}  mSSIM={metrics['masked_mssim']:.4f}  "
+            f"mLPIPS={metrics['masked_mlpips']:.4f}  (n={metrics['num_views']})"
+        )
+        compare_to = args.compare_to or bm.get("compare_to")
+        if compare_to:
+            compare(compare_to, bench_path)
+
+    (out_dir / "dynamic_summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"summary -> {out_dir / 'dynamic_summary.json'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="room4d render-proof harness (Track 2)")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -290,6 +381,16 @@ def main() -> None:
     tr.add_argument("--out-dir", default="train_out")
     tr.add_argument("--compare-to", default=None, help="SoM reference_benchmark.json to --compare against")
     tr.set_defaults(func=cmd_train)
+
+    dy = sub.add_parser("dynamic", help="dynamic Gaussian training from a borrowed init (Checkpoint 3)")
+    dy.add_argument("--dataset-root", required=True)
+    dy.add_argument("--init", required=True, help="borrowed motion-init .npz (scripts/borrow_som_motion_init.py)")
+    dy.add_argument("--config", default="configs/render/render_proof_windmill_dynamic.yaml")
+    dy.add_argument("--iters", type=int, default=None)
+    dy.add_argument("--device", default=None)
+    dy.add_argument("--out-dir", default="dynamic_out")
+    dy.add_argument("--compare-to", default=None)
+    dy.set_defaults(func=cmd_dynamic)
 
     args = parser.parse_args()
     args.func(args)
