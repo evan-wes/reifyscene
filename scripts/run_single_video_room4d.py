@@ -363,7 +363,7 @@ def main() -> None:
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
-    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long'])
+    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
     parser.add_argument('--geometry-frame-stride', type=int, default=None, help='Subsample the geometry frame set by original-frame stride after selecting the source timeline.')
