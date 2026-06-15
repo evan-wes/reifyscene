@@ -17,6 +17,7 @@ from room4d.geometry.camera_interpolation import densify_camera_states_for_frame
 from room4d.geometry.world_frame import GroundPlaneCanonicalizer
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
+from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -74,6 +75,8 @@ class Room4DPipeline:
         geometry_backend_name = str(geometry_cfg.get('backend_name', 'vggt')).lower()
         if geometry_backend_name == 'vggt-long':
             self.geometry_init = VGGTLongInitializer(geometry_cfg)
+        elif geometry_backend_name == 'dataset':
+            self.geometry_init = DatasetGeometryInitializer(geometry_cfg)
         else:
             self.geometry_init = VGGTInitializer(geometry_cfg)
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))

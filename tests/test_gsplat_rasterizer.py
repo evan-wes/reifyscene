@@ -3,9 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from room4d.common.types import CameraIntrinsics
 from room4d.render.gaussian4d.rasterizer import (
     GaussianCloud,
-    GaussianRasterizer,
+    GsplatRasterizer,
+    Rasterizer,
+    RenderCamera,
+    build_rasterizer,
     default_intrinsics,
     gsplat_available,
     look_at_viewmat,
@@ -19,6 +23,10 @@ requires_gsplat = pytest.mark.skipif(
 
 def _camera(eye, target, up=(0.0, 0.0, 1.0)) -> dict:
     return {"eye": list(eye), "target": list(target), "up": list(up)}
+
+
+def _render_camera(eye, target, width, height, up=(0.0, 0.0, 1.0)) -> RenderCamera:
+    return RenderCamera.from_look_at(list(eye), list(target), list(up), width, height)
 
 
 def test_look_at_viewmat_maps_target_to_optical_axis() -> None:
@@ -63,7 +71,7 @@ def test_render_single_gaussian_centered_blob() -> None:
         opacities=np.asarray([0.95], dtype=np.float32),
         device="cuda",
     )
-    out = GaussianRasterizer("cuda").render(cloud, _camera([2.0, 0.0, 0.0], [0.0, 0.0, 0.0]), 128, 96)
+    out = GsplatRasterizer("cuda").render(cloud, _render_camera([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], 128, 96))
     assert out["rgb"].shape == (96, 128, 3)
     assert out["alpha"].shape == (96, 128)
     assert out["depth"].shape == (96, 128)
@@ -76,8 +84,8 @@ def test_render_single_gaussian_centered_blob() -> None:
 
 @requires_gsplat
 def test_render_empty_cloud_returns_blank_canvases() -> None:
-    out = GaussianRasterizer("cuda").render(
-        GaussianCloud.empty("cuda"), _camera([2.0, 0.0, 0.0], [0.0, 0.0, 0.0]), 64, 48
+    out = GsplatRasterizer("cuda").render(
+        GaussianCloud.empty("cuda"), _render_camera([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], 64, 48)
     )
     assert float(out["rgb"].sum()) == 0.0
     assert float(out["alpha"].sum()) == 0.0
@@ -102,7 +110,7 @@ def test_cloud_concat_preserves_counts_and_renders() -> None:
     )
     merged = GaussianCloud.concat([a, b, GaussianCloud.empty("cuda")], device="cuda")
     assert len(merged) == 3
-    out = GaussianRasterizer("cuda").render(merged, _camera([2.5, 0.0, 0.0], [0.0, 0.0, 0.0]), 128, 96)
+    out = GsplatRasterizer("cuda").render(merged, _render_camera([2.5, 0.0, 0.0], [0.0, 0.0, 0.0], 128, 96))
     # All three colors must land on the canvas.
     assert float(out["rgb"][..., 0].max()) > 0.3
     assert float(out["rgb"][..., 1].max()) > 0.3
@@ -120,6 +128,34 @@ def test_full_render_occludes_by_depth() -> None:
         opacities=np.asarray([0.99, 0.99], dtype=np.float32),
         device="cuda",
     )
-    out = GaussianRasterizer("cuda").render(cloud, _camera([3.0, 0.0, 0.0], [0.0, 0.0, 0.0]), 128, 96)
+    out = GsplatRasterizer("cuda").render(cloud, _render_camera([3.0, 0.0, 0.0], [0.0, 0.0, 0.0], 128, 96))
     center = out["rgb"][48, 64]
     assert center[0] > center[1] * 2.0
+
+
+def test_render_camera_from_world_cam_projects_known_point() -> None:
+    # Camera at world [1, 0, 0], identity rotation (OpenCV: +z forward into scene).
+    # A world point straight ahead on the camera's +z axis must land on the
+    # principal point — the coordinate-convention guard for from_world_cam.
+    T_world_cam = np.eye(4, dtype=np.float32)
+    T_world_cam[:3, 3] = [1.0, 0.0, 0.0]
+    intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=64.0, cy=48.0)
+    cam = RenderCamera.from_world_cam(T_world_cam, intr, width=128, height=96)
+    assert cam.width == 128 and cam.height == 96
+    assert np.allclose(cam.K, [[100.0, 0.0, 64.0], [0.0, 100.0, 48.0], [0.0, 0.0, 1.0]], atol=1e-5)
+    world_pt = np.asarray([1.0, 0.0, 5.0, 1.0], dtype=np.float32)
+    cam_pt = cam.viewmat @ world_pt
+    assert np.allclose(cam_pt[:3], [0.0, 0.0, 5.0], atol=1e-5)
+    px = cam.K @ cam_pt[:3]
+    px = px[:2] / px[2]
+    assert np.allclose(px, [64.0, 48.0], atol=1e-4)
+
+
+def test_build_rasterizer_selects_backend() -> None:
+    rasterizer = build_rasterizer({"device": "cpu"})
+    assert isinstance(rasterizer, GsplatRasterizer)
+    assert isinstance(rasterizer, Rasterizer)
+    assert rasterizer.backend_name == "gsplat"
+    assert rasterizer.device == "cpu"
+    with pytest.raises(ValueError):
+        build_rasterizer({"rasterizer_backend": "does-not-exist"})

@@ -16,7 +16,8 @@ from room4d.render.base import RenderBackend, RenderSceneModel
 from room4d.render.camera_paths import CameraPathGenerator, _to_z_up_points, _to_z_up_vec
 from room4d.render.gaussian4d.rasterizer import (
     GaussianCloud,
-    GaussianRasterizer,
+    RenderCamera,
+    build_rasterizer,
     project_to_pixels,
     require_gsplat,
 )
@@ -46,7 +47,9 @@ class Gaussian4DTrainer(RenderBackend):
             # gsplat is GPU-only; require_gsplat() raises at render time if absent.
             self.device = "cuda"
         self.camera_paths = CameraPathGenerator()
-        self.rasterizer = GaussianRasterizer(device=self.device)
+        self.rasterizer = build_rasterizer(
+            {"rasterizer_backend": self.cfg.get("rasterizer_backend", "gsplat"), "device": self.device}
+        )
         self.enabled_paths = {
             "orbit": True,
             "overhead": True,
@@ -137,9 +140,12 @@ class Gaussian4DTrainer(RenderBackend):
         )
         full_cloud = GaussianCloud.concat([static_cloud, dynamic_cloud], device=self.device)
 
-        static_r = self.rasterizer.render(static_cloud, camera, render_w, render_h)
-        dynamic_r = self.rasterizer.render(dynamic_cloud, camera, render_w, render_h)
-        full_r = self.rasterizer.render(full_cloud, camera, render_w, render_h)
+        render_camera = RenderCamera.from_look_at(
+            camera["eye"], camera["target"], camera.get("up", [0.0, 0.0, 1.0]), render_w, render_h
+        )
+        static_r = self.rasterizer.render(static_cloud, render_camera)
+        dynamic_r = self.rasterizer.render(dynamic_cloud, render_camera)
+        full_r = self.rasterizer.render(full_cloud, render_camera)
         arrays = {
             "full": full_r["rgb"],
             "static_only": static_r["rgb"],

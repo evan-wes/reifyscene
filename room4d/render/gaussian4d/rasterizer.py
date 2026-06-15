@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,77 @@ def default_intrinsics(width: int, height: int) -> np.ndarray:
         [[fx, 0.0, width * 0.5], [0.0, fx, height * 0.5], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
+
+
+def _intrinsics_to_matrix(intrinsics: Any) -> np.ndarray:
+    """Build a 3x3 pinhole K from a CameraIntrinsics-like object or a 3x3 array."""
+    if hasattr(intrinsics, "fx"):
+        return np.asarray(
+            [
+                [float(intrinsics.fx), 0.0, float(intrinsics.cx)],
+                [0.0, float(intrinsics.fy), float(intrinsics.cy)],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+    arr = np.asarray(intrinsics, dtype=np.float32)
+    if arr.shape == (3, 3):
+        return arr
+    raise ValueError(
+        f"intrinsics must be a CameraIntrinsics or a 3x3 matrix, got shape {arr.shape}"
+    )
+
+
+@dataclass
+class RenderCamera:
+    """Resolved pinhole camera for rasterization: world-to-camera pose + K.
+
+    The backend-agnostic camera contract a Rasterizer renders from. Build it via
+    ``from_look_at`` (procedural path cameras, optionally synthesizing K) or
+    ``from_world_cam`` (a real dataset camera with known extrinsics/intrinsics).
+    """
+
+    viewmat: np.ndarray  # (4, 4) world-to-camera, OpenCV convention (+x right, +y down, +z fwd)
+    K: np.ndarray  # (3, 3) pinhole intrinsics in pixels
+    width: int
+    height: int
+
+    @classmethod
+    def from_look_at(
+        cls,
+        eye: Any,
+        target: Any,
+        up: Any,
+        width: int,
+        height: int,
+        intrinsics: Any | None = None,
+    ) -> "RenderCamera":
+        """Path-camera constructor; synthesizes intrinsics when none supplied."""
+        viewmat = look_at_viewmat(
+            np.asarray(eye, dtype=np.float32),
+            np.asarray(target, dtype=np.float32),
+            np.asarray(up, dtype=np.float32),
+        )
+        K = default_intrinsics(width, height) if intrinsics is None else _intrinsics_to_matrix(intrinsics)
+        return cls(viewmat=viewmat, K=K, width=int(width), height=int(height))
+
+    @classmethod
+    def from_world_cam(
+        cls,
+        T_world_cam: Any,
+        intrinsics: Any,
+        width: int,
+        height: int,
+    ) -> "RenderCamera":
+        """Real-camera constructor: viewmat = inv(T_world_cam), K from intrinsics."""
+        Twc = np.asarray(T_world_cam, dtype=np.float32).reshape(4, 4)
+        viewmat = np.linalg.inv(Twc).astype(np.float32)
+        return cls(
+            viewmat=viewmat,
+            K=_intrinsics_to_matrix(intrinsics),
+            width=int(width),
+            height=int(height),
+        )
 
 
 def project_to_pixels(
@@ -164,36 +236,46 @@ class GaussianCloud:
         )
 
 
-class GaussianRasterizer:
-    """Rasterize GaussianClouds with gsplat's CUDA EWA splatting."""
+class Rasterizer(abc.ABC):
+    """Pluggable contract for rasterizing GaussianClouds to image canvases.
+
+    Backends are selected via ``build_rasterizer``; gsplat is the first one.
+    The trainer and render-proof depend on this interface, not on gsplat
+    directly, so the splatting kernel stays swappable. PR 2 extends the contract
+    with a differentiable training path + densification telemetry.
+    """
+
+    backend_name = "base"
 
     def __init__(self, device: str = "cuda") -> None:
         self.device = device
 
-    def render(
-        self, cloud: GaussianCloud, camera: dict[str, Any], width: int, height: int
-    ) -> dict[str, np.ndarray]:
-        """Render one eye/target/up camera to float32 canvases.
+    @abc.abstractmethod
+    def render(self, cloud: GaussianCloud, camera: RenderCamera) -> dict[str, np.ndarray]:
+        """Render a cloud from a resolved camera to float32 canvases.
 
         Returns rgb (H, W, 3) in [0, 1], alpha (H, W) in [0, 1], and depth
         (H, W) with +inf where nothing splatted.
         """
+        raise NotImplementedError
+
+
+class GsplatRasterizer(Rasterizer):
+    """Rasterize GaussianClouds with gsplat's CUDA EWA splatting (first backend)."""
+
+    backend_name = "gsplat"
+
+    def render(self, cloud: GaussianCloud, camera: RenderCamera) -> dict[str, np.ndarray]:
         require_gsplat()
+        width, height = int(camera.width), int(camera.height)
         if len(cloud) == 0:
             return {
                 "rgb": np.zeros((height, width, 3), dtype=np.float32),
                 "alpha": np.zeros((height, width), dtype=np.float32),
                 "depth": np.full((height, width), np.inf, dtype=np.float32),
             }
-        viewmat = torch.as_tensor(
-            look_at_viewmat(
-                np.asarray(camera["eye"], dtype=np.float32),
-                np.asarray(camera["target"], dtype=np.float32),
-                np.asarray(camera.get("up", [0.0, 0.0, 1.0]), dtype=np.float32),
-            ),
-            device=self.device,
-        )[None]
-        K = torch.as_tensor(default_intrinsics(width, height), device=self.device)[None]
+        viewmat = torch.as_tensor(camera.viewmat, dtype=torch.float32, device=self.device)[None]
+        K = torch.as_tensor(camera.K, dtype=torch.float32, device=self.device)[None]
         with torch.no_grad():
             rendered, alphas, _ = gsplat.rasterization(
                 cloud.means,
@@ -213,3 +295,21 @@ class GaussianRasterizer:
         alpha = alphas[0, ..., 0].clamp(0.0, 1.0).float().cpu().numpy()
         depth = np.where(alpha > 1e-4, depth, np.inf).astype(np.float32)
         return {"rgb": rgb, "alpha": alpha, "depth": depth}
+
+
+_RASTERIZERS: dict[str, type[Rasterizer]] = {
+    "gsplat": GsplatRasterizer,
+}
+
+
+def build_rasterizer(cfg: dict | None = None) -> Rasterizer:
+    """Construct the configured rasterizer backend (default: gsplat)."""
+    cfg = cfg or {}
+    name = str(cfg.get("rasterizer_backend", "gsplat")).lower()
+    device = str(cfg.get("device", "cuda"))
+    backend_cls = _RASTERIZERS.get(name)
+    if backend_cls is None:
+        raise ValueError(
+            f"Unknown rasterizer backend '{name}'. Supported backends: {sorted(_RASTERIZERS)}"
+        )
+    return backend_cls(device=device)

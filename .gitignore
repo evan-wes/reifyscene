@@ -18,6 +18,11 @@ artifacts/
 datasets/
 *.zip
 
+# Render-proof / checkpoint render outputs
+checkpoint0_*/
+render_proof/
+*_render_proof/
+
 # Third-party source checkouts
 third_party/
 
