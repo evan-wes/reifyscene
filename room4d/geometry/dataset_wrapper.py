@@ -132,6 +132,15 @@ class DatasetGeometryInitializer(GeometryInitializer):
         with Image.open(self.rgb_dir / f"{frame_name}.png") as img:
             return np.asarray(img.convert("RGB"), dtype=np.uint8)
 
+    def load_covisible(self, frame_name: str, split: str = "val") -> np.ndarray:
+        """Co-visibility mask (HxW bool) for a held-out frame, True = covisible.
+
+        DyCheck/NVIDIA sequences ship these under covisible/{factor}x/{split}/.
+        """
+        path = self.dataset_root / "covisible" / f"{self.factor}x" / split / f"{frame_name}.png"
+        with Image.open(path) as img:
+            return np.asarray(img.convert("L")) > 0
+
     def split_frames(self, split: str | None = None) -> list[tuple[str, int]]:
         """Return (camera_id, time_id) pairs from a split json."""
         split = split or self.split

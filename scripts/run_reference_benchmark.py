@@ -64,7 +64,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOM_DIR = REPO_ROOT / "third_party" / "shape-of-motion"
 # Must match the CONDA_ENV_NAME default in scripts/setup_reference_tool.sh.
 DEFAULT_CONDA_ENV = "room4d_som_ref"
-SCHEMA = "reference_benchmark_v1"
+
+# The reference_benchmark_v1 contract (schema id, metric directions, compare)
+# lives in room4d so this Shape-of-Motion emitter and room4d's own renderer eval
+# share one source of truth.
+sys.path.insert(0, str(REPO_ROOT))
+from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  # noqa: E402
+    HIGHER_IS_BETTER,
+    SCHEMA,
+    compare,
+)
 # Written into the run dir by this wrapper after run_training exits 0. SoM
 # itself writes checkpoints/last.ckpt at epoch 0 and every 200 steps, so a
 # bare checkpoint does NOT prove training completed — only this sentinel
@@ -107,25 +116,6 @@ NVIDIA_TB_METRICS: dict[str, str] = {
     "val/bg_psnr": "bg_psnr",
     "val/bg_ssim": "bg_ssim",
     "val/bg_lpips": "bg_lpips",
-}
-
-# Direction of "better" per metric, used by --compare output.
-HIGHER_IS_BETTER = {
-    "masked_mpsnr": True,
-    "masked_mssim": True,
-    "masked_mlpips": False,
-    "track3d_epe": False,
-    "track3d_pck_10cm": True,
-    "track3d_pck_5cm": True,
-    "track2d_aj": True,
-    "track2d_avg_pck": True,
-    "track2d_occ_acc": True,
-    "fg_psnr": True,
-    "fg_ssim": True,
-    "fg_lpips": False,
-    "bg_psnr": True,
-    "bg_ssim": True,
-    "bg_lpips": False,
 }
 
 # Required layout verified against the pinned SoM commit (579753e):
@@ -848,63 +838,6 @@ def _locked_benchmark(
             arrow = "↑" if HIGHER_IS_BETTER.get(key, True) else "↓"
             print(f"  {key:<{width}}  {metrics[key]:>10.4f}  {arrow}")
 
-
-def compare(path_a: str, path_b: str) -> None:
-    a = json.loads(Path(path_a).read_text())
-    b = json.loads(Path(path_b).read_text())
-    for blob, path in ((a, path_a), (b, path_b)):
-        if blob.get("schema") != SCHEMA:
-            sys.exit(f"{path}: schema {blob.get('schema')!r} != {SCHEMA!r}")
-
-    name_a = f"{a.get('method', '?')}"
-    name_b = f"{b.get('method', '?')}"
-    seq = a.get("sequence", "?")
-    if b.get("sequence") != seq:
-        print(
-            f"[warn] comparing different sequences: {seq} vs {b.get('sequence')}",
-            flush=True,
-        )
-    # Same keys, different measurement protocol (e.g. nvidia validator at 2x
-    # vs iphone eval at 1x) -> winner verdicts on incomparable numbers.
-    if a.get("eval") != b.get("eval"):
-        print(
-            f"[warn] comparing different eval protocols: {a.get('eval')} vs "
-            f"{b.get('eval')} — metric values are not directly comparable",
-            flush=True,
-        )
-
-    # Union of both sides' metrics: known keys first (in canonical order),
-    # then any method-specific extras — dropped keys would silently hide a
-    # mismatch between two methods' emitters.
-    metrics_a, metrics_b = a.get("metrics", {}), b.get("metrics", {})
-    known = [k for k in METRIC_PATTERNS if k in metrics_a or k in metrics_b]
-    extras = sorted((set(metrics_a) | set(metrics_b)) - set(known))
-    keys = known + extras
-    width = max(len(k) for k in keys) if keys else 10
-    print(f"\nSequence: {seq}")
-    print(f"  {'metric':<{width}}  {name_a:>14}  {name_b:>14}  {'better':>8}")
-
-    def _usable(v) -> bool:
-        # json.loads accepts NaN AND Infinity literals; bool is an int
-        # subclass. Any of them would silently win/lose a direction
-        # comparison, so only finite real numbers count.
-        return (
-            isinstance(v, (int, float))
-            and not isinstance(v, bool)
-            and math.isfinite(v)
-        )
-
-    for key in keys:
-        va, vb = metrics_a.get(key), metrics_b.get(key)
-        sa = f"{va:.4f}" if _usable(va) else "—"
-        sb = f"{vb:.4f}" if _usable(vb) else "—"
-        better = ""
-        if _usable(va) and _usable(vb) and va != vb:
-            if key in HIGHER_IS_BETTER:
-                better = name_a if (va > vb) == HIGHER_IS_BETTER[key] else name_b
-            else:
-                better = "?"  # unknown metric — direction not defined
-        print(f"  {key:<{width}}  {sa:>14}  {sb:>14}  {better:>8}")
 
 
 def main() -> None:
