@@ -117,13 +117,14 @@ a bundle). Implement a native room4d `MotionInitializer` backend (lift borrowed
 **Why:** the borrow is a stopgap; the dynamic init should be room4d's own, like
 every other stage. **Priority:** P2.
 
-### Follow-up: dynamic densification
+### Follow-up: dynamic densification — DONE (v0.1.10.0, PR 6)
 
-**What:** the dynamic trainer (v1) refines the fixed-size borrowed init without
-densification. Extend `DensificationController` to grow/prune the fg field
-(incl. `motion_coefs`) + bg in lockstep, sliced from the combined-cloud telemetry.
-**Why:** densification is part of the proven recipe and should lift dynamic
-quality further. **Priority:** P2.
+Standard 3DGS adaptive density control now runs on the dynamic fg + bg fields
+(`DensificationController` generalized with `param_names`/`group_prefix`/telemetry
+slicing; `DynamicGaussianTrainer` runs one controller per field). On
+paper-windmill: Gaussians grow ~137k → ~970k, masked mLPIPS 0.178 → 0.164,
+mSSIM 0.661 → 0.669, train-view PSNR ~25 → 27.2, sharper flythrough. The
+remaining renderer-track follow-up is the native motion initializer (above).
 
 ## Completed
 

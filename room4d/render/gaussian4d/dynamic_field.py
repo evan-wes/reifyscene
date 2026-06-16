@@ -13,10 +13,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from room4d.render.gaussian4d.gaussian_field import GaussianField
+from room4d.render.gaussian4d.gaussian_field import PARAM_NAMES, GaussianField
 from room4d.render.gaussian4d.motion import MotionBases
 from room4d.render.gaussian4d.rasterizer import GaussianCloud
 from room4d.render.gaussian4d.transforms import quat_multiply, rotmat_to_quat
+
+# Foreground densification grows these (the static set + per-Gaussian motion).
+FG_PARAM_NAMES = PARAM_NAMES + ("motion_coefs",)
 
 
 class DynamicGaussianField(GaussianField):

@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.10.0] - 2026-06-15
+
+### Added
+- Dynamic densification (closes the PR-4 follow-up) — standard 3DGS adaptive
+  density control now runs on the dynamic foreground + background fields, the
+  same recipe/thresholds already ported for the static trainer (no new
+  algorithm). `DensificationController` gained `param_names` + `group_prefix`
+  (so the fg field can grow its extra `motion_coefs` param and fg/bg share one
+  optimizer), per-field telemetry slicing of the combined cloud, and a
+  generalized clone/split (split children inherit every non-positional param,
+  including `motion_coefs`, from the parent). `DynamicGaussianTrainer` drives one
+  controller per field, each fed its slice of the combined-cloud `means2d`/`radii`
+  telemetry. New `densify:` config section in the dynamic config.
+- Effect on paper-windmill (Gaussians grow ~137k → ~970k over training):
+  masked mLPIPS 0.178 → 0.164 and mSSIM 0.661 → 0.669 (perceptual/structural
+  sharpness, where densification helps most), dynamic train-view PSNR ~25 → 27.2,
+  and a visibly sharper flythrough. masked mPSNR is flat (~20.7) because that
+  metric is dominated by the already-reconstructed static background. Still beats
+  the SoM baseline on all three masked metrics.
+
+### Tests
+- `tests/test_dynamic.py`: a CPU test that the foreground controller grows
+  `motion_coefs` in lockstep with the other params (and the Adam state) and that
+  the optimizer still steps on the grown field.
+
 ## [0.1.9.0] - 2026-06-15
 
 ### Added
