@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.11.0] - 2026-06-15
+
+### Added
+- Native 3D-track lifting (PR-A of the native-motion-init port) — room4d's own
+  port of Shape-of-Motion's track lift, replacing the first borrowed step on the
+  way to a native motion initializer. Only the 2D point tracks
+  (`flow3d_preprocessed/2d_tracks/`) are still borrowed; the lift itself is
+  room4d code. New `room4d/lifting/native_track_lift.py`: TAPIR track parsing,
+  SoM scene normalization (gravity-up → +z, center, scale), foreground-track
+  unprojection (`get_tracks_3d`), and background point sampling
+  (`get_bkgd_points`) — all ported onto room4d's `DatasetGeometryInitializer`.
+  Lifts from SoM's aligned inverse-depth source (`aligned_depth_anything_colmap`,
+  with the per-stack depth clamp) and COLMAP-refined cameras
+  (`camera_type="refined"`, via pycolmap; ARKit `"original"` poses optional), so
+  the output lands in the same normalized frame as the borrowed bundle.
+- `room4d/lifting/tracks_3d.py` — `Tracks3D` / `StaticPoints3D` containers (room4d
+  analogs of SoM's `TrackObservations` / `StaticObservations`) consumed by the
+  upcoming clustering + Procrustes + Gaussian-placement initializer (PR-B).
+- `DatasetGeometryInitializer.load_fg_mask` — reads Track-Anything foreground
+  masks (`flow3d_preprocessed/track_anything/{factor}x/`).
+- `scripts/check_native_lift.py` — validates the native lift against SoM's cached
+  `tracks_3d_40000.pth` + `scene_norm_dict.pth`. On paper-windmill: scene-norm
+  rotation matches to 3.9e-8, scale 0.1093 vs 0.1089 (0.4%), 39 500 vs 39 525
+  foreground tracks (0.1%) — a faithful reproduction of the borrowed frame.
+
+### Tests
+- `tests/test_native_track_lift.py` — dataset-free unit tests for the ported math
+  (TAPIR parsing, Rodrigues/`rt_to_mat4`, `normalize_coords`, depth-normals,
+  scene-norm up-alignment/centering) and the `Tracks3D`/`StaticPoints3D`
+  `check_sizes`/`filter_valid` contracts.
+
 ## [0.1.10.0] - 2026-06-15
 
 ### Added

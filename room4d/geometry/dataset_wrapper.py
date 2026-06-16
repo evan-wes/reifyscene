@@ -132,6 +132,17 @@ class DatasetGeometryInitializer(GeometryInitializer):
         with Image.open(self.rgb_dir / f"{frame_name}.png") as img:
             return np.asarray(img.convert("RGB"), dtype=np.uint8)
 
+    def load_fg_mask(self, frame_name: str) -> np.ndarray:
+        """Foreground (dynamic-object) mask (HxW float in [0, 1]) for a frame.
+
+        DyCheck/SoM sequences ship Track-Anything masks under
+        ``flow3d_preprocessed/track_anything/{factor}x/``; 1 = foreground. Used
+        by the native motion initializer to split fg trajectories from bg points.
+        """
+        path = self.dataset_root / "flow3d_preprocessed" / "track_anything" / f"{self.factor}x" / f"{frame_name}.png"
+        with Image.open(path) as img:
+            return np.asarray(img.convert("L"), dtype=np.float32) / 255.0
+
     def load_covisible(self, frame_name: str, split: str = "val") -> np.ndarray:
         """Co-visibility mask (HxW bool) for a held-out frame, True = covisible.
 
