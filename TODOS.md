@@ -111,9 +111,23 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
 
 **What:** PR 4's dynamic init is borrowed from SoM (`scripts/borrow_som_motion_init.py`
 runs SoM's cuML-clustering + Procrustes track init in the reference env and dumps
-a bundle). Implement a native room4d `MotionInitializer` backend (lift borrowed
-2D tracks, cluster without cuML, Procrustes) behind the existing
-`render/gaussian4d/motion_init.py` seam.
+a bundle). Replace it with a native room4d `MotionInitializer` behind the existing
+`render/gaussian4d/motion_init.py` seam. Split into two PRs:
+
+- **PR-A — track-lifting bridge: DONE (v0.1.11.0).** `room4d/lifting/native_track_lift.py`
+  ports SoM's lift natively (TAPIR parse, scene-norm, `get_tracks_3d`,
+  `get_bkgd_points`) onto `DatasetGeometryInitializer`, from aligned inverse-depth
+  + COLMAP-refined cameras. Reproduces the borrowed frame on paper-windmill to
+  <1% (rotation 3.9e-8, scale 0.4%, track count 0.1%). Validated by
+  `scripts/check_native_lift.py`. Only the 2D tracker output is still borrowed.
+- **PR-B — clustering + Procrustes + init (NEXT).** Consume `Tracks3D` /
+  `StaticPoints3D`: pick `cano_t`, cluster trajectories (sklearn KMeans on
+  velocity dirs — no cuML), per-cluster/per-frame weighted Procrustes →
+  `MotionBases` + `motion_coefs`, then `init_fg_from_tracks_3d` / `init_bg` →
+  `DynamicScene`. Expose as `NativeMotionInitializer` returning the same
+  `(DynamicScene, cameras)` shape as `load_borrowed_init`; wire a `--native` path
+  into `run_render_proof.py dynamic` and confirm masked mPSNR ≈ 20.7.
+
 **Why:** the borrow is a stopgap; the dynamic init should be room4d's own, like
 every other stage. **Priority:** P2.
 
