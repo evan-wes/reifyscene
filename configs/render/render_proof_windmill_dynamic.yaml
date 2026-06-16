@@ -33,3 +33,10 @@ render_proof:
     lpips_net: alex
     max_eval_frames: null
     compare_to: null
+
+  flythrough:                 # render flythrough.mp4 along a hand-authored path
+    enabled: true
+    path: orbit               # orbit (near-trajectory arc) | replay (input cameras)
+    num_frames: 120
+    fps: 24
+    arc_degrees: 90.0         # orbit sweep; kept near the input trajectory

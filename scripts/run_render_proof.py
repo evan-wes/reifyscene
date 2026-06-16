@@ -39,7 +39,9 @@ from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
     write_record,
 )
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from room4d.render.camera_paths import orbit_cameras
 from room4d.render.eval.novel_view import score_masked_dynamic_views, score_masked_novel_views
+from room4d.render.export import write_video
 from room4d.render.gaussian4d.densify import DensifyConfig
 from room4d.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
 from room4d.render.gaussian4d.gaussian_field import GaussianField
@@ -351,6 +353,56 @@ def cmd_dynamic(args) -> None:
         compare_to = args.compare_to or bm.get("compare_to")
         if compare_to:
             compare(compare_to, bench_path)
+
+    # Flythrough: render the dynamic scene along a hand-authored path while time
+    # advances, and encode flythrough.mp4 (the renderer-track deliverable).
+    fly = cfg.get("flythrough", {}) or {}
+    if fly.get("enabled", True):
+        fps = int(fly.get("fps", 24))
+        num = int(fly.get("num_frames", 120))
+        with torch.no_grad():
+            center = scene.cloud_at(0).means.mean(dim=0).cpu().numpy()
+        centers, ups = [], []
+        for c in cams["train"]:
+            rot, trans = c.w2c[:3, :3].astype(np.float32), c.w2c[:3, 3].astype(np.float32)
+            centers.append(-rot.T @ trans)
+            ups.append(rot.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32))
+        centers = np.stack(centers)
+        up = np.mean(ups, axis=0)
+        radius = float(np.mean(np.linalg.norm(centers - center, axis=1)))
+        start_dir = np.mean(centers, axis=0) - center
+
+        ref = cams["train"][len(cams["train"]) // 2]
+        K = ref.K.astype(np.float32).copy()
+        K[:2] *= k_scale
+        sample = backend.load_rgb(cams["train"][0].frame_name)
+        height, width = sample.shape[:2]
+
+        if fly.get("path", "orbit") == "replay":
+            path = []
+            for c in cams["train"]:
+                rot, trans = c.w2c[:3, :3].astype(np.float32), c.w2c[:3, 3].astype(np.float32)
+                eye = -rot.T @ trans
+                path.append({
+                    "eye": eye.tolist(),
+                    "target": (eye + rot.T @ np.array([0.0, 0.0, 1.0], dtype=np.float32)).tolist(),
+                    "up": (rot.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32)).tolist(),
+                })
+        else:
+            path = orbit_cameras(center, radius, num, up=up, start_dir=start_dir, arc_degrees=float(fly.get("arc_degrees", 90.0)))
+
+        print(f"flythrough: rendering {len(path)} frames ({fly.get('path', 'orbit')} path)...")
+        frames = []
+        with torch.no_grad():
+            for i, pose in enumerate(path):
+                time_id = int(round(i / max(len(path) - 1, 1) * (scene.num_frames - 1)))
+                camera = RenderCamera.from_look_at(pose["eye"], pose["target"], pose["up"], width, height, intrinsics=K)
+                cloud = scene.cloud_at(time_id)
+                out = rasterizer.rasterize(cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera)
+                frames.append(np.clip(out.rgb.cpu().numpy() * 255.0, 0, 255).astype(np.uint8))
+        fly_path = write_video(frames, out_dir / "flythrough.mp4", fps=fps)
+        summary["flythrough"] = {"path": fly.get("path", "orbit"), "frames": len(frames), "fps": fps}
+        print(f"  flythrough -> {fly_path}")
 
     (out_dir / "dynamic_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"summary -> {out_dir / 'dynamic_summary.json'}")
