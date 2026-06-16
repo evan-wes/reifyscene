@@ -13,7 +13,9 @@ from typing import Callable
 
 import torch
 
-from room4d.render.gaussian4d.dynamic_field import DynamicScene
+from room4d.render.gaussian4d.densify import DensificationController, DensifyConfig, compute_scene_extent
+from room4d.render.gaussian4d.dynamic_field import FG_PARAM_NAMES, DynamicScene
+from room4d.render.gaussian4d.gaussian_field import PARAM_NAMES
 from room4d.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_bchw
 from room4d.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 
@@ -44,12 +46,38 @@ class DynamicTrainConfig:
 class DynamicGaussianTrainer:
     """Optimize a DynamicScene against (camera, time, gt) views."""
 
-    def __init__(self, scene: DynamicScene, cfg: DynamicTrainConfig, *, device: str = "cuda", rasterizer=None) -> None:
+    def __init__(
+        self,
+        scene: DynamicScene,
+        cfg: DynamicTrainConfig,
+        densify_cfg: DensifyConfig | None = None,
+        *,
+        device: str = "cuda",
+        rasterizer=None,
+    ) -> None:
         self.cfg = cfg
         self.device = device
         self.scene = scene.to(device)
-        self.rasterizer = rasterizer or build_rasterizer({"device": device})
+        self.rasterizer = rasterizer or build_rasterizer({"device": device, "absgrad": (densify_cfg or DensifyConfig()).absgrad})
         self.optimizer = self._build_optimizer()
+
+        # One densification controller per field (foreground grows motion_coefs
+        # too), both driven by the same combined-cloud telemetry. Standard 3DGS
+        # adaptive density control, applied to fg + bg as in Shape-of-Motion.
+        self.densify_cfg = densify_cfg or DensifyConfig(enabled=False)
+        scene_extent = compute_scene_extent(scene.cloud_at(0).means.detach())
+        self.fg_ctrl = DensificationController(
+            self.scene.fg, self.optimizer, self.densify_cfg, scene_extent,
+            param_names=FG_PARAM_NAMES, group_prefix="fg.",
+        )
+        self.bg_ctrl = (
+            DensificationController(
+                self.scene.bg, self.optimizer, self.densify_cfg, scene_extent,
+                param_names=PARAM_NAMES, group_prefix="bg.",
+            )
+            if self.scene.bg is not None
+            else None
+        )
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         c = self.cfg
@@ -94,21 +122,30 @@ class DynamicGaussianTrainer:
 
         for step in range(1, self.cfg.iters + 1):
             camera, gt, time_id = train_views[int(torch.randint(n, (1,), generator=gen).item())]
+            n_fg = self.scene.fg.num_gaussians
+            n_bg = self.scene.bg.num_gaussians if self.scene.bg is not None else 0
             cloud = self.scene.cloud_at(time_id)
             out = self.rasterizer.rasterize(
-                cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera
+                cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera,
+                with_telemetry=self.densify_cfg.enabled,
             )
             photo, l1 = self._photometric(out.rgb, gt)
             loss = photo + self.cfg.lambda_smooth * self.scene.motion_smoothness()
 
             loss.backward()
+            self.fg_ctrl.after_backward(out, (0, n_fg))
+            if self.bg_ctrl is not None:
+                self.bg_ctrl.after_backward(out, (n_fg, n_fg + n_bg))
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
+            self.fg_ctrl.after_step(step)
+            if self.bg_ctrl is not None:
+                self.bg_ctrl.after_step(step)
 
             if on_log is not None and (step % self.cfg.log_every == 0 or step == 1):
                 with torch.no_grad():
                     psnr = image_psnr(out.rgb.detach().clamp(0, 1), gt)
-                on_log({"step": step, "loss": float(loss.detach()), "l1": l1, "psnr": psnr})
+                on_log({"step": step, "loss": float(loss.detach()), "l1": l1, "psnr": psnr, "num_gaussians": self.scene.num_gaussians})
 
         return self.scene
 

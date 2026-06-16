@@ -132,3 +132,42 @@ def test_load_borrowed_init_roundtrip(tmp_path) -> None:
     assert scene.cloud_at(1).means.shape[0] == 8
     rc = cams["val"][0].render_camera(64, 48, k_scale=0.5)
     assert rc.width == 64 and abs(float(rc.K[0, 0]) - 1.0) < 1e-5  # fx 2.0 * 0.5
+
+
+def test_dynamic_densification_grows_motion_coefs() -> None:
+    from room4d.render.gaussian4d.densify import DensificationController, DensifyConfig
+    from room4d.render.gaussian4d.dynamic_field import FG_PARAM_NAMES
+
+    n, k = 10, 3
+    quats = torch.zeros(n, 4)
+    quats[:, 0] = 1.0
+    field = DynamicGaussianField(
+        means=torch.randn(n, 3), quats=quats,
+        log_scales=torch.full((n, 3), float(torch.log(torch.tensor(0.005)))),  # small -> clone
+        logit_opacities=logit(torch.full((n,), 0.9)),
+        colors_logit=logit(torch.rand(n, 3).clamp(0.1, 0.9)),
+        motion_coefs=torch.zeros(n, k),
+    )
+    opt = torch.optim.Adam(
+        [{"params": [field.get_param(nm)], "lr": 1e-3, "name": "fg." + nm} for nm in FG_PARAM_NAMES], eps=1e-15
+    )
+    sum(p.sum() for p in field.parameters()).backward()
+    opt.step()
+    opt.zero_grad(set_to_none=True)
+
+    ctrl = DensificationController(
+        field, opt, DensifyConfig(grad2d_threshold=0.0, scene_extent=1.0),
+        scene_extent=1.0, param_names=FG_PARAM_NAMES, group_prefix="fg.",
+    )
+    ctrl.grad2d_accum = torch.ones(n)
+    ctrl.count = torch.ones(n)
+    stats = ctrl.densify_and_prune(step=600)
+
+    assert stats["cloned"] == n and field.num_gaussians == 2 * n
+    assert field.motion_coefs.shape == (2 * n, k)  # grown in lockstep
+    for group in opt.param_groups:
+        if group["name"] == "fg.motion_coefs":
+            assert opt.state[group["params"][0]]["exp_avg"].shape[0] == 2 * n
+    # optimizer still steps on the grown params
+    sum(p.sum() for p in field.parameters()).backward()
+    opt.step()

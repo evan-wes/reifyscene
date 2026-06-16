@@ -298,8 +298,9 @@ def cmd_dynamic(args) -> None:
     print(f"train views: {len(train_views)}; training {iters} iters")
 
     train_cfg = DynamicTrainConfig.from_cfg({**cfg["dynamic"], "iters": iters})
-    trainer = DynamicGaussianTrainer(scene, train_cfg, device=device, rasterizer=rasterizer)
-    trainer.fit(train_views, on_log=lambda r: print(f"  iter {r['step']:>6}  loss={r['loss']:.4f}  psnr={r['psnr']:.2f}"))
+    densify_cfg = DensifyConfig.from_cfg(cfg.get("densify"))
+    trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=device, rasterizer=rasterizer)
+    trainer.fit(train_views, on_log=lambda r: print(f"  iter {r['step']:>6}  loss={r['loss']:.4f}  psnr={r['psnr']:.2f}  N={r['num_gaussians']}"))
 
     summary = {"mode": "dynamic", "iters": iters, "final_gaussians": scene.num_gaussians, "checkpoint3": []}
 

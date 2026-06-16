@@ -26,6 +26,24 @@ render_proof:
     random_seed: 0
     log_every: 250
 
+  densify:                    # standard 3DGS adaptive density control (fg + bg)
+    enabled: true
+    start_iter: 500
+    stop_iter: 4000
+    refine_every: 100
+    reset_opacity_every: 3000
+    pause_refine_after_reset: 0
+    grad2d_threshold: 0.0002
+    grow_scale3d: 0.01
+    prune_opacity: 0.005
+    prune_scale3d: 0.1
+    split_count: 2
+    split_scale_divider: 1.6
+    reset_opacity_value: 0.01
+    absgrad: false
+    scene_extent: null
+    max_gaussians: 4000000
+
   benchmark:
     enabled: true
     dataset_format: iphone

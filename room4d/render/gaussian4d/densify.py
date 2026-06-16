@@ -79,10 +79,18 @@ class DensificationController:
         optimizer: torch.optim.Optimizer,
         cfg: DensifyConfig,
         scene_extent: float | None = None,
+        *,
+        param_names: tuple[str, ...] = PARAM_NAMES,
+        group_prefix: str = "",
     ) -> None:
         self.field = field
         self.optimizer = optimizer
         self.cfg = cfg
+        # The field's optimizable params + the optimizer-group-name prefix. The
+        # dynamic foreground adds "motion_coefs" and uses "fg."/"bg." group names
+        # so one combined optimizer can host both fields plus the motion bases.
+        self.param_names = tuple(param_names)
+        self.group_prefix = str(group_prefix)
         self.scene_extent = float(
             cfg.scene_extent if cfg.scene_extent is not None
             else (scene_extent if scene_extent is not None else compute_scene_extent(field.means.detach()))
@@ -98,8 +106,13 @@ class DensificationController:
         self.count = torch.zeros(n, device=dev)
 
     @torch.no_grad()
-    def after_backward(self, output: Any) -> None:
-        """Accumulate per-Gaussian screen-space gradient from a RasterOutput."""
+    def after_backward(self, output: Any, gaussian_range: tuple[int, int] | None = None) -> None:
+        """Accumulate per-Gaussian screen-space gradient from a RasterOutput.
+
+        ``gaussian_range`` selects this field's slice of a combined-cloud
+        telemetry tensor (e.g. (0, n_fg) for foreground, (n_fg, n_fg + n_bg) for
+        background); None means the telemetry is this field's alone.
+        """
         if not self.cfg.enabled or output.means2d is None:
             return
         grad = getattr(output.means2d, "absgrad", None) if self.cfg.absgrad else output.means2d.grad
@@ -117,7 +130,7 @@ class DensificationController:
 
         radii = output.radii
         if radii is None:
-            visible = gnorm > 0
+            radii_flat = None
         else:
             radii = radii.detach()
             if radii.dim() == 3:
@@ -126,23 +139,30 @@ class DensificationController:
                 radii = radii.amax(dim=-1)
             elif radii.dim() == 2:
                 radii = radii[0]
-            visible = radii.reshape(-1) > 0
+            radii_flat = radii.reshape(-1)
 
+        if gaussian_range is not None:
+            start, end = gaussian_range
+            gnorm = gnorm[start:end]
+            radii_flat = radii_flat[start:end] if radii_flat is not None else None
+
+        visible = (radii_flat > 0) if radii_flat is not None else (gnorm > 0)
         self.grad2d_accum[visible] += gnorm[visible]
         self.count[visible] += 1
 
     # -- optimizer-state surgery ------------------------------------------
 
     def _optimizer_op(self, build_fn) -> None:
+        group_to_param = {self.group_prefix + p: p for p in self.param_names}
         for group in self.optimizer.param_groups:
-            name = group.get("name")
-            if name not in PARAM_NAMES:
+            pname = group_to_param.get(group.get("name"))
+            if pname is None:
                 continue
             old = group["params"][0]
             state = self.optimizer.state.get(old, {})
             exp_avg = state.get("exp_avg")
             exp_avg_sq = state.get("exp_avg_sq")
-            new_tensor, new_ea, new_eas = build_fn(name, old, exp_avg, exp_avg_sq)
+            new_tensor, new_ea, new_eas = build_fn(pname, old, exp_avg, exp_avg_sq)
             new_param = nn.Parameter(new_tensor.contiguous().detach().requires_grad_(True))
             if old in self.optimizer.state:
                 del self.optimizer.state[old]
@@ -153,7 +173,7 @@ class DensificationController:
                     "exp_avg_sq": new_eas,
                 }
             group["params"][0] = new_param
-            self.field.set_param(name, new_param)
+            self.field.set_param(pname, new_param)
 
     def _append(self, keep_orig_mask: torch.Tensor, appended: dict[str, torch.Tensor]) -> None:
         def build(name, old, exp_avg, exp_avg_sq):
@@ -182,7 +202,8 @@ class DensificationController:
 
     def _clone_and_split_rows(self, clone_mask: torch.Tensor, split_mask: torch.Tensor) -> dict[str, torch.Tensor]:
         field = self.field
-        rows: dict[str, list[torch.Tensor]] = {name: [field.get_param(name).detach()[clone_mask]] for name in PARAM_NAMES}
+        # Clones are straight copies of every param (standard 3DGS).
+        rows: dict[str, list[torch.Tensor]] = {name: [field.get_param(name).detach()[clone_mask]] for name in self.param_names}
 
         n_split = int(split_mask.sum())
         if n_split > 0:
@@ -193,18 +214,23 @@ class DensificationController:
             samples = torch.randn((n_split, k, 3), device=field.device) * scales[:, None, :]
             rot = _quat_to_rotmat(quats)                       # (n, 3, 3)
             offsets = torch.einsum("nij,nkj->nki", rot, samples)
-            child = {
-                "means": (means[:, None, :] + offsets).reshape(n_split * k, 3),
-                "log_scales": torch.log((scales / self.cfg.split_scale_divider).clamp_min(1e-8))[:, None, :]
-                .repeat(1, k, 1).reshape(n_split * k, 3),
-                "quats": quats[:, None, :].repeat(1, k, 1).reshape(n_split * k, 4),
-                "logit_opacities": field.logit_opacities.detach()[split_mask][:, None].repeat(1, k).reshape(n_split * k),
-                "colors_logit": field.colors_logit.detach()[split_mask][:, None, :].repeat(1, k, 1).reshape(n_split * k, 3),
-            }
-            for name in PARAM_NAMES:
-                rows[name].append(child[name])
+            split_means = (means[:, None, :] + offsets).reshape(n_split * k, 3)
+            split_log_scales = (
+                torch.log((scales / self.cfg.split_scale_divider).clamp_min(1e-8))[:, None, :]
+                .repeat(1, k, 1).reshape(n_split * k, 3)
+            )
+            for name in self.param_names:
+                if name == "means":
+                    rows[name].append(split_means)
+                elif name == "log_scales":
+                    rows[name].append(split_log_scales)
+                else:
+                    # All other params (quats, opacities, colors, motion_coefs, ...)
+                    # are inherited from the parent — the standard 3DGS split.
+                    parent = field.get_param(name).detach()[split_mask]
+                    rows[name].append(parent[:, None].repeat(1, k, *([1] * (parent.dim() - 1))).reshape(n_split * k, *parent.shape[1:]))
 
-        return {name: torch.cat(rows[name], dim=0) for name in PARAM_NAMES}
+        return {name: torch.cat(rows[name], dim=0) for name in self.param_names}
 
     @torch.no_grad()
     def densify_and_prune(self, step: int) -> dict[str, int]:
