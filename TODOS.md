@@ -96,6 +96,30 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
   paper-windmill, 419 val frames): masked mPSNR 18.51 vs 19.53 — the residual
   gap is motion, closed by PR 4. (Satisfies the former "emit
   reference_benchmark_v1" P2 item.)
+- **PR 4 landed (v0.1.8.0):** dynamic Gaussian branch (SoM SE(3) motion model
+  ported) — `transforms`/`motion`/`dynamic_field`/`dynamic_trainer`, the
+  `entity_id` channel, `run_render_proof.py dynamic`. Checkpoint 3 PASSES:
+  dynamic train-view 25.4 dB (windmill reconstructed); masked NV mPSNR 20.71
+  (+2.2 dB over the static 18.51) — beats SoM on all three masked metrics.
+  Remaining: PR 5 (CLI flythrough).
+
+### Follow-up: own motion initializer (replace the borrowed SoM init)
+
+**What:** PR 4's dynamic init is borrowed from SoM (`scripts/borrow_som_motion_init.py`
+runs SoM's cuML-clustering + Procrustes track init in the reference env and dumps
+a bundle). Implement a native room4d `MotionInitializer` backend (lift borrowed
+2D tracks, cluster without cuML, Procrustes) behind the existing
+`render/gaussian4d/motion_init.py` seam.
+**Why:** the borrow is a stopgap; the dynamic init should be room4d's own, like
+every other stage. **Priority:** P2.
+
+### Follow-up: dynamic densification
+
+**What:** the dynamic trainer (v1) refines the fixed-size borrowed init without
+densification. Extend `DensificationController` to grow/prune the fg field
+(incl. `motion_coefs`) + bg in lockstep, sliced from the combined-cloud telemetry.
+**Why:** densification is part of the proven recipe and should lift dynamic
+quality further. **Priority:** P2.
 
 ## Completed
 

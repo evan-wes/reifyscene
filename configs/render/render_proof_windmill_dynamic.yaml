@@ -1,0 +1,35 @@
+# Dynamic render-proof config for DyCheck paper-windmill (Checkpoint 3).
+# Trains a borrowed SoM motion init (fg deformed by SE(3) motion bases + static
+# bg). The borrowed cameras are full-res; rendering at factor 2 scales K by 1/2,
+# reusing the factor-2 covisible masks (directly comparable to the static
+# Checkpoint-2 number, 18.51).
+render_proof:
+  device: cuda
+
+  dataset:
+    factor: 2                 # render/eval factor; borrowed K scaled by 1/factor
+    train_cameras: ["0"]
+    eval_cameras: ["1", "2"]
+
+  dynamic:
+    iters: 3000
+    lambda_l1: 0.8
+    lambda_ssim: 0.2
+    lambda_smooth: 1.0        # temporal motion-bases smoothness
+    lr_means: 1.6e-4
+    lr_scales: 5.0e-3
+    lr_quats: 1.0e-3
+    lr_opacities: 5.0e-2
+    lr_colors: 2.5e-3
+    lr_motion_coefs: 1.0e-2
+    lr_motion_bases: 1.6e-4
+    random_seed: 0
+    log_every: 250
+
+  benchmark:
+    enabled: true
+    dataset_format: iphone
+    method_name: room4d-dynamic
+    lpips_net: alex
+    max_eval_frames: null
+    compare_to: null
