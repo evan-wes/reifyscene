@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.9.0] - 2026-06-15
+
+### Added
+- CLI flythrough (Renderer Track 2, PR 5) — renders the trained dynamic scene
+  along a hand-authored camera path while time advances and encodes
+  `flythrough.mp4`. This completes the v1 renderer track (design-doc steps 8–11):
+  borrowed dataset geometry → static trainer → masked-NVS benchmark vs SoM →
+  dynamic SE(3) branch → free-viewpoint video. Validated: a 120-frame orbit
+  flythrough of paper-windmill renders the scene (and the spinning windmill)
+  coherently from novel viewpoints.
+- `render/camera_paths.py::orbit_cameras` — a standalone near-trajectory orbit
+  arc (center/radius/up derived from the input cameras so the path stays near
+  the input trajectory, where monocular 4D is stable, rather than orbiting
+  behind the scene). `replay` (the input cameras) is a config alternative.
+- `render/export.py::write_video` — RGB-frames → mp4 via OpenCV (`mp4v`;
+  imageio/imageio-ffmpeg aren't in the env).
+- `run_render_proof.py dynamic` now emits `flythrough.mp4` after Checkpoint 3,
+  driven by a `flythrough:` config section (path/num_frames/fps/arc_degrees).
+
+### Tests
+- New `tests/test_flythrough.py` (3 CPU tests): orbit-camera geometry
+  (distance-from-center, target/up), single-frame edge case, and mp4 encoding.
+
 ## [0.1.8.0] - 2026-06-15
 
 ### Added

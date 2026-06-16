@@ -101,7 +101,11 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
   `entity_id` channel, `run_render_proof.py dynamic`. Checkpoint 3 PASSES:
   dynamic train-view 25.4 dB (windmill reconstructed); masked NV mPSNR 20.71
   (+2.2 dB over the static 18.51) — beats SoM on all three masked metrics.
-  Remaining: PR 5 (CLI flythrough).
+- **PR 5 landed (v0.1.9.0):** CLI flythrough — `orbit_cameras` (near-trajectory
+  arc) + `write_video` (cv2 mp4); `run_render_proof.py dynamic` emits
+  `flythrough.mp4`. **Renderer track (design-doc steps 8–11) COMPLETE.** Next
+  phase is step 12 (swap in room4d's own VGGT/CoTracker, one backend at a time)
+  plus the two PR-4 follow-ups above (own motion init, dynamic densification).
 
 ### Follow-up: own motion initializer (replace the borrowed SoM init)
 
