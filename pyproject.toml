@@ -40,6 +40,10 @@ vision = [
   "torchvision>=0.17",
   "Pillow>=10.0",
   "huggingface_hub[cli]>=0.23",
+  # einshape is required by the ported tapnet (bootstapir) point-tracker model
+  # in room4d/tracking/tapnet/ — kept as a real dep so that port stays
+  # byte-faithful to Shape-of-Motion's preproc/tapnet_torch reference.
+  "einshape>=1.0",
 ]
 geometry = [
   "scipy>=1.13",
@@ -72,6 +76,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored byte-for-byte from DeepMind's tapnet torch port (kept re-diffable
+# against upstream); not linted to our style.
+extend-exclude = ["room4d/tracking/tapnet"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

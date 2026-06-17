@@ -7,6 +7,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.13.0] - 2026-06-17
+
+### Added
+- Native 2D point tracker — closes the **last borrowed input** in the motion-init
+  path (only the dataset's RGB/depth/poses remain dataset-provided). A faithful
+  port of Shape-of-Motion's `preproc/compute_tracks_torch.py`, wired as a real
+  plug-and-play tracker backend alongside the CoTracker wrapper:
+  - `room4d/tracking/tapnet/` vendors the DeepMind TAPIR torch model **byte-for-byte**
+    (re-diffable against upstream; Apache-2.0 headers kept). `einshape` is added to
+    the `vision` extra + `scripts/locks/room4d.lock` specifically to keep the port
+    byte-faithful. `scripts/fetch_tapir_checkpoint.sh` fetches the bootstapir/tapir
+    checkpoints (idempotent, size-guarded) to `data/tapnet/checkpoints/`.
+  - `room4d/tracking/tapir_wrapper.py::TAPIRWrapper` is now a real `PointTracker`
+    backend (model_type bootstapir|tapir): per-frame foreground-masked query grid
+    (grid_size 4, SoM's value), 256×256 model input, all-pairs tracking to
+    `(x, y, occ_logit, dist_logit)`.
+  - `TrackArtifact` gains a first-class all-pairs payload (`room4d/tracking/all_pairs.py::AllPairsTracks`)
+    with SoM `2d_tracks/<name_i>_<name_j>.npy` save/load and a `write_2d_tracks`
+    helper. The extension is additive — the single-query CoTracker/scaffold path is
+    unaffected.
+  - `lift_tracks_3d` / `build_native_init_inputs` / `NativeMotionInitializer` /
+    `build_native_init` gained a `tracks_dir` override; `generate_native_tracks`
+    bridges the train-split frames+masks to the tracker. `run_render_proof.py dynamic
+    --own-tracker [--own-tracks-dir DIR]` produces the init with no borrowed tracks,
+    and `scripts/compute_tracks_native.py` dumps the tracks standalone.
+- Validated on paper-windmill (factor 2): the native tracker reproduces the shipped
+  tracks' foreground seeding **exactly** (1739/1739 diagonal query coords) and agrees
+  with the shipped tracks to ~1–2px on nearby frames (looser over long temporal gaps,
+  as expected for two independent tracker runs on a fast-moving scene). The bar that
+  matters is end-to-end: masked mPSNR **20.70** (mSSIM 0.668, mLPIPS 0.161, 419 val
+  frames) vs borrowed-init 20.68 / native-borrowed-tracks 20.74 — parity with no
+  borrowed tracks.
+
+### Tests
+- `tests/test_tapir_wrapper.py` — `AllPairsTracks` shape validation / filename slicing
+  / round-trip; `TrackArtifact` all-pairs save/load (+ empty path unaffected) and
+  `write_2d_tracks` stream selection; wrapper checkpoint-path resolution, config
+  defaults, and missing-checkpoint error; plus a GPU+checkpoint-gated model forward
+  (exact FG-seeded diagonal coords + finite occ/dist logits).
+
 ## [0.1.12.0] - 2026-06-16
 
 ### Added

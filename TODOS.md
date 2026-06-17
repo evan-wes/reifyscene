@@ -133,14 +133,22 @@ a bundle). Replace it with a native room4d `MotionInitializer` behind the existi
 **Why:** the borrow is a stopgap; the dynamic init is now room4d's own, like
 every other stage. **Status:** DONE.
 
-### Follow-up: own 2D point tracker (last borrowed init input)
+### Follow-up: own 2D point tracker — DONE (v0.1.13.0)
 
-**What:** The native motion init (v0.1.11.0 + v0.1.12.0) still loads borrowed 2D
-tracks from `flow3d_preprocessed/2d_tracks/`. Replace with room4d's own tracker
-(e.g. a TAPIR/CoTracker-style pass) producing the same `(x, y, occ, dist)` per
-(query, target) frame pair that `native_track_lift.lift_tracks_3d` consumes.
-**Why:** closes the final borrowed dependency in the motion-init path.
-**Priority:** P2.
+room4d's own tracker now produces the 2D tracks the native motion init consumes —
+the last borrowed input in the motion-init path is closed. `room4d/tracking/tapnet/`
+vendors the DeepMind TAPIR torch model byte-for-byte and `TAPIRWrapper` (a real
+`PointTracker` backend, sibling to the CoTracker wrapper) faithfully ports SoM's
+`compute_tracks_torch.py` all-pairs FG-seeded loop to `(x, y, occ, dist)`.
+`TrackArtifact` was extended (additively) with a first-class `AllPairsTracks`
+payload + SoM `2d_tracks/{i}_{j}.npy` save/load; `lift_tracks_3d` and friends gained
+a `tracks_dir` override, and `run_render_proof.py dynamic --own-tracker` (or
+`scripts/compute_tracks_native.py`) runs the whole init with no borrowed tracks.
+On paper-windmill the native tracker reproduces the shipped FG seeding exactly
+(1739/1739 diagonal coords); e2e masked mPSNR **20.70** (mSSIM 0.668, mLPIPS 0.161)
+matches the borrowed/native quality bar (borrowed 20.68 / native-borrowed-tracks
+20.74). The remaining dataset-provided inputs (RGB/depth/poses) are dataset ground
+truth, not borrowed reconstruction.
 
 ### Follow-up: dynamic densification — DONE (v0.1.10.0, PR 6)
 
