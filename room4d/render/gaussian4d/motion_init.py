@@ -1,9 +1,16 @@
-"""Load a motion-init bundle into a DynamicScene.
+"""Build/load a motion-init bundle into a DynamicScene.
 
-This is the swappable ``MotionInitializer`` seam. Today the only backend loads a
-bundle dumped by ``scripts/borrow_som_motion_init.py`` (SoM's track-based init —
-a stopgap). A native room4d motion initializer would implement the same
-load-shape and is tracked follow-up work.
+This is the swappable ``MotionInitializer`` seam, with two backends that return
+the same ``(DynamicScene, {"train"/"val": [BorrowedCamera]})`` shape:
+
+- :func:`load_borrowed_init` loads a bundle dumped by
+  ``scripts/borrow_som_motion_init.py`` (SoM's track-based init run in the
+  reference env — the original stopgap).
+- :class:`NativeMotionInitializer` builds the same scene natively from a
+  DyCheck-format sequence: room4d lifts the 2D tracks to 3D (PR-A,
+  ``room4d.lifting.native_track_lift``) and runs its own clustering + Procrustes
+  + Gaussian placement (``room4d.render.gaussian4d.procrustes_init``). The only
+  borrowed input left is the 2D point tracker output.
 """
 
 from __future__ import annotations
@@ -73,3 +80,80 @@ def load_borrowed_init(npz_path: str, device: str = "cuda") -> tuple[DynamicScen
     scene = DynamicScene(fg, bases, bg).to(device)
     cameras = {split: _cameras(data, split) for split in ("train", "val")}
     return scene, cameras
+
+
+def _to_borrowed_cameras(records) -> list[BorrowedCamera]:
+    """Adapt PR-A ``CameraRecords`` -> the ``BorrowedCamera`` list the render path expects."""
+    w2cs = records.w2cs.detach().cpu().numpy()
+    ks = records.Ks.detach().cpu().numpy()
+    time_ids = records.time_ids.detach().cpu().numpy()
+    return [
+        BorrowedCamera(records.frame_names[i], int(time_ids[i]), w2cs[i], ks[i])
+        for i in range(len(records.frame_names))
+    ]
+
+
+@dataclass
+class NativeMotionInitializer:
+    """Build a :class:`DynamicScene` natively from a DyCheck-format sequence.
+
+    room4d lifts the borrowed 2D tracks to 3D (PR-A) and runs its own
+    clustering + Procrustes + Gaussian placement (PR-B), producing the same
+    bundle shape as :func:`load_borrowed_init`. Cameras are full-res (factor 1,
+    matching the borrow), so the render-proof's ``k_scale`` handling is unchanged.
+
+    Lifting + init run on CPU (the lift holds all full-res frames in memory and
+    KMeans/kNN are CPU anyway); only the assembled scene is moved to ``device``.
+    """
+
+    dataset_root: str
+    factor: int = 1
+    num_fg: int = 40_000
+    num_bg: int = 100_000
+    num_bases: int = 10
+    depth_type: str = "depth_anything_colmap"
+    camera_type: str = "refined"
+    seed: int | None = None
+
+    def build(self, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
+        # Lazy imports: only the native path needs the lift / sklearn machinery.
+        from room4d.lifting.native_track_lift import build_native_init_inputs
+        from room4d.render.gaussian4d.procrustes_init import (
+            init_bg,
+            init_fg_from_tracks_3d,
+            init_motion_params_with_procrustes,
+        )
+
+        tracks, bg_points, cameras, _norm = build_native_init_inputs(
+            self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
+            depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
+        )
+        # Canonical frame = the one where the most tracks are visible.
+        cano_t = int(tracks.visibles.sum(dim=0).argmax().item())
+        bases, motion_coefs, tracks = init_motion_params_with_procrustes(
+            tracks, self.num_bases, cano_t, seed=self.seed
+        )
+        fg = init_fg_from_tracks_3d(cano_t, tracks, motion_coefs)
+        bg = init_bg(bg_points)
+        scene = DynamicScene(fg, bases, bg).to(device)
+        cams = {split: _to_borrowed_cameras(records) for split, records in cameras.items()}
+        return scene, cams
+
+
+def build_native_init(
+    dataset_root: str,
+    *,
+    factor: int = 1,
+    num_fg: int = 40_000,
+    num_bg: int = 100_000,
+    num_bases: int = 10,
+    depth_type: str = "depth_anything_colmap",
+    camera_type: str = "refined",
+    device: str = "cuda",
+    seed: int | None = None,
+) -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
+    """Convenience wrapper around :class:`NativeMotionInitializer`.build."""
+    return NativeMotionInitializer(
+        dataset_root=dataset_root, factor=factor, num_fg=num_fg, num_bg=num_bg,
+        num_bases=num_bases, depth_type=depth_type, camera_type=camera_type, seed=seed,
+    ).build(device=device)

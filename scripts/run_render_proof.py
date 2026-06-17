@@ -46,7 +46,7 @@ from room4d.render.gaussian4d.densify import DensifyConfig
 from room4d.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
 from room4d.render.gaussian4d.gaussian_field import GaussianField
 from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
-from room4d.render.gaussian4d.motion_init import load_borrowed_init
+from room4d.render.gaussian4d.motion_init import build_native_init, load_borrowed_init
 from room4d.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 from room4d.render.gaussian4d.seed import seed_cloud_from_geometry
 
@@ -279,9 +279,22 @@ def cmd_dynamic(args) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    scene, cams = load_borrowed_init(args.init, device=device)
+    if args.native:
+        # Native init lifts at full res (factor 1) — 2D tracks + aligned depth
+        # ship only at 1x and the bundle is full-res like the borrow; the render
+        # factor is applied via k_scale below, exactly as for borrowed cameras.
+        scene, cams = build_native_init(
+            args.dataset_root, factor=1, num_fg=args.num_fg, num_bg=args.num_bg,
+            num_bases=args.num_bases, camera_type=args.camera_type, device=device, seed=args.seed,
+        )
+        kind = "native"
+    else:
+        if not args.init:
+            raise SystemExit("dynamic mode needs --init <bundle.npz> (or --native)")
+        scene, cams = load_borrowed_init(args.init, device=device)
+        kind = "borrowed"
     print(
-        f"borrowed init: fg={scene.fg.num_gaussians} bg={scene.bg.num_gaussians if scene.bg else 0} "
+        f"{kind} init: fg={scene.fg.num_gaussians} bg={scene.bg.num_gaussians if scene.bg else 0} "
         f"bases={scene.fg.num_bases} frames={scene.num_frames}"
     )
     backend = DatasetGeometryInitializer({"dataset_root": args.dataset_root, "factor": factor, "split": "train"})
@@ -298,7 +311,9 @@ def cmd_dynamic(args) -> None:
     print(f"train views: {len(train_views)}; training {iters} iters")
 
     train_cfg = DynamicTrainConfig.from_cfg({**cfg["dynamic"], "iters": iters})
-    densify_cfg = DensifyConfig.from_cfg(cfg.get("densify"))
+    # Schedule fields the config omits are derived from `iters` (SoM-shaped), so
+    # the opacity reset always lands with recovery + polish — never on the final step.
+    densify_cfg = DensifyConfig.from_cfg(cfg.get("densify"), max_iters=iters, num_frames=scene.num_frames)
     trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=device, rasterizer=rasterizer)
     trainer.fit(train_views, on_log=lambda r: print(f"  iter {r['step']:>6}  loss={r['loss']:.4f}  psnr={r['psnr']:.2f}  N={r['num_gaussians']}"))
 
@@ -435,9 +450,15 @@ def main() -> None:
     tr.add_argument("--compare-to", default=None, help="SoM reference_benchmark.json to --compare against")
     tr.set_defaults(func=cmd_train)
 
-    dy = sub.add_parser("dynamic", help="dynamic Gaussian training from a borrowed init (Checkpoint 3)")
+    dy = sub.add_parser("dynamic", help="dynamic Gaussian training from a borrowed or native init (Checkpoint 3)")
     dy.add_argument("--dataset-root", required=True)
-    dy.add_argument("--init", required=True, help="borrowed motion-init .npz (scripts/borrow_som_motion_init.py)")
+    dy.add_argument("--init", default=None, help="borrowed motion-init .npz (scripts/borrow_som_motion_init.py)")
+    dy.add_argument("--native", action="store_true", help="build the motion init natively instead of loading --init")
+    dy.add_argument("--num-fg", type=int, default=40_000, help="native: foreground tracks to lift")
+    dy.add_argument("--num-bg", type=int, default=100_000, help="native: background points to sample")
+    dy.add_argument("--num-bases", type=int, default=10, help="native: SE(3) motion bases (clusters)")
+    dy.add_argument("--camera-type", default="refined", choices=["refined", "original"], help="native: camera source")
+    dy.add_argument("--seed", type=int, default=None, help="native: RNG seed (track sampling + KMeans)")
     dy.add_argument("--config", default="configs/render/render_proof_windmill_dynamic.yaml")
     dy.add_argument("--iters", type=int, default=None)
     dy.add_argument("--device", default=None)
