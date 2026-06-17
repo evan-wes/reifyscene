@@ -120,16 +120,27 @@ a bundle). Replace it with a native room4d `MotionInitializer` behind the existi
   + COLMAP-refined cameras. Reproduces the borrowed frame on paper-windmill to
   <1% (rotation 3.9e-8, scale 0.4%, track count 0.1%). Validated by
   `scripts/check_native_lift.py`. Only the 2D tracker output is still borrowed.
-- **PR-B — clustering + Procrustes + init (NEXT).** Consume `Tracks3D` /
-  `StaticPoints3D`: pick `cano_t`, cluster trajectories (sklearn KMeans on
-  velocity dirs — no cuML), per-cluster/per-frame weighted Procrustes →
-  `MotionBases` + `motion_coefs`, then `init_fg_from_tracks_3d` / `init_bg` →
-  `DynamicScene`. Expose as `NativeMotionInitializer` returning the same
-  `(DynamicScene, cameras)` shape as `load_borrowed_init`; wire a `--native` path
-  into `run_render_proof.py dynamic` and confirm masked mPSNR ≈ 20.7.
+- **PR-B — clustering + Procrustes + init: DONE (v0.1.12.0).**
+  `render/gaussian4d/procrustes_init.py` ports the clustering (sklearn KMeans on
+  velocity dirs, no cuML) + per-cluster/per-frame weighted Procrustes +
+  `init_fg_from_tracks_3d` / `init_bg`; `NativeMotionInitializer` returns the same
+  `(DynamicScene, cameras)` shape as `load_borrowed_init`. Wired as
+  `run_render_proof.py dynamic --native` (+ `scripts/native_motion_init.py` npz
+  dump). Validated at the full SoM schedule (iters=5000): native masked mPSNR
+  **20.74** vs borrowed **20.68**. The only borrowed input left is the 2D tracker
+  output (own tracker = separate future work).
 
-**Why:** the borrow is a stopgap; the dynamic init should be room4d's own, like
-every other stage. **Priority:** P2.
+**Why:** the borrow is a stopgap; the dynamic init is now room4d's own, like
+every other stage. **Status:** DONE.
+
+### Follow-up: own 2D point tracker (last borrowed init input)
+
+**What:** The native motion init (v0.1.11.0 + v0.1.12.0) still loads borrowed 2D
+tracks from `flow3d_preprocessed/2d_tracks/`. Replace with room4d's own tracker
+(e.g. a TAPIR/CoTracker-style pass) producing the same `(x, y, occ, dist)` per
+(query, target) frame pair that `native_track_lift.lift_tracks_3d` consumes.
+**Why:** closes the final borrowed dependency in the motion-init path.
+**Priority:** P2.
 
 ### Follow-up: dynamic densification — DONE (v0.1.10.0, PR 6)
 

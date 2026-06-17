@@ -20,6 +20,33 @@ import torch.nn.functional as F
 from room4d.render.gaussian4d.gaussian_field import PARAM_NAMES, GaussianField, logit
 
 
+# Schedule fields that scale with the total iteration budget. Anything not set
+# explicitly in a config is derived from `iters` via `densify_schedule`.
+SCHEDULE_FIELDS = ("start_iter", "refine_every", "reset_opacity_every", "stop_iter", "pause_refine_after_reset")
+
+
+def densify_schedule(max_iters: int, *, num_frames: int, refine_every: int = 100) -> dict[str, int]:
+    """SoM-shaped densification schedule derived from the total iteration budget.
+
+    Anchored on Shape-of-Motion's 5000-step recipe (``flow3d`` OptimizerConfig) as
+    fractions of the total, so the opacity reset always lands *with recovery and a
+    polish phase after it*: ``reset(~0.6·T) < control stop(~0.8·T) < T``. This makes
+    the terminal-reset collapse (a reset on the final iteration, never recovered)
+    structurally impossible for any ``max_iters``. At ``max_iters=5000`` it returns
+    SoM's exact numbers ``{200, 100, 3000, 4000}`` (+ a post-reset densify gap of
+    ``num_frames``, as SoM does).
+    """
+    r = max(1, int(refine_every))
+    mult = lambda frac: max(r, int(round(frac * max_iters / r)) * r)
+    return {
+        "start_iter": mult(0.04),          # warmup before densifying (SoM 200/5000)
+        "refine_every": r,                 # control cadence (SoM control_every=100)
+        "reset_opacity_every": mult(0.60), # last reset at ~0.6·T (SoM 3000/5000)
+        "stop_iter": mult(0.80),           # control/densify ends at ~0.8·T (SoM 4000/5000)
+        "pause_refine_after_reset": int(num_frames),  # skip refine right after a reset
+    }
+
+
 @dataclass
 class DensifyConfig:
     enabled: bool = True
@@ -40,10 +67,38 @@ class DensifyConfig:
     max_gaussians: int | None = None  # safety cap; growth pauses at/above it
 
     @classmethod
-    def from_cfg(cls, cfg: dict | None) -> "DensifyConfig":
-        cfg = cfg or {}
+    def from_cfg(
+        cls,
+        cfg: dict | None,
+        *,
+        max_iters: int | None = None,
+        num_frames: int | None = None,
+    ) -> "DensifyConfig":
+        """Build a config; when ``max_iters`` is given, derive any schedule field
+        the config doesn't set explicitly via :func:`densify_schedule`.
+
+        Explicit config values always win over derived ones. With ``max_iters``
+        set, the resulting ``stop_iter`` must be ``< max_iters`` (a reset/densify
+        window that runs to the final iteration leaves no recovery) — otherwise a
+        ``ValueError`` is raised so the misconfiguration can't pass silently.
+        """
+        cfg = dict(cfg or {})
+        if max_iters is not None:
+            sched = densify_schedule(
+                max_iters,
+                num_frames=int(num_frames) if num_frames is not None else 1,
+                refine_every=int(cfg.get("refine_every", 100)),
+            )
+            for key in SCHEDULE_FIELDS:
+                cfg.setdefault(key, sched[key])
         fields = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in cfg.items() if k in fields})
+        inst = cls(**{k: v for k, v in cfg.items() if k in fields})
+        if inst.enabled and max_iters is not None and inst.stop_iter >= max_iters:
+            raise ValueError(
+                f"densify stop_iter ({inst.stop_iter}) must be < iters ({max_iters}); "
+                "a densify/reset window running to the final step leaves no recovery."
+            )
+        return inst
 
 
 def _quat_to_rotmat(quats: torch.Tensor) -> torch.Tensor:
@@ -286,7 +341,11 @@ class DensificationController:
         in_window = self.cfg.start_iter < step < self.cfg.stop_iter
         if in_window and step % self.cfg.refine_every == 0 and (step - self._last_reset) > self.cfg.pause_refine_after_reset:
             stats = self.densify_and_prune(step)
-        if self.cfg.reset_opacity_every > 0 and step > 0 and step % self.cfg.reset_opacity_every == 0:
+        # Opacity reset only inside the densify window: a reset must be followed by
+        # densify-prune + recovery training (both gated by `in_window`), else it
+        # just strands the scene transparent — the SoM control loop guards it the
+        # same way (`global_step < stop_control_steps`).
+        if in_window and self.cfg.reset_opacity_every > 0 and step % self.cfg.reset_opacity_every == 0:
             self.reset_opacity()
             self._last_reset = step
         return stats

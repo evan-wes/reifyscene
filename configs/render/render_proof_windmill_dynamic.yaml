@@ -12,7 +12,7 @@ render_proof:
     eval_cameras: ["1", "2"]
 
   dynamic:
-    iters: 3000
+    iters: 5000               # matches SoM's max_steps so the schedule lines up
     lambda_l1: 0.8
     lambda_ssim: 0.2
     lambda_smooth: 1.0        # temporal motion-bases smoothness
@@ -28,11 +28,10 @@ render_proof:
 
   densify:                    # standard 3DGS adaptive density control (fg + bg)
     enabled: true
-    start_iter: 500
-    stop_iter: 4000
-    refine_every: 100
-    reset_opacity_every: 3000
-    pause_refine_after_reset: 0
+    # Schedule (start_iter / refine_every / reset_opacity_every / stop_iter /
+    # pause_refine_after_reset) is derived from `iters` (SoM-shaped) — see
+    # densify.py::densify_schedule. At iters=5000 it resolves to SoM's exact
+    # 200 / 100 / 3000 / 4000 / num_frames. Set any of them here to override.
     grad2d_threshold: 0.0002
     grow_scale3d: 0.01
     prune_opacity: 0.005

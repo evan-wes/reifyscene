@@ -7,6 +7,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.12.0] - 2026-06-16
+
+### Added
+- Native motion initializer (PR-B; closes the "own motion init" follow-up) — the
+  borrowed SoM init is now fully reproducible natively. `render/gaussian4d/
+  procrustes_init.py` ports SoM's clustering + Procrustes + Gaussian placement
+  (`solve_procrustes`, `get_weights_for_procrustes`, sklearn-KMeans on velocity
+  directions replacing cuML, a numpy port of the cupy masked-track interpolation,
+  `init_fg_from_tracks_3d` / `init_bg`, roma-free). `NativeMotionInitializer` in
+  `render/gaussian4d/motion_init.py` chains PR-A's lift → cano_t → clustering/
+  Procrustes → fg/bg placement into the same `(DynamicScene, {train/val:
+  [BorrowedCamera]})` shape as `load_borrowed_init`. The only borrowed input left
+  is the 2D point tracker output.
+- `run_render_proof.py dynamic --native` builds the init natively (no SoM env, no
+  cuML); `scripts/native_motion_init.py` dumps the native bundle to an `.npz` for
+  parity/inspection (same layout as `borrow_som_motion_init.py`).
+- Validated on paper-windmill at the full SoM schedule (iters=5000): native masked
+  mPSNR **20.74** (mSSIM 0.670, mLPIPS 0.157) vs borrowed **20.68** — parity at the
+  quality bar; both grow to ~955k Gaussians.
+
+### Fixed
+- Dynamic densification opacity-reset collapse. The schedule constants
+  (`reset_opacity_every: 3000`, `stop_iter: 4000`) were SoM's, but the run used
+  `iters: 3000`, so the opacity reset landed on the final iteration — every
+  Gaussian clamped to ~1% opacity with no recovery training, leaving eval to render
+  a near-black scene (masked mPSNR collapsed ~20.7 → 6.3 for *both* native and
+  borrowed inits). Fixed by deriving a SoM-shaped schedule from the iteration
+  budget: `densify.py::densify_schedule` sets `start/reset/stop` as fractions of
+  `iters` (0.04 / 0.60 / 0.80) so `reset < stop < iters` always holds (reset always
+  has recovery + a polish phase); `DensifyConfig.from_cfg(..., max_iters, num_frames)`
+  derives any schedule field a config omits and errors if `stop_iter >= iters`; the
+  opacity reset is now guarded to the densify window (as SoM's control loop does).
+  The dynamic config's default `iters` is now 5000 (matches SoM's `max_steps`), and
+  its schedule fields auto-derive to SoM's exact `200 / 100 / 3000 / 4000`.
+
+### Tests
+- `tests/test_procrustes_init.py` — `solve_procrustes` recovers a known SE(3) (+ 6D
+  decode), kNN, masked interpolation, KMeans on synthetic 2-cluster velocity data,
+  and `init_fg`/`init_bg` shape + log/logit/quaternion sanity.
+- `tests/test_densify_schedule.py` — schedule reproduces SoM at 5000, the
+  `reset < stop < iters` invariant across budgets, explicit-overrides-derived, the
+  `stop_iter >= iters` guard, and backward-compatible defaults without `max_iters`.
+
 ## [0.1.11.0] - 2026-06-15
 
 ### Added
