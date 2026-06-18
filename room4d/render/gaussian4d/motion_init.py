@@ -114,6 +114,9 @@ class NativeMotionInitializer:
     depth_type: str = "depth_anything_colmap"
     camera_type: str = "refined"
     seed: int | None = None
+    # Optional override: read 2D tracks from room4d's own tracker output instead
+    # of the borrowed 2d_tracks dir (see lifting.native_track_lift.generate_native_tracks).
+    tracks_dir: str | None = None
 
     def build(self, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
         # Lazy imports: only the native path needs the lift / sklearn machinery.
@@ -127,6 +130,7 @@ class NativeMotionInitializer:
         tracks, bg_points, cameras, _norm = build_native_init_inputs(
             self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
             depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
+            tracks_dir=self.tracks_dir,
         )
         # Canonical frame = the one where the most tracks are visible.
         cano_t = int(tracks.visibles.sum(dim=0).argmax().item())
@@ -151,9 +155,11 @@ def build_native_init(
     camera_type: str = "refined",
     device: str = "cuda",
     seed: int | None = None,
+    tracks_dir: str | None = None,
 ) -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
     """Convenience wrapper around :class:`NativeMotionInitializer`.build."""
     return NativeMotionInitializer(
         dataset_root=dataset_root, factor=factor, num_fg=num_fg, num_bg=num_bg,
         num_bases=num_bases, depth_type=depth_type, camera_type=camera_type, seed=seed,
+        tracks_dir=tracks_dir,
     ).build(device=device)

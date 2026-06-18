@@ -283,11 +283,31 @@ def cmd_dynamic(args) -> None:
         # Native init lifts at full res (factor 1) — 2D tracks + aligned depth
         # ship only at 1x and the bundle is full-res like the borrow; the render
         # factor is applied via k_scale below, exactly as for borrowed cameras.
+        tracks_dir = None
+        if args.own_tracker:
+            # Drop the last borrowed input: generate the 2D tracks with room4d's
+            # own tapnet tracker. Reuse an existing dir (the all-pairs pass is
+            # expensive) unless it is empty.
+            from room4d.lifting.native_track_lift import generate_native_tracks
+
+            tracks_root = Path(args.own_tracks_dir) if args.own_tracks_dir else out_dir / "own_tracks"
+            factor_dir = tracks_root / "1x"
+            if factor_dir.exists() and any(factor_dir.glob("*.npy")):
+                print(f"own-tracker: reusing existing tracks at {factor_dir}")
+                tracks_dir = factor_dir
+            else:
+                print(f"own-tracker: generating 2D tracks -> {factor_dir}")
+                tracks_dir = generate_native_tracks(
+                    args.dataset_root, tracks_root, factor=1,
+                    camera_type=args.camera_type, tracker_cfg={"device": device},
+                )
+            tracks_dir = str(tracks_dir)
         scene, cams = build_native_init(
             args.dataset_root, factor=1, num_fg=args.num_fg, num_bg=args.num_bg,
             num_bases=args.num_bases, camera_type=args.camera_type, device=device, seed=args.seed,
+            tracks_dir=tracks_dir,
         )
-        kind = "native"
+        kind = "native+own-tracker" if args.own_tracker else "native"
     else:
         if not args.init:
             raise SystemExit("dynamic mode needs --init <bundle.npz> (or --native)")
@@ -454,6 +474,10 @@ def main() -> None:
     dy.add_argument("--dataset-root", required=True)
     dy.add_argument("--init", default=None, help="borrowed motion-init .npz (scripts/borrow_som_motion_init.py)")
     dy.add_argument("--native", action="store_true", help="build the motion init natively instead of loading --init")
+    dy.add_argument("--own-tracker", action="store_true",
+                    help="native: produce the 2D tracks with room4d's own tapnet tracker (drops the last borrowed input)")
+    dy.add_argument("--own-tracks-dir", default=None,
+                    help="native+own-tracker: dir to write/reuse generated tracks (default: <out-dir>/own_tracks)")
     dy.add_argument("--num-fg", type=int, default=40_000, help="native: foreground tracks to lift")
     dy.add_argument("--num-bg", type=int, default=100_000, help="native: background points to sample")
     dy.add_argument("--num-bases", type=int, default=10, help="native: SE(3) motion bases (clusters)")

@@ -318,6 +318,7 @@ def lift_tracks_3d(
     num_samples: int,
     step: int = 1,
     rng: np.random.Generator | None = None,
+    tracks_dir: str | Path | None = None,
 ) -> Tracks3D:
     """Lift sampled 2D foreground tracks to 3D trajectories (SoM get_tracks_3d port).
 
@@ -326,13 +327,17 @@ def lift_tracks_3d(
     ``inv(K)`` + ``c2w``, keeps only in-foreground-mask observations, and drops
     tracks visible <5% of the time. ``step`` temporally subsamples (used by the
     scene-norm pass). ``rng`` makes the (otherwise random) sampling reproducible.
+
+    ``tracks_dir`` overrides where the ``<name_i>_<name_j>.npy`` 2D tracks are read
+    from (defaults to the dataset's borrowed ``flow3d_preprocessed/2d_tracks/<factor>x``);
+    point it at room4d's own tracker output to drop the last borrowed input.
     """
     choice = (rng.choice if rng is not None else np.random.choice)
     names = stack.cameras.frame_names
     num_frames = len(names)
     H, W = stack.depths.shape[1], stack.depths.shape[2]
     device = stack.depths.device
-    tracks_dir = _tracks_dir(dataset_root, factor)
+    tracks_dir = Path(tracks_dir) if tracks_dir is not None else _tracks_dir(dataset_root, factor)
 
     def load_pair(i: int, j: int) -> torch.Tensor:
         arr = np.load(tracks_dir / f"{names[i]}_{names[j]}.npy").astype(np.float32)
@@ -466,12 +471,17 @@ def build_native_init_inputs(
     camera_type: str = "refined",
     device: str = "cpu",
     seed: int | None = None,
+    tracks_dir: str | Path | None = None,
 ) -> tuple[Tracks3D, StaticPoints3D, dict[str, CameraRecords], SceneNorm]:
     """Lift native init inputs for a DyCheck-format sequence (normalized frame).
 
     Mirrors SoM's pipeline order: lift a foreground-track subsample in the raw
     frame to derive the scene normalization, normalize the train stack, then lift
     the full foreground tracks + background points and normalize the val cameras.
+
+    ``tracks_dir`` (optional) overrides where the 2D tracks are read from — pass
+    room4d's own tracker output (see :func:`generate_native_tracks`) to lift from
+    natively-produced tracks instead of the borrowed ``2d_tracks`` dir.
 
     Returns ``(tracks, bg_points, {"train"/"val": cameras}, scene_norm)``.
     """
@@ -485,11 +495,15 @@ def build_native_init_inputs(
 
     # Scene norm from a temporally-subsampled raw-frame track lift.
     step = max(1, train_stack.num_frames // 10)
-    sample = lift_tracks_3d(train_stack, dataset_root, factor, num_samples=10_000, step=step, rng=rng)
+    sample = lift_tracks_3d(
+        train_stack, dataset_root, factor, num_samples=10_000, step=step, rng=rng, tracks_dir=tracks_dir
+    )
     norm = compute_scene_norm(train_stack.cameras.w2cs, sample.xyz)
 
     apply_scene_norm_stack(train_stack, norm)
-    tracks = lift_tracks_3d(train_stack, dataset_root, factor, num_samples=num_fg, step=1, rng=rng)
+    tracks = lift_tracks_3d(
+        train_stack, dataset_root, factor, num_samples=num_fg, step=1, rng=rng, tracks_dir=tracks_dir
+    )
     bg_points = lift_bkgd_points(train_stack, num_samples=num_bg, rng=rng)
 
     val_backend = DatasetGeometryInitializer(
@@ -500,3 +514,42 @@ def build_native_init_inputs(
 
     cameras = {"train": train_stack.cameras, "val": val_cameras}
     return tracks, bg_points, cameras, norm
+
+
+def generate_native_tracks(
+    dataset_root: str | Path,
+    out_dir: str | Path,
+    *,
+    factor: int = 1,
+    depth_type: str = "depth_anything_colmap",
+    camera_type: str = "refined",
+    device: str = "cpu",
+    tracker_cfg: dict | None = None,
+) -> Path:
+    """Run room4d's own point tracker over the train split and write SoM-format tracks.
+
+    Loads the train split's RGB frames + foreground masks (the same ``stack.fg``
+    the lift later re-checks) and runs :class:`~room4d.tracking.tapir_wrapper.TAPIRWrapper`
+    to produce all-pairs 2D tracks, written as ``<out_dir>/<factor>x/<name_i>_<name_j>.npy``
+    — the exact layout :func:`lift_tracks_3d` reads. Returns the ``<factor>x`` directory
+    to pass back as ``tracks_dir``. This replaces the last borrowed input in the
+    native motion-init path.
+    """
+    from room4d.tracking.tapir_wrapper import TAPIRWrapper
+
+    backend = DatasetGeometryInitializer(
+        {"dataset_root": str(dataset_root), "factor": factor, "split": "train"}
+    )
+    stack = _load_frame_stack(
+        backend, "train", device, dataset_root, factor, depth_type, camera_type
+    )
+    frames = stack.rgbs.cpu().numpy()  # (T, H, W, 3) uint8
+    masks = stack.fg.cpu().numpy()     # (T, H, W) float in [0, 1]
+    frame_names = list(stack.cameras.frame_names)
+
+    wrapper = TAPIRWrapper(tracker_cfg or {})
+    all_pairs = wrapper.compute_all_pairs(frames, masks, frame_names, factor=factor)
+
+    factor_dir = Path(out_dir) / f"{factor}x"
+    all_pairs.write(factor_dir)
+    return factor_dir
