@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -33,6 +34,9 @@ from PIL import Image
 
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
 from room4d.lifting.tracks_3d import StaticPoints3D, Tracks3D
+
+if TYPE_CHECKING:
+    from room4d.lifting.geometry_provider import GeometryProvider
 
 
 # -- ported math primitives (SoM flow3d/data/utils.py, no roma) -----------
@@ -472,6 +476,7 @@ def build_native_init_inputs(
     device: str = "cpu",
     seed: int | None = None,
     tracks_dir: str | Path | None = None,
+    provider: "GeometryProvider | None" = None,
 ) -> tuple[Tracks3D, StaticPoints3D, dict[str, CameraRecords], SceneNorm]:
     """Lift native init inputs for a DyCheck-format sequence (normalized frame).
 
@@ -483,15 +488,21 @@ def build_native_init_inputs(
     room4d's own tracker output (see :func:`generate_native_tracks`) to lift from
     natively-produced tracks instead of the borrowed ``2d_tracks`` dir.
 
+    ``provider`` (optional) is the geometry source — cameras + per-frame
+    depth/rgb/fg. It defaults to :class:`DyCheckGeometryProvider` (the borrowed
+    dataset ground truth) built from ``dataset_root``/``factor``/``depth_type``/
+    ``camera_type``; pass a native backend (e.g. VGGT) to lift from
+    room4d-reconstructed geometry instead. Tracks stay separate from geometry.
+
     Returns ``(tracks, bg_points, {"train"/"val": cameras}, scene_norm)``.
     """
+    if provider is None:
+        from room4d.lifting.geometry_provider import DyCheckGeometryProvider
+
+        provider = DyCheckGeometryProvider(dataset_root, factor, depth_type, camera_type)
+
     rng = np.random.default_rng(seed) if seed is not None else None
-    train_backend = DatasetGeometryInitializer(
-        {"dataset_root": str(dataset_root), "factor": factor, "split": "train"}
-    )
-    train_stack = _load_frame_stack(
-        train_backend, "train", device, dataset_root, factor, depth_type, camera_type
-    )
+    train_stack = provider.frame_stack("train", device=device)
 
     # Scene norm from a temporally-subsampled raw-frame track lift.
     step = max(1, train_stack.num_frames // 10)
@@ -506,10 +517,7 @@ def build_native_init_inputs(
     )
     bg_points = lift_bkgd_points(train_stack, num_samples=num_bg, rng=rng)
 
-    val_backend = DatasetGeometryInitializer(
-        {"dataset_root": str(dataset_root), "factor": factor, "split": "val"}
-    )
-    val_cameras = _load_cameras(val_backend, "val", device, dataset_root, factor, camera_type)
+    val_cameras = provider.cameras("val", device=device)
     apply_scene_norm_cameras(val_cameras, norm)
 
     cameras = {"train": train_stack.cameras, "val": val_cameras}

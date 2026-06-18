@@ -16,6 +16,7 @@ the same ``(DynamicScene, {"train"/"val": [BorrowedCamera]})`` shape:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -24,6 +25,9 @@ from room4d.render.gaussian4d.dynamic_field import DynamicGaussianField, Dynamic
 from room4d.render.gaussian4d.gaussian_field import GaussianField
 from room4d.render.gaussian4d.motion import MotionBases
 from room4d.render.gaussian4d.rasterizer import RenderCamera
+
+if TYPE_CHECKING:
+    from room4d.lifting.geometry_provider import GeometryProvider
 
 
 @dataclass
@@ -117,6 +121,10 @@ class NativeMotionInitializer:
     # Optional override: read 2D tracks from room4d's own tracker output instead
     # of the borrowed 2d_tracks dir (see lifting.native_track_lift.generate_native_tracks).
     tracks_dir: str | None = None
+    # Optional geometry source (cameras + per-frame depth/rgb/fg). Defaults to the
+    # borrowed DyCheck ground truth (built from dataset_root/factor/depth_type/
+    # camera_type); pass a native backend (e.g. VGGT) to reconstruct geometry.
+    provider: "GeometryProvider | None" = None
 
     def build(self, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
         # Lazy imports: only the native path needs the lift / sklearn machinery.
@@ -130,7 +138,7 @@ class NativeMotionInitializer:
         tracks, bg_points, cameras, _norm = build_native_init_inputs(
             self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
             depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
-            tracks_dir=self.tracks_dir,
+            tracks_dir=self.tracks_dir, provider=self.provider,
         )
         # Canonical frame = the one where the most tracks are visible.
         cano_t = int(tracks.visibles.sum(dim=0).argmax().item())
@@ -156,10 +164,11 @@ def build_native_init(
     device: str = "cuda",
     seed: int | None = None,
     tracks_dir: str | None = None,
+    provider: "GeometryProvider | None" = None,
 ) -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
     """Convenience wrapper around :class:`NativeMotionInitializer`.build."""
     return NativeMotionInitializer(
         dataset_root=dataset_root, factor=factor, num_fg=num_fg, num_bg=num_bg,
         num_bases=num_bases, depth_type=depth_type, camera_type=camera_type, seed=seed,
-        tracks_dir=tracks_dir,
+        tracks_dir=tracks_dir, provider=provider,
     ).build(device=device)

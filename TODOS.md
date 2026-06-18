@@ -2,25 +2,37 @@
 
 ## Reference Comparison Tool
 
-### Post-spike: calibration M0 hardening + M1 baseline batch
+### Calibration arc next: M2/M3 joint-opt fusion (person + SfM)
 
-**What:** Conditional on S1's CONTINUE verdict: fingerprinted SfM reuse +
-copied flock for `score_calibration_gt.py` (design D8/D12 — copy the ~20
-lines, do NOT import from the wrapper, which must stay stdlib-anywhere);
-per-camera GT-intrinsics injection for Panoptic (per-folder imports or
-COLMAP DB writes — hloc's `image_options` is global, D12); batch runner
-over certified wide-baseline configurations with the overlap-certification
-report (M1).
+**What:** S1 cleared the concept-proof gates (CONTINUE-qualified, D15), so the
+justified next build is real joint-opt fusion of the moving-person bridge with
+SfM — promoting the spike's two throwaway proof scripts (detect+correct
+robustness; metric-scale anchor) into production optimizer factors (full
+reprojection + person joint BA is M3 greenfield). Named dependencies surfaced by
+the spike:
+- **Per-camera intrinsics injection for Panoptic** — THE scale-accuracy
+  dependency (the +16% bias traced to free-estimated focal). hloc's
+  `image_options` is global, so this needs per-folder imports or COLMAP DB writes
+  (D12).
+- **De-stub the real machinery the fusion rides on** — the sync stage and ALL
+  joint-opt factors are placeholder stubs, and `pose2d.py` silently falls back to
+  fabricated keypoints (calibration-grade consumers must hard-require `'real'`).
+- (Lower-priority M0-hardening tooling carried over: fingerprinted SfM reuse +
+  copied flock for `score_calibration_gt.py` — copy the ~20 lines, do NOT import
+  from the wrapper, which must stay stdlib-anywhere, D8/D12.)
 
-**Why:** The deferred half of the eng-reviewed M0/M1 scope; deliberately
-gated so a kill verdict strands nothing.
+**Why:** The arc is justified but not free — M2/M3 is a genuine build comparable
+in size to the renderer's step 12, to be sequenced against it (user's per-session
+call).
 
-**Context:** Design doc M0-HARDENING + M1 sections. **If S1 returns KILL,
-delete this entry** (that condition is the point of it).
+**Superseded by D15:** the original "M1 baseline batch / person-beats-SfM"
+framing is dead — on wide-baseline shared-subject SfM already wins; the value is
+robustness + scale *complementarity*, not a benchmark batch. Disjoint-FOV (the
+arc's real endpoint) still needs own-rig captures (no public GT).
 
-**Effort:** M
+**Effort:** L
 **Priority:** P2
-**Depends on:** S1 spike verdict (see the M0-minimal + S1 entry below)
+**Depends on:** per-camera intrinsics injection; de-stubbing sync + joint-opt factors
 
 ### Shared data-dir cache race between concurrent runs of one sequence
 
@@ -42,29 +54,34 @@ feature/dataset-backends; deferred when the run-dir lock shipped.
 **Priority:** P3
 **Depends on:** None
 
-### Calibration arc: M0-minimal GT scorer + S1 kyotovision spike
+### Calibration arc: M0-minimal GT scorer + S1 kyotovision spike — DONE
 
-**What:** (a) M0-minimal — `room4d/calibration/gt_scoring.py` +
-`scripts/score_calibration_gt.py`: score recovered extrinsics against
-dataset GT with pairwise-relative errors (primary) and guarded Sim(3) APE
-(secondary). (b) S1 — standalone spike: run the kyotovision IROS'22
-moving-person calibration code on CMU Panoptic wide-baseline subsets,
-score with M0-minimal, deliver an explicit kill/continue verdict for the
-calibration arc.
+**M0-minimal — DONE (2026-06-12, PR #8).** `room4d/calibration/gt_scoring.py` +
+`scripts/score_calibration_gt.py`: score recovered extrinsics against dataset GT
+with pairwise-relative errors (primary) + guarded Sim(3) APE (secondary). Turns
+the calibration stage's correctness into a number.
 
-**Why:** M0 turns the calibration stage's correctness into a number; S1 is
-the kill gate for the pipeline-as-rig-calibrator vision (entity bridges vs
-static SfM) — cheap to falsify before any deeper investment.
+**S1 spike — RAN 2026-06-13/14, verdict CONTINUE (qualified).** Standalone
+workspace `spike_s1_calibration/` (record
+`RESULTS_flute1.md`; design doc D15). On CMU Panoptic `161029_flute1`
+(cams 3/12/18/22) kyotovision reproduces (1.48° median pairwise rot), but static
+hloc+COLMAP MATCHES it (1.03°) — on wide-baseline shared-subject plain SfM already
+solves it, so "person beats SfM" was the wrong kill-gate. D15 reframed the thesis
+to **person COMPLEMENTS SfM**, fixing two blind spots, both then validated:
+- **Robustness — YES** (Exp A): SfM silently misregistered the isolated cam 12 by
+  ~70° with every internal signal green; SfM-vs-person disagreement detected it and
+  select-and-transform corrected 35.6° → 2.33°. Inert when SfM is healthy.
+- **Scale — QUALIFIED YES** (Exp B): person-anchored metric scale is consistent
+  (IQR 5–10%) but +16% biased — the bias traces to SfM free-estimating focal +13%
+  (not the person), i.e. it needs per-camera intrinsics (GT-intrinsic round-trip
+  validates at 0.998).
 
-**Context:** Full decision record (D2–D12, incl. outside-voice round) in
-`a private design note`.
-S1 needs the Panoptic toolbox download + kyotovision checkout. A Panoptic
-PASS validates wide-baseline only, NOT disjoint-FOV (no public GT exists
-for that regime — own-rig captures later).
-
-**Effort:** M0-minimal S (built 2026-06-12); S1 M (downloads + runs + memo)
-**Priority:** P1
-**Depends on:** None
+Net: the arc cleared its concept-proof gates → M2/M3 (real joint-opt fusion) is a
+justified build, to weigh against the renderer (Track 2) priority — user's
+per-session call (see the M2/M3 entry above). Full record (D2–D15):
+`a private design note`;
+memory a private note. Disjoint-FOV (the arc's real endpoint) still
+needs own-rig captures — no public GT exists for that regime.
 
 ## Renderer (Track 2)
 
@@ -149,6 +166,27 @@ On paper-windmill the native tracker reproduces the shipped FG seeding exactly
 matches the borrowed/native quality bar (borrowed 20.68 / native-borrowed-tracks
 20.74). The remaining dataset-provided inputs (RGB/depth/poses) are dataset ground
 truth, not borrowed reconstruction.
+
+### Step 12: native geometry (VGGT) → real renderer — IN PROGRESS
+
+Replace the borrowed DyCheck geometry (depth/poses; masks deferred) in the render
+path with room4d's own VGGT reconstruction, scored against the DyCheck-GT oracle
+(masked mPSNR ~20.7), one input at a time. **De-risking spike DONE:** VGGT-vs-GT on
+paper-windmill is small (poses within ~0.5° rel-rot of COLMAP; depth AbsRel ~0.02;
+single global up-to-scale s≈0.83) → integration + a scale-alignment hook, not a
+research effort.
+
+- **PR 2 — geometry-provider seam: DONE (v0.1.14.0).** `room4d/lifting/geometry_provider.py`
+  (`GeometryProvider` ABC + `DyCheckGeometryProvider`, the permanent oracle);
+  `build_native_init_inputs`/`NativeMotionInitializer` take an optional `provider`.
+  Byte-identical to the old direct path (lossless refactor).
+- **PR 3 — `VGGTGeometryProvider` + global scale-alignment hook; swap POSES first**,
+  score vs the oracle. VGGT geometry already runs on this machine
+  (`run_single_video_vggt.py`); the GeometryArtifact→FrameStack/CameraRecords bridge
+  + Sim(3)/scale alignment to the GT eval frame is the work (reuse `calibration/gt_scoring.py`).
+- **PR 4 — swap DEPTH**, score. (Masks stay borrowed.)
+- **Deferred:** native foreground masks (needs a segmenter, no FG/BG one wired in);
+  folding into `Room4DPipeline` (World-A↔B convergence). Out of step-12 core.
 
 ### Follow-up: dynamic densification — DONE (v0.1.10.0, PR 6)
 
