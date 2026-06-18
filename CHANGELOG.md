@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.15.1] - 2026-06-18
+
+### Changed
+- `scripts/setup_room4d.sh` now installs the **ffmpeg CLI** into the conda env
+  (conda-forge, pinned `FFMPEG_VERSION=8.1.1`, GPL build → includes `libx264`
+  for `-crf 0` lossless H.264). Default-on with a `--no-ffmpeg` opt-out; skipped
+  in `--use-venv` mode. ffmpeg is a **dataset-prep convenience** — assembling
+  image-sequence datasets (DyCheck, DAVIS) into the mp4s the pipeline ingests;
+  room4d's own decode path uses OpenCV and does not require it. A post-install
+  smoke test asserts `libx264` is actually present (the non-GPL conda-forge
+  variant omits it). This removes the prior need to borrow ffmpeg from another
+  conda env by absolute path.
+
 ## [0.1.15.0] - 2026-06-18
 
 ### Added
