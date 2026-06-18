@@ -115,3 +115,28 @@ def materialize_stage_from_prior(prior_run_dir: str | Path, current_run_dir: str
 def ensure_start_stage(stage_name: str) -> None:
     if stage_name not in STAGE_ORDER:
         raise ValueError(f"Unknown stage '{stage_name}'. Expected one of: {', '.join(STAGE_ORDER)}")
+
+
+def ensure_stop_stage(stage_name: str) -> None:
+    if stage_name not in STAGE_ORDER:
+        raise ValueError(f"Unknown stage '{stage_name}'. Expected one of: {', '.join(STAGE_ORDER)}")
+
+
+def resolve_stage_window(start_stage: str, stop_stage: str) -> tuple[int, int]:
+    """Resolve and validate an inclusive ``[start, stop]`` stage window.
+
+    Returns the ``(start_idx, stop_idx)`` pair into ``STAGE_ORDER``. Stages
+    before ``start`` are loaded from a prior run; stages in ``[start, stop]``
+    run; stages after ``stop`` are skipped. Raises ``ValueError`` if either
+    name is unknown or if ``stop_stage`` precedes ``start_stage``.
+    """
+    ensure_start_stage(start_stage)
+    ensure_stop_stage(stop_stage)
+    start_idx = STAGE_ORDER.index(start_stage)
+    stop_idx = STAGE_ORDER.index(stop_stage)
+    if stop_idx < start_idx:
+        raise ValueError(
+            f"--stop-stage '{stop_stage}' precedes --start-stage '{start_stage}'; "
+            f"the stage window must run forward through: {', '.join(STAGE_ORDER)}."
+        )
+    return start_idx, stop_idx

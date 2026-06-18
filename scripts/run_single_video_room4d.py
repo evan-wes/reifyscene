@@ -16,7 +16,7 @@ from time import perf_counter
 from rich.console import Console
 from rich.table import Table
 from room4d.api.pipeline import Room4DPipeline
-from room4d.api.resume import ensure_start_stage, materialize_stage_from_prior
+from room4d.api.resume import materialize_stage_from_prior, resolve_stage_window
 from room4d.api.stages import STAGE_ORDER, write_run_manifest
 from room4d.common.io import read_yaml
 from room4d.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
@@ -358,6 +358,7 @@ def main() -> None:
     parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
     parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
     parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
+    parser.add_argument('--stop-stage', default=STAGE_ORDER[-1], choices=list(STAGE_ORDER), help='Last stage to run, inclusive. Stages after it are skipped. Default: the final stage (full pipeline).')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
@@ -418,7 +419,7 @@ def main() -> None:
     parser.add_argument('--debug-max-points', type=int, default=5000)
     args = parser.parse_args()
 
-    ensure_start_stage(args.start_stage)
+    start_idx, stop_idx = resolve_stage_window(args.start_stage, args.stop_stage)
     console = Console()
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
@@ -481,6 +482,7 @@ def main() -> None:
             'run_dir': str(Path(args.run_dir).expanduser().resolve()),
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
+            'stop_stage': args.stop_stage,
             'config': cfg,
         },
     )
@@ -510,11 +512,12 @@ def main() -> None:
         'render': 'render',
     }
 
-    start_idx = list(STAGE_ORDER).index(args.start_stage)
     if start_idx > 0 and not args.prior_run_dir:
         raise ValueError('--prior-run-dir is required when --start-stage is later than ingest.')
 
     for idx, stage_name in enumerate(STAGE_ORDER):
+        if idx > stop_idx:
+            break
         spec = registry[stage_name]
         label = stage_labels[stage_name]
         if idx < start_idx:
@@ -549,7 +552,9 @@ def main() -> None:
     _print_frame_summary(console, outputs, cfg)
 
     for name in STAGE_ORDER:
-        artifact = outputs[name]
+        artifact = outputs.get(name)
+        if artifact is None:
+            continue
         print(f'{name}: {artifact.summary()}')
         print(f'  save_dir: {artifact.save_dir}')
 
