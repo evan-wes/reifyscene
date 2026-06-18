@@ -52,6 +52,13 @@ GSPLAT_REPO="https://github.com/nerfstudio-project/gsplat.git"
 GSPLAT_REF="4e52698e45eaaed929ed3a5065e96a688d085df6"
 GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 
+# ffmpeg CLI for dataset prep: assembling image-sequence datasets (DyCheck,
+# DAVIS) into the mp4s the pipeline ingests. room4d's own decode path uses
+# OpenCV and does NOT need this — it is a workflow convenience. conda-forge
+# ships a GPL-variant build (build string `gpl_*`) that includes libx264,
+# required for `-crf 0` lossless H.264.
+FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.1}"
+
 REQUIRED_GXX_MAJOR=9
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 # ------------------------------------------------------------------------------
@@ -80,6 +87,7 @@ INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
 INSTALL_CALIBRATION=1
+INSTALL_FFMPEG=1
 FORCE_VGGT_LONG_WEIGHTS=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -124,6 +132,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_GEOMETRY=0; shift ;;
     --no-calibration)
       INSTALL_CALIBRATION=0; shift ;;
+    --no-ffmpeg)
+      INSTALL_FFMPEG=0; shift ;;
     --unlocked)
       UNLOCKED=1; shift ;;
     -h|--help)
@@ -150,6 +160,7 @@ Install options:
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
   --no-calibration        Skip calibration extras and hloc install
+  --no-ffmpeg             Skip the ffmpeg (conda-forge) dataset-prep install
   --unlocked              Resolve dependencies fresh instead of installing the
                           pinned tree from scripts/locks/room4d.lock
                           (regenerate locks with scripts/gen_env_locks.sh)
@@ -473,6 +484,35 @@ PY
   remove_gsplat_leaked_top_level_packages
 }
 
+ensure_ffmpeg() {
+  # Install the ffmpeg CLI into the active conda env for dataset prep. Prefer
+  # the conda-forge GPL build (build string `gpl_*`) because it bundles
+  # libx264; the non-GPL variant omits it and `-crf 0` H.264 would fail. The
+  # smoke test below asserts libx264 is actually present.
+  if [[ $USE_VENV -eq 1 ]]; then
+    echo "Skipping ffmpeg conda install in --use-venv mode; install ffmpeg on PATH manually if you need dataset prep." >&2
+    return
+  fi
+  if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    echo "No active conda environment detected while ensuring ffmpeg." >&2
+    exit 1
+  fi
+
+  local ffmpeg_bin="${CONDA_PREFIX}/bin/ffmpeg"
+  if [[ -x "${ffmpeg_bin}" ]] \
+     && "${ffmpeg_bin}" -version 2>/dev/null | head -n 1 | grep -q "ffmpeg version ${FFMPEG_VERSION}" \
+     && "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
+    echo "ffmpeg ${FFMPEG_VERSION} (with libx264) already present at ${ffmpeg_bin} — skipping."
+    return
+  fi
+
+  echo "Installing ffmpeg ${FFMPEG_VERSION} into env '${CONDA_DEFAULT_ENV:-unknown}' (conda-forge, GPL build with libx264)..."
+  if ! run_conda_install_relaxed -y -c conda-forge "ffmpeg=${FFMPEG_VERSION}=gpl*"; then
+    echo "Pinned GPL-variant install did not resolve; retrying without the build-string constraint..."
+    run_conda_install_relaxed -y -c conda-forge "ffmpeg=${FFMPEG_VERSION}"
+  fi
+}
+
 ensure_modern_conda_compilers() {
   if [[ $USE_VENV -eq 1 ]]; then
     local current_compiler="${CXX:-c++}"
@@ -699,10 +739,32 @@ print(f"[smoke-test] OK gsplat rasterization: version={version} output={tuple(rg
 PYCODE
 }
 
+smoke_test_ffmpeg() {
+  local ffmpeg_bin="${CONDA_PREFIX:-}/bin/ffmpeg"
+  if [[ ! -x "${ffmpeg_bin}" ]]; then
+    ffmpeg_bin="$(command -v ffmpeg || true)"
+  fi
+  if [[ -z "${ffmpeg_bin}" || ! -x "${ffmpeg_bin}" ]]; then
+    echo "[smoke-test] FAIL ffmpeg: binary not found after install" >&2
+    exit 1
+  fi
+  if ! "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
+    echo "[smoke-test] FAIL ffmpeg: libx264 encoder missing (need the GPL build for -crf 0 H.264)" >&2
+    exit 1
+  fi
+  local ver
+  ver="$("${ffmpeg_bin}" -version 2>/dev/null | head -n 1)"
+  echo "[smoke-test] OK ffmpeg: ${ver} path=${ffmpeg_bin} (libx264 present)"
+}
+
 run_post_install_smoke_tests() {
   echo
   echo "Running post-install smoke tests..."
   smoke_test_python_module "room4d" "room4d" "room4d"
+
+  if [[ $INSTALL_FFMPEG -eq 1 ]]; then
+    smoke_test_ffmpeg
+  fi
 
   if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
     smoke_test_python_module "detectron2" "detectron2" "detectron2"
@@ -896,6 +958,10 @@ if [[ $INSTALL_GSPLAT -eq 1 ]]; then
   install_gsplat
 fi
 
+if [[ $INSTALL_FFMPEG -eq 1 ]]; then
+  ensure_ffmpeg
+fi
+
 run_post_install_smoke_tests
 
 cat <<EOF
@@ -916,6 +982,7 @@ $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
 $( [[ $INSTALL_GSPLAT -eq 1 ]] && echo "- gsplat built from source for sm_120 at commit ${GSPLAT_REF}" )
+$( [[ $INSTALL_FFMPEG -eq 1 ]] && echo "- ffmpeg ${FFMPEG_VERSION} (conda-forge GPL build with libx264)" )
 
 Notes:
 - third_party/ should be gitignored so external source checkouts are never tracked.
