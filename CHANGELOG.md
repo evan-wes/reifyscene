@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.15.2] - 2026-06-18
+
+### Fixed
+- VGGT-Long camera poses were globally inconsistent. VGGT-Long estimates
+  per-chunk Sim(3) transforms (overlap registration + optional loop closure)
+  and applies them **only** when writing `camera_poses.txt`; the per-chunk
+  `_tmp_results_aligned/*.npy` files keep **chunk-local** extrinsics (only
+  `world_points` are globalized there). `VGGTLongInitializer` merged those
+  chunk-local extrinsics, so an N-chunk sequence became N independently-anchored
+  mini-trajectories — each chunk's poses were self-consistent but anchored at
+  its own identity frame, with the camera trajectory jumping at every chunk
+  boundary. The wrapper now reads VGGT-Long's authoritative globally-aligned
+  `camera_poses.txt` (new `_load_global_camera_to_world`) for the camera poses,
+  with a graceful fallback to the chunk-local extrinsics when the file is absent
+  or its frame count mismatches; the already-global `world_points` and
+  camera-frame `depth` are unchanged. On the paper-windmill 277-frame train clip
+  this drops the stored-pose error from **pairwise rot 20.5° / sim3 134°** to
+  **1.73° / 10.2°** — matching VGGT-Long's native trajectory exactly, vs the
+  COLMAP ground truth. Plain VGGT (single forward pass, no chunking) was never
+  affected. Found via a throwaway de-risk spike that scored the geometry stage
+  end-to-end against the dataset GT before wiring VGGT-Long into the render path.
+
 ## [0.1.15.1] - 2026-06-18
 
 ### Changed
