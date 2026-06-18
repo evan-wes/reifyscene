@@ -7,6 +7,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.15.0] - 2026-06-18
+
+### Added
+- `run_single_video_room4d.py` gained a `--stop-stage` flag (inclusive), the
+  complement to the existing `--start-stage`. The runner was resume-forward only
+  — pick a start, run to `render`. Now any contiguous stage window `[start, stop]`
+  runs: stages before `start` load from `--prior-run-dir`, stages in the window
+  run, stages after `stop` are skipped. Default is the final stage, so existing
+  invocations are unchanged. This lets the real pipeline run e.g.
+  `ingest → sync → geometry` and stop, instead of needing a throwaway driver to
+  exercise a single stage (e.g. the step-12 VGGT geometry de-risk). Window
+  resolution + validation (unknown stage; stop-before-start) live in a unit-tested
+  helper `room4d.api.resume.resolve_stage_window`.
+
+### Fixed
+- Partial runs no longer crash the end-of-run summary: the per-stage print loop
+  indexed every stage in `STAGE_ORDER` unconditionally (`KeyError` once a run
+  stops early); it now skips stages absent from `outputs`. The run manifest also
+  records `stop_stage` alongside `start_stage` for reproducibility.
+
 ## [0.1.14.0] - 2026-06-17
 
 ### Added
