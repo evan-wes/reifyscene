@@ -7,6 +7,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.14.0] - 2026-06-17
+
+### Added
+- Render-path geometry-provider seam (step 12, PR 2) — the first step toward
+  replacing the borrowed DyCheck geometry with room4d's own reconstruction. New
+  `room4d/lifting/geometry_provider.py`: a `GeometryProvider` ABC
+  (`cameras(split)` + `frame_stack(split)`) with `DyCheckGeometryProvider` — the
+  borrowed dataset ground truth, now the permanent oracle/baseline a native
+  backend (VGGT, future) is scored against in the same harness/eval.
+  `build_native_init_inputs` / `NativeMotionInitializer` / `build_native_init`
+  gained an optional `provider` (defaults to a `DyCheckGeometryProvider` built
+  from `dataset_root`/`factor`/`depth_type`/`camera_type`), so the geometry source
+  is swappable. **Behavior-preserving:** the DyCheck provider delegates to the
+  existing loaders unchanged — verified **byte-identical** (277-frame train
+  `FrameStack` + 419 val cameras) against the old direct path. The e2e through the
+  provider scores masked mPSNR **20.68** (mSSIM 0.670, mLPIPS 0.158, 419 val
+  frames), matching the native baseline (20.70–20.74) within GPU training
+  run-to-run noise — the byte-identical inputs are the rigorous lossless proof.
+- A throwaway de-risking spike (outside the repo) measured the VGGT-vs-GT geometry
+  gap on paper-windmill before committing to the design: VGGT poses land within
+  ~0.5° relative rotation of COLMAP (median pairwise rot 0.45°, sim3 abs rot 1.98°,
+  one global up-to-scale factor s≈0.83); depth AbsRel ~0.02 with a consistent
+  global scale. So step 12 is integration + a scale-alignment hook, not a
+  quality-closing research effort.
+
+### Changed
+- `TODOS.md`: marked the calibration S1 kyotovision spike **DONE** (verdict
+  CONTINUE-qualified — robustness YES, scale QUALIFIED YES, the D15 "person
+  complements SfM" reframe) and reframed the post-spike entry from the superseded
+  "M0-hardening + M1 batch" into the now-justified "M2/M3 joint-opt fusion" build.
+
+### Tests
+- `tests/test_geometry_provider.py` — the `GeometryProvider` ABC contract, the
+  `DyCheckGeometryProvider` config/backend wiring, that it delegates to the
+  existing loaders with identical args (lossless by construction), and that
+  `build_native_init_inputs` accepts the `provider` override.
+
 ## [0.1.13.0] - 2026-06-17
 
 ### Added
