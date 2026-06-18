@@ -395,10 +395,51 @@ class VGGTLongInitializer(VGGTInitializer):
             raise RuntimeError("VGGT-Long produced no readable chunk predictions.")
         return chunks
 
+    def _load_global_camera_to_world(self, runner: Any, num_frames: int) -> np.ndarray | None:
+        """Read VGGT-Long's globally-aligned camera poses from ``camera_poses.txt``.
+
+        VGGT-Long estimates per-chunk Sim(3) transforms (overlap registration +
+        optional loop closure), accumulates them, and applies the result only
+        when writing ``camera_poses.txt`` — the per-chunk ``_tmp_results_aligned``
+        ``.npy`` files keep their **chunk-local** extrinsics (only ``world_points``
+        are globalized there). Merging those local extrinsics yields 23
+        independently-anchored mini-trajectories. So we read the authoritative
+        global trajectory VGGT-Long published instead.
+
+        Returns an ``(N, 4, 4)`` stack of camera-to-world (world-from-camera)
+        matrices in global-frame order, or ``None`` (graceful fallback to the
+        chunk-local extrinsics) when the file is absent or its frame count does
+        not match the selected frames.
+        """
+        candidates = []
+        output_dir = getattr(runner, "output_dir", None)
+        if output_dir:
+            candidates.append(Path(output_dir) / "camera_poses.txt")
+        aligned_dir = getattr(runner, "result_aligned_dir", None)
+        if aligned_dir:
+            candidates.append(Path(aligned_dir).parent / "camera_poses.txt")
+        for path in candidates:
+            if not path.exists():
+                continue
+            rows = [
+                [float(x) for x in line.split()]
+                for line in path.read_text().splitlines()
+                if line.strip()
+            ]
+            if len(rows) != num_frames or any(len(r) != 16 for r in rows):
+                self._log_auto_tune(
+                    f"camera_poses.txt at {path} has {len(rows)} pose(s) for {num_frames} frame(s); "
+                    "falling back to chunk-local extrinsics."
+                )
+                return None
+            return np.asarray(rows, dtype=float).reshape(-1, 4, 4)
+        return None
+
     def _combined_predictions_from_chunks(
         self,
         frames: list[FrameRef],
         chunks: list[dict[str, Any]],
+        global_c2w: np.ndarray | None = None,
     ) -> dict[str, Any]:
         num_frames = len(frames)
         extrinsic: list[Any] = [None] * num_frames
@@ -467,6 +508,20 @@ class VGGTLongInitializer(VGGTInitializer):
             preds["point_map"] = np.stack([np.asarray(v) for v in point_map], axis=0)
         if all(v is not None for v in point_conf):
             preds["point_conf"] = np.stack([np.asarray(v) for v in point_conf], axis=0)
+
+        if global_c2w is not None:
+            # VGGT-Long's per-chunk extrinsics are chunk-local; replace them with
+            # the globally-aligned poses from camera_poses.txt. Those are
+            # camera-to-world, so invert to camera-from-world (the convention the
+            # shared `_initialize_from_predictions` / `_world_from_cam` path
+            # expects, matching plain VGGT) — it inverts back to recover a correct
+            # global `T_world_cam`. world_points are already globalized; depth is
+            # camera-frame, both unaffected.
+            if global_c2w.shape[0] != len(frames):
+                raise RuntimeError(
+                    f"global camera poses ({global_c2w.shape[0]}) do not match frame count ({len(frames)})."
+                )
+            preds["extrinsic"] = np.stack([np.linalg.inv(np.asarray(p, dtype=float)) for p in global_c2w], axis=0)
         return preds
 
     def _requested_device(self) -> str:
@@ -938,7 +993,8 @@ class VGGTLongInitializer(VGGTInitializer):
                 runner.img_list = [str(path) for path in image_paths]
                 self._run_runner(runner)
                 chunks = self._load_chunk_predictions(runner)
-                predictions = self._combined_predictions_from_chunks(selected_frames, chunks)
+                global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
+                predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
                 attempt_history.append({
                     **plan,
                     "attempt_index": attempt_idx,
@@ -958,6 +1014,11 @@ class VGGTLongInitializer(VGGTInitializer):
                 )
                 notes.append(
                     f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s)."
+                )
+                notes.append(
+                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
+                    if global_c2w is not None
+                    else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
                 )
                 return predictions, image_paths, notes, attempt_history, recommendation
             except Exception as exc:
@@ -1058,8 +1119,14 @@ class VGGTLongInitializer(VGGTInitializer):
             runner.img_list = [str(path) for path in image_paths]
             self._run_runner(runner)
             chunks = self._load_chunk_predictions(runner)
-            predictions = self._combined_predictions_from_chunks(selected_frames, chunks)
+            global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
+            predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
             notes = list(notes)
+            notes.append(
+                "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
+                if global_c2w is not None
+                else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
+            )
             notes.append(
                 f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
             )
