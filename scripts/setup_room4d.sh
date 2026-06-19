@@ -59,6 +59,11 @@ GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 # required for `-crf 0` lossless H.264.
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.1}"
 
+# faiss (conda-forge CPU build) for VGGT-Long loop closure's place-recognition
+# retrieval. Stripped from VGGT-Long's pip requirements (faiss-gpu needs a CUDA
+# build); the CPU build is sufficient for retrieval over a clip's frames.
+FAISS_VERSION="${FAISS_VERSION:-1.9.0}"
+
 REQUIRED_GXX_MAJOR=9
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 # ------------------------------------------------------------------------------
@@ -513,6 +518,31 @@ ensure_ffmpeg() {
   fi
 }
 
+ensure_faiss() {
+  # faiss for VGGT-Long loop closure (place-recognition retrieval). It is
+  # stripped from VGGT-Long's pip requirements (faiss-gpu needs a CUDA build),
+  # so install the conda-forge CPU build instead — enough for retrieval, and it
+  # avoids a CUDA-version match. Loop closure also needs the dinov2 path patch
+  # below; without both, --vggt-long-loop-enable fails.
+  if [[ $USE_VENV -eq 1 ]]; then
+    echo "Skipping faiss conda install in --use-venv mode; install faiss-cpu manually if you need VGGT-Long loop closure." >&2
+    return
+  fi
+  if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    echo "No active conda environment detected while ensuring faiss; skipping (loop closure will be unavailable)." >&2
+    return
+  fi
+  if python -c "import faiss" >/dev/null 2>&1; then
+    echo "faiss already importable — skipping."
+    return
+  fi
+  echo "Installing faiss-cpu ${FAISS_VERSION} into env '${CONDA_DEFAULT_ENV:-unknown}' (conda-forge) for VGGT-Long loop closure..."
+  if ! run_conda_install_relaxed -y -c conda-forge "faiss-cpu=${FAISS_VERSION}"; then
+    echo "Pinned faiss-cpu install did not resolve; retrying without the version constraint..."
+    run_conda_install_relaxed -y -c conda-forge faiss-cpu
+  fi
+}
+
 ensure_modern_conda_compilers() {
   if [[ $USE_VENV -eq 1 ]]; then
     local current_compiler="${CXX:-c++}"
@@ -678,7 +708,7 @@ install_vggt_long_requirements() {
 
   if grep -Eqi '^[[:space:]]*faiss-gpu([[:space:]]*(==|=|>=|<=|!=|~=).*)?[[:space:]]*$' "${req_file}"; then
     echo "Skipping faiss-gpu from pip requirements."
-    echo "If you need it later, install it separately via conda."
+    echo "The conda-forge faiss-cpu build is installed separately by ensure_faiss (for loop closure)."
   fi
 }
 
@@ -927,7 +957,38 @@ if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
   ensure_modern_conda_compilers
   clone_or_update_checkout "${VGGT_LONG_REPO}" "${VGGT_LONG_DIR}" "${VGGT_LONG_COMMIT}"
   install_vggt_long_requirements
+  ensure_faiss
   ensure_cuda_toolkit_for_torch_extensions
+
+  # Patch VGGT-Long's loop-closure DINOv2 backbone: it torch.hub.load's
+  # './LoopModels/dinov2' relative to the process CWD, so loop closure breaks
+  # whenever VGGT-Long runs from any directory but its own (always, under
+  # room4d). Anchor the path to the module's own location. Idempotent; fails
+  # loudly if the upstream anchor is gone.
+  echo "Patching VGGT-Long loop-closure DINOv2 path (CWD-relative -> __file__-anchored)..."
+  python - "${VGGT_LONG_DIR}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]) / "LoopModels" / "backbones" / "dinov2.py"
+OLD = "        self.model = torch.hub.load('./LoopModels/dinov2', model_name, source='local', pretrained=False)"
+NEW = (
+    "        # room4d patch (applied by scripts/setup_room4d.sh): the upstream './LoopModels/dinov2'\n"
+    "        # path is resolved against the process CWD, so loop closure breaks whenever VGGT-Long\n"
+    "        # runs from any directory but its own (always, under room4d). Anchor it to this file.\n"
+    "        import os as _os\n"
+    "        _dinov2_repo = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'dinov2')\n"
+    "        self.model = torch.hub.load(_dinov2_repo, model_name, source='local', pretrained=False)"
+)
+src = path.read_text()
+if "_dinov2_repo" in src:
+    print("  dinov2 path already patched")
+elif OLD in src:
+    path.write_text(src.replace(OLD, NEW))
+    print(f"  patched {path.name}")
+else:
+    sys.exit(f"dinov2 patch anchor not found in {path} -- upstream drifted; update the patch in setup_room4d.sh")
+PYEOF
 
   if [[ -f "${VGGT_LONG_DIR}/scripts/download_weights.sh" ]]; then
     echo "Patching VGGT-Long download_weights.sh for current Hugging Face CLI..."
@@ -981,6 +1042,7 @@ $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_C
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
+$( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long loop closure enabled: faiss-cpu ${FAISS_VERSION} + DINOv2 path patch (CWD-relative -> __file__)" )
 $( [[ $INSTALL_GSPLAT -eq 1 ]] && echo "- gsplat built from source for sm_120 at commit ${GSPLAT_REF}" )
 $( [[ $INSTALL_FFMPEG -eq 1 ]] && echo "- ffmpeg ${FFMPEG_VERSION} (conda-forge GPL build with libx264)" )
 

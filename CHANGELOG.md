@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.15.3] - 2026-06-19
+
+### Fixed
+- VGGT-Long loop closure (`--vggt-long-loop-enable`) was non-functional in the
+  room4d setup — doubly broken: (1) `LoopModels/backbones/dinov2.py`
+  `torch.hub.load`s `./LoopModels/dinov2` relative to the **process CWD**, so it
+  fails whenever VGGT-Long runs from any directory but its own (always, under
+  room4d); and (2) `faiss` (place-recognition retrieval) is stripped from
+  VGGT-Long's pip requirements. `scripts/setup_room4d.sh` now installs the
+  conda-forge **faiss-cpu** build (`ensure_faiss`, pinned `FAISS_VERSION=1.9.0`)
+  and applies an idempotent patch anchoring the DINOv2 path to the module's own
+  location via `__file__`. With both, loop closure runs end-to-end (verified on
+  paper-windmill: 5 loop constraints, Sim3 loop optimization). Loop closure is
+  opt-in and off by default; on a forward-sweep clip it left pose error unchanged
+  (its lever is accumulated drift, not per-frame noise), but it's now available
+  for clips that genuinely revisit places.
+
 ## [0.1.15.2] - 2026-06-18
 
 ### Fixed
