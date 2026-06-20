@@ -9,11 +9,13 @@ from typing import Any
 
 from room4d.common.io import read_yaml
 from room4d.calibration.runner import CalibrationRunner
-from room4d.common.types import FrameRef, HumanState, ObjectState
+from room4d.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from room4d.common.paths import ensure_dir
 from room4d.common.memory import release_memory
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.camera_interpolation import densify_camera_states_for_frames
+from room4d.geometry.geometry_artifact import GeometryArtifact
+from room4d.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
 from room4d.geometry.world_frame import GroundPlaneCanonicalizer
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
@@ -280,6 +282,92 @@ class Room4DPipeline:
         self._stamp_stage_metadata(artifact, 'geometry', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
+
+    def refine_poses(self, ingest_artifact: IngestArtifact, geometry_artifact: GeometryArtifact) -> GeometryArtifact:
+        """BA-refine the geometry camera poses and emit a refined GeometryArtifact.
+
+        Backend-agnostic: consumes the GeometryArtifact contract (poses +
+        intrinsics + per-pixel world points) and the source frames, runs the
+        :class:`PoseRefiner` (VGGSfM tracks -> pycolmap seed -> robust iterative
+        BA, refine shared focal), then rebuilds the affected streams' keyframe
+        camera states from the refined poses and re-densifies interpolated states
+        for the tracking timeline.
+
+        When refinement is disabled (``cfg['pose_refine']['enabled']`` is false)
+        or the refinement runtime is unavailable, this is an identity
+        pass-through that re-emits the geometry unchanged under the ``pose_refine``
+        stage so downstream stages have a stable dependency either way.
+        """
+        pose_cfg = dict(self.cfg.get('pose_refine', {}))
+        enabled = bool(pose_cfg.get('enabled', False))
+        save_dir = self._stage_dir('pose_refine')
+
+        refinements: dict[str, Any] = {}
+        extra_notes: list[str] = []
+        if enabled:
+            refiner = PoseRefiner(pose_cfg)
+            try:
+                refinements = refiner.refine(geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact)
+            except PoseRefineUnavailable as exc:
+                extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
+            extra_notes.extend(refiner.notes)
+        else:
+            extra_notes.append("Pose refinement disabled; emitted geometry unchanged.")
+
+        new_intrinsics = dict(geometry_artifact.intrinsics_by_stream)
+        new_states = {sid: list(states) for sid, states in geometry_artifact.camera_states_by_stream.items()}
+        for stream_id, refinement in refinements.items():
+            new_intrinsics[stream_id] = refinement.refined_intrinsics
+            keyframes = sorted(
+                (
+                    f for f in geometry_artifact.selected_frames
+                    if str(f.stream_id) == stream_id
+                    and f"{stream_id}:{int(f.frame_idx)}" in geometry_artifact.pointmaps_by_frame
+                ),
+                key=lambda fr: int(fr.frame_idx),
+            )
+            rebuilt: list[TimedCameraState] = []
+            for fr in keyframes:
+                key = f"{stream_id}:{int(fr.frame_idx)}"
+                orig = geometry_artifact._find_state_for_frame(fr)
+                rebuilt.append(TimedCameraState(
+                    stream_id=stream_id,
+                    time_sec=float(orig.time_sec) if orig is not None else float(fr.timestamp_sec),
+                    intrinsics=refinement.refined_intrinsics,
+                    pose=CameraPose(T_world_cam=np.asarray(refinement.refined_T_world_cam_by_frame_key[key], dtype=float)),
+                ))
+            new_states[stream_id] = rebuilt
+
+        refined_metadata = dict(geometry_artifact.metadata or {})
+        refined_metadata['pose_refine'] = {
+            'enabled': enabled,
+            'refined_streams': sorted(refinements.keys()),
+            'stats': {sid: refinement.stats for sid, refinement in refinements.items()},
+        }
+        refined = GeometryArtifact(
+            run_id=geometry_artifact.run_id,
+            stage_name='pose_refine',
+            save_dir=save_dir,
+            metadata=refined_metadata,
+            backend_name=geometry_artifact.backend_name,
+            selected_frames=list(geometry_artifact.selected_frames),
+            intrinsics_by_stream=new_intrinsics,
+            camera_states_by_stream=new_states,
+            pointmaps_by_frame=geometry_artifact.pointmaps_by_frame,
+            depthmaps_by_frame=geometry_artifact.depthmaps_by_frame,
+            pairwise_matches=geometry_artifact.pairwise_matches,
+            view_graph_edges=geometry_artifact.view_graph_edges,
+            notes=list(geometry_artifact.notes) + extra_notes,
+        )
+        # Re-derive interpolated tracking-frame states from the refined keyframes
+        # (mirrors initialize_geometry). Skipped on pass-through, where the copied
+        # states are already correct for the un-refined poses.
+        if refinements:
+            self._densify_geometry_cameras_for_tracking(refined, ingest_artifact)
+        refined.save_dir = save_dir
+        self._stamp_stage_metadata(refined, 'pose_refine', video_paths=self._video_paths_for_stage(ingest_artifact))
+        refined.save()
+        return refined
 
     def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
         """Run point tracking, 3D lifting, and static/dynamic partitioning."""
@@ -778,6 +866,8 @@ class Room4DPipeline:
         components: list[Any] = []
         if stage_name == 'geometry':
             components = [self.geometry_init]
+        elif stage_name == 'pose_refine':
+            components = []  # the refiner holds no persistent backend; just release memory below
         elif stage_name == 'tracking':
             components = [self.tracker]
         elif stage_name == 'humans':
@@ -802,17 +892,21 @@ class Room4DPipeline:
         ingest_artifact = self.preprocess(video_paths)
         sync_artifact = self.synchronize(ingest_artifact)
         geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
-        track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
-        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact, geometry_artifact=geometry_artifact)
+        # Pose-refined geometry feeds every downstream stage; the original
+        # geometry artifact is still returned under 'geometry' for inspection.
+        pose_geometry = self.refine_poses(ingest_artifact, geometry_artifact)
+        track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
+        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact, geometry_artifact=pose_geometry)
         object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
-        graph_artifact = self.build_graph(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
-        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        scene_artifact = self.assemble_scene(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
-        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=geometry_artifact, track_artifact=track_artifact, human_artifact=human_artifact)
+        graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
+        optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
+        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
+        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
             'geometry': geometry_artifact,
+            'pose_refine': pose_geometry,
             'tracks': track_artifact,
             'humans': human_artifact,
             'objects': object_artifact,

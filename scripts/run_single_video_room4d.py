@@ -76,6 +76,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     if cpu_threads is not None:
         geometry['cpu_threads'] = int(cpu_threads)
 
+    pose_refine = cfg.setdefault('pose_refine', {})
+    pose_refine['enabled'] = bool(getattr(args, 'pose_refine_enable', False))
+    pose_refine['device'] = getattr(args, 'pose_refine_device', None) or 'cuda'
+    pose_refine['vis_thresh'] = float(getattr(args, 'pose_refine_vis_thresh', 0.2))
+    pose_refine['max_reproj_error'] = float(getattr(args, 'pose_refine_max_reproj_error', 8.0))
+    pose_refine['ba_iters'] = int(getattr(args, 'pose_refine_ba_iters', 3))
+    pose_refine['ba_max_err'] = float(getattr(args, 'pose_refine_ba_max_err', 4.0))
+    pose_refine['ba_loss_scale'] = float(getattr(args, 'pose_refine_ba_loss_scale', 1.0))
+    pose_refine['max_query_pts'] = int(getattr(args, 'pose_refine_max_query_pts', 2048))
+    pose_refine['query_frame_num'] = int(getattr(args, 'pose_refine_query_frame_num', 6))
+    pose_refine['max_points_num'] = int(getattr(args, 'pose_refine_max_points_num', 20480))
+    pose_refine['fine_tracking'] = bool(getattr(args, 'pose_refine_fine_tracking', False))
+    pose_refine['refine_focal'] = not bool(getattr(args, 'pose_refine_no_refine_focal', False))
+    pose_refine['refine_pp'] = bool(getattr(args, 'pose_refine_refine_pp', False))
+
     tracking = cfg.setdefault('tracking', {})
     tracking_device = args.tracking_device or args.geometry_device or tracking.get('device', 'cpu')
     rec = {}
@@ -380,6 +395,19 @@ def main() -> None:
     parser.add_argument('--vggt-long-use-dbow', action='store_true')
     parser.add_argument('--vggt-long-delete-temp-files', action='store_true')
     parser.add_argument('--vggt-long-output-cache-dir', default=None)
+    parser.add_argument('--pose-refine-enable', action='store_true', help='BA-refine geometry camera poses (seed pycolmap with backend geometry + VGGSfM tracks, robust iterative BA) before tracking. Off by default; needs CUDA + pycolmap.')
+    parser.add_argument('--pose-refine-device', default=None, help='Device for the VGGSfM tracker during pose refinement (default: cuda). BA itself runs on CPU.')
+    parser.add_argument('--pose-refine-vis-thresh', type=float, default=0.2, help='Track visibility threshold for BA observations.')
+    parser.add_argument('--pose-refine-max-reproj-error', type=float, default=8.0, help='Drop seed observations whose reprojection error vs the seed poses exceeds this (px).')
+    parser.add_argument('--pose-refine-ba-iters', type=int, default=3, help='Iterative robust BA + outlier-filter rounds.')
+    parser.add_argument('--pose-refine-ba-max-err', type=float, default=4.0, help='Drop 3D points with reprojection error above this between BA rounds (px).')
+    parser.add_argument('--pose-refine-ba-loss-scale', type=float, default=1.0, help='Cauchy robust-loss scale (px).')
+    parser.add_argument('--pose-refine-max-query-pts', type=int, default=2048, help='VGGSfM tracker max query points.')
+    parser.add_argument('--pose-refine-query-frame-num', type=int, default=6, help='VGGSfM tracker query frame count.')
+    parser.add_argument('--pose-refine-max-points-num', type=int, default=20480, help='VGGSfM track-transformer chunk size (peak GPU memory scales with this).')
+    parser.add_argument('--pose-refine-fine-tracking', action='store_true', help='Enable the VGGSfM fine tracker (slower, more accurate).')
+    parser.add_argument('--pose-refine-no-refine-focal', action='store_true', help='Disable shared-focal refinement in BA (focal refinement is on by default; pp stays fixed).')
+    parser.add_argument('--pose-refine-refine-pp', action='store_true', help='Also refine the principal point in BA (known to drift and hurt render registration; off by default).')
     parser.add_argument('--tracking-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--tracking-device', default=None)
     parser.add_argument('--tracking-grid-size', type=int, default=12)
@@ -473,6 +501,12 @@ def main() -> None:
             f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
             f"max_detections: {cfg['objects']['max_detections']}  frame_source: {cfg['objects']['frame_source']} stride: {cfg['objects']['frame_stride']}  embedder: {cfg['objects']['embedder_backend_mode']}"
         )
+        pr = cfg.get('pose_refine', {})
+        console.print(
+            f"pose_refine: {'on' if pr.get('enabled') else 'off'} on {pr.get('device')}  "
+            f"refine_focal: {pr.get('refine_focal')}  refine_pp: {pr.get('refine_pp')}  "
+            f"ba_iters: {pr.get('ba_iters')}  vis_thresh: {pr.get('vis_thresh')}"
+        )
         console.print(f"scene timeline source: {cfg.get('scene', {}).get('timeline_source', 'geometry')}")
 
     write_run_manifest(
@@ -492,20 +526,22 @@ def main() -> None:
 
     outputs = {}
     stage_labels = {
-        'ingest': 'Stage 1/10 · Ingest / preprocess',
-        'sync': 'Stage 2/10 · Temporal sync',
-        'geometry': 'Stage 3/10 · VGGT geometry',
-        'tracking': 'Stage 4/10 · Tracking + lifting + static/dynamic',
-        'humans': 'Stage 5/10 · Human perception',
-        'objects': 'Stage 6/10 · Object perception',
-        'graph': 'Stage 7/10 · Scene graph',
-        'optimization': 'Stage 8/10 · Optimization',
-        'scene': 'Stage 9/10 · 4D scene assembly',
-        'render': 'Stage 10/10 · Novel-view render',
+        'ingest': 'Stage 1/11 · Ingest / preprocess',
+        'sync': 'Stage 2/11 · Temporal sync',
+        'geometry': 'Stage 3/11 · VGGT geometry',
+        'pose_refine': 'Stage 4/11 · Pose refinement (BA)',
+        'tracking': 'Stage 5/11 · Tracking + lifting + static/dynamic',
+        'humans': 'Stage 6/11 · Human perception',
+        'objects': 'Stage 7/11 · Object perception',
+        'graph': 'Stage 8/11 · Scene graph',
+        'optimization': 'Stage 9/11 · Optimization',
+        'scene': 'Stage 10/11 · 4D scene assembly',
+        'render': 'Stage 11/11 · Novel-view render',
     }
 
     stage_release_names = {
         'geometry': 'geometry',
+        'pose_refine': 'pose_refine',
         'tracking': 'tracking',
         'humans': 'humans',
         'objects': 'objects',

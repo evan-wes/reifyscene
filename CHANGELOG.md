@@ -7,6 +7,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.16.0] - 2026-06-20
+
+### Added
+- **Pose-refinement stage (`pose_refine`)** — a new, backend-agnostic pipeline
+  stage that bundle-adjusts the geometry camera poses, inserted between
+  `geometry` and `tracking` so every downstream stage consumes the refined
+  poses. It consumes the `GeometryArtifact` contract (poses + intrinsics +
+  per-pixel world points) plus the source frames, runs the vendored VGGSfM
+  tracker, seeds a `pycolmap` reconstruction with the backend's poses / K /
+  world points and the visible tracks, and runs COLMAP's iterative robust BA
+  (Cauchy loss + reprojection-outlier filtering, **refine shared focal, principal
+  point fixed**); it re-emits a refined `GeometryArtifact` and re-derives the
+  interpolated tracking-frame camera states from the refined keyframes. No
+  geometry backend is re-run. New module `room4d/geometry/pose_refine.py`
+  (`PoseRefiner`); pipeline method `Room4DPipeline.refine_poses`; stage wired
+  into `STAGE_ORDER` / `build_stage_registry` (now 11 stages) with the six
+  downstream stages rewired to depend on `pose_refine`. Why BA closes the
+  native-geometry pose gap when photometric pose-opt could not: BA minimizes
+  *reprojection* error of feature correspondences — a signal tied to the true
+  scene independent of the current geometry — breaking the pose↔geometry gauge
+  ambiguity. Validated in the step-12 spike (Path B): paper-windmill pairwise
+  rotation **1.73° → 0.26°** and masked mPSNR **17.01 → 19.58** (+2.57, ~69% of
+  the gap to the GT-pose oracle 20.75); spin **4.0° → 1.08°**. Robust BA rejects
+  dynamic-foreground tracks on its own at typical dynamic fractions, so **no
+  foreground mask is generated** (the spike ablation found masking is not
+  load-bearing: none 1.078° ≈ image-mask 1.062° ≈ motion-mask 1.098°). Refining
+  the principal point is harmful (drifts ~9px, wrecks render registration) and
+  stays off. Opt-in and **off by default** (`--pose-refine-enable`); when
+  disabled or when the refinement runtime is unavailable, the stage is an
+  identity pass-through that re-emits the geometry unchanged so downstream has a
+  stable dependency either way. Resumable via the existing stage window
+  (`--start-stage pose_refine --prior-run-dir <cached geometry run>`) to re-tune
+  BA without re-running geometry. New `pose_refine` extra in `pyproject.toml`
+  (`pycolmap`, `hydra-core`, `omegaconf`, `scipy`) installed by default in
+  `scripts/setup_room4d.sh` (`--no-pose-refine` to skip); `hydra-core` /
+  `omegaconf` are required by the vendored VGGSfM tracker and were previously
+  undeclared.
+
 ## [0.1.15.3] - 2026-06-19
 
 ### Fixed
