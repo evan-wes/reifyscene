@@ -92,6 +92,7 @@ INSTALL_DEV=0
 INSTALL_VISION=1
 INSTALL_GEOMETRY=1
 INSTALL_CALIBRATION=1
+INSTALL_POSE_REFINE=1
 INSTALL_FFMPEG=1
 FORCE_VGGT_LONG_WEIGHTS=0
 
@@ -137,6 +138,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_GEOMETRY=0; shift ;;
     --no-calibration)
       INSTALL_CALIBRATION=0; shift ;;
+    --no-pose-refine)
+      INSTALL_POSE_REFINE=0; shift ;;
     --no-ffmpeg)
       INSTALL_FFMPEG=0; shift ;;
     --unlocked)
@@ -165,6 +168,7 @@ Install options:
   --no-vision             Skip vision extras
   --no-geometry           Skip geometry extras
   --no-calibration        Skip calibration extras and hloc install
+  --no-pose-refine        Skip pose-refinement extras (pycolmap, hydra-core, omegaconf, scipy)
   --no-ffmpeg             Skip the ffmpeg (conda-forge) dataset-prep install
   --unlocked              Resolve dependencies fresh instead of installing the
                           pinned tree from scripts/locks/room4d.lock
@@ -805,6 +809,13 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_COTRACKER -eq 1 ]]; then
     smoke_test_python_module "CoTracker" "cotracker" "cotracker"
   fi
+  if [[ $INSTALL_POSE_REFINE -eq 1 ]]; then
+    # pose-refinement deps: pycolmap (BA), hydra-core + omegaconf (required by
+    # the vendored VGGSfM tracker the refiner drives).
+    smoke_test_python_module "pycolmap" "pycolmap" "pycolmap"
+    smoke_test_python_module "hydra-core" "hydra" "hydra-core"
+    smoke_test_python_module "omegaconf" "omegaconf" "omegaconf"
+  fi
   if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
     smoke_test_python_module "pycolmap" "pycolmap" "pycolmap"
     smoke_test_python_module "hloc" "hloc" "hloc"
@@ -851,6 +862,7 @@ EXTRAS=()
 [[ $INSTALL_VISION -eq 1 ]] && EXTRAS+=(vision)
 [[ $INSTALL_GEOMETRY -eq 1 ]] && EXTRAS+=(geometry)
 [[ $INSTALL_CALIBRATION -eq 1 ]] && EXTRAS+=(calibration)
+[[ $INSTALL_POSE_REFINE -eq 1 ]] && EXTRAS+=(pose_refine)
 [[ $INSTALL_VGGT_LONG -eq 1 ]] && EXTRAS+=(vggt_long)
 [[ $INSTALL_DEV -eq 1 ]] && EXTRAS+=(dev)
 

@@ -26,7 +26,13 @@ def test_single_stage_window() -> None:
 
 
 def test_mid_window_excludes_endpoints_outside_range() -> None:
-    assert _window('sync', 'tracking') == ['sync', 'geometry', 'tracking']
+    assert _window('sync', 'tracking') == ['sync', 'geometry', 'pose_refine', 'tracking']
+
+
+def test_pose_refine_sits_between_geometry_and_tracking() -> None:
+    order = list(STAGE_ORDER)
+    assert order.index('geometry') < order.index('pose_refine') < order.index('tracking')
+    assert order[order.index('geometry') + 1] == 'pose_refine'
 
 
 def test_stop_before_start_raises() -> None:

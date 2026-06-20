@@ -13,6 +13,7 @@ from room4d.common.paths import ensure_dir
 
 VOLATILE_STAGE_KEYS: dict[str, set[str]] = {
     'geometry': {'device', 'system_report', 'frame_cache_dir', 'output_cache_dir', 'cpu_threads', 'debug_shapes', 'debug_max_points'},
+    'pose_refine': {'device'},
     'tracking': {'device', 'cpu_threads', 'allow_github', 'debug', 'debug_max_points'},
     'humans': {'device'},
     'objects': {'device'},
