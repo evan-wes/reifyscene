@@ -1,5 +1,10 @@
 # TODOS
 
+> **Architecture roadmap → design doc.** The v1 full-pipeline roadmap (F0–P9) now lives in
+> `docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md` — **that doc is
+> the system of record.** Entries the design absorbs are marked `→ <phase>`; the rest are still-live
+> orthogonal backlog.
+
 ## Reference Comparison Tool
 
 ### Calibration arc next: M2/M3 joint-opt fusion (person + SfM)
@@ -33,6 +38,8 @@ arc's real endpoint) still needs own-rig captures (no public GT).
 **Effort:** L
 **Priority:** P2
 **Depends on:** per-camera intrinsics injection; de-stubbing sync + joint-opt factors
+**→ Now scoped as F2** (real multi-stream joint-opt fusion) in the full-pipeline design doc; the
+per-camera-intrinsics + de-stub-sync/factors dependencies carry over verbatim.
 
 ### Shared data-dir cache race between concurrent runs of one sequence
 
@@ -167,26 +174,40 @@ matches the borrowed/native quality bar (borrowed 20.68 / native-borrowed-tracks
 20.74). The remaining dataset-provided inputs (RGB/depth/poses) are dataset ground
 truth, not borrowed reconstruction.
 
-### Step 12: native geometry (VGGT) → real renderer — IN PROGRESS
+### Step 12: native geometry (VGGT-Long) → real renderer — pose rung DONE
 
-Replace the borrowed DyCheck geometry (depth/poses; masks deferred) in the render
-path with room4d's own VGGT reconstruction, scored against the DyCheck-GT oracle
-(masked mPSNR ~20.7), one input at a time. **De-risking spike DONE:** VGGT-vs-GT on
-paper-windmill is small (poses within ~0.5° rel-rot of COLMAP; depth AbsRel ~0.02;
-single global up-to-scale s≈0.83) → integration + a scale-alignment hook, not a
-research effort.
+Replace the borrowed DyCheck geometry (depth/poses; masks deferred) with room4d's
+own VGGT-Long reconstruction, scored against the DyCheck-GT oracle (masked mPSNR
+~20.75 on paper-windmill), one input at a time.
 
 - **PR 2 — geometry-provider seam: DONE (v0.1.14.0).** `room4d/lifting/geometry_provider.py`
   (`GeometryProvider` ABC + `DyCheckGeometryProvider`, the permanent oracle);
   `build_native_init_inputs`/`NativeMotionInitializer` take an optional `provider`.
   Byte-identical to the old direct path (lossless refactor).
-- **PR 3 — `VGGTGeometryProvider` + global scale-alignment hook; swap POSES first**,
-  score vs the oracle. VGGT geometry already runs on this machine
-  (`run_single_video_vggt.py`); the GeometryArtifact→FrameStack/CameraRecords bridge
-  + Sim(3)/scale alignment to the GT eval frame is the work (reuse `calibration/gt_scoring.py`).
-- **PR 4 — swap DEPTH**, score. (Masks stay borrowed.)
-- **Deferred:** native foreground masks (needs a segmenter, no FG/BG one wired in);
-  folding into `Room4DPipeline` (World-A↔B convergence). Out of step-12 core.
+- **Pose rung — DONE (diagnosed + fix productionized).** Native VGGT-Long poses
+  (GT depth) scored **17.01** vs oracle **20.75** — a −3.7 dB gap diagnosed as a
+  POSE problem (spike R0/R1 ladder, memory a private note).
+  VGGT-Long itself was fixed first — global pose alignment (v0.1.15.2,
+  chunk-local→`camera_poses.txt`, 20.5°→1.73°) + loop closure (v0.1.15.3).
+  Photometric pose-opt (Path A) failed; COLMAP-BA pose refinement (Path B)
+  recovered **17.01→19.58** (windmill 1.73°→0.26°), productionized as the
+  **`pose_refine` pipeline stage (v0.1.16.0)** — robust BA, refine focal, pp fixed,
+  no FG mask needed (ablation: masking not load-bearing).
+- **Remaining rungs (lower priority — poses were the dominant gap):** native DEPTH
+  (explored in spike R3, not productionized) and native FG masks (needs a
+  segmenter, none wired in). Score each vs the oracle when picked up.
+- **The big convergence** — making the *production* `Room4DPipeline` use the trained
+  renderer end-to-end — is its own headline item below.
+
+### Productionize the trained renderer into Room4DPipeline — → F0 (design doc)
+
+**Superseded by the full-pipeline design.** This is now **F0 (renderable core)** in
+`docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md`: delete the
+no-train `Gaussian4DTrainer`/`Gaussian4DScene` toy, wire the proven `Static/DynamicGaussianTrainer`
+into the render stage (`SceneArtifact→seed` adapter, static/dynamic select, training-config home),
+clean the scene↔render boundary, and emit in-pipeline masked-NVS. The open design forks (trainer
+init, trainer selection, config home, resume/stage-window, the weak BenchmarkRunner metric) are
+carried into the design doc's §5d. **F0 is the first build phase.**
 
 ### Follow-up: dynamic densification — DONE (v0.1.10.0, PR 6)
 
@@ -196,6 +217,49 @@ slicing; `DynamicGaussianTrainer` runs one controller per field). On
 paper-windmill: Gaussians grow ~137k → ~970k, masked mLPIPS 0.178 → 0.164,
 mSSIM 0.661 → 0.669, train-view PSNR ~25 → 27.2, sharper flythrough. The
 remaining renderer-track follow-up is the native motion initializer (above).
+
+## Open cleanup / parked
+
+### 2D-tracks O(N²) files antipattern
+
+**What:** the native tracker / `TrackArtifact` write one `.npy` per frame-pair
+(`2d_tracks/{i}_{j}.npy`) — 181k files at 426 frames, ~1M for long sequences.
+Replace with a single packed/memmapped array. Only the `--own_tracker` path emits
+them (Path B / pose_refine uses a single VGGSfM npz), so not urgent.
+
+**Effort:** S **Priority:** P3 **Depends on:** None (fix before own-tracker on a long seq)
+
+### Benchmarker on real (in-pipeline) code — PARKED
+
+**What:** a GT-aware benchmark runner with a composite input provider (per-slot
+GT/native sourcing) that scores masked-NVS vs the oracle — the native-swap ladder's
+permanent measuring instrument, replacing the pipeline's weak train-view render
+metric. The masked-mPSNR machinery already exists (`eval/metrics/image.py`,
+`render/eval/novel_view.py`, the `covisibility_masked_novel_view_synthesis` record
+contract) but is only driven by `run_render_proof.py`.
+
+**Why parked:** intentionally deferred until the trained renderer is in the pipeline
+(see "Productionize the trained renderer") — there is no real in-pipeline render to
+benchmark until then.
+
+**Effort:** L **Priority:** P2 **Depends on:** trained renderer in Room4DPipeline
+**→ Now folded into** the design doc's eval: in-pipeline masked-NVS lands in F0; the round-trip
+graph-diff eval is P7. The "permanent measuring instrument" role is the design's eval stage.
+
+### develop → main release merge
+
+**What:** `main` is at v0.1.1.0; `develop` is at v0.1.16.0 (~45 commits). Cut a
+`develop`→`main` release merge when a batch is ready — a per-batch call, not
+per-feature.
+
+**Effort:** S **Priority:** P2 **Depends on:** None
+
+### Optional: confirm Path B render gain on spin
+
+One render-proof run scoring the refined poses on the dynamic spin scene (like
+windmill 17.01→19.58). Nice-to-have, not blocking.
+
+**Effort:** S **Priority:** P3 **Depends on:** None
 
 ## Completed
 
