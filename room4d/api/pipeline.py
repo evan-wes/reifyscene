@@ -841,6 +841,15 @@ class Room4DPipeline:
         """
         render_dir = self._stage_dir('render')
         artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
+        # Masked-NVS scoring against held-out GT runs only on a benchmark dataset
+        # (covisibility masks / held-out cameras don't exist for arbitrary video).
+        eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
+        if eval_cfg.get('dataset_root'):
+            from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
+            device = str(self.cfg.get('render', {}).get('device', 'cuda'))
+            metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+            if metrics:
+                artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir
         self._stamp_stage_metadata(artifact, 'render', video_paths=self._video_paths_for_stage())
         artifact.save()
