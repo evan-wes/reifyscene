@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.17.1] - 2026-06-26
+
+### Changed
+- **Front-half perception redesign — design + build plan formalized** in the
+  full-pipeline design doc (`docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md`).
+  Decision-only doc change; no code yet.
+  - **§4A (new section)** — replaces the hand-tuned 2D associator front-half with
+    a modern foundation-model stack, verified by two adversarial deep-research
+    passes: **SAM 3** (detect+segment+track / identity) → **DINOv3-L** (cross-gap
+    re-ID) → **SigLIP 2 + Qwen2.5-VL** (open-vocab semantics) → **MoGe-2** (metric
+    depth backstop) + **VGGT** → **Sapiens + GVHMR** (humans); **CoTracker3** kept
+    as the orthogonal motion subsystem. Core principle: **decouple identity from
+    motion** (the old design derived identity from point-track Jaccard). Every
+    stage is an **artifact contract** filled by a **fallback ladder** (foundation
+    model → lighter model → today's backend → graceful-empty) whose floor is the
+    current pipeline, so a missing/ungated model degrades fidelity, never
+    completeness. Runs **staged** (load→infer→release) within 32 GB.
+  - **Stage map (§4)** — perception band reorders to
+    `pose_refine → segment → reid → objects → humans → tracking → graph`; two
+    net-new stages (`segment`, `reid`) and artifacts (`InstanceArtifact`,
+    `ReidArtifact`); `objects`/`humans`/`tracking` re-cut.
+  - **Build plan (§7)** — adds **FP0–FP6** (floor-first structure, then climb the
+    ladder ungated-first), resumes **F0b** dynamic render on FP1 floor-rung masks,
+    and subsumes the old **F3 pose2d de-stub** into FP5.
+  - §0/§3/§8/§9 reconciled; `a private note` memory records
+    the verified stack + licenses/gating.
+
 ## [0.1.17.0] - 2026-06-25
 
 ### Added
