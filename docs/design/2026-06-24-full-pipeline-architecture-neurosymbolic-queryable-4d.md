@@ -42,6 +42,17 @@
    optimizer is the **calibration arc's M2/M3** (`a private note`), not abstract "learning
    value": multi-stream high-fidelity reconstruction lowers the eval's noise floor (§5e/§8), so it is
    foundation, de-risked first.
+9. **Front-half perception redesign — foundation-model stack + degradable ladders (2026-06-26).**
+   Two adversarial deep-research passes (`a private note`) verified a modern
+   stack that **replaces the hand-tuned 2D associator front-half**. This *evolves* §0.2/§0.6 ("keep
+   the proven front-half as-is"): **perception is now explicit redesign scope**; the rest of the
+   front-half spine (geometry / pose_refine / sync / optimization) is still kept + built-out. Core
+   principle: **decouple identity from motion** — instance perception (SAM 3 mask-propagation →
+   DINOv3 re-ID → open-vocab semantics) owns identity; CoTracker point-tracks own motion. Every
+   perception stage is a fixed **artifact contract** filled by a **fallback ladder** (foundation
+   model → lighter model → today's backend → graceful-empty), so a missing/ungated model degrades
+   *fidelity*, never *completeness*; the ladder floor is today's pipeline (strict superset). Runs
+   **staged** (load→infer→release) within 32 GB. Deep design in §4A.
 
 ---
 
@@ -96,9 +107,9 @@ name / dependencies / artifact_cls / run_fn / load_fn), orchestrated by
 | 2 | `sync` | **Stub (no-op)** | `audio_sync.py:11` / `motion_sync.py:16` hardcode `return 0.0, 0.0`; fine for monocular, build out + validate on the rig (F1) |
 | 3 | `geometry` | **Proven** | VGGT / VGGT-Long / dataset backends → `GeometryArtifact` |
 | 4 | `pose_refine` | **Proven** | BA pose refinement (v0.1.16.0); identity pass-through when disabled |
-| 5 | `tracking` | **Proven** | 2D tracks + 3D lift + static/dynamic partition |
-| 6 | `humans` | **Proven\*** | detect / DensePose / SMPL / associate real; **`pose2d` can fabricate** — `_run_real` falls back per-box to heuristic keypoints (`pose2d.py:114`) then stamps `backend_used='real'` (`:115`). De-stub in F3 |
-| 7 | `objects` | **Proven** | detect / segment / embed / re-ID |
+| 5 | `tracking` | **Proven → Redesign (§4A)** | today: 2D tracks + 3D lift + static/dynamic. Redesign: **motion-only**; identity moves to `segment`/`reid`; reordered *after* perception |
+| 6 | `humans` | **Proven\* → Redesign (§4A)** | today: detect / DensePose / SMPL / associate; **`pose2d` can fabricate** — `_run_real` → heuristic keypoints (`pose2d.py:114`) then stamps `backend_used='real'` (`:115`). Redesign: Sapiens (dense) + GVHMR (world-SMPL) replace the Keypoint-RCNN/DensePose/SMPL path (subsumes the F3 de-stub); consumes `segment` masks |
+| 7 | `objects` | **Proven → Redesign (§4A)** | today: detect / segment / embed / re-ID. Redesign: SigLIP2/Qwen2.5-VL semantics over `segment` masks; the hand-tuned associator is deleted |
 | 8 | `graph` | **Redesign** | `DynamicSceneGraphBuilder` builds a *passive* graph — not queryable |
 | 9 | `optimization` | **Stub (no-op) → build out early (F2)** | `JointSpatiotemporalSolver` runs, but every geometric factor returns placeholder `0.0,{}` (`epipolar/depth_consistency/smoothness/graph/human/object_factors.py:13`); the rest return `len(...) * weight`, a count, not a residual. Optimizes nothing today |
 | 10 | `scene` | **Re-cut** | `SceneArtifact` (renderable repr) — clean its boundary vs render |
@@ -106,7 +117,8 @@ name / dependencies / artifact_cls / run_fn / load_fn), orchestrated by
 
 Net-new (not in the registry today): the **query** stage (`room4d/query/` is all stubs —
 `PromptParser.parse` returns a placeholder dict), the **compiler**, and the **query-conditioned
-eval**.
+eval**. Also net-new from the perception redesign (§4A): the **`segment`** (SAM 3) and **`reid`**
+(DINOv3) stages + their `InstanceArtifact` / `ReidArtifact`.
 
 **Trust tiers (verified 2026-06-24 — `a private note`).** The
 "front-half" is not uniformly proven. Read the table's status column as three tiers: **proven**
@@ -117,9 +129,10 @@ plan **hardens these stubs early** (Block 1 / F1–F3, gated by G1) rather than 
 
 ## 4. Full stage map & contracts (target)
 
-Front-half contracts are unchanged in substance; the table records responsibility + artifact I/O so
-the redesign has a fixed perimeter. **Separation of concerns is the governing principle:** each
-stage owns exactly one responsibility and communicates only through its artifact.
+Front-half contracts are unchanged in substance **except the perception band
+(`segment`/`reid`/`objects`/`humans`/`tracking`), re-cut in §4A**; the table records responsibility +
+artifact I/O so the redesign has a fixed perimeter. **Separation of concerns is the governing
+principle:** each stage owns exactly one responsibility and communicates only through its artifact.
 
 | Stage | Responsibility (one line) | Consumes | Produces |
 |---|---|---|---|
@@ -127,9 +140,11 @@ stage owns exactly one responsibility and communicates only through its artifact
 | sync | per-stream time offsets | ingest | `SyncArtifact` |
 | geometry | per-frame poses/intrinsics/depth/pointmaps | ingest, sync | `GeometryArtifact` |
 | pose_refine | BA-refined poses (+ focal) | ingest, geometry | `GeometryArtifact` (refined) |
-| tracking | 2D tracks → 3D lift → static/dynamic labels | ingest, pose_refine | `TrackArtifact` |
-| humans | per-frame human entities (pose/SMPL/masks) | ingest, tracking, pose_refine | `HumanArtifact` |
-| objects | per-frame object entities (masks/embeddings/IDs) | ingest, tracking | `ObjectArtifact` |
+| **segment** *(new, §4A)* | open-vocab detect+segment+**track** → instance masks + persistent IDs (objects + humans) | ingest, pose_refine | **`InstanceArtifact`** *(new)* |
+| **reid** *(new, §4A)* | per-tracklet appearance features + cross-occlusion identity merges | ingest, segment | **`ReidArtifact`** *(new)* |
+| objects *(re-cut, §4A)* | non-human tracklets → open-vocab category + attributes | ingest, segment, reid | `ObjectArtifact` |
+| humans *(re-cut, §4A)* | human tracklets → dense maps (pose/seg/depth) + world-grounded SMPL | ingest, segment, reid, pose_refine | `HumanArtifact` |
+| tracking *(motion-only, §4A)* | dense point tracks → 3D lift → static/dynamic (seeded by `segment` fg) | ingest, pose_refine, segment | `TrackArtifact` |
 | **graph** | **queryable temporal 4D scene graph (+ dual-use judge contract)** | pose_refine, tracking, humans, objects | `GraphArtifact` (re-cut) |
 | optimization | staged joint refinement of states | sync, pose_refine, tracking, humans, objects, graph | `OptimizationArtifact` |
 | **scene** | **renderable representation only** (static layer + dynamic SE(3) motion bundle) | pose_refine, tracking, humans, objects, optimization | `SceneArtifact` |
@@ -141,6 +156,111 @@ stage owns exactly one responsibility and communicates only through its artifact
 The new stages slot **after** `graph` and `scene`: `… → graph → query → compile → render → eval`.
 `query`/`compile`/`eval` are added to `STAGE_ORDER` and the registry with their own
 dependencies; resume/stage-window behavior is inherited for free.
+
+The **perception band also reorders** (§4A) to
+`pose_refine → segment → reid → objects → humans → tracking → graph`: identity (`segment`/`reid`)
+now precedes motion (`tracking`), reversing today's `tracking → humans → objects`. Two stages
+(`segment`, `reid`) and two artifacts (`InstanceArtifact`, `ReidArtifact`) are net-new; `objects`,
+`humans`, `tracking` are re-cut against the new contracts.
+
+## 4A. Front-half perception redesign — verified foundation-model stack + degradable ladders (2026-06-26)
+
+Supersedes the "keep perception as-is" assumption (§0.2/§0.6). The old front-half derived **identity
+from CoTracker point-track Jaccard** (`object_assoc.py` / `human_assoc.py`, `track_weight=2.0`
+dominant) and associated in 2D with ~6 magic weights — a *motion* cue doing an *identity* job
+(a person + carried bag share tracks → false merge; same object across an occlusion gap shares none →
+false fragment). The redesign **decouples motion from identity**, rebuilds identity on
+mask-propagation + appearance + 3D, and makes every stage **degradable by contract**. Verified by two
+adversarial deep-research passes (`a private note`).
+
+### Verified stack (per capability)
+
+| Capability | Primary | License / gating | Replaces |
+|---|---|---|---|
+| identity backbone (detect+segment+**track** in one model) | **SAM 3** (`facebook/sam3`, 2025-11-19) | custom SAM License, **gated/manual** | Mask R-CNN detect + segmenter + associator-identity + point-track-as-identity |
+| cross-occlusion re-ID | **DINOv3-ViT-L** | custom Meta license, **gated/manual** | ResNet18 embedder + associator embed/merge |
+| open-vocab semantics + attributes | **SigLIP 2 + Qwen2.5-VL** | open / permissive | COCO-80 category string |
+| depth/geometry backstop (2D→3D lift) | **MoGe-2** (metric point map) | **MIT**, ungated | backstops VGGT |
+| humans (dense + parametric) | **Sapiens** (pose/seg/depth/normals) + **GVHMR** (world-SMPL) | both non-commercial | Keypoint-RCNN + DensePose/SMPL **stubs** |
+| motion (kept, orthogonal) | **CoTracker3** | — | *(unchanged)* |
+
+Architectural template: **4D-LangSplat** (CVPR 2025) — MLLM-per-tracklet temporally-consistent
+semantics *over* CLIP-only. SMPL/SMPL-X needs MPI registration. The field moves fast: **re-check
+successors (SAM 3.1, Sapiens2, Qwen3-VL, OnlineHMR, GeometryCrafter/ViGeo) right before vendoring.**
+
+### Staged execution (32 GB constraint — load-bearing)
+
+The heavy models cannot co-reside at video resolution (Qwen2.5-VL-7B ~17–20 GB, DINOv3-7B ~14 GB —
+**use ViT-L**, SAM 3 ~4–12 GB). Perception is therefore **N sequential sub-stages**, each
+**load → infer over the video → release VRAM → persist its artifact** — *not* one monolithic
+all-models-resident stage. Mitigations: DINOv3-L not 7B; fp16/bf16; stage the VLM alone (or the 3B
+variant). This *reinforces* the decoupling and maps cleanly onto the existing `StageSpec`/resume
+machinery — each stage is independently resumable and skippable.
+
+### Reordered stage band
+
+`pose_refine → segment → reid → objects → humans → tracking → graph`. **SAM 3 is the shared mask
+source** (load once, prompt with object + human concepts, get all instance masks + persistent IDs,
+release) → `objects`/`humans`/`reid` are *enrichment passes* over those masks; **`tracking` drops to
+pure motion** (CoTracker), reordered after `segment` so its dynamic split is seeded by real
+foreground masks (this is the original F0b fg-gap fix, now clean). Net-new artifacts:
+**`InstanceArtifact`** (per-frame masks + track IDs) and **`ReidArtifact`** (tracklet embeddings +
+cross-gap merges).
+
+### Degradability — the contract is the interface, the ladder fills it
+
+Each stage = a fixed **artifact contract** + a **fallback ladder** (best → degraded →
+graceful-empty). At stage start it probes the ladder top-down (importable? weights present + access
+granted? smoke-inference passes?), runs the first available rung, and stamps `backend_used` + a
+**capability manifest** (which rung ran, what fidelity the artifact carries) into the metadata — so
+degradation is *observable*, not silent. This generalizes the existing `backend_used` idiom
+(detector `real→heuristic`, embedder `real→histogram`, tracker `cotracker→fallback`).
+
+| Stage | Fallback ladder (best → … → floor) |
+|---|---|
+| `segment` | SAM 3 → Grounded-SAM-2 (Apache, **ungated**) → SAM 2 + Mask R-CNN → Mask R-CNN + IoU assoc *(today)* → graceful-empty |
+| `reid` | DINOv3-L → DINOv2 (Apache) → ResNet18/CLIP *(today)* → color histogram *(today)* → skip (SAM 3 in-shot IDs only) |
+| `objects` (semantics) | Qwen2.5-VL + SigLIP 2 → SigLIP 2/OpenCLIP zero-shot → CLIP → detector COCO-80 label → `"unknown"` |
+| `humans` | *dense:* Sapiens → Keypoint-RCNN → bbox-only · *SMPL:* GVHMR (world) → 4D-Humans (camera) → Multi-HMR → skip |
+| `tracking` (motion) | CoTracker3 → TAPIR → RAFT flow → all-static · *(dynamic seed from `segment` masks, else motion-threshold)* |
+| depth backstop | VGGT → MoGe-2 (MIT) → Metric3D v2 (BSD)/UniDepth (NC) → triangulate from tracks+poses → ground-plane |
+
+### Back-half contract + resolution guarantee
+
+The load-bearing split: **`scene`/`render` need masks + static/dynamic partition + 3D** (from
+`segment` + `tracking`); **`graph` needs entity nodes** {id, kind, 3D trajectory, lifespan} **(+
+degradable semantics)**. Crucially, render's dynamic-Gaussian seed depends on `segment` masks +
+`tracking` labels — **NOT** on the `objects`/`humans`/`reid` enrichment — so those degrade freely
+without touching render; they only lower *graph* richness.
+
+Three invariants make every ladder combination safe: **(1)** per-stage top-down availability probe;
+**(2) every rung — including graceful-empty — emits a schema-valid artifact** (the F0 graceful-empty
+render/scene/eval path already exercises this floor); **(3) empty-in → empty-out, never crash**
+(`reid`/`objects`/`humans` consume `InstanceArtifact`; empty → empty enrichment → static-only
+graph/render, pipeline still completes).
+
+**Guarantee:** because the load-bearing ladders (`segment`, `tracking`) bottom out at *today's
+working backends*, and every rung emits a valid artifact the already-graceful back-half consumes,
+**no ladder combination fails to produce the full graph/scene/render artifact set.** Degradation only
+lowers *fidelity* (open-vocab → closed-vocab → unknown; world-SMPL → camera-SMPL → none; dynamic →
+all-static), never *completeness*. Worked traces:
+- **SAM 3 not yet granted** → `segment`=Grounded-SAM-2 (Apache); `reid`=DINOv3 recovers the weaker
+  IoU-IDs; `objects`/`humans`/`tracking` unaffected → full back-half, only open-vocab identity
+  slightly weaker.
+- **SAM 3 ok, Sapiens absent** → human masks still come from `segment`; `humans` dense=Keypoint-RCNN,
+  SMPL=4D-Humans/skip → **render identical** (masks never depended on Sapiens), graph human node
+  marginally less rich.
+- **Floor (no foundation models)** → `segment`=Mask R-CNN+IoU *(today's path)*, `reid`=histogram,
+  `objects`=COCO-80, `humans`=RCNN/no-SMPL → render works, graph closed-vocab. **The ladder floor is
+  literally today's pipeline → the redesign is a strict superset, never worse.**
+
+### Setup
+
+Gating means **register-to-download only** — models run **fully offline locally, no data egress**.
+**Request `facebook/sam3` + `facebook/dinov3` access early** (manual approval, reported days-to-weeks
+wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_room4d.sh`
+(`a private note`, `a private note`); the gated weights need
+a pre-authorized HF token — the one step that isn't fully scriptable.
 
 ## 5. Back-half deep design
 
@@ -359,9 +479,10 @@ real research bet, not a sure thing.
 room4d is a no-ship/no-publish learning project (§0.7–0.8). **Block 1 builds the entire front-half to
 a real, no-stub state and runs it end-to-end on multi-stream rig data — that is GATE G1, the
 precondition for any back-half work.** Block 2 (queryable graph / query / compiler / eval) starts
-only after G1. The stub stages (`sync`, `optimization`, `pose2d`) and multi-stream integration are
-explicit Block-1 scope. Each phase is a feature branch off `develop`, PR back to `develop`, version
-bump per the repo convention. Horizon phases (P8–P9) are intentionally coarse — learning reshapes them.
+only after G1. The stub stages (`sync`, `optimization`, `pose2d`), the **perception redesign (§4A)**,
+and multi-stream integration are explicit Block-1 scope. Each phase is a feature branch off
+`develop`, PR back to `develop`, version bump per the repo convention. Horizon phases (P8–P9) are
+intentionally coarse — learning reshapes them.
 
 ```
 BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
@@ -370,6 +491,41 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     (SceneArtifact→seed adapter, static/dynamic select, training-
                                     config home); clean scene↔render; in-pipeline masked-NVS.
                                     Monocular proven spine first. Depends on: none (trainers exist).
+
+  PERCEPTION REDESIGN (§4A) — floor-first structure, THEN climb the ladder. Ungated tools first
+  (Grounded-SAM-2 / DINOv2 / SigLIP2 / Qwen-VL / Sapiens / GVHMR / MoGe-2); SAM 3 + DINOv3 swap in as
+  top rungs when gated access lands. Every rung sits behind the availability probe so the pipeline
+  never breaks. Branch: feature/perception-redesign.
+  FP0  Access + ladder scaffold     Request SAM3 + DINOv3 HF access (manual approval, days-to-weeks
+                                    lead). Build the backend-ladder base (top-down probe →
+                                    backend_used + capability manifest) + new artifact schemas
+                                    (InstanceArtifact, ReidArtifact, re-cut Object/Human/Track
+                                    contracts). No new models. Depends on: none.
+  FP1  Structural reorder           Add segment + reid stages; reorder STAGE_ORDER to
+       (floor rungs only)           pose_refine→segment→reid→objects→humans→tracking→graph; rewire
+                                    registry deps + run(). Floor rungs = today's backends (Mask R-CNN
+                                    segment, ResNet18 reid, COCO-80 semantics, today's humans,
+                                    CoTracker motion-only). GOAL: pipeline runs end-to-end in the new
+                                    shape, all back-half artifacts produced, full suite green —
+                                    proves the degradability invariants + blast radius, zero
+                                    download. Depends on: FP0.
+  F0b  Dynamic render               Resume the dynamic-render path (ArtifactGeometryProvider + packed
+       (on FP1 floor-rung masks)    AllPairsTracks already built on feature/f0b-dynamic-render) using
+                                    FP1 FLOOR-RUNG fg masks — prove the full perception→…→dynamic-
+                                    render pipeline BEFORE any new tools. Target ~20.7 in-pipeline
+                                    masked-NVS on paper-windmill. Depends on: FP1, F0.
+  FP2  Climb segment                SAM 3 top rung (Grounded-SAM-2, Apache/ungated, is the rung until
+                                    access granted) behind the probe. Real propagation masks + IDs;
+                                    re-validate F0b on them. Depends on: FP1.
+  FP3  Climb reid                   DINOv3-L top rung (DINOv2, Apache, until granted). Cross-occlusion
+                                    identity stitching vs the ResNet18 floor. Depends on: FP1.
+  FP4  Climb semantics              SigLIP 2 + Qwen2.5-VL → per-tracklet open-vocab category +
+                                    attributes. The front-half half of the Grounding spike (below).
+                                    Depends on: FP1.
+  FP5  Climb humans                 Sapiens (dense) + GVHMR (world-grounded SMPL). SUBSUMES F3.
+                                    Depends on: FP1.
+  FP6  Depth backstop               MoGe-2 (MIT, metric point map) into the 2D→3D lift. Depends on: FP1.
+
   F1  Real temporal sync            Replace the 0.0 stub (audio_sync.py:11 / motion_sync.py:16) with a
                                     real sync stage; VALIDATE on the fixed rig — must recover the known
                                     ~0 offset. A wrong answer on a synced rig = a broken impl caught
@@ -380,19 +536,22 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     (person-anchored; intrinsics a named dep). Validate vs GT
                                     extrinsics on NVIDIA 12-cam / CMU Panoptic. Replaces the verified
                                     no-op factors (return 0.0,{}).
-  F3  pose2d de-stub                Real 2D-pose model; kill the heuristic-stamped-'real' fallback
-                                    (pose2d.py:114). Calibration-grade consumers require real.
+  F3  pose2d de-stub                SUBSUMED by FP5 — Sapiens (dense) + GVHMR replace the
+                                    Keypoint-RCNN/pose2d path wholesale; the heuristic-stamped-'real'
+                                    fallback (pose2d.py:114) is deleted, not patched.
   F4  Multi-stream integration      Whatever G1 surfaces beyond the stubs: geometry fusion across
                                     streams, scene assembly from multiple cams, render from a fused
                                     multi-cam reconstruction. (The end-to-end run is what finds these.)
-  ── GATE G1: the full pipeline (ingest→sync→geometry→pose_refine→tracking→humans→objects→
-              optimization→scene→render) RUNS END-TO-END on multi-stream rig data, every stage real,
-              validated against rig GT (extrinsics + recovered sync offset + masked-NVS). ──
+  ── GATE G1: the full pipeline (ingest→sync→geometry→pose_refine→segment→reid→objects→humans→
+              tracking→optimization→scene→render) RUNS END-TO-END on multi-stream rig data, every
+              stage real, validated against rig GT (extrinsics + recovered sync offset + masked-NVS). ──
 
   (parallel) Grounding spike        Open-vocab language→reconstructed-entity grounding (4D-LangSplat-
                                     style time-varying semantic field, or ConceptGraphs-style),
                                     measured on a small known entity set. Integrates at P3; does NOT
                                     gate G1. Gates query-resolution AND eval node-correspondence.
+                                    FP4 (SigLIP2/Qwen-VL per-tracklet semantics) is the front-half
+                                    half of this — the spike measures grounding; FP4 builds it.
 
 BLOCK 2 — BACK-HALF REDESIGN (starts only after G1)
   P3  Queryable + dual-use graph    Re-cut GraphArtifact (§5a): temporal entity trajectories,
@@ -423,8 +582,10 @@ HORIZON (coarse; learning reshapes)
                                     The genuine frontier bet. Depends on: P7, P8.
 ```
 
-Milestones: **Foundation = F0–F4 + G1** (a real, no-stub, multi-stream pipeline running end-to-end).
-**Level-1 closed loop = P3–P7** on top of it. The frontier is **P8–P9**.
+Milestones: **Foundation = F0–F4 + FP0–FP6 + F0b + G1** (a real, no-stub, multi-stream pipeline
+running end-to-end on the modern perception stack). **Level-1 closed loop = P3–P7** on top of it. The
+frontier is **P8–P9**. Near-term path: **FP0 → FP1 → F0b** (prove the full pipeline on floor rungs),
+then climb FP2–FP6 ungated-first.
 
 ## 8. Open questions / risks
 
@@ -432,15 +593,20 @@ These are **learning checkpoints, not ship gates** (§0.7) — each is an experi
 sequencing, not a go/no-go.
 
 - **Perception noise floor (the central eval risk).** The judge is only as good as the
-  perception→graph stack; detectors flicker, `pose2d` can fabricate (`pose2d.py:114`), open-vocab 3D
-  grounding is low in absolute terms (mAP ~6.08). Mitigation: F1–F3 de-stub perception; P4 measures
-  no-op round-trip drift first and reports only above-floor deltas; consider a temporally-smoothed
-  (tracking) judge.
+  perception→graph stack; detectors flicker, open-vocab 3D grounding is low in absolute terms
+  (mAP ~6.08). **The §4A redesign substantially raises this floor** — SAM 3 propagation gives
+  temporally-consistent masks/IDs, DINOv3 backstops re-ID, and Sapiens kills the `pose2d` fabrication
+  path. Residual: SAM 3 is **not** identity-solved under heavy occlusion (~75–80% human perf;
+  ReMeDI/SAM3-DMS refine it), so the `reid` stage stays load-bearing. Mitigation otherwise unchanged:
+  P4 measures no-op round-trip drift first and reports only above-floor deltas; consider a
+  temporally-smoothed (tracking) judge.
 - **Grounding language → reconstructed entities** is itself unsolved (lit-review). The node↔
   `render_contract` bridge in §5a is the load-bearing assumption; may need a 4D-LangSplat-style
   open-vocab semantic field.
-- **Re-ID through long occlusion** — the conservation law (§6) is easy to *write*, hard to *satisfy*;
-  the association that realizes it is open.
+- **Re-ID through long occlusion** — the conservation law (§6) is easy to *write*, hard to *satisfy*.
+  §4A makes the mechanism concrete (SAM 3 in-shot IDs + DINOv3 cross-gap features = the `reid`
+  stage), but cross-occlusion re-acquisition remains the open risk that both SAM 3 and Grounded-SAM-2
+  (IoU-only continuous-ID) leave unsolved.
 - **IR-generalizes-to-world-model** — designing the render-plan IR only around Lowering A risks
   under-specifying Lowering B. Mitigation: specify the Lowering B control schema in P4 even though it
   isn't built.
@@ -463,13 +629,20 @@ sequencing, not a go/no-go.
 - **New:** `room4d/compile/` (render-plan IR + lowering), expand `room4d/query/` (parser + executor +
   `QueryPlanArtifact`), `eval/benchmarks/query_conditioned_generation/`, plus `compile`/`query`/`eval`
   entries in `room4d/api/stages.py::STAGE_ORDER` + registry and `Room4DPipeline.run`.
+- **New (perception, §4A):** `room4d/perception/segment/` (SAM 3) + `room4d/perception/reid/`
+  (DINOv3) stages, `InstanceArtifact` / `ReidArtifact`, a shared **backend-ladder base** (top-down
+  availability probe → `backend_used` + capability manifest), and `segment`/`reid` STAGE_ORDER +
+  registry entries with the reordered perception band.
 - **Re-cut:** `room4d/graph/` (`GraphArtifact`, `DynamicSceneGraphBuilder`, node/edge types in
-  `room4d/common/types.py`); `room4d/scene/` (boundary cleanup).
+  `room4d/common/types.py`); `room4d/scene/` (boundary cleanup); **`room4d/perception/objects/` +
+  `room4d/perception/humans/`** (delete the hand-tuned associators; SigLIP2/Qwen-VL semantics +
+  Sapiens/GVHMR over `segment` masks); **`room4d/tracking/`** (motion-only, reordered, dynamic split
+  seeded by `segment` fg).
 - **Replace/delete:** `room4d/render/gaussian4d/scene_model.py::Gaussian4DScene`,
   `room4d/render/gaussian4d/trainer.py::Gaussian4DTrainer` (the toy); the render stage drives the
   proven `gaussian_trainer.py` / `dynamic_trainer.py`.
-- **Reuse unchanged:** ingest / sync / geometry / pose_refine / tracking / humans / objects; the
-  `StageSpec` registry + resume + stage-window; the masked-NVS eval machinery.
+- **Reuse unchanged:** ingest / sync / geometry / pose_refine (perception *consumes* pose_refine,
+  doesn't change it); the `StageSpec` registry + resume + stage-window; the masked-NVS eval machinery.
 
 ---
 
