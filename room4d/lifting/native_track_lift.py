@@ -559,5 +559,8 @@ def generate_native_tracks(
     all_pairs = wrapper.compute_all_pairs(frames, masks, frame_names, factor=factor)
 
     factor_dir = Path(out_dir) / f"{factor}x"
-    all_pairs.write(factor_dir)
+    # SoM per-pair layout: lift_tracks_3d reads <name_i>_<name_j>.npy directly from
+    # this dir for the standalone --own-tracker flow. (The pipeline uses the packed
+    # AllPairsTracks + in-memory pair_loader and never writes per-pair files.)
+    all_pairs.write_som_pairs(factor_dir)
     return factor_dir
