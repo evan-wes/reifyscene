@@ -246,6 +246,20 @@ job becomes **train the `SceneArtifact`, then render the compiled camera path** 
   §5e; the real measuring instrument is the masked-NVS machinery
   (`eval/metrics/image.py`, `eval/benchmarks/covisibility_masked_novel_view_synthesis/`).
 
+**F0a — IMPLEMENTED (2026-06-25, `feature/f0-renderable-core`, v0.1.17.0). Static spine shipped:**
+- The seed comes from **geometry via the scene assembler** (`seed_arrays_from_geometry`), *not* a
+  "`SceneArtifact → init` adapter" — the lightweight artifact can't carry depth/GT, so the assembler
+  bakes a **self-contained renderable `SceneArtifact`** (dense seed + per-frame train views with the
+  GT frame persisted *in* the artifact + an orbit trajectory). The render stage consumes ONLY it.
+- New `render/gaussian4d/render_backend.py::GaussianRenderBackend`: seed → `GaussianField` →
+  `StaticGaussianTrainer.fit(train_views)` → trajectory render + trained checkpoint; the toy
+  (`scene_model.py` + `trainer.py`) is deleted. Degenerate scenes (no depth/GT) emit an empty render.
+- Masked-NVS metric (`render/eval/masked_nvs_benchmark.py`) scores the trained checkpoint vs a
+  dataset's held-out val + covisibility, reusing the proof scorer (dataset-coupled; `{}` otherwise).
+- **Validated:** in-pipeline masked mPSNR **18.54** on DyCheck paper-windmill (static) reproduces the
+  standalone proof harness's **18.51**. Static/dynamic *selection*, the training-config home, and the
+  `DynamicGaussianTrainer` wiring are **F0b**; resume is stage-level (artifact-exists) for now.
+
 ### 5e. `eval` — round-trip graph-diff (cycle consistency)
 
 **Mechanism:**
