@@ -323,6 +323,7 @@ def lift_tracks_3d(
     step: int = 1,
     rng: np.random.Generator | None = None,
     tracks_dir: str | Path | None = None,
+    pair_loader: "Callable[[int, int], np.ndarray] | None" = None,
 ) -> Tracks3D:
     """Lift sampled 2D foreground tracks to 3D trajectories (SoM get_tracks_3d port).
 
@@ -341,11 +342,18 @@ def lift_tracks_3d(
     num_frames = len(names)
     H, W = stack.depths.shape[1], stack.depths.shape[2]
     device = stack.depths.device
-    tracks_dir = Path(tracks_dir) if tracks_dir is not None else _tracks_dir(dataset_root, factor)
 
-    def load_pair(i: int, j: int) -> torch.Tensor:
-        arr = np.load(tracks_dir / f"{names[i]}_{names[j]}.npy").astype(np.float32)
-        return torch.as_tensor(arr, device=device)
+    if pair_loader is not None:
+        # In-memory all-pairs (e.g. the pipeline's TrackArtifact.all_pairs_by_stream):
+        # pair_loader(i, j) -> (N_i, 4). No disk reads, no dataset_root needed.
+        def load_pair(i: int, j: int) -> torch.Tensor:
+            return torch.as_tensor(np.asarray(pair_loader(i, j), dtype=np.float32), device=device)
+    else:
+        tracks_dir = Path(tracks_dir) if tracks_dir is not None else _tracks_dir(dataset_root, factor)
+
+        def load_pair(i: int, j: int) -> torch.Tensor:
+            arr = np.load(tracks_dir / f"{names[i]}_{names[j]}.npy").astype(np.float32)
+            return torch.as_tensor(arr, device=device)
 
     candidate_frames = list(range(0, num_frames, step))
     num_sampled_frames = len(candidate_frames)
@@ -477,6 +485,7 @@ def build_native_init_inputs(
     seed: int | None = None,
     tracks_dir: str | Path | None = None,
     provider: "GeometryProvider | None" = None,
+    pair_loader: "Callable[[int, int], np.ndarray] | None" = None,
 ) -> tuple[Tracks3D, StaticPoints3D, dict[str, CameraRecords], SceneNorm]:
     """Lift native init inputs for a DyCheck-format sequence (normalized frame).
 
@@ -507,13 +516,15 @@ def build_native_init_inputs(
     # Scene norm from a temporally-subsampled raw-frame track lift.
     step = max(1, train_stack.num_frames // 10)
     sample = lift_tracks_3d(
-        train_stack, dataset_root, factor, num_samples=10_000, step=step, rng=rng, tracks_dir=tracks_dir
+        train_stack, dataset_root, factor, num_samples=10_000, step=step, rng=rng,
+        tracks_dir=tracks_dir, pair_loader=pair_loader,
     )
     norm = compute_scene_norm(train_stack.cameras.w2cs, sample.xyz)
 
     apply_scene_norm_stack(train_stack, norm)
     tracks = lift_tracks_3d(
-        train_stack, dataset_root, factor, num_samples=num_fg, step=1, rng=rng, tracks_dir=tracks_dir
+        train_stack, dataset_root, factor, num_samples=num_fg, step=1, rng=rng,
+        tracks_dir=tracks_dir, pair_loader=pair_loader,
     )
     bg_points = lift_bkgd_points(train_stack, num_samples=num_bg, rng=rng)
 

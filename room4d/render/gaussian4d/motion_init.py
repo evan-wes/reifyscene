@@ -125,6 +125,10 @@ class NativeMotionInitializer:
     # borrowed DyCheck ground truth (built from dataset_root/factor/depth_type/
     # camera_type); pass a native backend (e.g. VGGT) to reconstruct geometry.
     provider: "GeometryProvider | None" = None
+    # Optional in-memory all-pairs loader: pair_loader(i, j) -> (N_i, 4). When set,
+    # the lift reads 2D tracks from this (the pipeline's AllPairsTracks.pair) instead
+    # of disk -- no per-pair files, no dataset_root needed.
+    pair_loader: "Callable[[int, int], np.ndarray] | None" = None
 
     def build(self, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
         # Lazy imports: only the native path needs the lift / sklearn machinery.
@@ -138,7 +142,7 @@ class NativeMotionInitializer:
         tracks, bg_points, cameras, _norm = build_native_init_inputs(
             self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
             depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
-            tracks_dir=self.tracks_dir, provider=self.provider,
+            tracks_dir=self.tracks_dir, provider=self.provider, pair_loader=self.pair_loader,
         )
         # Canonical frame = the one where the most tracks are visible.
         cano_t = int(tracks.visibles.sum(dim=0).argmax().item())
@@ -165,10 +169,11 @@ def build_native_init(
     seed: int | None = None,
     tracks_dir: str | None = None,
     provider: "GeometryProvider | None" = None,
+    pair_loader: "Callable[[int, int], np.ndarray] | None" = None,
 ) -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
     """Convenience wrapper around :class:`NativeMotionInitializer`.build."""
     return NativeMotionInitializer(
         dataset_root=dataset_root, factor=factor, num_fg=num_fg, num_bg=num_bg,
         num_bases=num_bases, depth_type=depth_type, camera_type=camera_type, seed=seed,
-        tracks_dir=tracks_dir, provider=provider,
+        tracks_dir=tracks_dir, provider=provider, pair_loader=pair_loader,
     ).build(device=device)
