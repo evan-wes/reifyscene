@@ -130,8 +130,24 @@ class GaussianRenderBackend(RenderBackend):
 
         field = self._build_field(scene_artifact)
         train_views = self._train_views(scene_artifact)
-        if not train_views:
-            raise ValueError("SceneArtifact has no train_views; cannot fit the renderer.")
+        if not train_views or int(field.num_gaussians) == 0:
+            # Degenerate scene (e.g. heuristic/synthetic geometry with no depth or
+            # GT frames): nothing to train. Emit an empty render rather than crash;
+            # the empty flag keeps it visible without breaking the pipeline.
+            return RenderArtifact(
+                run_id=getattr(scene_artifact, "run_id", "dev"),
+                stage_name="render",
+                save_dir=save_dir,
+                metadata={"backend": self.backend_name, "device": self.device},
+                scene_state={
+                    "kind": "static",
+                    "empty": True,
+                    "num_gaussians": int(field.num_gaussians),
+                    "num_train_views": len(train_views),
+                    "reason": "no train_views or empty seed; render skipped",
+                },
+                path_index={},
+            )
 
         densify_cfg = DensifyConfig.from_cfg(self.cfg.get("densify", {}))
         rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
