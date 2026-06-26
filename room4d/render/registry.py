@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from room4d.render.gaussian4d.trainer import Gaussian4DTrainer
+from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
 
 
 # "gaussian_layered" and "offline_high_quality" are legacy names kept so older
 # run configs keep resolving; all aliases map to the one gsplat-backed renderer.
 _BACKENDS = {
-    "gaussian_layered": Gaussian4DTrainer,
-    "gaussian4d": Gaussian4DTrainer,
-    "offline_high_quality": Gaussian4DTrainer,
+    "gaussian": GaussianRenderBackend,
+    "gaussian_layered": GaussianRenderBackend,
+    "gaussian4d": GaussianRenderBackend,
+    "offline_high_quality": GaussianRenderBackend,
 }
 
 

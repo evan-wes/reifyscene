@@ -41,7 +41,6 @@ from room4d.perception.objects.segmenter import ObjectSegmenter
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
 from room4d.api.stages import build_stage_registry
-from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.registry import build_renderer
 from room4d.scene.assembler import SingleVideoSceneAssembler
 from room4d.eval.benchmark_runner import BenchmarkRunner
@@ -833,27 +832,24 @@ class Room4DPipeline:
         return artifact
 
     def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None, track_artifact=None, human_artifact=None):
-        """Fit a renderable 4D scene model and export novel-view playback."""
-        scene = Gaussian4DScene(self.cfg.get('render', {}))
-        scene.initialize_from_scene(scene_artifact)
+        """Train + render the self-contained SceneArtifact (proven Gaussian trainer).
+
+        The render stage consumes ONLY the SceneArtifact (dense seed + persisted
+        train views + render trajectory). The optimization/geometry/track/human
+        artifacts are accepted for stage-signature compatibility but unused here;
+        masked-NVS scoring against held-out GT is the eval stage's job (F0 follow-up).
+        """
         render_dir = self._stage_dir('render')
-        artifact = self.renderer.fit(
-            scene,
-            optimization_artifact=optimization_artifact,
-            geometry_artifact=geometry_artifact,
-            save_dir=render_dir,
-        )
-        evaluation = self.benchmark_runner.run(
-            geometry_artifact=geometry_artifact,
-            track_artifact=track_artifact,
-            human_artifact=human_artifact,
-            scene_artifact=scene_artifact,
-            render_artifact=artifact,
-            renderer=self.renderer,
-            output_dir=render_dir,
-        )
-        artifact.scene_state['evaluation'] = evaluation.get('metrics', {})
-        artifact.metadata['failure_report'] = evaluation.get('failure_report', {})
+        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
+        # Masked-NVS scoring against held-out GT runs only on a benchmark dataset
+        # (covisibility masks / held-out cameras don't exist for arbitrary video).
+        eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
+        if eval_cfg.get('dataset_root'):
+            from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
+            device = str(self.cfg.get('render', {}).get('device', 'cuda'))
+            metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+            if metrics:
+                artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir
         self._stamp_stage_metadata(artifact, 'render', video_paths=self._video_paths_for_stage())
         artifact.save()

@@ -7,6 +7,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.17.0] - 2026-06-25
+
+### Added
+- **F0a — renderable core: a self-contained, renderable `SceneArtifact` + a
+  trainer-driven render backend** (first phase of the full-pipeline architecture,
+  design doc `docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md`).
+  The render stage now **trains a real 3DGS scene and emits real novel views**
+  in-pipeline, replacing the no-train placeholder, with a clean separation of
+  concerns: the **scene stage** turns the reconstruction into a self-contained
+  renderable scene; the **render stage consumes only that artifact**.
+  - `room4d/scene/scene_artifact.py`: re-cut to a self-contained renderable
+    contract — a dense Gaussian `render_seed` (npz), per-frame `train_views` with
+    the **GT frame persisted into the artifact** (portable/reproducible), a
+    novel-view `render_trajectory`, a `kind` (static/dynamic), and a
+    `dynamic_bundle` placeholder (F0b). The toy `render_contract` /
+    `layered_scene_v2` / `static_scene` / `dynamic_entities` schema is gone.
+  - `room4d/scene/assembler.py`: re-cut (1046 → ~210 lines). Builds the dense seed
+    (`seed_arrays_from_geometry`, the new numpy-only seed path factored out of
+    `seed_cloud_from_geometry`) + train views + an orbit trajectory. Sheds the
+    toy sprite/template/entity machinery (entity world-anchoring is a graph-stage
+    concern, deferred to P3). Tolerant `**cfg` constructor (legacy `scene:` keys
+    are ignored).
+  - `room4d/render/gaussian4d/render_backend.py` (new) `GaussianRenderBackend`:
+    seed → `GaussianField` → `StaticGaussianTrainer.fit(train_views)` → trajectory
+    render + a trained-Gaussian checkpoint → `RenderArtifact`. A degenerate scene
+    (no depth / GT frames) emits an empty render (`scene_state['empty']`) instead
+    of crashing, so the pipeline stays robust on smoke/degenerate inputs.
+  - `room4d/render/eval/masked_nvs_benchmark.py` (new): in-pipeline masked-NVS
+    (DyCheck protocol) — scores the trained checkpoint against a benchmark
+    dataset's held-out val cameras + covisibility masks, reusing the proof
+    harness's `score_masked_novel_views` path. Dataset-coupled: runs only when an
+    eval dataset source is configured (`cfg['evaluation']['masked_nvs']`), returns
+    `{}` on arbitrary video. Wired into `Room4DPipeline.fit_renderer`.
+
+### Changed
+- **Render stage rewired** to the new contract: `render/registry.py`,
+  `render/__init__.py`, and `Room4DPipeline.fit_renderer` now drive
+  `GaussianRenderBackend` (the proven `StaticGaussianTrainer`) instead of the
+  deleted toy.
+
+### Removed
+- The no-train toy renderer — `render/gaussian4d/scene_model.py`
+  (`Gaussian4DScene`) and `render/gaussian4d/trainer.py` (`Gaussian4DTrainer`).
+
+### Tests
+- `tests/test_scene_render.py` rewritten against the new contract (assembler
+  builds a self-contained renderable scene; save/load round-trip persists GT
+  frames; render backend trains+renders+checkpoints, gsplat-gated; dynamic kind
+  rejected until F0b). `tests/test_eval_metrics.py` rewritten to the masked-NVS
+  graceful-empty contract. Full suite: 260 passed, 1 skipped.
+
+### Validated
+- In-pipeline masked mPSNR **18.54** on DyCheck paper-windmill (static; 277 train
+  frames, 7000 iters, 419 val views) **reproduces the standalone
+  `run_render_proof.py` static 18.51** — F0a static parity proven. The dynamic
+  branch (the +2.2 dB toward the 20.7 dynamic number) is F0b.
+
 ## [0.1.16.0] - 2026-06-20
 
 ### Added

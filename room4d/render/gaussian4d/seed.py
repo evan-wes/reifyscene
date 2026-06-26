@@ -71,11 +71,10 @@ def _backproject_view(
     return pts_world.astype(np.float32), colors, scales
 
 
-def seed_cloud_from_geometry(
+def seed_arrays_from_geometry(
     geometry_artifact,
     rgb_by_frame: dict[str, np.ndarray],
     *,
-    device: str = "cuda",
     pixel_stride: int = 1,
     max_points: int | None = 1_500_000,
     depth_near: float = 1e-3,
@@ -83,13 +82,13 @@ def seed_cloud_from_geometry(
     scale_mult: float = 1.5,
     scale_min: float = 1e-5,
     scale_max: float = 0.05,
-    opacity: float = 0.9,
     rng_seed: int = 0,
-) -> GaussianCloud:
-    """Backproject every selected frame's depth into one colored GaussianCloud.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Backproject every selected frame's depth into (means, colors_uint8, scales).
 
-    ``rgb_by_frame`` maps ``"{stream_id}:{frame_idx}"`` -> HxWx3 uint8 image,
-    aligned with ``geometry_artifact.depthmaps_by_frame`` keys.
+    Pure numpy (no torch/gsplat) so the scene assembler can build a persistable
+    seed without a GPU. ``rgb_by_frame`` maps ``"{stream_id}:{frame_idx}"`` ->
+    HxWx3 uint8 image, aligned with ``geometry_artifact.depthmaps_by_frame`` keys.
     """
     state_by_key: dict[tuple[str, float], Any] = {}
     for stream_id, states in geometry_artifact.camera_states_by_stream.items():
@@ -125,7 +124,11 @@ def seed_cloud_from_geometry(
             scale_parts.append(scales)
 
     if not xyz_parts:
-        return GaussianCloud.empty(device)
+        return (
+            np.zeros((0, 3), dtype=np.float32),
+            np.zeros((0, 3), dtype=np.uint8),
+            np.zeros((0, 3), dtype=np.float32),
+        )
 
     means = np.concatenate(xyz_parts, axis=0)
     colors = np.concatenate(color_parts, axis=0)
@@ -136,6 +139,39 @@ def seed_cloud_from_geometry(
         idx = rng.choice(means.shape[0], size=int(max_points), replace=False)
         means, colors, scales = means[idx], colors[idx], scales[idx]
 
+    return means.astype(np.float32), colors.astype(np.uint8), scales.astype(np.float32)
+
+
+def seed_cloud_from_geometry(
+    geometry_artifact,
+    rgb_by_frame: dict[str, np.ndarray],
+    *,
+    device: str = "cuda",
+    pixel_stride: int = 1,
+    max_points: int | None = 1_500_000,
+    depth_near: float = 1e-3,
+    depth_far: float | None = None,
+    scale_mult: float = 1.5,
+    scale_min: float = 1e-5,
+    scale_max: float = 0.05,
+    opacity: float = 0.9,
+    rng_seed: int = 0,
+) -> GaussianCloud:
+    """Backproject every selected frame's depth into one colored GaussianCloud."""
+    means, colors, scales = seed_arrays_from_geometry(
+        geometry_artifact,
+        rgb_by_frame,
+        pixel_stride=pixel_stride,
+        max_points=max_points,
+        depth_near=depth_near,
+        depth_far=depth_far,
+        scale_mult=scale_mult,
+        scale_min=scale_min,
+        scale_max=scale_max,
+        rng_seed=rng_seed,
+    )
+    if means.shape[0] == 0:
+        return GaussianCloud.empty(device)
     opacities = np.full((means.shape[0],), float(opacity), dtype=np.float32)
     return GaussianCloud.from_numpy(
         means=means,

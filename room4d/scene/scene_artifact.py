@@ -1,4 +1,21 @@
-"""Artifact for assembled single-video 4D scenes."""
+"""Artifact for a self-contained, renderable 4D scene.
+
+The scene stage turns a reconstruction (geometry + ingest + tracking) into a
+**self-contained renderable scene** and the render stage consumes *only* this
+artifact. It carries everything the render stage needs:
+
+* ``render_seed`` -- a dense Gaussian seed cloud (means / colors / scales),
+  backprojected from geometry with dynamic regions masked out.
+* ``train_views`` -- the per-frame training supervision: camera pose +
+  intrinsics + the GT frame itself (persisted into the artifact directory, so
+  the artifact is portable and reproducible with no dependency on the upstream
+  geometry/ingest artifacts at render time).
+* ``render_trajectory`` -- the novel-view cameras to render the answer along.
+
+The held-out GT views + covisibility masks used to *score* a benchmark dataset
+are deliberately NOT here -- they are an eval-stage input (dataset-sourced),
+not part of the scene.
+"""
 
 from __future__ import annotations
 
@@ -8,243 +25,167 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
 from room4d.common.types import BaseArtifact, FrameRef
 
 
+def _sanitize_key(key: str) -> str:
+    return str(key).replace(":", "__").replace("/", "_")
+
+
 @dataclass
 class SceneArtifact(BaseArtifact):
-    """Persist a lightweight static/dynamic single-video 4D scene."""
+    """A self-contained renderable static/dynamic 4D scene."""
 
-    static_scene: dict[str, Any] = field(default_factory=dict)
-    dynamic_entities: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # "static" | "dynamic" -- selects the trainer in the render stage.
+    kind: str = "static"
+    # Dense Gaussian seed: means_xyz (N,3) float32, colors_rgb (N,3) uint8,
+    # scales_xyz (N,3) float32, num_gaussians int.
+    render_seed: dict[str, Any] = field(default_factory=dict)
+    # Per-frame training supervision. Each entry:
+    #   frame_key, time_id, t_world_cam (4x4), intrinsics {fx,fy,cx,cy},
+    #   width, height, image_file (relative to save_dir once persisted).
+    # During assembly the entry carries an absolute ``image_path``; save()
+    # copies it into the artifact and rewrites it to ``image_file``.
+    train_views: list[dict[str, Any]] = field(default_factory=list)
+    # Novel-view output trajectory: t_world_cam, intrinsics, width, height, time_id.
+    render_trajectory: list[dict[str, Any]] = field(default_factory=list)
+    # Dynamic SE(3) motion bundle init (F0b: DynamicScene / motion bases). Empty for static.
+    dynamic_bundle: dict[str, Any] = field(default_factory=dict)
     frame_refs: list[FrameRef] = field(default_factory=list)
     timeline: dict[str, Any] = field(default_factory=dict)
-    render_contract: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
-        counts = {kind: len(items) for kind, items in self.dynamic_entities.items()}
-        static_layer = (self.render_contract or {}).get("static_layer", {}) or {}
-        dynamic_layers = (self.render_contract or {}).get("dynamic_layers", {}) or {}
-        appearance = (self.render_contract or {}).get("appearance", {}) or {}
-        dynamic_layer_counts = {kind: len(items) for kind, items in dynamic_layers.items()} if isinstance(dynamic_layers, dict) else {}
+        seed = self.render_seed or {}
         return {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "num_static_points": int(self.static_scene.get("num_points", 0)),
-            "dynamic_counts": counts,
+            "kind": self.kind,
+            "num_seed_gaussians": int(seed.get("num_gaussians", np.asarray(seed.get("means_xyz", np.zeros((0, 3)))).shape[0])),
+            "num_train_views": len(self.train_views),
+            "num_render_cameras": len(self.render_trajectory),
             "num_frames": len(self.frame_refs),
-            "render_contract_schema": str((self.render_contract or {}).get("schema", "")),
-            "num_static_gaussians": int(static_layer.get("num_gaussians", 0)),
-            "dynamic_layer_counts": dynamic_layer_counts,
-            "static_appearance_sources": int(appearance.get("static_source_count", 0)),
             "notes": list(self.notes),
         }
 
-    @staticmethod
-    def _strip_static_layer_arrays(render_contract: dict[str, Any]) -> dict[str, Any]:
-        serializable = dict(render_contract)
-        static_layer = dict(serializable.get("static_layer", {}) or {})
-        for key in ("means_xyz", "scales_xyz", "colors_rgb", "opacities", "source_codes"):
-            static_layer.pop(key, None)
-        if static_layer:
-            serializable["static_layer"] = static_layer
-        else:
-            serializable.pop("static_layer", None)
-        return serializable
+    # ------------------------------------------------------------------ save
 
-    def _save_static_gaussians(self, contract: dict[str, Any], layer_dir: Path) -> dict[str, Any]:
-        static_layer = dict(contract.get("static_layer", {}) or {})
-        means = np.asarray(static_layer.get("means_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
-        scales = np.asarray(static_layer.get("scales_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
-        colors = np.asarray(static_layer.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
-        opacities = np.asarray(static_layer.get("opacities", np.zeros((0,), dtype=np.float32)), dtype=np.float32)
-        source_codes = np.asarray(static_layer.get("source_codes", np.zeros((0,), dtype=np.int16)), dtype=np.int16)
-        np.savez_compressed(
-            layer_dir / "static_gaussians.npz",
-            means_xyz=means,
-            scales_xyz=scales,
-            colors_rgb=colors,
-            opacities=opacities,
-            source_codes=source_codes,
-        )
-        static_meta = dict(static_layer)
-        static_meta["num_gaussians"] = int(means.shape[0])
-        static_meta["npz_file"] = str((Path("render_contract") / "static_gaussians.npz").as_posix())
-        contract["static_layer"] = static_meta
-        return contract
+    def _save_seed(self, seed_dir: Path) -> dict[str, Any]:
+        seed = dict(self.render_seed or {})
+        means = np.asarray(seed.get("means_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        colors = np.asarray(seed.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
+        scales = np.asarray(seed.get("scales_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        np.savez_compressed(seed_dir / "seed_cloud.npz", means_xyz=means, colors_rgb=colors, scales_xyz=scales)
+        return {"num_gaussians": int(means.shape[0]), "npz_file": "render_seed/seed_cloud.npz"}
 
-    def _save_appearance(self, contract: dict[str, Any], layer_dir: Path) -> dict[str, Any]:
-        appearance = dict(contract.get("appearance", {}) or {})
-        static_sources = list(appearance.get("static_sources", []) or [])
-        saved_static_sources: list[dict[str, Any]] = []
-        static_dir = ensure_dir(layer_dir / "static_sources")
-        for idx, source in enumerate(static_sources):
-            src = dict(source)
-            stem = f"{idx:03d}_{str(src.get('frame_key', idx)).replace(':', '__').replace('/', '_')}"
-            image_path = src.get("image_path") or src.get("image_file")
-            if image_path is not None:
-                src_path = Path(image_path)
-                dst_path = static_dir / f"{stem}{src_path.suffix or '.png'}"
-                if src_path.exists() and src_path.resolve() != dst_path.resolve():
-                    shutil.copy2(src_path, dst_path)
-                src["image_file"] = str((Path("render_contract") / "static_sources" / dst_path.name).as_posix())
-            points = src.pop("points_xyz", None)
-            confidence = src.pop("confidence", None)
-            existing_points_file = src.get("points_file")
-            if points is not None:
-                npz_path = static_dir / f"{stem}_points.npz"
-                np.savez_compressed(
-                    npz_path,
-                    points_xyz=np.asarray(points, dtype=np.float32),
-                    confidence=np.zeros((0,), dtype=np.float32) if confidence is None else np.asarray(confidence, dtype=np.float32),
-                )
-                src["points_file"] = str((Path("render_contract") / "static_sources" / npz_path.name).as_posix())
-            elif existing_points_file is not None:
-                src["points_file"] = str((Path("render_contract") / "static_sources" / Path(existing_points_file).name).as_posix()) if Path(existing_points_file).exists() else existing_points_file
-            saved_static_sources.append(src)
-        appearance["static_sources"] = saved_static_sources
-        appearance["static_source_count"] = int(len(saved_static_sources))
-        contract["appearance"] = appearance
-
-        dynamic_dir = ensure_dir(layer_dir / "dynamic_sprites")
-        dynamic_layers = dict(contract.get("dynamic_layers", {}) or {})
-        for kind, entities in list(dynamic_layers.items()):
-            saved_entities = []
-            for ent_idx, entity in enumerate(list(entities or [])):
-                ent = dict(entity)
-                saved_obs = []
-                for obs_idx, obs in enumerate(list(ent.get("observations", []) or [])):
-                    obs_dict = dict(obs)
-                    sprite = obs_dict.pop("sprite_rgba", None)
-                    if sprite is not None:
-                        name = f"{kind}_{ent_idx:03d}_{obs_idx:03d}.png"
-                        sprite_path = dynamic_dir / name
-                        Image.fromarray(np.asarray(sprite, dtype=np.uint8), mode="RGBA").save(sprite_path)
-                        obs_dict["sprite_file"] = str((Path("render_contract") / "dynamic_sprites" / name).as_posix())
-                    saved_obs.append(obs_dict)
-                ent["observations"] = saved_obs
-                saved_entities.append(ent)
-            dynamic_layers[kind] = saved_entities
-        contract["dynamic_layers"] = dynamic_layers
-        return contract
-
-    def _save_render_contract(self) -> dict[str, Any]:
-        contract = dict(self.render_contract or {})
-        if not contract:
-            return {}
-        layer_dir = ensure_dir(self.save_dir / "render_contract")
-        contract = self._save_static_gaussians(contract, layer_dir)
-        contract = self._save_appearance(contract, layer_dir)
-        return self._strip_static_layer_arrays(contract)
-
-    @classmethod
-    def _load_render_contract(cls, save_dir: Path, raw_contract: dict[str, Any]) -> dict[str, Any]:
-        contract = cls._deserialize_untyped(raw_contract or {})
-        if not contract:
-            return {}
-        static_layer = dict(contract.get("static_layer", {}) or {})
-        npz_rel = static_layer.get("npz_file")
-        if npz_rel:
-            npz_path = save_dir / Path(npz_rel)
-            if npz_path.exists():
-                static_npz = np.load(npz_path)
-                static_layer["means_xyz"] = np.asarray(static_npz["means_xyz"], dtype=np.float32)
-                static_layer["scales_xyz"] = np.asarray(static_npz["scales_xyz"], dtype=np.float32)
-                static_layer["colors_rgb"] = np.asarray(static_npz["colors_rgb"], dtype=np.uint8)
-                static_layer["opacities"] = np.asarray(static_npz["opacities"], dtype=np.float32)
-                static_layer["source_codes"] = np.asarray(static_npz["source_codes"], dtype=np.int16)
-        if static_layer:
-            contract["static_layer"] = static_layer
-        appearance = dict(contract.get("appearance", {}) or {})
-        static_sources = []
-        for source in list(appearance.get("static_sources", []) or []):
-            src = dict(source)
-            image_file = src.get("image_file")
-            if image_file is not None:
-                src["image_file"] = str((save_dir / Path(image_file)).resolve())
-            points_file = src.get("points_file")
-            if points_file is not None:
-                src["points_file"] = str((save_dir / Path(points_file)).resolve())
-            static_sources.append(src)
-        appearance["static_sources"] = static_sources
-        contract["appearance"] = appearance
-        dynamic_layers = dict(contract.get("dynamic_layers", {}) or {})
-        for kind, entities in list(dynamic_layers.items()):
-            loaded_entities = []
-            for entity in list(entities or []):
-                ent = dict(entity)
-                obs_loaded = []
-                for obs in list(ent.get("observations", []) or []):
-                    obs_dict = dict(obs)
-                    sprite_file = obs_dict.get("sprite_file")
-                    if sprite_file is not None:
-                        obs_dict["sprite_file"] = str((save_dir / Path(sprite_file)).resolve())
-                    obs_loaded.append(obs_dict)
-                ent["observations"] = obs_loaded
-                loaded_entities.append(ent)
-            dynamic_layers[kind] = loaded_entities
-        contract["dynamic_layers"] = dynamic_layers
-        return contract
+    def _save_train_views(self, views_dir: Path) -> list[dict[str, Any]]:
+        saved: list[dict[str, Any]] = []
+        for idx, view in enumerate(self.train_views):
+            entry = {
+                "frame_key": str(view.get("frame_key", idx)),
+                "time_id": int(view.get("time_id", idx)),
+                "t_world_cam": np.asarray(view["t_world_cam"], dtype=np.float32).tolist(),
+                "intrinsics": {k: float(view["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
+                "width": int(view["width"]),
+                "height": int(view["height"]),
+            }
+            image_file = view.get("image_file")
+            image_path = view.get("image_path")
+            if image_path is not None and Path(image_path).exists():
+                stem = f"{idx:04d}_{_sanitize_key(entry['frame_key'])}"
+                dst = views_dir / f"{stem}{Path(image_path).suffix or '.png'}"
+                if Path(image_path).resolve() != dst.resolve():
+                    shutil.copy2(image_path, dst)
+                entry["image_file"] = str((Path("train_views") / dst.name).as_posix())
+            elif image_file is not None:
+                entry["image_file"] = str(image_file)
+            saved.append(entry)
+        return saved
 
     def save(self) -> None:
         ensure_dir(self.save_dir)
-        static_dir = ensure_dir(self.save_dir / "static")
-        points = np.asarray(self.static_scene.get("points_xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
-        colors = np.asarray(self.static_scene.get("colors_rgb", np.zeros((0, 3), dtype=np.uint8)), dtype=np.uint8)
-        np.savez_compressed(static_dir / "background_points.npz", points_xyz=points, colors_rgb=colors)
-
-        entity_debug_summary = dict((self.metadata or {}).get('entity_debug_summary', {}) or {})
-        if entity_debug_summary:
-            write_json(self.save_dir / 'render_entity_summary.json', entity_debug_summary)
-
+        seed_meta = self._save_seed(ensure_dir(self.save_dir / "render_seed"))
+        train_views = self._save_train_views(ensure_dir(self.save_dir / "train_views"))
         serializable = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
             "save_dir": str(self.save_dir),
             "metadata": self.metadata,
-            "static_scene": {
-                key: value
-                for key, value in self.static_scene.items()
-                if key not in {"points_xyz", "colors_rgb"}
-            },
-            "dynamic_entities": self.dynamic_entities,
+            "kind": self.kind,
+            "render_seed": seed_meta,
+            "train_views": train_views,
+            "render_trajectory": [
+                {
+                    "t_world_cam": np.asarray(cam["t_world_cam"], dtype=np.float32).tolist(),
+                    "intrinsics": {k: float(cam["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
+                    "width": int(cam["width"]),
+                    "height": int(cam["height"]),
+                    "time_id": int(cam.get("time_id", 0)),
+                }
+                for cam in self.render_trajectory
+            ],
+            "dynamic_bundle": self._serialize_value(self.dynamic_bundle),
             "frame_refs": [
                 {"stream_id": fr.stream_id, "frame_idx": int(fr.frame_idx), "timestamp_sec": float(fr.timestamp_sec)}
                 for fr in self.frame_refs
             ],
             "timeline": self.timeline,
-            "render_contract": self._serialize_value(self._save_render_contract()),
             "notes": self.notes,
-            "entity_debug_summary_file": "render_entity_summary.json" if entity_debug_summary else None,
         }
         write_json(self.artifact_path(), serializable)
+
+    # ------------------------------------------------------------------ load
+
+    @classmethod
+    def _load_seed(cls, save_dir: Path, raw_seed: dict[str, Any]) -> dict[str, Any]:
+        npz_rel = (raw_seed or {}).get("npz_file")
+        if not npz_rel:
+            return {"means_xyz": np.zeros((0, 3), dtype=np.float32), "colors_rgb": np.zeros((0, 3), dtype=np.uint8),
+                    "scales_xyz": np.zeros((0, 3), dtype=np.float32), "num_gaussians": 0}
+        npz = np.load(save_dir / Path(npz_rel))
+        means = np.asarray(npz["means_xyz"], dtype=np.float32)
+        return {
+            "means_xyz": means,
+            "colors_rgb": np.asarray(npz["colors_rgb"], dtype=np.uint8),
+            "scales_xyz": np.asarray(npz["scales_xyz"], dtype=np.float32),
+            "num_gaussians": int(means.shape[0]),
+        }
 
     @classmethod
     def load(cls, save_dir: Path) -> "SceneArtifact":
         raw = read_json(save_dir / "artifact.json")
-        static_npz = np.load(save_dir / "static" / "background_points.npz")
-        static_scene = dict(raw.get("static_scene", {}))
-        static_scene["points_xyz"] = np.asarray(static_npz["points_xyz"], dtype=np.float32)
-        static_scene["colors_rgb"] = np.asarray(static_npz["colors_rgb"], dtype=np.uint8)
+        render_seed = cls._load_seed(save_dir, raw.get("render_seed", {}))
+        train_views = []
+        for view in raw.get("train_views", []):
+            entry = dict(view)
+            image_file = entry.get("image_file")
+            if image_file is not None:
+                entry["image_file"] = str((save_dir / Path(image_file)).resolve())
+            entry["t_world_cam"] = np.asarray(entry["t_world_cam"], dtype=np.float32)
+            train_views.append(entry)
+        render_trajectory = []
+        for cam in raw.get("render_trajectory", []):
+            entry = dict(cam)
+            entry["t_world_cam"] = np.asarray(entry["t_world_cam"], dtype=np.float32)
+            render_trajectory.append(entry)
         frame_refs = [
             FrameRef(stream_id=str(fr["stream_id"]), frame_idx=int(fr["frame_idx"]), timestamp_sec=float(fr["timestamp_sec"]))
             for fr in raw.get("frame_refs", [])
         ]
-        render_contract = cls._load_render_contract(save_dir, raw.get("render_contract", {}))
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
             save_dir=Path(raw["save_dir"]),
             metadata=raw.get("metadata", {}),
-            static_scene=static_scene,
-            dynamic_entities=raw.get("dynamic_entities", {}),
+            kind=str(raw.get("kind", "static")),
+            render_seed=render_seed,
+            train_views=train_views,
+            render_trajectory=render_trajectory,
+            dynamic_bundle=cls._deserialize_untyped(raw.get("dynamic_bundle", {}) or {}),
             frame_refs=frame_refs,
             timeline=raw.get("timeline", {}),
-            render_contract=render_contract,
             notes=raw.get("notes", []),
         )
