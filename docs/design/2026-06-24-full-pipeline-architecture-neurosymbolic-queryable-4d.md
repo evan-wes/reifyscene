@@ -498,12 +498,14 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
   never breaks. Branch: feature/perception-redesign.
   FP0  Access + ladder scaffold     Request SAM3 + DINOv3 HF access (manual approval, days-to-weeks
                                     lead). Build the backend-ladder base (top-down probe →
-                                    backend_used + capability manifest) + new artifact schemas
-                                    (InstanceArtifact, ReidArtifact, re-cut Object/Human/Track
-                                    contracts). No new models. Depends on: none.
+                                    backend_used + capability manifest) + new artifact types
+                                    (InstanceArtifact, ReidArtifact). Purely ADDITIVE — new files
+                                    only, zero behaviour change, suite green by construction. No new
+                                    models. Depends on: none.
   FP1  Structural reorder           Add segment + reid stages; reorder STAGE_ORDER to
        (floor rungs only)           pose_refine→segment→reid→objects→humans→tracking→graph; rewire
-                                    registry deps + run(). Floor rungs = today's backends (Mask R-CNN
+                                    registry deps + run(); RE-CUT Object/Human/Track contracts to
+                                    consume InstanceArtifact. Floor rungs = today's backends (Mask R-CNN
                                     segment, ResNet18 reid, COCO-80 semantics, today's humans,
                                     CoTracker motion-only). GOAL: pipeline runs end-to-end in the new
                                     shape, all back-half artifacts produced, full suite green —

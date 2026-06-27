@@ -7,6 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.18.0] - 2026-06-26
+
+### Added
+- **FP0 — perception redesign foundation: degradable backend ladder + new
+  perception artifact types** (design §4A; purely additive — no existing
+  behaviour changes, not yet wired into the pipeline).
+  - `room4d/common/backend_ladder.py`: `BackendRung` / `BackendLadder` /
+    `CapabilityManifest`. A ladder probes its rungs top-down (best → graceful-
+    empty), runs the first available one, and records an observable manifest
+    (which rung ran, at what fidelity, why higher rungs were skipped —
+    `not-installed` / `no-access` / `probe-error`). A resolved rung that raises
+    falls through to the next rung. Generalizes the ad-hoc per-backend
+    `backend_used` idiom (detector `real→heuristic`, embedder `real→histogram`)
+    into one reusable, observable abstraction. Includes an `importable()` probe
+    helper.
+  - `room4d/perception/instance/instance_artifact.py`: `InstanceArtifact`
+    (+ `InstanceObservation`) — the shared mask + identity source of the
+    reordered band: per-frame instance masks + persistent `track_id` + concept/
+    kind routing hint, with npz-mask persistence + index (mirrors
+    `ObjectArtifact`) and the capability manifest under `metadata['capability']`.
+  - `room4d/perception/reid/reid_artifact.py`: `ReidArtifact` — per-tracklet
+    appearance embeddings + a cross-occlusion `merge_map` with cycle-safe
+    `canonical()` / `merged_groups()` and npz-embedding persistence.
+  - Tests: `tests/test_backend_ladder.py`, `tests/test_perception_artifacts.py`
+    (15 tests — ladder resolve/skip/fail-through/graceful-empty/no-rung, manifest
+    round-trip, `importable` probe, artifact save/load incl. masks/embeddings/
+    indices/manifest/merge-canonicalization).
+
+### Changed
+- Design doc §7: FP0 is purely additive (ladder base + new artifact types); the
+  Object/Human/Track contract re-cut moves to FP1 where those stages are rewired.
+
 ## [0.1.17.1] - 2026-06-26
 
 ### Changed
