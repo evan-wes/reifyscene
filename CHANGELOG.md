@@ -7,6 +7,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.19.0] - 2026-06-27
+
+### Added
+- **FP1 — perception band reordered onto the new `segment`/`reid` stages
+  (floor rungs).** The pipeline now runs
+  `pose_refine → segment → reid → objects → humans → tracking → graph` end-to-end
+  using today's backends as the ladder floors — no new model downloads; full
+  suite green (279 passed).
+  - `segment` stage (`Room4DPipeline.segment` + `room4d/perception/instance/segment.py`):
+    floor rung = COCO Mask R-CNN + greedy-IoU association (`person`→human-kind,
+    else object-kind) → `InstanceArtifact` (per-frame masks + persistent track
+    ids). The shared mask + identity source. SAM 3 is the top rung at FP2.
+  - `reid` stage (`Room4DPipeline.compute_reid` + `room4d/perception/reid/reid_stage.py`):
+    floor rung = mean ResNet18 embeddings per tracklet, empty merge_map →
+    `ReidArtifact`. DINOv3 + cross-occlusion merges at FP3.
+  - Both stages run behind the `BackendLadder` (probe → run → capability manifest)
+    with a graceful-empty floor; `stages.py` registry + `STAGE_ORDER` + `run()`
+    updated; resume/stage-window inherited.
+
+### Changed
+- **`objects` / `humans` re-cut to consume `segment` + `reid`** instead of
+  detecting from scratch: identity is the canonical (reid-merged) track id;
+  `objects` carries the COCO category (floor semantics; open-vocab at FP4),
+  `humans` runs pose/DensePose/SMPL over the segment masks. `tracking` is now
+  motion-only and runs after perception (geometry-based static/dynamic partition
+  unchanged; mask-seeding lands with F0b).
+- Point-track support (`attributes['track_ids']`) is decoupled from identity
+  (§4A) and empty at FP1 — the graph's `support_track_ids` node attr empties out
+  accordingly (graph is the passive builder, re-cut at P3).
+
+### Removed
+- The hand-tuned associators `room4d/perception/objects/object_assoc.py` and
+  `room4d/perception/humans/human_assoc.py` (identity now comes from
+  `segment`/`reid`; the ~6-weight scoring soup is gone).
+
 ## [0.1.18.1] - 2026-06-27
 
 ### Changed

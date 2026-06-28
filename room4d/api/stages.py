@@ -13,7 +13,9 @@ from room4d.graph.graph_artifact import GraphArtifact
 from room4d.ingest.ingest_artifact import IngestArtifact
 from room4d.optimize.optimization_artifact import OptimizationArtifact
 from room4d.perception.humans.human_artifact import HumanArtifact
+from room4d.perception.instance.instance_artifact import InstanceArtifact
 from room4d.perception.objects.object_artifact import ObjectArtifact
+from room4d.perception.reid.reid_artifact import ReidArtifact
 from room4d.render.gaussian4d.render_artifact import RenderArtifact
 from room4d.scene.scene_artifact import SceneArtifact
 from room4d.sync.sync_artifact import SyncArtifact
@@ -40,9 +42,11 @@ STAGE_ORDER: tuple[str, ...] = (
     'sync',
     'geometry',
     'pose_refine',
-    'tracking',
-    'humans',
+    'segment',
+    'reid',
     'objects',
+    'humans',
+    'tracking',
     'graph',
     'optimization',
     'scene',
@@ -81,26 +85,40 @@ def build_stage_registry() -> dict[str, StageSpec]:
             run_fn=lambda pipeline, outputs, video_paths: pipeline.refine_poses(outputs['ingest'], outputs['geometry']),
             load_fn=GeometryArtifact.load,
         ),
-        'tracking': StageSpec(
-            name='tracking',
+        'segment': StageSpec(
+            name='segment',
             dependencies=('ingest', 'pose_refine'),
-            artifact_cls=TrackArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine']),
-            load_fn=TrackArtifact.load,
+            artifact_cls=InstanceArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.segment(outputs['ingest'], geometry_artifact=outputs['pose_refine']),
+            load_fn=InstanceArtifact.load,
         ),
-        'humans': StageSpec(
-            name='humans',
-            dependencies=('ingest', 'tracking', 'pose_refine'),
-            artifact_cls=HumanArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_humans(outputs['ingest'], track_artifact=outputs['tracking'], geometry_artifact=outputs['pose_refine']),
-            load_fn=HumanArtifact.load,
+        'reid': StageSpec(
+            name='reid',
+            dependencies=('ingest', 'segment'),
+            artifact_cls=ReidArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment']),
+            load_fn=ReidArtifact.load,
         ),
         'objects': StageSpec(
             name='objects',
-            dependencies=('ingest', 'tracking'),
+            dependencies=('ingest', 'segment', 'reid'),
             artifact_cls=ObjectArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_objects(outputs['ingest'], track_artifact=outputs['tracking']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_objects(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid']),
             load_fn=ObjectArtifact.load,
+        ),
+        'humans': StageSpec(
+            name='humans',
+            dependencies=('ingest', 'segment', 'reid', 'pose_refine'),
+            artifact_cls=HumanArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_humans(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid'], geometry_artifact=outputs['pose_refine']),
+            load_fn=HumanArtifact.load,
+        ),
+        'tracking': StageSpec(
+            name='tracking',
+            dependencies=('ingest', 'pose_refine', 'segment'),
+            artifact_cls=TrackArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine']),
+            load_fn=TrackArtifact.load,
         ),
         'graph': StageSpec(
             name='graph',

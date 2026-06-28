@@ -1,4 +1,4 @@
-"""Tests for object perception and debug artifact export."""
+"""Tests for object perception (consume-from-instance) and debug artifact export."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import numpy as np
 from room4d.api.pipeline import Room4DPipeline
 from room4d.common.types import FrameRef, ObjectState, VideoStreamRef
 from room4d.perception.objects.object_artifact import ObjectArtifact
-from room4d.perception.objects.object_assoc import ObjectAssociator
+from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from room4d.perception.reid.reid_artifact import ReidArtifact
 from room4d.ingest.ingest_artifact import IngestArtifact
 from room4d.tracking.track_artifact import TrackArtifact
 
@@ -32,39 +33,47 @@ def _make_obj(det_id: str, global_id: str, frame_idx: int, bbox, category='dog',
     )
 
 
-def test_object_association_prefers_shared_tracks_and_consensus() -> None:
-    artifact = ObjectArtifact(run_id='dev', stage_name='objects', save_dir=Path('.'))
-    artifact.objects = [
-        _make_obj('det:0', 'det:0', 0, [1, 1, 8, 8], category='dog', embedding=[1, 0, 0], track_ids=[1, 2, 3]),
-        _make_obj('det:1', 'det:1', 1, [2, 1, 9, 8], category='dog', embedding=[1, 0, 0], track_ids=[1, 2, 3]),
-        _make_obj('det:2', 'det:2', 2, [3, 1, 10, 8], category='cat', embedding=[1, 0, 0], track_ids=[1, 2, 3], confidence=0.45),
-        _make_obj('det:3', 'det:3', 1, [20, 1, 28, 8], category='bottle', embedding=[0, 1, 0], track_ids=[9]),
-    ]
-    out = ObjectAssociator({'min_match_score': 0.25}).associate(artifact)
-    ids_by_det = {obj.attributes['detection_id']: obj.object_id for obj in out.objects}
-    assert ids_by_det['det:0'] == ids_by_det['det:1'] == ids_by_det['det:2']
-    assert ids_by_det['det:3'] != ids_by_det['det:0']
-    dogish = [obj for obj in out.objects if obj.object_id == ids_by_det['det:0']]
-    assert all(obj.category == 'dog' for obj in dogish)
-    assert any(obj.attributes['current_category'] == 'cat' for obj in dogish)
-    assert all(obj.attributes['consensus_category'] == 'dog' for obj in dogish)
-    assert all('category_entropy' in obj.attributes for obj in dogish)
-    assert all('quality_score' in obj.attributes for obj in dogish)
+def _fr(idx: int) -> FrameRef:
+    return FrameRef(stream_id='cam_00', frame_idx=idx, timestamp_sec=float(idx))
 
 
-def test_per_frame_duplicate_suppression_removes_overlapping_conflicts() -> None:
-    artifact = ObjectArtifact(run_id='dev', stage_name='objects', save_dir=Path('.'))
-    dog = _make_obj('det:dog', 'det:dog', 0, [2, 2, 10, 10], category='dog', embedding=[1, 0, 0], track_ids=[1, 2], confidence=0.95)
-    cat = _make_obj('det:cat', 'det:cat', 0, [2.5, 2, 10.5, 10], category='cat', embedding=[1, 0, 0], track_ids=[1, 2], confidence=0.60)
-    artifact.objects = [dog, cat]
-    mask = np.pad(np.ones((8, 8), dtype=bool), ((2, 14), (2, 22)))
-    artifact.mask_arrays = {'det:dog': mask, 'det:cat': mask.copy()}
-    out = ObjectAssociator({'min_match_score': 0.2}).associate(artifact)
-    assert len(out.objects) == 1
-    assert out.objects[0].attributes['detection_id'] == 'det:dog'
-    raw_cat = next(obj for obj in out.raw_objects if obj.attributes['detection_id'] == 'det:cat')
-    assert raw_cat.attributes.get('suppressed') is True
-    assert raw_cat.attributes.get('suppression_kind') == 'frame_duplicate'
+def _ingest(save_dir, video) -> IngestArtifact:
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.touch()
+    return IngestArtifact(
+        run_id='dev', stage_name='ingest', save_dir=save_dir,
+        streams=[VideoStreamRef(stream_id='cam_00', video_path=video, fps=10.0, num_frames=10, width=32, height=24, has_audio=False)],
+        keyframes=[_fr(0), _fr(1)],
+    )
+
+
+def test_perceive_objects_consumes_instance_and_reid(tmp_path: Path) -> None:
+    """objects = non-human tracklets, ids canonicalized via the reid merge_map."""
+    pipeline = Room4DPipeline({'run_dir': str(tmp_path)})
+    inst = InstanceArtifact(
+        run_id='dev', stage_name='segment', save_dir=tmp_path / 'segment',
+        observations=[
+            InstanceObservation('i0', 'track_0000', _fr(0), concept='car', kind='object', bbox_xyxy=np.array([0, 0, 8, 8], np.float32), confidence=0.9, attributes={'label_id': 3}),
+            InstanceObservation('i1', 'track_0002', _fr(1), concept='car', kind='object', bbox_xyxy=np.array([1, 0, 9, 8], np.float32), confidence=0.8, attributes={'label_id': 3}),
+            InstanceObservation('i2', 'track_0001', _fr(0), concept='person', kind='human', bbox_xyxy=np.array([20, 0, 28, 20], np.float32), confidence=0.95),
+        ],
+        mask_arrays={'i0': np.ones((8, 8), bool), 'i1': np.ones((8, 8), bool), 'i2': np.ones((8, 8), bool)},
+        metadata={'detector_backend': 'maskrcnn'},
+    )
+    inst.rebuild_indices()
+    reid = ReidArtifact(
+        run_id='dev', stage_name='reid', save_dir=tmp_path / 'reid',
+        embeddings={'track_0000': np.array([1, 0, 0], np.float32)},
+        merge_map={'track_0002': 'track_0000'},  # i1 re-acquired as track_0000 across the gap
+    )
+    out = pipeline.perceive_objects(_ingest(tmp_path / 'ingest', tmp_path / 'clip.mp4'), instance_artifact=inst, reid_artifact=reid)
+
+    # the human instance is excluded; the two car instances both fold onto track_0000
+    assert {o.object_id for o in out.objects} == {'track_0000'}
+    assert len(out.objects) == 2
+    assert all(o.category == 'car' for o in out.objects)
+    assert all(o.embedding is not None for o in out.objects)  # carried from reid
+    assert out.metadata['num_object_tracks'] == 1
 
 
 def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
@@ -102,22 +111,14 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
     artifact.raw_objects = [
         _make_obj('det:0', 'det:0', 0, [1, 1, 8, 8], track_ids=[1, 2]),
         _make_obj('det:1', 'det:1', 1, [2, 1, 9, 8], category='cat', track_ids=[1, 2]),
-        _make_obj('det:supp', 'det:supp', 1, [2.2, 1.2, 9.0, 8.2], category='cat', track_ids=[1, 2], confidence=0.2),
     ]
-    artifact.raw_objects[-1].attributes.update({
-        'suppressed': True,
-        'suppression_kind': 'frame_duplicate',
-        'suppressed_by_detection_id': 'det:1',
-    })
     artifact.mask_arrays = {
         'det:0': np.pad(np.ones((8, 8), dtype=bool), ((1, 15), (1, 23))),
         'det:1': np.pad(np.ones((8, 8), dtype=bool), ((1, 15), (2, 22))),
-        'det:supp': np.pad(np.ones((8, 8), dtype=bool), ((1, 15), (2, 22))),
     }
     artifact.embedding_vectors = {
         'det:0': np.asarray([1, 0, 0], dtype=np.float32),
         'det:1': np.asarray([1, 0, 0], dtype=np.float32),
-        'det:supp': np.asarray([1, 0, 0], dtype=np.float32),
     }
     artifact.linked_ids = {
         'track_summaries': {
@@ -131,44 +132,25 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
                 'quality_score': 0.8,
             },
         },
-        'raw_detection_count': 3,
-        'kept_detection_count': 2,
-        'final_detection_count': 2,
-        'suppressed_detection_count': 1,
     }
     artifact.frame_index = artifact._build_frame_index(artifact.objects)
     artifact.save()
     html = (artifact.save_dir / 'object_debug_viewer.html').read_text(encoding='utf-8')
-    assert 'Raw detections' in html
     assert 'obj_0000' in html
-    assert 'entropy' in html.lower()
     loaded = ObjectArtifact.load(artifact.save_dir)
     assert len(loaded.objects) == 2
-    assert len(loaded.raw_objects) == 3
     assert 'det:0' in loaded.mask_arrays
 
 
-def test_pipeline_selects_tracked_frames_for_objects() -> None:
-    pipeline = Room4DPipeline({'objects': {'frame_source': 'tracking', 'frame_stride': 2}})
+def test_pipeline_select_frames_falls_back_to_keyframes_without_tracks() -> None:
+    """`_select_perception_frames` (used by `segment`) strides keyframes when no tracks exist."""
+    pipeline = Room4DPipeline({'objects': {'frame_stride': 1}})
     ingest = IngestArtifact(
         run_id='dev',
         stage_name='ingest',
         save_dir=Path('.'),
         streams=[VideoStreamRef(stream_id='cam_00', video_path=Path('video.mp4'), fps=10.0, num_frames=10, width=32, height=24, has_audio=False)],
-        keyframes=[FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0), FrameRef(stream_id='cam_00', frame_idx=5, timestamp_sec=0.5)],
+        keyframes=[_fr(0), _fr(5)],
     )
-    track_artifact = TrackArtifact(
-        run_id='dev',
-        stage_name='tracking',
-        save_dir=Path('.'),
-        track_payloads_by_stream={
-            'cam_00': {
-                'frame_indices': np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int32),
-                'points_xy': np.zeros((6, 1, 2), dtype=np.float32),
-                'visibility': np.ones((6, 1), dtype=bool),
-                'track_ids': np.asarray([0], dtype=np.int32),
-            }
-        },
-    )
-    frames = pipeline._select_perception_frames(ingest, track_artifact, pipeline.cfg['objects'], default_source='tracking')
-    assert [f.frame_idx for f in frames] == [0, 2, 4]
+    frames = pipeline._select_perception_frames(ingest, None, pipeline.cfg['objects'], default_source='keyframes')
+    assert [f.frame_idx for f in frames] == [0, 5]
