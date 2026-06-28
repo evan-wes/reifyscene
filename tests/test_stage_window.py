@@ -26,7 +26,7 @@ def test_single_stage_window() -> None:
 
 
 def test_mid_window_excludes_endpoints_outside_range() -> None:
-    assert _window('sync', 'tracking') == ['sync', 'geometry', 'pose_refine', 'tracking']
+    assert _window('sync', 'tracking') == ['sync', 'geometry', 'pose_refine', 'segment', 'reid', 'objects', 'humans', 'tracking']
 
 
 def test_pose_refine_sits_between_geometry_and_tracking() -> None:
