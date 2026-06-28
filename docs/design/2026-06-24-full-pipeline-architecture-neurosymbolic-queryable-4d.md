@@ -104,7 +104,7 @@ name / dependencies / artifact_cls / run_fn / load_fn), orchestrated by
 | # | Stage | Status | Note |
 |---|---|---|---|
 | 1 | `ingest` | **Proven** | decode, keyframe sampling, quality |
-| 2 | `sync` | **Stub (no-op)** | `audio_sync.py:11` / `motion_sync.py:16` hardcode `return 0.0, 0.0`; fine for monocular, build out + validate on the rig (F1) |
+| 2 | `sync` | **Stub (no-op) → two-tier (§4B)** | `audio_sync.py:11` / `motion_sync.py:16` hardcode `return 0.0, 0.0`. Redesign (§4B): Tier-1 **coarse temporal prior** stays here; Tier-2 **fine alignment folds into the joint optimizer (F2)**. Rig recovers ~0 (necessary, not sufficient) |
 | 3 | `geometry` | **Proven** | VGGT / VGGT-Long / dataset backends → `GeometryArtifact` |
 | 4 | `pose_refine` | **Proven** | BA pose refinement (v0.1.16.0); identity pass-through when disabled |
 | 5 | `tracking` | **Proven → Redesign (§4A)** | today: 2D tracks + 3D lift + static/dynamic. Redesign: **motion-only**; identity moves to `segment`/`reid`; reordered *after* perception |
@@ -137,8 +137,8 @@ principle:** each stage owns exactly one responsibility and communicates only th
 | Stage | Responsibility (one line) | Consumes | Produces |
 |---|---|---|---|
 | ingest | raw video → frames/keyframes/quality | video paths | `IngestArtifact` |
-| sync | per-stream time offsets | ingest | `SyncArtifact` |
-| geometry | per-frame poses/intrinsics/depth/pointmaps | ingest, sync | `GeometryArtifact` |
+| sync | **coarse** per-stream temporal prior (Tier 1, §4B); fine alignment → `optimization` | ingest | `SyncArtifact` |
+| geometry | per-frame poses/intrinsics/depth/pointmaps (**per-stream**) | ingest (+sync Tier-1 prior; not required, §4B) | `GeometryArtifact` |
 | pose_refine | BA-refined poses (+ focal) | ingest, geometry | `GeometryArtifact` (refined) |
 | **segment** *(new, §4A)* | open-vocab detect+segment+**track** → instance masks + persistent IDs (objects + humans) | ingest, pose_refine | **`InstanceArtifact`** *(new)* |
 | **reid** *(new, §4A)* | per-tracklet appearance features + cross-occlusion identity merges | ingest, segment | **`ReidArtifact`** *(new)* |
@@ -261,6 +261,54 @@ Gating means **register-to-download only** — models run **fully offline locall
 wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_room4d.sh`
 (`a private note`, `a private note`); the gated weights need
 a pre-authorized HF token — the one step that isn't fully scriptable.
+
+## 4B. Sync & cross-stream fusion — two-tier sync, per-stream-until-fusion (2026-06-27)
+
+Refines the F1/F2 design. The current linear order (`ingest → sync → geometry → …`, with `sync` at
+stage 2 feeding `geometry`) is the **rig-convenient** ordering: on a hardware-synced rig, sync is ~0
+and there is nothing to estimate. The north-star input — **several casually-captured,
+independently-clocked streams of the same dynamic volume** — breaks that: robust temporal alignment
+depends on *reconstructed per-stream content*, so sync cannot be a cheap stage-2 op on raw frames.
+
+**Two regimes.**
+- *Fixed rig* (G1 validation target): synced / near-synced; sync confirms ~0. Stage-2 placement is
+  fine. F1's "recover ~0 on the rig" proves the impl runs — **necessary, not sufficient**.
+- *Casual multi-stream* (general case): unknown offsets, possibly different frame rates / clock drift
+  / no shared audio. Sync is a coupled estimation problem over reconstructed content.
+
+**Two-tier sync.**
+- **Tier 1 — coarse temporal prior (early, raw signals).** Audio cross-correlation where audio
+  overlaps, else a global motion-energy correlation across streams → a rough per-stream offset **+
+  confidence** (may abstain). On a rig: trivially ~0. This is the only part near stage 2, and it is a
+  *prior*, not the answer — it's what today's `sync` stage / `SyncArtifact` carries.
+- **Tier 2 — fine temporal alignment (late, in the joint optimizer / F2).** The time offset (and
+  frame-rate / drift) becomes a **parameter jointly estimated with extrinsics + metric scale**, by
+  enforcing **cross-view consistency of reconstructed dynamic content** (matched 3D trajectories of
+  the same moving entity across views; epipolar / photometric consistency of dynamic points at
+  aligned times). This objective cannot be written until each stream has geometry + motion + entity
+  reconstruction — so it lives in `optimization` (calibration-arc M2/M3), not stage 2.
+
+**Per-stream-until-fusion (the structural consequence).** Most of the front-half is **single-stream**:
+`geometry`, `pose_refine`, `segment`, `reid`, `objects`, `humans`, `tracking` each run independently
+per stream on the stream's *own* timeline — none need cross-stream sync. Cross-stream alignment —
+**temporal sync + extrinsics + metric scale + cross-view identity** — is the **fusion**, and it
+depends on those per-stream reconstructions. Consequences:
+- The registry's `geometry depends on sync` edge is **wrong for the casual case** — geometry is
+  per-stream; the real dependency is reversed (fine-sync depends on per-stream geometry/motion). A
+  Tier-1 prior may still precede geometry to seed a common timeline, but geometry does not *require* it.
+- The clean shape is **per-stream front-half (parallel) → a fusion stage** doing sync + extrinsics +
+  scale + cross-view ID jointly. The linear single-pass order is a rig-era simplification to revisit
+  at F2 / F4.
+
+**Cross-view identity rides the same fusion.** "Same dynamic volume" ⇒ the same entity appears in
+multiple streams. In-stream identity is per-stream (`segment` / `reid`); matching "entity A in stream
+1 = entity A in stream 2" is a **fusion-time** operation that needs the spatio-temporal alignment
+first, riding on the same DINOv3 appearance features (§4A). So `reid` has a **cross-stream dimension**
+that surfaces at F2 / F4.
+
+**Validation.** Recovering ~0 on a synced rig is necessary but not sufficient; the casual fine-sync
+must be validated on genuinely *unsynced* data with a **known injected offset** (and known frame-rate
+mismatch) — the real test of Tier 2.
 
 ## 5. Back-half deep design
 
@@ -528,16 +576,20 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     Depends on: FP1.
   FP6  Depth backstop               MoGe-2 (MIT, metric point map) into the 2D→3D lift. Depends on: FP1.
 
-  F1  Real temporal sync            Replace the 0.0 stub (audio_sync.py:11 / motion_sync.py:16) with a
-                                    real sync stage; VALIDATE on the fixed rig — must recover the known
-                                    ~0 offset. A wrong answer on a synced rig = a broken impl caught
-                                    before unsynced streams ever depend on it.
+  F1  Real temporal sync            TIER-1 coarse temporal prior (§4B): replace the 0.0 stub
+       (Tier-1 coarse prior, §4B)   (audio_sync.py:11 / motion_sync.py:16) with audio / motion-energy
+                                    cross-correlation → offset + confidence (may abstain). VALIDATE on
+                                    the fixed rig (recover ~0 — necessary, NOT sufficient) AND on
+                                    unsynced data with a known injected offset (the real Tier-1 test).
+                                    Fine alignment is F2, not here.
   F2  Real joint-opt fusion         = calibration-arc M2/M3 (a private note; eng-reviewed
-                                    design + S1 spikes cleared the robustness + scale gates). Real
+       (+ Tier-2 fine sync, §4B)    design + S1 spikes cleared the robustness + scale gates). Real
                                     factors / multi-stream BA over poses+states; metric scale
-                                    (person-anchored; intrinsics a named dep). Validate vs GT
-                                    extrinsics on NVIDIA 12-cam / CMU Panoptic. Replaces the verified
-                                    no-op factors (return 0.0,{}).
+                                    (person-anchored; intrinsics a named dep). ALSO estimates the
+                                    Tier-2 FINE time offset (+frame-rate/drift) jointly with
+                                    extrinsics+scale via cross-view dynamic-content consistency (§4B).
+                                    Validate vs GT extrinsics on NVIDIA 12-cam / CMU Panoptic. Replaces
+                                    the verified no-op factors (return 0.0,{}).
   F3  pose2d de-stub                SUBSUMED by FP5 — Sapiens (dense) + GVHMR replace the
                                     Keypoint-RCNN/pose2d path wholesale; the heuristic-stamped-'real'
                                     fallback (pose2d.py:114) is deleted, not patched.
@@ -615,8 +667,15 @@ sequencing, not a go/no-go.
 - **Paired-data cost** — any future Level-2 adapter needs (control-signal, video) pairs; producing
   them is itself a reconstruction pipeline (which room4d is) — a hidden cost, not just compute.
 - **`optimization` is a verified no-op** (all geometric factors `return 0.0,{}`) and **`sync` is
-  hardcoded** — both are now **Block-1 foundation scope** (F1 real sync validated on the rig; F2 real
-  multi-stream joint-opt fusion = calibration-arc M2/M3), built and validated *before* G1.
+  hardcoded** — both are now **Block-1 foundation scope** (F1 Tier-1 coarse sync prior; F2 real
+  multi-stream joint-opt fusion = calibration-arc M2/M3, which *also* estimates Tier-2 fine sync),
+  built and validated *before* G1.
+- **Casual multi-stream sync is a fusion problem, not a stage-2 op (§4B).** For independently-clocked
+  streams the front-half is **per-stream until a fusion point**: geometry / perception / motion run
+  per stream; fine sync + extrinsics + scale + cross-view identity are estimated *jointly* at F2 / F4.
+  The linear `sync→geometry` order is a rig-era simplification — geometry does not require sync. Risk:
+  the casual fine-sync (Tier 2) is unvalidated until tested on genuinely unsynced data with a known
+  injected offset; the rig ~0 recovery does not bound it.
 - **Viewpoint-invariance eval hides a Sim(3) alignment problem.** The "graph invariance" axis (§5e)
   needs graph-correspondence up-to-Sim(3) between two independent reconstructions — itself an open
   alignment problem (cf. step-12 Sim(3)/orientation pain). Scope viewpoint queries out of the first
