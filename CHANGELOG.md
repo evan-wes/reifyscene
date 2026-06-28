@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.18.1] - 2026-06-27
+
+### Changed
+- **Design doc §4B (new): two-tier sync + per-stream-until-fusion** — refines the
+  F1/F2 sync design for casually-captured, independently-clocked multi-stream
+  input (decision-only doc change; no code).
+  - Sync becomes **two-tier**: Tier-1 a **coarse temporal prior** (audio /
+    motion-energy cross-correlation) at the early `sync` stage; Tier-2 a **fine
+    temporal alignment** (time offset + frame-rate/drift) estimated **jointly
+    with extrinsics + scale in the joint optimizer (F2)** via cross-view
+    dynamic-content consistency.
+  - Records the structural consequence: most of the front-half is **single-stream
+    until a fusion point** (geometry/perception/motion run per-stream; sync +
+    extrinsics + scale + cross-view identity are joint at F2/F4). The registry's
+    `geometry depends on sync` edge is wrong for the casual case — geometry does
+    not require sync.
+  - Cross-view identity rides the same fusion (cross-stream `reid` on DINOv3
+    features). Validation: rig ~0 recovery is necessary-not-sufficient; casual
+    fine-sync needs an unsynced known-offset test.
+  - Reconciled §3 (sync row), §4 (sync/geometry stage rows), §7 (F1 Tier-1
+    coarse prior; F2 Tier-2 fine sync), §8 (new risk bullet).
+
 ## [0.1.18.0] - 2026-06-26
 
 ### Added
