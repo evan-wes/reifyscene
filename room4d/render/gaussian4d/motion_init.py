@@ -28,6 +28,7 @@ from room4d.render.gaussian4d.rasterizer import RenderCamera
 
 if TYPE_CHECKING:
     from room4d.lifting.geometry_provider import GeometryProvider
+    from room4d.lifting.native_track_lift import SceneNorm
 
 
 @dataclass
@@ -47,7 +48,14 @@ class BorrowedCamera:
         return RenderCamera(viewmat=self.w2c.astype(np.float32), K=K, width=int(width), height=int(height))
 
 
+def _bundle_has(data, key: str) -> bool:
+    """Membership check that works for both an npz ``NpzFile`` and a plain dict."""
+    return (key in data.files) if hasattr(data, "files") else (key in data)
+
+
 def _cameras(data, split: str) -> list[BorrowedCamera]:
+    if not _bundle_has(data, f"{split}_w2cs"):
+        return []  # native in-pipeline bundles may carry train only (no held-out val).
     w2cs, ks = data[f"{split}_w2cs"], data[f"{split}_Ks"]
     tids, names = data[f"{split}_time_ids"], data[f"{split}_frame_names"]
     return [
@@ -56,12 +64,17 @@ def _cameras(data, split: str) -> list[BorrowedCamera]:
     ]
 
 
-def load_borrowed_init(npz_path: str, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
-    """Load a borrowed init bundle -> (DynamicScene, {"train"/"val": cameras})."""
-    data = np.load(npz_path, allow_pickle=True)
+def bundle_to_scene(data, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
+    """Reconstruct a ``DynamicScene`` + cameras from a bundle mapping.
+
+    ``data`` is any ``str -> array`` mapping with the borrowed-init schema -- an
+    npz ``NpzFile`` (on-disk bundle) or an in-memory dict (the pipeline's
+    serialized ``SceneArtifact.dynamic_bundle``). This is the inverse of
+    :func:`dump_bundle`.
+    """
 
     def t(key: str) -> torch.Tensor:
-        return torch.as_tensor(data[key], dtype=torch.float32, device=device)
+        return torch.as_tensor(np.asarray(data[key]), dtype=torch.float32, device=device)
 
     fg = DynamicGaussianField(
         means=t("fg_means"),
@@ -73,7 +86,7 @@ def load_borrowed_init(npz_path: str, device: str = "cuda") -> tuple[DynamicScen
     )
     bases = MotionBases(rots=t("motion_rots"), transls=t("motion_transls"))
     bg = None
-    if "bg_means" in data.files:
+    if _bundle_has(data, "bg_means"):
         bg = GaussianField(
             means=t("bg_means"),
             quats=t("bg_quats"),
@@ -84,6 +97,68 @@ def load_borrowed_init(npz_path: str, device: str = "cuda") -> tuple[DynamicScen
     scene = DynamicScene(fg, bases, bg).to(device)
     cameras = {split: _cameras(data, split) for split in ("train", "val")}
     return scene, cameras
+
+
+def dump_bundle(
+    scene: DynamicScene,
+    cams: dict[str, list[BorrowedCamera]],
+    *,
+    factor: int = 1,
+    scene_norm: "SceneNorm | None" = None,
+) -> dict[str, np.ndarray]:
+    """Serialize a ``DynamicScene`` + cameras to a numpy bundle (torch -> numpy).
+
+    Inverse of :func:`bundle_to_scene`: emits the same npz schema the borrowed
+    init uses, so the pipeline can persist a natively-built scene into a
+    ``SceneArtifact`` and reload it unchanged in the render stage. Splits with no
+    cameras (e.g. a train-only in-pipeline build) are omitted. ``scene_norm``, if
+    given, is recorded so held-out dataset cameras can be normalized into the
+    scene frame at score time.
+    """
+
+    def n(p: torch.Tensor) -> np.ndarray:
+        return p.detach().cpu().numpy()
+
+    fg = scene.fg
+    dump: dict[str, np.ndarray] = {
+        "fg_means": n(fg.means),
+        "fg_quats": n(fg.quats),
+        "fg_scales": n(fg.log_scales),      # log-space (matches load)
+        "fg_colors": n(fg.colors_logit),    # logit
+        "fg_opacities": n(fg.logit_opacities),  # logit
+        "fg_motion_coefs": n(fg.motion_coefs),  # raw (softmax at use)
+        "motion_rots": n(scene.motion_bases.rots),      # (K, T, 6)
+        "motion_transls": n(scene.motion_bases.transls),  # (K, T, 3)
+        "num_bases": np.asarray(int(scene.motion_bases.num_bases)),
+        "factor": np.asarray(int(factor)),
+    }
+    if scene_norm is not None:
+        dump["scene_norm_transfm"] = np.asarray(
+            scene_norm.transfm.detach().cpu().numpy() if hasattr(scene_norm.transfm, "detach")
+            else scene_norm.transfm, dtype=np.float32,
+        )
+        dump["scene_norm_scale"] = np.asarray(float(scene_norm.scale), dtype=np.float32)
+    if scene.bg is not None:
+        dump.update({
+            "bg_means": n(scene.bg.means),
+            "bg_quats": n(scene.bg.quats),
+            "bg_scales": n(scene.bg.log_scales),
+            "bg_colors": n(scene.bg.colors_logit),
+            "bg_opacities": n(scene.bg.logit_opacities),
+        })
+    for split, cam_list in cams.items():
+        if not cam_list:
+            continue
+        dump[f"{split}_w2cs"] = np.stack([np.asarray(c.w2c, dtype=np.float32) for c in cam_list], axis=0)
+        dump[f"{split}_Ks"] = np.stack([np.asarray(c.K, dtype=np.float32) for c in cam_list], axis=0)
+        dump[f"{split}_time_ids"] = np.asarray([int(c.time_id) for c in cam_list], dtype=np.int64)
+        dump[f"{split}_frame_names"] = np.asarray([str(c.frame_name) for c in cam_list])
+    return dump
+
+
+def load_borrowed_init(npz_path: str, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
+    """Load a borrowed init bundle -> (DynamicScene, {"train"/"val": cameras})."""
+    return bundle_to_scene(np.load(npz_path, allow_pickle=True), device=device)
 
 
 def _to_borrowed_cameras(records) -> list[BorrowedCamera]:
@@ -130,7 +205,15 @@ class NativeMotionInitializer:
     # of disk -- no per-pair files, no dataset_root needed.
     pair_loader: "Callable[[int, int], np.ndarray] | None" = None
 
-    def build(self, device: str = "cuda") -> tuple[DynamicScene, dict[str, list[BorrowedCamera]]]:
+    def build(self, device: str = "cuda", *, return_norm: bool = False):
+        """Build the scene + cameras; with ``return_norm`` also return the scene-norm.
+
+        Returns ``(scene, cams)`` by default. ``return_norm=True`` appends the
+        :class:`SceneNorm` (the world align/center + scale that places the scene in
+        its normalized frame) so a caller can normalize held-out dataset cameras
+        into the same frame at score time -- needed when the geometry provider has
+        no ``val`` split (the in-pipeline ``ArtifactGeometryProvider``).
+        """
         # Lazy imports: only the native path needs the lift / sklearn machinery.
         from room4d.lifting.native_track_lift import build_native_init_inputs
         from room4d.render.gaussian4d.procrustes_init import (
@@ -139,7 +222,7 @@ class NativeMotionInitializer:
             init_motion_params_with_procrustes,
         )
 
-        tracks, bg_points, cameras, _norm = build_native_init_inputs(
+        tracks, bg_points, cameras, norm = build_native_init_inputs(
             self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
             depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
             tracks_dir=self.tracks_dir, provider=self.provider, pair_loader=self.pair_loader,
@@ -153,7 +236,7 @@ class NativeMotionInitializer:
         bg = init_bg(bg_points)
         scene = DynamicScene(fg, bases, bg).to(device)
         cams = {split: _to_borrowed_cameras(records) for split, records in cameras.items()}
-        return scene, cams
+        return (scene, cams, norm) if return_norm else (scene, cams)
 
 
 def build_native_init(
