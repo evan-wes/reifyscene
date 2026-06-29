@@ -69,7 +69,7 @@ class TrackArtifact(BaseArtifact):
                     f"{sorted(self.all_pairs_by_stream)}"
                 )
             stream_id = next(iter(self.all_pairs_by_stream))
-        return self.all_pairs_by_stream[stream_id].write(out_dir)
+        return self.all_pairs_by_stream[stream_id].write_som_pairs(out_dir)
 
     def _progress_iter(self, iterable, *, total: int | None = None, description: str = ""):
         enabled = bool(self.metadata.get('save_debug_assets', False) or self.metadata.get('save_debug_html', False))
@@ -800,12 +800,7 @@ class TrackArtifact(BaseArtifact):
 
         all_pairs_by_stream: dict[str, AllPairsTracks] = {}
         for stream_id, info in raw.get('all_pairs_index', {}).items():
-            all_pairs_by_stream[stream_id] = AllPairsTracks.load(
-                save_dir / info['dir'],
-                list(info['frame_names']),
-                int(info['factor']),
-                (int(info['image_hw'][0]), int(info['image_hw'][1])),
-            )
+            all_pairs_by_stream[stream_id] = AllPairsTracks.load(save_dir / info['dir'])
 
         return cls(
             run_id=raw['run_id'],

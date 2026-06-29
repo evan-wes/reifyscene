@@ -105,6 +105,29 @@ class SceneArtifact(BaseArtifact):
             saved.append(entry)
         return saved
 
+    def _save_dynamic_bundle(self, save_dir: Path) -> dict[str, Any]:
+        """Persist a dynamic ``DynamicScene`` bundle as its own npz (not inlined JSON).
+
+        ``dynamic_bundle`` holds the borrowed-init numpy schema (fg/bg gaussians +
+        motion bases + per-split cameras, from ``motion_init.dump_bundle``). Mirrors
+        ``_save_seed``: write the arrays to ``dynamic/scene_bundle.npz`` and keep
+        only a path + counts in artifact.json. Empty for static scenes.
+        """
+        bundle = self.dynamic_bundle or {}
+        if not bundle:
+            return {}
+        arrays = {k: np.asarray(v) for k, v in bundle.items()}
+        dyn_dir = ensure_dir(save_dir / "dynamic")
+        np.savez_compressed(dyn_dir / "scene_bundle.npz", **arrays)
+        fg = np.asarray(arrays.get("fg_means", np.zeros((0, 3))))
+        bg = np.asarray(arrays.get("bg_means", np.zeros((0, 3))))
+        return {
+            "npz_file": "dynamic/scene_bundle.npz",
+            "num_fg": int(fg.shape[0]),
+            "num_bg": int(bg.shape[0]),
+            "num_bases": int(np.asarray(arrays.get("num_bases", 0))),
+        }
+
     def save(self) -> None:
         ensure_dir(self.save_dir)
         seed_meta = self._save_seed(ensure_dir(self.save_dir / "render_seed"))
@@ -127,7 +150,7 @@ class SceneArtifact(BaseArtifact):
                 }
                 for cam in self.render_trajectory
             ],
-            "dynamic_bundle": self._serialize_value(self.dynamic_bundle),
+            "dynamic_bundle": self._save_dynamic_bundle(self.save_dir),
             "frame_refs": [
                 {"stream_id": fr.stream_id, "frame_idx": int(fr.frame_idx), "timestamp_sec": float(fr.timestamp_sec)}
                 for fr in self.frame_refs
@@ -153,6 +176,20 @@ class SceneArtifact(BaseArtifact):
             "scales_xyz": np.asarray(npz["scales_xyz"], dtype=np.float32),
             "num_gaussians": int(means.shape[0]),
         }
+
+    @classmethod
+    def _load_dynamic_bundle(cls, save_dir: Path, raw: dict[str, Any]) -> dict[str, Any]:
+        """Reload the dynamic npz back into the in-memory numpy-bundle shape.
+
+        Symmetric with ``_save_dynamic_bundle`` / ``_load_seed``: a reloaded
+        artifact carries the same numpy dict the assembler produced, so the
+        render stage feeds it straight into ``motion_init.bundle_to_scene``.
+        """
+        npz_rel = (raw or {}).get("npz_file")
+        if not npz_rel:
+            return {}
+        data = np.load(save_dir / Path(npz_rel), allow_pickle=True)
+        return {k: data[k] for k in data.files}
 
     @classmethod
     def load(cls, save_dir: Path) -> "SceneArtifact":
@@ -184,7 +221,7 @@ class SceneArtifact(BaseArtifact):
             render_seed=render_seed,
             train_views=train_views,
             render_trajectory=render_trajectory,
-            dynamic_bundle=cls._deserialize_untyped(raw.get("dynamic_bundle", {}) or {}),
+            dynamic_bundle=cls._load_dynamic_bundle(save_dir, raw.get("dynamic_bundle", {})),
             frame_refs=frame_refs,
             timeline=raw.get("timeline", {}),
             notes=raw.get("notes", []),

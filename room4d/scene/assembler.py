@@ -50,6 +50,19 @@ class SingleVideoSceneAssembler:
         # Render trajectory (novel-view orbit).
         self.num_render_cameras = int(cfg.get("num_render_cameras", 60))
         self.orbit_up_axis = str(cfg.get("orbit_up_axis", "z")).lower()
+        # Dynamic scene (F0b): ``kind="dynamic"`` swaps the static seed path for the
+        # SE(3) motion-bundle path (NativeMotionInitializer over the pipeline's own
+        # geometry + in-memory all-pairs tracks). Default static -> F0a unchanged.
+        self.kind = str(cfg.get("kind", "static")).lower()
+        self.dynamic_num_fg = int(cfg.get("dynamic_num_fg", 40_000))
+        self.dynamic_num_bg = int(cfg.get("dynamic_num_bg", 100_000))
+        self.dynamic_num_bases = int(cfg.get("dynamic_num_bases", 10))
+        _ds = cfg.get("dynamic_seed", None)
+        self.dynamic_seed = None if _ds is None else int(_ds)
+        self.device = str(cfg.get("device", "cuda"))
+        # Tracker cfg for the in-assembler all-pairs generation (decision: tracks
+        # are produced inside the dynamic init, not the tracking stage, for F0b).
+        self.tracker_cfg = dict(cfg.get("tracker", {}) or {})
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -158,6 +171,134 @@ class SingleVideoSceneAssembler:
             })
         return traj
 
+    # ------------------------------------------------------------ dynamic (F0b)
+    def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
+        """Per-frame union of all segment instance masks -> the dynamic foreground.
+
+        Keyed ``"{stream_id}:{frame_idx}"`` to match ArtifactGeometryProvider. The
+        union of every instance's mask in a frame is the foreground the native lift
+        seeds tracks in. Empty when there is no segment artifact, which lifts no
+        foreground -> a degenerate (effectively static) scene.
+        """
+        if instance_artifact is None:
+            return {}
+        mask_arrays = getattr(instance_artifact, "mask_arrays", {}) or {}
+        frame_index = getattr(instance_artifact, "frame_index", {}) or {}
+        out: dict[str, np.ndarray] = {}
+        for key, instance_ids in frame_index.items():
+            union: np.ndarray | None = None
+            for iid in instance_ids:
+                mask = mask_arrays.get(iid)
+                if mask is None:
+                    continue
+                m = np.asarray(mask, dtype=bool)
+                if union is None:
+                    union = m.copy()
+                elif union.shape == m.shape:
+                    union |= m
+            if union is not None:
+                out[key] = union.astype(np.float32)
+        return out
+
+    def _dynamic_train_views(self, cams_train, height: int, width: int, geometry_artifact) -> list[dict[str, Any]]:
+        """Training views from the (scene-normalized) dynamic cameras + GT frames.
+
+        Cameras are the normalized train cameras the init produced (so they sit in
+        the gaussians' frame); intrinsics/size are the lift resolution; GT is the
+        geometry artifact's frame per ``frame_key`` (resized to size at load).
+        """
+        views: list[dict[str, Any]] = []
+        for cam in cams_train:
+            key = str(cam.frame_name)
+            path = self._gt_image_path(key, geometry_artifact)
+            if path is None or not Path(path).exists():
+                continue
+            t_world_cam = np.linalg.inv(np.asarray(cam.w2c, dtype=np.float32)).astype(np.float32)
+            K = np.asarray(cam.K, dtype=np.float32)
+            views.append({
+                "frame_key": key,
+                "time_id": int(cam.time_id),
+                "t_world_cam": t_world_cam,
+                "intrinsics": {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "cx": float(K[0, 2]), "cy": float(K[1, 2])},
+                "width": int(width),
+                "height": int(height),
+                "image_path": str(path),
+            })
+        return views
+
+    def _dynamic_orbit_trajectory(self, scene, train_views: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Novel-view orbit for a dynamic scene: the static orbit + a time sweep."""
+        if not train_views:
+            return []
+        means = scene.cloud_at(0).means.detach().cpu().numpy().astype(np.float32)
+        traj = self._orbit_trajectory({"means_xyz": means}, train_views)
+        num_frames = int(scene.num_frames)
+        n = max(1, len(traj))
+        for i, cam in enumerate(traj):
+            cam["time_id"] = int(round(i / max(n - 1, 1) * max(num_frames - 1, 0)))
+        return traj
+
+    def _assemble_dynamic(
+        self, *, run_id: str, save_dir, geometry_artifact, instance_artifact,
+        metadata: dict[str, Any] | None, frame_refs, timeline,
+    ) -> SceneArtifact:
+        """Build a dynamic SE(3) scene from the pipeline's own geometry + tracks.
+
+        Geometry comes from an ``ArtifactGeometryProvider`` over the (pose-refined)
+        geometry artifact; foreground from the segment masks; the all-pairs 2D
+        tracks are generated in-memory here (decision: tracks live in the dynamic
+        init for F0b, not the tracking stage). The built ``DynamicScene`` + cameras
+        are serialized into ``dynamic_bundle`` for the render stage.
+        """
+        from room4d.lifting.geometry_provider import ArtifactGeometryProvider
+        from room4d.render.gaussian4d.motion_init import NativeMotionInitializer, dump_bundle
+        from room4d.tracking.tapir_wrapper import TAPIRWrapper
+
+        fg_by_frame = self._fg_mask_by_frame(instance_artifact)
+        provider = ArtifactGeometryProvider(geometry_artifact, fg_mask_by_frame=fg_by_frame)
+        # NOTE: build_native_init_inputs re-reads frame_stack internally; we read it
+        # once more here for the all-pairs frames + the lift resolution (acceptable
+        # for v1 -- it reads the in-memory artifact, not disk-heavy dataset loaders).
+        stack = provider.frame_stack("train", device="cpu")
+        if stack.num_frames == 0:
+            return SceneArtifact(
+                run_id=run_id, stage_name="scene", save_dir=save_dir, metadata=dict(metadata or {}),
+                kind="dynamic", render_seed={}, train_views=[], render_trajectory=[],
+                dynamic_bundle={}, frame_refs=frame_refs, timeline=timeline,
+                notes=["dynamic: no usable geometry frames"],
+            )
+        height, width = int(stack.depths.shape[1]), int(stack.depths.shape[2])
+        frames = stack.rgbs.cpu().numpy()
+        masks = stack.fg.cpu().numpy()
+        frame_names = list(stack.cameras.frame_names)
+
+        all_pairs = TAPIRWrapper(self.tracker_cfg).compute_all_pairs(frames, masks, frame_names, factor=1)
+
+        scene, cams, norm = NativeMotionInitializer(
+            dataset_root="",  # unused once provider + pair_loader supply geometry + tracks
+            factor=1, num_fg=self.dynamic_num_fg, num_bg=self.dynamic_num_bg,
+            num_bases=self.dynamic_num_bases, seed=self.dynamic_seed,
+            provider=provider, pair_loader=all_pairs.pair,
+        ).build(device=self.device, return_norm=True)
+
+        bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
+        train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact)
+        render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
+        notes = [
+            f"dynamic_fg={scene.fg.num_gaussians}",
+            f"dynamic_bg={scene.bg.num_gaussians if scene.bg is not None else 0}",
+            f"motion_bases={scene.motion_bases.num_bases}",
+            f"train_views={len(train_views)}",
+            f"fg_frames={len(fg_by_frame)}",
+            f"render_cameras={len(render_trajectory)}",
+        ]
+        return SceneArtifact(
+            run_id=run_id, stage_name="scene", save_dir=save_dir, metadata=dict(metadata or {}),
+            kind="dynamic", render_seed={}, train_views=train_views,
+            render_trajectory=render_trajectory, dynamic_bundle=bundle,
+            frame_refs=frame_refs, timeline=timeline, notes=notes,
+        )
+
     def assemble(
         self,
         *,
@@ -167,11 +308,9 @@ class SingleVideoSceneAssembler:
         track_artifact=None,
         human_artifact=None,
         object_artifact=None,
+        instance_artifact=None,
         metadata: dict[str, Any] | None = None,
     ) -> SceneArtifact:
-        seed = self._build_seed(geometry_artifact)
-        train_views = self._build_train_views(geometry_artifact)
-        render_trajectory = self._orbit_trajectory(seed, train_views)
         frame_refs = sorted(list(geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
             "source": "geometry",
@@ -179,6 +318,16 @@ class SingleVideoSceneAssembler:
             "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
         }
+        if self.kind == "dynamic":
+            return self._assemble_dynamic(
+                run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
+                instance_artifact=instance_artifact, metadata=metadata,
+                frame_refs=frame_refs, timeline=timeline,
+            )
+
+        seed = self._build_seed(geometry_artifact)
+        train_views = self._build_train_views(geometry_artifact)
+        render_trajectory = self._orbit_trajectory(seed, train_views)
         notes = [
             f"seed_gaussians={seed['num_gaussians']}",
             f"train_views={len(train_views)}",

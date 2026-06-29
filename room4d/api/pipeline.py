@@ -759,8 +759,12 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None):
-        """Assemble a lightweight static/dynamic single-video 4D scene."""
+    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
+        """Assemble a lightweight static/dynamic single-video 4D scene.
+
+        ``instance_artifact`` (segment stage) supplies the per-frame foreground
+        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from.
+        """
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -768,6 +772,7 @@ class Room4DPipeline:
             track_artifact=track_artifact,
             human_artifact=human_artifact,
             object_artifact=object_artifact,
+            instance_artifact=instance_artifact,
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
@@ -791,9 +796,13 @@ class Room4DPipeline:
         # (covisibility masks / held-out cameras don't exist for arbitrary video).
         eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
         if eval_cfg.get('dataset_root'):
-            from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
             device = str(self.cfg.get('render', {}).get('device', 'cuda'))
-            metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+            if str(artifact.scene_state.get('kind', 'static')) == 'dynamic':
+                from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+                metrics = score_render_artifact_masked_nvs_dynamic(artifact, eval_cfg, device=device)
+            else:
+                from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
+                metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
             if metrics:
                 artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir
@@ -846,7 +855,7 @@ class Room4DPipeline:
         track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
         graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
+        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
         render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
         return {
             'ingest': ingest_artifact,

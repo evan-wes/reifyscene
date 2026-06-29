@@ -7,6 +7,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.20.0] - 2026-06-29
+
+### Added
+- **F0b — in-pipeline dynamic Gaussian render path.** The render half of the
+  scene→render seam now resolves a *moving* scene end to end: `scene.kind=dynamic`
+  lifts an SE(3) `DynamicScene` from the pipeline's own geometry + foreground,
+  serializes it into the `SceneArtifact`, and the render stage trains + scores it.
+  This closes the loop so front-half perception backends become measurable by
+  their downstream novel-view quality. **Gate: 20.72 masked mPSNR on DyCheck
+  paper-windmill** (own-tracker, oracle geometry, 5000 iters, n=419 val frames) —
+  reproducing the standalone `run_render_proof.py` reference (~20.7) through the
+  new wiring.
+  - **Serialization (`room4d/render/gaussian4d/motion_init.py`):** `dump_bundle` /
+    `bundle_to_scene` round-trip a `DynamicScene` + cameras through the borrowed-init
+    npz schema (torch↔numpy); `SceneArtifact.dynamic_bundle` persists it as a
+    separate `dynamic/scene_bundle.npz` (not inlined JSON), mirroring the static
+    seed. `NativeMotionInitializer.build(return_norm=True)` surfaces the scene-norm
+    so held-out dataset cameras land in the scene frame at score time.
+  - **Assembler dynamic branch (`room4d/scene/assembler.py`):** `scene.kind=dynamic`
+    builds a `DynamicScene` from an `ArtifactGeometryProvider` (per-frame union of
+    `segment` instance masks → foreground) + in-memory packed all-pairs tracks
+    (no per-pair `.npy` files); the `segment` `InstanceArtifact` is threaded through
+    `Room4DPipeline.assemble_scene`. Default `kind=static` keeps F0a unchanged.
+  - **Render dispatch (`room4d/render/gaussian4d/render_backend.py`):** the
+    `kind=="dynamic"` branch (formerly `NotImplementedError`) trains the bundle with
+    `DynamicGaussianTrainer`, writes a `trained_dynamic.npz` checkpoint, and renders
+    the trajectory per `time_id`.
+  - **Dynamic masked-NVS scorer (`room4d/render/eval/masked_nvs_benchmark.py`):**
+    `score_render_artifact_masked_nvs_dynamic` scores held-out val views against a
+    scene re-materialized per `time_id` (DyCheck protocol), wired into `fit_renderer`.
+  - **`scripts/f0_validate_windmill.py`** — reproducible gate driver (borrowed-init
+    wiring smoke + own-tracker gate over oracle geometry).
+
+### Tests
+- Dynamic-bundle serialization round-trip, fg-mask union → provider keys,
+  scene-norm ↔ lift convention, and dynamic render dispatch (CPU empty-bundle +
+  gsplat end-to-end train/checkpoint). Full suite: **284 passed, 1 skipped**.
+
 ## [0.1.19.0] - 2026-06-27
 
 ### Added

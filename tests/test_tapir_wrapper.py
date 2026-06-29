@@ -41,21 +41,35 @@ def test_all_pairs_query_counts_and_shape_validation() -> None:
         AllPairsTracks(frame_names=["a"], tracks=[np.zeros((2, 1, 3), np.float32)], factor=1, image_hw=(8, 8))
 
 
-def test_all_pairs_write_filenames_and_slicing(tmp_path: Path) -> None:
+def test_all_pairs_packed_write_is_single_structure(tmp_path: Path) -> None:
+    # The packed format replaces the O(N^2) per-pair files with one array + index.
     ap = _ragged_all_pairs()
-    out = ap.write(tmp_path / "1x")
+    out = ap.write(tmp_path / "packed")
+    assert sorted(p.name for p in out.iterdir()) == ["index.json", "tracks.npy"]
+    # pair(i, j) == tracks[i][:, j], shape (N_i, 4)
+    assert np.array_equal(ap.pair(0, 2), ap.tracks[0][:, 2])
+    assert ap.pair(1, 0).shape == (3, 4)
+
+
+def test_all_pairs_packed_roundtrip(tmp_path: Path) -> None:
+    ap = _ragged_all_pairs()
+    ap.write(tmp_path / "packed")
+    back = AllPairsTracks.load(tmp_path / "packed")
+    assert back.frame_names == ap.frame_names and back.factor == 1 and back.image_hw == (48, 64)
+    assert all(np.array_equal(a, b) for a, b in zip(ap.tracks, back.tracks))
+    for i in range(ap.num_frames):
+        for j in range(ap.num_frames):
+            assert np.array_equal(ap.pair(i, j), back.pair(i, j))
+
+
+def test_all_pairs_som_pairs_interop(tmp_path: Path) -> None:
+    # The SoM per-pair layout survives only for external borrowed-DyCheck interop.
+    ap = _ragged_all_pairs()
+    out = ap.write_som_pairs(tmp_path / "1x")
     files = sorted(p.name for p in out.glob("*.npy"))
     assert len(files) == ap.num_frames ** 2  # all ordered pairs
-    # file <name_i>_<name_j>.npy must equal tracks[i][:, j], shape (N_i, 4)
     assert np.array_equal(np.load(out / "000_002.npy"), ap.tracks[0][:, 2])
-    assert np.load(out / "001_000.npy").shape == (3, 4)
-
-
-def test_all_pairs_roundtrip(tmp_path: Path) -> None:
-    ap = _ragged_all_pairs()
-    ap.write(tmp_path / "1x")
-    back = AllPairsTracks.load(tmp_path / "1x", ap.frame_names, factor=1, image_hw=(48, 64))
-    assert back.frame_names == ap.frame_names and back.factor == 1 and back.image_hw == (48, 64)
+    back = AllPairsTracks.load_som_pairs(out, ap.frame_names, factor=1, image_hw=(48, 64))
     assert all(np.array_equal(a, b) for a, b in zip(ap.tracks, back.tracks))
 
 

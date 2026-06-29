@@ -134,6 +134,30 @@ def test_load_borrowed_init_roundtrip(tmp_path) -> None:
     assert rc.width == 64 and abs(float(rc.K[0, 0]) - 1.0) < 1e-5  # fx 2.0 * 0.5
 
 
+def test_normalize_w2c_matches_lift_convention() -> None:
+    """The dynamic scorer's camera-normalization agrees with the lift's in-place one."""
+    import numpy as np
+
+    from room4d.lifting.native_track_lift import CameraRecords, SceneNorm, apply_scene_norm_cameras
+    from room4d.render.eval.masked_nvs_benchmark import _normalize_w2c
+
+    rng = np.random.default_rng(1)
+    w2c = np.eye(4, dtype=np.float32)
+    w2c[:3, :3] = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+    w2c[:3, 3] = rng.normal(size=3)
+    transfm = np.eye(4, dtype=np.float32)
+    transfm[:3, :3] = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+    transfm[:3, 3] = rng.normal(size=3)
+    scale = 2.5
+
+    recs = CameraRecords(
+        frame_names=["f"], time_ids=torch.zeros(1, dtype=torch.long),
+        w2cs=torch.as_tensor(w2c)[None].clone(), Ks=torch.eye(3)[None],
+    )
+    apply_scene_norm_cameras(recs, SceneNorm(transfm=torch.as_tensor(transfm), scale=scale))
+    assert np.allclose(_normalize_w2c(w2c, transfm, scale), recs.w2cs[0].numpy(), atol=1e-5)
+
+
 def test_dynamic_densification_grows_motion_coefs() -> None:
     from room4d.render.gaussian4d.densify import DensificationController, DensifyConfig
     from room4d.render.gaussian4d.dynamic_field import FG_PARAM_NAMES

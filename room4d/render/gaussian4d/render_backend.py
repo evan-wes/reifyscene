@@ -22,7 +22,7 @@ from room4d.render.base import RenderBackend
 from room4d.render.export import write_video
 from room4d.render.gaussian4d.densify import DensifyConfig
 from room4d.render.gaussian4d.gaussian_field import GaussianField
-from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
+from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig, image_psnr
 from room4d.render.gaussian4d.rasterizer import GaussianCloud, RenderCamera, build_rasterizer
 from room4d.render.gaussian4d.render_artifact import RenderArtifact
 
@@ -126,7 +126,7 @@ class GaussianRenderBackend(RenderBackend):
         save_dir = Path(save_dir) if save_dir is not None else Path(scene_artifact.save_dir).parent / "render"
         ensure_dir(save_dir)
         if str(getattr(scene_artifact, "kind", "static")) == "dynamic":
-            raise NotImplementedError("dynamic render backend lands in F0b")
+            return self._fit_dynamic(scene_artifact, save_dir)
 
         field = self._build_field(scene_artifact)
         train_views = self._train_views(scene_artifact)
@@ -174,6 +174,116 @@ class GaussianRenderBackend(RenderBackend):
             scene_state={
                 "kind": "static",
                 "num_gaussians": int(field.num_gaussians),
+                "iters": int(train_cfg.iters),
+                "train_view_psnr": train_view_psnr,
+                "checkpoint": checkpoint,
+                "num_train_views": len(train_views),
+            },
+            path_index=path_index,
+        )
+
+    # -- dynamic (F0b) ----------------------------------------------------
+    def _dynamic_train_views(self, scene_artifact) -> list[tuple[RenderCamera, "torch.Tensor", int]]:
+        """Train views for the dynamic trainer: (camera, gt[H,W,3], time_id)."""
+        out: list[tuple[RenderCamera, torch.Tensor, int]] = []
+        for view in scene_artifact.train_views:
+            path = self._view_image_path(view)
+            if not path:
+                continue
+            out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view.get("time_id", 0))))
+        return out
+
+    def _render_dynamic_trajectory(self, scene_artifact, scene, rasterizer, save_dir: Path) -> dict[str, list[str]]:
+        traj = scene_artifact.render_trajectory or []
+        if not traj:
+            return {}
+        frames_dir = ensure_dir(save_dir / "flythrough")
+        frame_paths: list[str] = []
+        frames: list[np.ndarray] = []
+        for i, spec in enumerate(traj):
+            cam = self._camera(spec)
+            cloud = scene.cloud_at(int(spec.get("time_id", 0)))
+            out = rasterizer.rasterize(cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, cam)
+            rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
+            path = frames_dir / f"frame_{i:04d}.png"
+            Image.fromarray(rgb).save(path)
+            frame_paths.append(str(path))
+            frames.append(rgb)
+        try:
+            write_video(frames, save_dir / "flythrough.mp4", fps=self.fps)
+        except Exception:
+            pass
+        return {"flythrough": frame_paths}
+
+    def _save_dynamic_checkpoint(self, scene, cams, source_bundle: dict, save_dir: Path) -> str:
+        """Persist the trained DynamicScene as a dump_bundle npz the scorer reloads.
+
+        Carries forward the scene-norm (and any held-out val cameras) from the
+        source bundle so masked-NVS can place dataset cameras in the scene frame.
+        """
+        from room4d.render.gaussian4d.motion_init import dump_bundle
+
+        ckpt = dump_bundle(scene, cams, factor=1)
+        for key in ("scene_norm_transfm", "scene_norm_scale"):
+            if key in (source_bundle or {}):
+                ckpt[key] = np.asarray(source_bundle[key])
+        path = save_dir / "trained_dynamic.npz"
+        np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
+        return path.name
+
+    def _fit_dynamic(self, scene_artifact, save_dir: Path) -> RenderArtifact:
+        from room4d.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
+        from room4d.render.gaussian4d.motion_init import bundle_to_scene
+
+        bundle = scene_artifact.dynamic_bundle or {}
+        train_views = self._dynamic_train_views(scene_artifact)
+        if not bundle or not train_views:
+            return RenderArtifact(
+                run_id=getattr(scene_artifact, "run_id", "dev"),
+                stage_name="render",
+                save_dir=save_dir,
+                metadata={"backend": self.backend_name, "device": self.device},
+                scene_state={
+                    "kind": "dynamic", "empty": True,
+                    "num_train_views": len(train_views),
+                    "reason": "empty dynamic bundle or no train_views; render skipped",
+                },
+                path_index={},
+            )
+
+        scene, cams = bundle_to_scene(bundle, device=self.device)
+
+        dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
+        iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
+        train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
+        densify_cfg = DensifyConfig.from_cfg(self.cfg.get("densify"), max_iters=iters, num_frames=scene.num_frames)
+        rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
+        trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
+
+        logs: list[dict] = []
+        trained = trainer.fit(train_views, on_log=lambda record: logs.append(record))
+
+        path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
+        checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir)
+        eval_n = min(len(train_views), 8)
+        with torch.no_grad():
+            psnrs = [
+                float(image_psnr(trainer.render_at(cam, t), gt))
+                for cam, gt, t in train_views[:eval_n]
+            ]
+        train_view_psnr = float(np.mean(psnrs)) if psnrs else 0.0
+
+        return RenderArtifact(
+            run_id=getattr(scene_artifact, "run_id", "dev"),
+            stage_name="render",
+            save_dir=save_dir,
+            metadata={"backend": self.backend_name, "device": self.device},
+            scene_state={
+                "kind": "dynamic",
+                "num_gaussians": int(trained.num_gaussians),
+                "num_fg": int(trained.fg.num_gaussians),
+                "num_bg": int(trained.bg.num_gaussians) if trained.bg is not None else 0,
+                "num_frames": int(trained.num_frames),
                 "iters": int(train_cfg.iters),
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
