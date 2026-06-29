@@ -7,6 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.21.0] - 2026-06-29
+
+### Added
+- **FP2a — SAM 2 `segment` top rung (prompt-free, class-agnostic).** The first
+  rung of the perception climb above the FP1 Mask R-CNN floor. SAM 2 automatic
+  mask generation discovers object-like masks on a keyframe (no class list, no
+  prompt), a tunable object-ness filter prunes them, and the SAM 2 video predictor
+  propagates each across the stream with a **persistent native ID** — real
+  temporal identity in place of the floor's greedy-IoU stitching. Naming stays
+  downstream (FP4 semantics); this rung emits only masks + identity. SAM 3 is the
+  eventual gated top rung; SAM 2 (Apache, ungated) is the stand-in.
+  - `room4d/perception/instance/sam2_segment.py` — `SAM2InstanceSegmenter`
+    (discover → object-ness filter → SAM 2 video propagation → person-tag →
+    `InstanceArtifact`). The existing person detector tags `kind='human'` so the
+    `humans` stage keeps working class-agnostically. sam2 is lazy-imported (loaded
+    only on run), so the module is import-safe when sam2 is absent.
+  - `room4d/api/pipeline.py` — the `segment` ladder gains a probe-gated `sam2`
+    rung (`importable('sam2')`) above `maskrcnn_iou`, built inside the runner so
+    the model loads only when selected and releases after the stage. Falls to the
+    Mask R-CNN floor when sam2 is not installed — the degradability invariant holds.
+  - `scripts/setup_room4d.sh` — `--with-sam2`: SAM 2 pinned into `third_party/sam2`
+    + the `sam2.1_hiera_large` checkpoint (direct fbaipublicfiles URL, idempotent,
+    size-guarded); `SAM2_BUILD_CUDA=0` keeps the install off the CUDA-toolchain path.
+
+### Tests
+- Object-ness filter (keep object / drop background, low-stability, tiny masks) +
+  bbox/IoU helpers; a sam2-gated functional test (synthetic moving-square clip →
+  one persistent track across frames). Full suite: **288 passed, 1 skipped**.
+
 ## [0.1.20.0] - 2026-06-29
 
 ### Added

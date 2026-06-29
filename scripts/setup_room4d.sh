@@ -36,6 +36,18 @@ VGGT_COMMIT="44b3afbd1869d8bde4894dd8ea1e293112dd5eba"
 COTRACKER_REPO="https://github.com/facebookresearch/co-tracker.git"
 COTRACKER_COMMIT="82e02e8029753ad4ef13cf06be7f4fc5facdda4d"
 
+# SAM 2 (Apache-2.0, ungated) — the FP2 `segment` top rung: class-agnostic
+# automatic mask generation + video mask propagation (persistent instance IDs).
+# Pinned to main HEAD at vendoring time. The sm_120 CUDA connected-components
+# extension is OPTIONAL (Python fallback exists), so the install skips it
+# (SAM2_BUILD_CUDA=0) to stay toolchain-light. The SAM 2.1 Hiera-Large checkpoint
+# ships at a direct fbaipublicfiles URL (like the tapnet checkpoints), so the
+# fetch is fully scripted + idempotent. ~900 MB.
+SAM2_REPO="https://github.com/facebookresearch/sam2.git"
+SAM2_COMMIT="2b90b9f5ceec907a1c18123530e92e794ad901a4"
+SAM2_CKPT_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+SAM2_CKPT_MIN_MB="${SAM2_CKPT_MIN_MB:-700}"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -86,6 +98,7 @@ TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
 INSTALL_COTRACKER=0
+INSTALL_SAM2=0
 INSTALL_VGGT_LONG=0
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -100,6 +113,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 VGGT_DIR="${THIRD_PARTY_DIR}/vggt"
 COTRACKER_DIR="${THIRD_PARTY_DIR}/co-tracker"
+SAM2_DIR="${THIRD_PARTY_DIR}/sam2"
+SAM2_CKPT_DIR="${SAM2_DIR}/checkpoints"
+SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
 VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
@@ -122,6 +138,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_VGGT=1; shift ;;
     --with-cotracker)
       INSTALL_COTRACKER=1; shift ;;
+    --with-sam2)
+      INSTALL_SAM2=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
@@ -158,6 +176,8 @@ Install options:
   --with-detectron2       Install detectron2 from official tag v0.6
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
+  --with-sam2             Clone/install SAM 2 into third_party/sam2 at pinned commit
+                          + download the sam2.1_hiera_large checkpoint (FP2 segment rung)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the room4d renderer requires it)
@@ -420,6 +440,42 @@ download_vggt_long_weights_if_needed() {
     bash ./scripts/download_weights.sh
   )
   touch "${VGGT_LONG_WEIGHTS_STAMP}"
+}
+
+download_sam2_checkpoint_if_needed() {
+  # Fetch the SAM 2.1 Hiera-Large checkpoint from its direct fbaipublicfiles URL
+  # (same fully-scripted idiom as scripts/fetch_tapir_checkpoint.sh). Idempotent:
+  # skip a plausibly-sized existing file; download to a temp file + mv so an
+  # interrupted transfer never leaves a partial that the size guard accepts.
+  mkdir -p "${SAM2_CKPT_DIR}"
+  local mb
+  if [[ -f "${SAM2_CKPT}" ]]; then
+    mb="$(du -m "${SAM2_CKPT}" 2>/dev/null | awk '{print $1}')"
+    if [[ -n "${mb}" && "${mb}" -ge "${SAM2_CKPT_MIN_MB}" ]]; then
+      echo "SAM 2 checkpoint already present (>= ${SAM2_CKPT_MIN_MB} MB): ${SAM2_CKPT} — skipping."
+      return
+    fi
+  fi
+  echo "Downloading SAM 2.1 Hiera-Large checkpoint -> ${SAM2_CKPT} ..."
+  local tmp
+  tmp="$(mktemp "${SAM2_CKPT}.XXXXXX")"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 -o "${tmp}" "${SAM2_CKPT_URL}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "${tmp}" "${SAM2_CKPT_URL}"
+  else
+    rm -f "${tmp}"
+    echo "Neither curl nor wget is available to download the SAM 2 checkpoint." >&2
+    exit 1
+  fi
+  mb="$(du -m "${tmp}" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "${mb}" || "${mb}" -lt "${SAM2_CKPT_MIN_MB}" ]]; then
+    rm -f "${tmp}"
+    echo "Downloaded SAM 2 checkpoint smaller than ${SAM2_CKPT_MIN_MB} MB — treating as failed/truncated." >&2
+    exit 1
+  fi
+  mv "${tmp}" "${SAM2_CKPT}"
+  echo "Done: ${SAM2_CKPT} (${mb} MB)"
 }
 
 remove_gsplat_leaked_top_level_packages() {
@@ -809,6 +865,9 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_COTRACKER -eq 1 ]]; then
     smoke_test_python_module "CoTracker" "cotracker" "cotracker"
   fi
+  if [[ $INSTALL_SAM2 -eq 1 ]]; then
+    smoke_test_python_module "SAM2" "sam2" "SAM-2"
+  fi
   if [[ $INSTALL_POSE_REFINE -eq 1 ]]; then
     # pose-refinement deps: pycolmap (BA), hydra-core + omegaconf (required by
     # the vendored VGGSfM tracker the refiner drives).
@@ -891,6 +950,15 @@ if [[ $INSTALL_COTRACKER -eq 1 ]]; then
   clone_or_update_checkout "${COTRACKER_REPO}" "${COTRACKER_DIR}" "${COTRACKER_COMMIT}"
   echo "Installing CoTracker from ${COTRACKER_DIR}..."
   python -m pip install -e "${COTRACKER_DIR}"
+fi
+
+if [[ $INSTALL_SAM2 -eq 1 ]]; then
+  clone_or_update_checkout "${SAM2_REPO}" "${SAM2_DIR}" "${SAM2_COMMIT}"
+  echo "Installing SAM 2 from ${SAM2_DIR} (SAM2_BUILD_CUDA=0 — optional ext skipped)..."
+  # The connected-components CUDA ext is optional (Python fallback exists);
+  # skipping it keeps the install off the CUDA-toolkit/compiler path.
+  SAM2_BUILD_CUDA=0 python -m pip install --no-build-isolation -e "${SAM2_DIR}"
+  download_sam2_checkpoint_if_needed
 fi
 
 if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
@@ -1051,6 +1119,7 @@ Installed:
 $( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}" )
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
+$( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
