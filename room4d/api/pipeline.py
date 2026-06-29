@@ -38,9 +38,10 @@ from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.perception.objects.segmenter import ObjectSegmenter
 from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 from room4d.perception.instance.segment import FloorInstanceSegmenter
+from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
 from room4d.perception.reid.reid_artifact import ReidArtifact
 from room4d.perception.reid.reid_stage import FloorReid
-from room4d.common.backend_ladder import BackendLadder, BackendRung
+from room4d.common.backend_ladder import BackendLadder, BackendRung, importable
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
 from room4d.api.stages import build_stage_registry
@@ -513,6 +514,17 @@ class Room4DPipeline:
         selected_frames = self._select_perception_frames(ingest_artifact, None, objects_cfg, default_source='keyframes')
         floor = FloorInstanceSegmenter(self.decoder, self.object_detector, self.object_segmenter, objects_cfg)
         ladder = BackendLadder('segment', [
+            # SAM 3 (gated) is the eventual top rung (design §4A); SAM 2 is the
+            # ungated stand-in: prompt-free class-agnostic discovery + video
+            # propagation. The segmenter is built inside the runner so SAM 2 is
+            # imported + loaded only when this rung is actually selected (and the
+            # model is released after the stage). Falls to the Mask R-CNN floor
+            # when `sam2` is not installed.
+            BackendRung(
+                'sam2', 'class_agnostic_propagation',
+                runner=lambda inp: SAM2InstanceSegmenter(self.decoder, self.object_detector, objects_cfg).run(inp['ingest'], inp['frames']),
+                probe=importable('sam2'),
+            ),
             BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames'])),
             BackendRung('empty', 'empty', runner=lambda inp: ([], {})),
         ])
