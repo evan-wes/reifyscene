@@ -55,9 +55,10 @@ def test_floor_reid_means_per_track_and_normalizes(tmp_path: Path) -> None:
         streams=[VideoStreamRef(stream_id='cam0', video_path=Path('v.mp4'), fps=30.0, num_frames=3, width=16, height=16, has_audio=False)],
     )
     embedder = _Embedder()
-    out = FloorReid(_Decoder(), embedder).run(ingest, _instance(tmp_path / 'seg'))
+    out, merge_map = FloorReid(_Decoder(), embedder).run(ingest, _instance(tmp_path / 'seg'))
 
     assert set(out) == {'track_0000', 'track_0001'}
+    assert merge_map == {}  # floor does no cross-occlusion gap-merging (FP3 fills this)
     np.testing.assert_allclose(out['track_0000'], [1.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(out['track_0001'], [0.0, 1.0], atol=1e-6)
     # frames decoded once each (2 unique frames), not once per instance
@@ -70,5 +71,6 @@ def test_floor_reid_empty_instances(tmp_path: Path) -> None:
         streams=[VideoStreamRef(stream_id='cam0', video_path=Path('v.mp4'), fps=30.0, num_frames=1, width=16, height=16, has_audio=False)],
     )
     empty = InstanceArtifact(run_id='r', stage_name='segment', save_dir=tmp_path / 'seg')
-    out = FloorReid(_Decoder(), _Embedder()).run(ingest, empty)
+    out, merge_map = FloorReid(_Decoder(), _Embedder()).run(ingest, empty)
     assert out == {}
+    assert merge_map == {}
