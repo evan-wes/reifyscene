@@ -472,6 +472,53 @@ def lift_bkgd_points(
     )
 
 
+# -- motion-gated foreground (FP2c) ---------------------------------------
+
+def gate_tracks_by_motion(
+    tracks: Tracks3D,
+    bg_points: StaticPoints3D,
+    *,
+    percentile: float = 95.0,
+    threshold: float = 0.05,
+) -> tuple[Tracks3D, StaticPoints3D]:
+    """Keep only *ever-moved* tracks as foreground; reroute static tracks to bg.
+
+    A track is dynamic iff the ``percentile``-th per-frame world-space displacement
+    from its median center exceeds ``threshold``. The high percentile is the
+    "did it move at any point" test: a *median* reducer averages brief motion away
+    (an object static for most of the clip that moves briefly), while a raw *max*
+    trips on single-frame lift/depth glitches; ``p95`` catches genuine motion (which
+    spans several frames) and ignores one-frame outliers.
+
+    Static tracks are converted to static background gaussians at their median
+    position rather than dropped: their (segment-fg-masked) regions are excluded
+    from the background point sampler, so dropping them would leave holes.
+    """
+    xyz = tracks.xyz  # (N, T, 3)
+    if xyz.shape[0] == 0:
+        return tracks, bg_points
+    vis = tracks.visibles.bool()[..., None]
+    masked = torch.where(vis, xyz, torch.full_like(xyz, float("nan")))
+    center = torch.nanmedian(masked, dim=1).values  # (N, 3)
+    spread = torch.linalg.norm(masked - center[:, None, :], dim=2)  # (N, T), nan where invisible
+    q = torch.nanquantile(spread, float(percentile) / 100.0, dim=1)  # (N,)
+    # Too-few-visible tracks (nan score) stay foreground — never silently drop motion.
+    dynamic = torch.where(torch.isnan(q), torch.ones_like(q, dtype=torch.bool), q > float(threshold))
+    if bool(dynamic.all()):
+        return tracks, bg_points  # nothing static to reroute (e.g. an already-clean fg)
+
+    fg = tracks.filter_valid(dynamic)
+    static = tracks.filter_valid(~dynamic)
+    s_masked = torch.where(static.visibles.bool()[..., None], static.xyz, torch.full_like(static.xyz, float("nan")))
+    s_xyz = torch.nanmedian(s_masked, dim=1).values  # (M, 3) representative static position
+    merged = StaticPoints3D(
+        xyz=torch.cat([bg_points.xyz, s_xyz.to(bg_points.xyz)], dim=0),
+        normals=torch.cat([bg_points.normals, torch.zeros_like(s_xyz).to(bg_points.normals)], dim=0),
+        colors=torch.cat([bg_points.colors, static.colors.to(bg_points.colors)], dim=0),
+    )
+    return fg, merged
+
+
 # -- orchestrator ---------------------------------------------------------
 
 def build_native_init_inputs(
@@ -486,6 +533,7 @@ def build_native_init_inputs(
     tracks_dir: str | Path | None = None,
     provider: "GeometryProvider | None" = None,
     pair_loader: "Callable[[int, int], np.ndarray] | None" = None,
+    motion_gate: dict | None = None,
 ) -> tuple[Tracks3D, StaticPoints3D, dict[str, CameraRecords], SceneNorm]:
     """Lift native init inputs for a DyCheck-format sequence (normalized frame).
 
@@ -527,6 +575,15 @@ def build_native_init_inputs(
         tracks_dir=tracks_dir, pair_loader=pair_loader,
     )
     bg_points = lift_bkgd_points(train_stack, num_samples=num_bg, rng=rng)
+
+    # FP2c: keep only ever-moved tracks as deformable foreground; static tracks
+    # (e.g. SAM-2-segmented background the segment fg let in) become static bg.
+    if motion_gate and motion_gate.get("enabled"):
+        tracks, bg_points = gate_tracks_by_motion(
+            tracks, bg_points,
+            percentile=float(motion_gate.get("percentile", 95.0)),
+            threshold=float(motion_gate.get("threshold", 0.05)),
+        )
 
     val_cameras = provider.cameras("val", device=device)
     apply_scene_norm_cameras(val_cameras, norm)

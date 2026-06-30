@@ -204,6 +204,9 @@ class NativeMotionInitializer:
     # the lift reads 2D tracks from this (the pipeline's AllPairsTracks.pair) instead
     # of disk -- no per-pair files, no dataset_root needed.
     pair_loader: "Callable[[int, int], np.ndarray] | None" = None
+    # Optional FP2c motion gate: {"enabled", "percentile", "threshold"}. When
+    # enabled, only ever-moved tracks stay foreground; static tracks -> background.
+    motion_gate: dict | None = None
 
     def build(self, device: str = "cuda", *, return_norm: bool = False):
         """Build the scene + cameras; with ``return_norm`` also return the scene-norm.
@@ -226,6 +229,7 @@ class NativeMotionInitializer:
             self.dataset_root, factor=self.factor, num_fg=self.num_fg, num_bg=self.num_bg,
             depth_type=self.depth_type, camera_type=self.camera_type, device="cpu", seed=self.seed,
             tracks_dir=self.tracks_dir, provider=self.provider, pair_loader=self.pair_loader,
+            motion_gate=self.motion_gate,
         )
         # Canonical frame = the one where the most tracks are visible.
         cano_t = int(tracks.visibles.sum(dim=0).argmax().item())

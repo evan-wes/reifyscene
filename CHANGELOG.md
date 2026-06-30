@@ -7,6 +7,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.22.0] - 2026-06-29
+
+### Added
+- **FP2c — motion-gated dynamic foreground (closes the perception→render loop).**
+  The dynamic-init lift now keeps only *ever-moved* tracks as deformable
+  foreground and reroutes static tracks to the background, so a broad
+  class-agnostic segment foreground (SAM 2's "segment everything") is cleaned by
+  **motion** rather than per-scene appearance heuristics. **Validated end to end
+  on paper-windmill: SAM 2 fg + motion gate → 20.43 masked mPSNR vs the 20.72
+  oracle gate** — the fully-native front half holds the oracle's novel-view
+  quality within 0.3 dB (n=419 val), the SAM 2 foreground (66% frame coverage)
+  gated down to the moving pinwheel.
+  - `lifting/native_track_lift.gate_tracks_by_motion`: a track is foreground iff
+    the **p95** of its per-frame world-space displacement from its median center
+    exceeds a threshold — the robust "did it ever move" test. (A *median* reducer
+    averages brief motion away — a static-then-moving object — and a raw *max*
+    trips on single-frame lift glitches; p95 catches genuine motion and ignores
+    one-frame outliers.) Static tracks become static background gaussians at their
+    median position — their segment-fg-masked regions would otherwise be holes.
+    Threaded through `NativeMotionInitializer` + the scene assembler,
+    **opt-in** (`scene.dynamic_motion_gate`; default off → F0b gate + suite unchanged).
+  - `render/gaussian4d/dynamic_field.DynamicScene.cloud_at`: clamp the frame index
+    to the motion-bases range — an out-of-range time-id (e.g. a held-out camera
+    beyond the trained frames) degrades to the nearest frame instead of an
+    out-of-bounds CUDA assert.
+  - `scripts/f0_validate_windmill.py`: `--fg-source {dataset,sam2}` (SAM 2 union
+    masks injected via a wrapped oracle-geometry provider), `--motion-gate`,
+    `--tracker-grid-size`, `--max-frames` — the native-swap ladder driver for the
+    oracle-vs-SAM 2 foreground comparison.
+
+### Tests
+- Motion gate: ever-moved (p95) foreground vs static-rerouted-to-background; the
+  static-then-moving case where a median reducer mislabels but p95 catches it;
+  no-op when every track is dynamic. Full suite: **291 passed, 1 skipped**.
+
 ## [0.1.21.0] - 2026-06-29
 
 ### Added

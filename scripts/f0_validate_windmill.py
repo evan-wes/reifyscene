@@ -54,22 +54,104 @@ def _build_borrowed(init_npz: str, device: str):
     return scene, cams, None
 
 
-def _build_own_tracker(dataset_root: str, device: str, *, num_fg: int, num_bg: int, num_bases: int, seed: int):
+def _slice_cameras(c, n: int):
+    from room4d.lifting.native_track_lift import CameraRecords
+    return CameraRecords(frame_names=c.frame_names[:n], time_ids=c.time_ids[:n], w2cs=c.w2cs[:n], Ks=c.Ks[:n])
+
+
+def _slice_stack(s, n: int):
+    from room4d.lifting.native_track_lift import FrameStack
+    return FrameStack(cameras=_slice_cameras(s.cameras, n), depths=s.depths[:n], rgbs=s.rgbs[:n], fg=s.fg[:n], valid=s.valid[:n])
+
+
+class _WindmillProvider:
+    """DyCheckGeometryProvider wrapper: limit train frames + optionally override fg."""
+
+    def __init__(self, inner, max_frames: int = 0, train_fg=None) -> None:
+        self.inner = inner
+        self.max_frames = int(max_frames)
+        self.train_fg = train_fg  # (N, H, W) torch foreground, or None to keep dataset fg
+
+    def cameras(self, split, *, device="cpu"):
+        c = self.inner.cameras(split, device=device)
+        return _slice_cameras(c, self.max_frames) if (split == "train" and self.max_frames) else c
+
+    def frame_stack(self, split, *, device="cpu"):
+        s = self.inner.frame_stack(split, device=device)
+        if self.max_frames:
+            s = _slice_stack(s, self.max_frames)
+        if self.train_fg is not None:
+            s.fg = self.train_fg.to(s.fg)
+        return s
+
+
+def _sam2_fg(rgbs_np: np.ndarray, device: str) -> "torch.Tensor":
+    """Run the SAM 2 segmenter over the frames -> per-frame union foreground (N, H, W)."""
+    from room4d.common.types import FrameRef
+    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+
+    images = [rgbs_np[i] for i in range(rgbs_np.shape[0])]
+
+    class _D:
+        def get_frame(self, stream, idx):
+            return images[int(idx)]
+
+    class _S:
+        stream_id = "cam_00"
+
+    class _Det:
+        backend_used = "none"
+        def detect(self, frame):
+            return []  # no person detector needed for the windmill scene
+
+    class _I:
+        streams = [_S()]
+
+    seg = SAM2InstanceSegmenter(_D(), _Det(), {})
+    refs = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) * 0.05) for i in range(len(images))]
+    obs, masks = seg.run(_I(), refs)
+    h, w = images[0].shape[:2]
+    fg = np.zeros((len(images), h, w), dtype=np.float32)
+    for o in obs:
+        i = int(o.frame_ref.frame_idx)
+        fg[i] = np.maximum(fg[i], masks[o.instance_id].astype(np.float32))
+    print(f"sam2 fg: tracks={len(set(o.track_id for o in obs))}  coverage={fg.mean():.3f}")
+    return torch.as_tensor(fg, device="cpu")
+
+
+def _build_own_tracker(
+    dataset_root: str, device: str, *, num_fg: int, num_bg: int, num_bases: int, seed: int,
+    fg_source: str = "dataset", max_frames: int = 0, motion_gate: dict | None = None,
+    grid_size: int = 4,
+):
     """Oracle geometry + in-memory packed all-pairs tracks -> (scene, cams, norm).
 
-    This is the F0b in-memory track path: room4d's tapnet tracker produces the
-    packed AllPairsTracks once (no per-pair files on disk) and the lift reads
-    pairs straight from it via ``pair_loader``.
+    ``fg_source`` picks the foreground the lift seeds + masks from: ``dataset`` (the
+    DyCheck oracle fg, the F0b gate) or ``sam2`` (the SAM 2 segment union — broad,
+    includes static background). With ``motion_gate`` enabled, the lift then keeps
+    only ever-moved tracks as deformable fg and reroutes static ones to background.
     """
-    provider = DyCheckGeometryProvider(dataset_root, factor=1, depth_type="depth_anything_colmap", camera_type="refined")
-    stack = provider.frame_stack("train", device="cpu")
-    print(f"own-tracker: tracking all-pairs over {stack.num_frames} train frames (tapnet)...")
-    all_pairs = TAPIRWrapper({"device": device}).compute_all_pairs(
-        stack.rgbs.cpu().numpy(), stack.fg.cpu().numpy(), list(stack.cameras.frame_names), factor=1
-    )
+    inner = DyCheckGeometryProvider(dataset_root, factor=1, depth_type="depth_anything_colmap", camera_type="refined")
+    stack = inner.frame_stack("train", device="cpu")
+    if max_frames:
+        stack = _slice_stack(stack, max_frames)
+    frame_names = list(stack.cameras.frame_names)
+    rgbs_np = stack.rgbs.cpu().numpy()
+
+    if fg_source == "sam2":
+        print(f"sam2 fg: segmenting {len(frame_names)} frames...")
+        train_fg = _sam2_fg(rgbs_np, device)
+        fg_np = train_fg.cpu().numpy()
+    else:
+        train_fg = None
+        fg_np = stack.fg.cpu().numpy()
+
+    print(f"own-tracker: all-pairs over {len(frame_names)} frames (fg={fg_source}, grid={grid_size}, gate={bool(motion_gate and motion_gate.get('enabled'))})...")
+    all_pairs = TAPIRWrapper({"device": device, "grid_size": grid_size}).compute_all_pairs(rgbs_np, fg_np, frame_names, factor=1)
+    provider = _WindmillProvider(inner, max_frames=max_frames, train_fg=train_fg)
     scene, cams, norm = NativeMotionInitializer(
         dataset_root=dataset_root, factor=1, num_fg=num_fg, num_bg=num_bg, num_bases=num_bases,
-        seed=seed, provider=provider, pair_loader=all_pairs.pair,
+        seed=seed, provider=provider, pair_loader=all_pairs.pair, motion_gate=motion_gate,
     ).build(device=device, return_norm=True)
     return scene, cams, norm
 
@@ -109,7 +191,20 @@ def main() -> None:
     ap.add_argument("--num-bases", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--fg-source", choices=["dataset", "sam2"], default="dataset",
+                    help="foreground source for the lift (own-tracker): DyCheck oracle vs SAM 2 segment")
+    ap.add_argument("--motion-gate", action="store_true", help="keep only ever-moved tracks as fg (static -> bg)")
+    ap.add_argument("--motion-gate-percentile", type=float, default=95.0)
+    ap.add_argument("--motion-gate-threshold", type=float, default=0.05)
+    ap.add_argument("--max-frames", type=int, default=0, help="limit train frames (0 = all); for smoke runs")
+    ap.add_argument("--tracker-grid-size", type=int, default=4,
+                    help="all-pairs query-grid stride (coarsen for broad sam2 fg to stay tractable)")
     args = ap.parse_args()
+    motion_gate = {
+        "enabled": bool(args.motion_gate),
+        "percentile": float(args.motion_gate_percentile),
+        "threshold": float(args.motion_gate_threshold),
+    }
 
     cfg = yaml.safe_load(open(args.config))["render_proof"]
     device = args.device or cfg.get("device", "cuda")
@@ -124,10 +219,12 @@ def main() -> None:
         print(f"source=borrowed-init  init={init}")
         scene, cams, norm = _build_borrowed(init, device)
     else:
-        print("source=own-tracker  (oracle geometry + in-memory all-pairs)")
+        print(f"source=own-tracker  (oracle geometry + in-memory all-pairs, fg={args.fg_source})")
         scene, cams, norm = _build_own_tracker(
             args.dataset_root, device, num_fg=args.num_fg, num_bg=args.num_bg,
             num_bases=args.num_bases, seed=args.seed,
+            fg_source=args.fg_source, max_frames=args.max_frames, motion_gate=motion_gate,
+            grid_size=args.tracker_grid_size,
         )
     print(
         f"init: fg={scene.fg.num_gaussians} bg={scene.bg.num_gaussians if scene.bg else 0} "
@@ -160,14 +257,18 @@ def main() -> None:
     }
     metrics = score_render_artifact_masked_nvs_dynamic(render_art, eval_cfg, device=device)
     print("=" * 60)
-    print(f"F0b GATE  source={args.source}  iters={iters}")
+    gate_on = bool(motion_gate.get("enabled"))
+    print(f"F0b NVS  source={args.source}  fg={args.fg_source}  motion_gate={gate_on}  iters={iters}")
     print(
         f"  masked mPSNR={metrics.get('masked_mpsnr'):.4f}  mSSIM={metrics.get('masked_mssim'):.4f}  "
         f"mLPIPS={metrics.get('masked_mlpips'):.4f}  (n={metrics.get('num_views')})"
     )
     print("=" * 60)
     summary = {
-        "source": args.source, "iters": iters, "factor": factor,
+        "source": args.source, "fg_source": args.fg_source, "motion_gate": motion_gate if gate_on else None,
+        "max_frames": args.max_frames, "iters": iters, "factor": factor,
+        "fg_gaussians": int(render_art.scene_state.get("num_fg", 0)),
+        "bg_gaussians": int(render_art.scene_state.get("num_bg", 0)),
         "final_gaussians": int(render_art.scene_state.get("num_gaussians", 0)),
         "metrics": {k: metrics.get(k) for k in ("masked_mpsnr", "masked_mssim", "masked_mlpips", "num_views")},
     }
