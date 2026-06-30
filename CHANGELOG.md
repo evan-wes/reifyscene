@@ -7,6 +7,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.24.0] - 2026-06-30
+
+### Added
+- **FP4a — SigLIP2 open-vocab semantics rung (new `semantics` stage).** Names the
+  class-agnostic instances `segment` produces: a `semantics` stage attaches an
+  open-vocab **category** (+ a SigLIP image embedding) to each canonical
+  (reid-merged) tracklet, replacing the empty/`""` category the SAM 2 rung leaves
+  behind (which previously flowed straight to an empty graph-node label).
+  Qwen2.5-VL free-form attributes/captions arrive at FP4b.
+  - **New `semantics` stage** between `reid` and `objects` (`STAGE_ORDER`,
+    `stages.py`; deps ingest+segment+reid). `pipeline.compute_semantics` runs a
+    `BackendLadder('semantics', [siglip2 → coco80 → unknown])`: the SigLIP2 top
+    rung (probe `importable('transformers')`) zero-shot matches masked tracklet
+    crops against a candidate vocabulary; the floor carries the detector's COCO-80
+    `concept`, degrading to `"unknown"`. `perceive_objects` now reads the semantics
+    category (falling back to the COCO concept) into `ObjectState.category` → graph node.
+  - `perception/semantics/semantics_artifact.SemanticsArtifact`: per-canonical-track
+    `SemanticRecord` (category, score, top-k, attributes, caption) + SigLIP
+    embeddings (npz), mirroring `ReidArtifact` persistence.
+  - `perception/semantics/siglip_semantics`: `SiglipSemantics` (lazy transformers
+    SigLIP2; per-track masked-crop image features, mean-pooled, zero-shot scored)
+    + `FloorSemantics` (COCO concept → `"unknown"`) + the pure `score_zero_shot`
+    helper. Default model `google/siglip2-so400m-patch14-384` (ungated/Apache); a
+    `_pooled` shim handles the transformers-5.x `BaseModelOutputWithPooling` return.
+  - `scripts/setup_room4d.sh --with-siglip2`: installs transformers + pre-caches
+    the SigLIP2 weights (idempotent, ungated; mirrors `--with-dinov2`).
+  - `scripts/fp4_validate_semantics.py`: two-gate validation driver (`semantics`
+    does not feed render, so there is no mPSNR gate). **(1) COCO-agreement** on
+    `spin` (a person scene) — SigLIP2 zero-shot vs Mask R-CNN over COCO-80:
+    **top-1 62% / top-5 77%** raw (~85% on persistent objects; person 4/4, chair
+    3/4 — every miss is a one-frame detector false positive on background clutter).
+    **(2) windmill open-vocab** — SigLIP2 over an extended vocab on SAM 2 tracks:
+    names the fragmented petals only loosely (small non-COCO part-crops + SAM 2
+    over-segmentation are an honest limit; whole-object naming wants the
+    reid-merged whole mask).
+
+### Tests
+- `tests/test_siglip_semantics.py`: the pure `score_zero_shot` (argmax / top-k /
+  empty-vocab / min-score abstain), `FloorSemantics` (majority concept,
+  reid-canonical grouping, unknown), and a fake-embed `SiglipSemantics.run`
+  integration (decode / crop / pool / score, no weights).
+- `tests/test_resume_pipeline.py`, `tests/test_stage_window.py`: updated for the
+  new `semantics` stage in `STAGE_ORDER` + the `objects` dependency on it.
+
 ## [0.1.23.0] - 2026-06-30
 
 ### Added

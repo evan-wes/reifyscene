@@ -16,6 +16,7 @@ from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.instance.instance_artifact import InstanceArtifact
 from room4d.perception.objects.object_artifact import ObjectArtifact
 from room4d.perception.reid.reid_artifact import ReidArtifact
+from room4d.perception.semantics.semantics_artifact import SemanticsArtifact
 from room4d.render.gaussian4d.render_artifact import RenderArtifact
 from room4d.scene.scene_artifact import SceneArtifact
 from room4d.sync.sync_artifact import SyncArtifact
@@ -44,6 +45,7 @@ STAGE_ORDER: tuple[str, ...] = (
     'pose_refine',
     'segment',
     'reid',
+    'semantics',
     'objects',
     'humans',
     'tracking',
@@ -99,11 +101,18 @@ def build_stage_registry() -> dict[str, StageSpec]:
             run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment']),
             load_fn=ReidArtifact.load,
         ),
+        'semantics': StageSpec(
+            name='semantics',
+            dependencies=('ingest', 'segment', 'reid'),
+            artifact_cls=SemanticsArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_semantics(outputs['ingest'], outputs['segment'], outputs['reid']),
+            load_fn=SemanticsArtifact.load,
+        ),
         'objects': StageSpec(
             name='objects',
-            dependencies=('ingest', 'segment', 'reid'),
+            dependencies=('ingest', 'segment', 'reid', 'semantics'),
             artifact_cls=ObjectArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_objects(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_objects(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid'], semantics_artifact=outputs['semantics']),
             load_fn=ObjectArtifact.load,
         ),
         'humans': StageSpec(
