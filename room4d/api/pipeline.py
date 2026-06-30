@@ -42,6 +42,8 @@ from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
 from room4d.perception.reid.reid_artifact import ReidArtifact
 from room4d.perception.reid.reid_stage import FloorReid
 from room4d.perception.reid.dino_reid import DinoReid
+from room4d.perception.semantics.semantics_artifact import SemanticsArtifact
+from room4d.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
 from room4d.common.backend_ladder import BackendLadder, BackendRung, importable
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
@@ -592,6 +594,49 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
+    def compute_semantics(self, ingest_artifact, instance_artifact=None, reid_artifact=None):
+        """Open-vocab category (+ SigLIP embedding) per canonical tracklet → SemanticsArtifact.
+
+        Consumes `segment` masks + `reid` canonical ids. Runs a backend ladder: the
+        SigLIP2 top rung (FP4a) zero-shot names each tracklet from its masked crops;
+        the COCO-80 floor rung carries the detector's `concept` string, degrading to
+        "unknown". Qwen2.5-VL attributes/captions arrive at FP4b. Always emits a
+        schema-valid artifact.
+        """
+        semantics_cfg = self.cfg.get('semantics', {})
+        empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
+        instances = instance_artifact if instance_artifact is not None else empty
+        floor = FloorSemantics(reid_artifact)
+        ladder = BackendLadder('semantics', [
+            # SigLIP2 open-vocab category + image embedding. Built inside the runner so
+            # transformers is imported + the model loaded only when this rung is
+            # selected; if the weights can't load, run() raises and the ladder degrades
+            # to the COCO-80 detector floor (then to "unknown").
+            BackendRung(
+                'siglip2', 'open_vocab',
+                runner=lambda inp: SiglipSemantics(self.decoder, reid_artifact, semantics_cfg).run(inp['ingest'], inp['instances']),
+                probe=importable('transformers'),
+            ),
+            BackendRung('coco80', 'closed_vocab', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
+            BackendRung('unknown', 'empty', runner=lambda inp: ({}, {})),
+        ])
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instances})
+        records, embeddings = result if result is not None else ({}, {})
+        artifact = SemanticsArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='semantics',
+            save_dir=self._stage_dir('semantics'),
+            records=records or {},
+            embeddings=embeddings or {},
+            metadata={},
+        )
+        artifact.attach_manifest(manifest)
+        named = sum(1 for r in artifact.records.values() if r.category != 'unknown')
+        artifact.notes.append(f"named_tracks={named}/{len(artifact.records)}")
+        self._stamp_stage_metadata(artifact, 'semantics', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
     def perceive_humans(self, ingest_artifact, instance_artifact=None, reid_artifact=None, geometry_artifact=None):
         """Build HumanArtifact from human tracklets: pose / DensePose / SMPL over segment masks.
 
@@ -695,12 +740,13 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def perceive_objects(self, ingest_artifact, instance_artifact=None, reid_artifact=None):
-        """Build ObjectArtifact from non-human tracklets (consumes segment + reid).
+    def perceive_objects(self, ingest_artifact, instance_artifact=None, reid_artifact=None, semantics_artifact=None):
+        """Build ObjectArtifact from non-human tracklets (consumes segment + reid + semantics).
 
-        Carries the COCO category (floor semantics; SigLIP2/Qwen-VL open-vocab at FP4)
-        and the per-track embedding. Identity is the canonical (reid-merged) track id;
-        the hand-tuned associator is gone (§4A).
+        Category is the open-vocab label from the `semantics` stage (SigLIP2 at FP4a),
+        falling back to the COCO `concept` string when semantics is absent/"unknown".
+        Identity is the canonical (reid-merged) track id; the per-track embedding and
+        the deleted hand-tuned associator are unchanged (§4A).
         """
         objects_cfg = self.cfg.get('objects', {})
         object_states: list[ObjectState] = []
@@ -709,6 +755,14 @@ class Room4DPipeline:
 
         def _canonical(track_id: str) -> str:
             return reid_artifact.canonical(track_id) if reid_artifact is not None else track_id
+
+        def _semantic(canonical: str, concept: str):
+            """Open-vocab (category, topk) from the semantics stage; COCO-concept fallback."""
+            if semantics_artifact is not None:
+                rec = semantics_artifact.records.get(canonical)
+                if rec is not None and rec.category and rec.category != 'unknown':
+                    return rec.category, list(rec.category_topk)
+            return str(concept), []
 
         observations = [] if instance_artifact is None else [o for o in instance_artifact.observations if o.kind != 'human']
         for o in observations:
@@ -719,6 +773,7 @@ class Room4DPipeline:
             embedding = None if reid_artifact is None else reid_artifact.embeddings.get(canonical)
             if embedding is not None:
                 embedding_vectors[canonical] = np.asarray(embedding, dtype=np.float32)
+            category, semantic_topk = _semantic(canonical, o.concept)
             attrs = {
                 'detection_id': o.instance_id,
                 'track_id': canonical,
@@ -726,11 +781,12 @@ class Room4DPipeline:
                 'label_id': int(o.attributes.get('label_id', -1)),
                 'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
                 'detector_backend': (instance_artifact.metadata.get('detector_backend') if instance_artifact is not None else None),
+                'semantic_topk': semantic_topk,
             }
             object_states.append(ObjectState(
                 object_id=canonical,
                 frame_ref=o.frame_ref,
-                category=str(o.concept),
+                category=category,
                 bbox_xyxy=np.asarray(o.bbox_xyxy, dtype=np.float32),
                 mask_rle=None if mask is None else {'shape': list(np.asarray(mask).shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
                 embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),

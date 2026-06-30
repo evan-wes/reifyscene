@@ -58,6 +58,13 @@ SAM2_CKPT_MIN_MB="${SAM2_CKPT_MIN_MB:-700}"
 DINOV2_MODEL_ID="${DINOV2_MODEL_ID:-facebook/dinov2-large}"
 TRANSFORMERS_SPEC="${TRANSFORMERS_SPEC:-transformers>=4.44}"
 
+# SigLIP2 (Google, Apache-2.0, ungated) — the FP4 `semantics` top rung: a frozen
+# ViT image+text encoder for per-tracklet open-vocab category (zero-shot match vs a
+# candidate vocabulary). Loaded through transformers (`AutoModel`/`AutoProcessor`),
+# the same idiom as DINOv2; install = the (shared) transformers pip dep + pre-caching
+# the weights (~1.5 GB, no manual URL). Fixed-resolution variant -> standard pixel_values.
+SIGLIP2_MODEL_ID="${SIGLIP2_MODEL_ID:-google/siglip2-so400m-patch14-384}"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -110,6 +117,7 @@ INSTALL_VGGT=0
 INSTALL_COTRACKER=0
 INSTALL_SAM2=0
 INSTALL_DINOV2=0
+INSTALL_SIGLIP2=0
 INSTALL_VGGT_LONG=0
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -153,6 +161,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_SAM2=1; shift ;;
     --with-dinov2)
       INSTALL_DINOV2=1; shift ;;
+    --with-siglip2)
+      INSTALL_SIGLIP2=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
@@ -193,6 +203,8 @@ Install options:
                           + download the sam2.1_hiera_large checkpoint (FP2 segment rung)
   --with-dinov2           Install HuggingFace transformers + pre-cache the DINOv2-L
                           weights (FP3 reid top rung; DINOv3-L swaps in by model_id)
+  --with-siglip2          Install HuggingFace transformers + pre-cache the SigLIP2
+                          weights (FP4 semantics top rung; ungated, open-vocab category)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the room4d renderer requires it)
@@ -506,6 +518,21 @@ mid = os.environ["DINOV2_MODEL_ID"]
 AutoImageProcessor.from_pretrained(mid)
 AutoModel.from_pretrained(mid)
 print("DINOv2 weights cached:", mid)
+PYEOF
+}
+
+download_siglip2_weights_if_needed() {
+  # Pre-cache the SigLIP2 weights (image+text encoder) into the HF hub cache via
+  # transformers. Idempotent (from_pretrained reuses the snapshot) and ungated
+  # (SigLIP2 is Apache) — no `hf auth login` needed, unlike the gated facebook models.
+  echo "Pre-caching SigLIP2 weights (${SIGLIP2_MODEL_ID}) into the HF hub cache..."
+  SIGLIP2_MODEL_ID="${SIGLIP2_MODEL_ID}" python - <<'PYEOF'
+import os
+from transformers import AutoModel, AutoProcessor
+mid = os.environ["SIGLIP2_MODEL_ID"]
+AutoProcessor.from_pretrained(mid)
+AutoModel.from_pretrained(mid)
+print("SigLIP2 weights cached:", mid)
 PYEOF
 }
 
@@ -902,6 +929,9 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_DINOV2 -eq 1 ]]; then
     smoke_test_python_module "transformers" "transformers" "transformers"
   fi
+  if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
+    smoke_test_python_module "transformers" "transformers" "transformers"
+  fi
   if [[ $INSTALL_POSE_REFINE -eq 1 ]]; then
     # pose-refinement deps: pycolmap (BA), hydra-core + omegaconf (required by
     # the vendored VGGSfM tracker the refiner drives).
@@ -999,6 +1029,12 @@ if [[ $INSTALL_DINOV2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the DINOv2 reid rung..."
   python -m pip install "${TRANSFORMERS_SPEC}"
   download_dinov2_weights_if_needed
+fi
+
+if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
+  echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the SigLIP2 semantics rung..."
+  python -m pip install "${TRANSFORMERS_SPEC}"
+  download_siglip2_weights_if_needed
 fi
 
 if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
@@ -1161,6 +1197,7 @@ $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGG
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
 $( [[ $INSTALL_DINOV2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + DINOv2-L weights ${DINOV2_MODEL_ID} cached (FP3 reid rung)" )
+$( [[ $INSTALL_SIGLIP2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + SigLIP2 weights ${SIGLIP2_MODEL_ID} cached (FP4 semantics rung)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )
