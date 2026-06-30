@@ -78,7 +78,13 @@ class DynamicScene(nn.Module):
         return self.fg.num_gaussians + (self.bg.num_gaussians if self.bg is not None else 0)
 
     def cloud_at(self, t: int) -> GaussianCloud:
-        """Materialize the (grad-bearing) combined cloud at frame index ``t``."""
+        """Materialize the (grad-bearing) combined cloud at frame index ``t``.
+
+        ``t`` is clamped to the motion bases' frame range: an out-of-range index
+        (e.g. a held-out camera whose time-id exceeds the trained frames) degrades
+        to the nearest frame instead of an out-of-bounds CUDA assert.
+        """
+        t = max(0, min(int(t), self.num_frames - 1))
         ts = torch.as_tensor([int(t)], device=self.fg.means.device, dtype=torch.long)
         fg_means, fg_quats = self.fg.warp(self.motion_bases, ts)
         means, quats = fg_means[:, 0], fg_quats[:, 0]

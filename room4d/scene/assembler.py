@@ -63,6 +63,9 @@ class SingleVideoSceneAssembler:
         # Tracker cfg for the in-assembler all-pairs generation (decision: tracks
         # are produced inside the dynamic init, not the tracking stage, for F0b).
         self.tracker_cfg = dict(cfg.get("tracker", {}) or {})
+        # FP2c motion gate ({"enabled","percentile","threshold"}): keep only
+        # ever-moved tracks as deformable fg; static (e.g. SAM-2 background) -> bg.
+        self.dynamic_motion_gate = dict(cfg.get("dynamic_motion_gate", {}) or {})
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
@@ -279,6 +282,7 @@ class SingleVideoSceneAssembler:
             factor=1, num_fg=self.dynamic_num_fg, num_bg=self.dynamic_num_bg,
             num_bases=self.dynamic_num_bases, seed=self.dynamic_seed,
             provider=provider, pair_loader=all_pairs.pair,
+            motion_gate=self.dynamic_motion_gate,
         ).build(device=self.device, return_norm=True)
 
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
