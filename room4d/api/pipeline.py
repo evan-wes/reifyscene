@@ -41,6 +41,7 @@ from room4d.perception.instance.segment import FloorInstanceSegmenter
 from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
 from room4d.perception.reid.reid_artifact import ReidArtifact
 from room4d.perception.reid.reid_stage import FloorReid
+from room4d.perception.reid.dino_reid import DinoReid
 from room4d.common.backend_ladder import BackendLadder, BackendRung, importable
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
@@ -552,23 +553,37 @@ class Room4DPipeline:
     def compute_reid(self, ingest_artifact, instance_artifact=None):
         """Per-tracklet appearance embeddings + cross-gap merges → ReidArtifact.
 
-        Consumes the `InstanceArtifact` track ids. FP1 floor rung = mean ResNet18
-        embeddings with an empty merge_map (no gap-merging yet); DINOv3 + real
-        cross-occlusion merges arrive at FP3. Always emits a schema-valid artifact.
+        Consumes the `InstanceArtifact` track ids. Runs a backend ladder: the
+        DINOv2-L top rung (FP3) emits DINO features + a cross-occlusion merge_map;
+        the ResNet18 floor rung emits mean embeddings with an empty merge_map.
+        DINOv3-L swaps into the top rung by model_id once HF access lands. Always
+        emits a schema-valid artifact.
         """
         floor = FloorReid(self.decoder, self.object_embedder)
+        reid_cfg = self.cfg.get('reid', {})
         ladder = BackendLadder('reid', [
+            # DINOv2-L (ungated, Apache) appearance features + cross-occlusion gap
+            # merges, above the ResNet18 floor; DINOv3-L swaps in by model_id once
+            # HF access lands. Built inside the runner so transformers is imported
+            # + the model loaded only when this rung is selected. If the weights
+            # can't load, run() raises and the ladder degrades to the floor.
+            BackendRung(
+                'dinov2', 'dino_features',
+                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
+                probe=importable('transformers'),
+            ),
             BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
-            BackendRung('empty', 'empty', runner=lambda inp: {}),
+            BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
         ])
         empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
-        embeddings, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instance_artifact if instance_artifact is not None else empty})
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instance_artifact if instance_artifact is not None else empty})
+        embeddings, merge_map = result if result is not None else ({}, {})
         artifact = ReidArtifact(
             run_id=ingest_artifact.run_id,
             stage_name='reid',
             save_dir=self._stage_dir('reid'),
             embeddings=embeddings or {},
-            merge_map={},
+            merge_map=merge_map or {},
             metadata={'embedder_backend': self.object_embedder.backend_used},
         )
         artifact.attach_manifest(manifest)

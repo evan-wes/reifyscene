@@ -7,6 +7,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.23.0] - 2026-06-30
+
+### Added
+- **FP3 — DINOv2 cross-occlusion re-ID top rung (climbs the `reid` ladder).**
+  A frozen DINO ViT appearance rung above the ResNet18 floor that emits a
+  `merge_map` re-acquiring identity *across occlusion gaps* — two tracklets the
+  segmenter gave separate ids but that are the same entity (it left, came back)
+  fold onto one canonical id. Probe-gated on `transformers`; degrades to the
+  ResNet18 floor (empty merge_map) when the dep/weights are absent, so the
+  pipeline never breaks. **DINOv3-L swaps in by `model_id` alone** once HF access
+  lands — the same `AutoModel.from_pretrained` call (default
+  `facebook/dinov2-large`, ungated/Apache; gated
+  `facebook/dinov3-vitl16-pretrain-lvd1689m` later).
+  - `perception/reid/dino_reid.DinoReid`: per-tracklet mean DINO features
+    (decode-once-per-frame, masked crops, L2-normalized), with a lazy model load
+    so constructing the rung is import-safe when `transformers` is absent.
+  - `perception/reid/dino_reid.build_cross_occlusion_merge_map`: a **pure**
+    (no-torch) merge builder. Candidates are same-stream, span-**disjoint** pairs
+    (co-visible tracklets are a different problem and are never merged); a pair
+    merges only if it is a **mutual nearest neighbour** (plus an optional
+    Lowe-style ratio test, off by default), folding onto the earlier-appearing
+    canonical. Mutual-best matching is a *matching*, so it merges pairs, not
+    multi-gap chains (a deliberate v1 precision-over-completeness choice).
+  - `api/pipeline.compute_reid`: prepends the `dinov2` rung above `resnet18` in
+    the reid ladder; the reid runner contract is now `(embeddings, merge_map)`
+    (mirrors segment's `(observations, mask_arrays)`), threaded into
+    `ReidArtifact.merge_map` (previously hardcoded empty).
+  - `scripts/setup_room4d.sh --with-dinov2`: installs HuggingFace transformers +
+    pre-caches the DINOv2-L weights (idempotent; the gated DINOv3-L path needs
+    `hf auth login` + granted access).
+  - `scripts/fp3_validate_reid_merge.py`: the synthetic-occlusion validation
+    driver — splits real SAM 2 windmill tracks into time-disjoint halves and
+    measures merge precision/recall on real DINOv2 features. **Result: precision
+    1.0 (0 false merges), recall 2/5** on the adversarial near-identical spinning
+    petals — the rung abstains rather than mis-joining ambiguous identical
+    instances (`reid` does not feed render, so there is no mPSNR gate;
+    precision-over-recall is the correct bias for a graph identity merge, and
+    cross-occlusion re-acquisition remains the design's open risk).
+
+### Tests
+- `tests/test_dino_reid.py`: the mutual-NN + ratio merge builder (mutual
+  rejection, ratio rejection, co-visible / cross-stream exclusion,
+  earliest-canonical, empty input) + a fake-embed `DinoReid.run` integration test
+  (decode / pool / span / merge, no weights).
+- `tests/test_reid_stage.py`: updated for the `(embeddings, merge_map)` floor
+  contract (the floor leaves the merge_map empty).
+
 ## [0.1.22.0] - 2026-06-29
 
 ### Added

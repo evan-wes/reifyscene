@@ -48,6 +48,16 @@ SAM2_COMMIT="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 SAM2_CKPT_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
 SAM2_CKPT_MIN_MB="${SAM2_CKPT_MIN_MB:-700}"
 
+# DINOv2-L (Apache-2.0, ungated) — the FP3 `reid` top rung: frozen ViT appearance
+# features for cross-occlusion identity stitching, above the ResNet18 floor. Loaded
+# through HuggingFace transformers (`AutoModel`), so install = the transformers pip
+# dep + pre-caching the weights from the HF hub (~1.2 GB, no manual URL — unlike the
+# sam2 checkpoint). The gated DINOv3-L (facebook/dinov3-vitl16-pretrain-lvd1689m) is
+# a drop-in model_id swap once HF access is granted: same AutoModel call, but needs
+# `hf auth login` + a transformers build with Dinov3 support.
+DINOV2_MODEL_ID="${DINOV2_MODEL_ID:-facebook/dinov2-large}"
+TRANSFORMERS_SPEC="${TRANSFORMERS_SPEC:-transformers>=4.44}"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -99,6 +109,7 @@ INSTALL_DETECTRON2=0
 INSTALL_VGGT=0
 INSTALL_COTRACKER=0
 INSTALL_SAM2=0
+INSTALL_DINOV2=0
 INSTALL_VGGT_LONG=0
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -140,6 +151,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_COTRACKER=1; shift ;;
     --with-sam2)
       INSTALL_SAM2=1; shift ;;
+    --with-dinov2)
+      INSTALL_DINOV2=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
@@ -178,6 +191,8 @@ Install options:
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-sam2             Clone/install SAM 2 into third_party/sam2 at pinned commit
                           + download the sam2.1_hiera_large checkpoint (FP2 segment rung)
+  --with-dinov2           Install HuggingFace transformers + pre-cache the DINOv2-L
+                          weights (FP3 reid top rung; DINOv3-L swaps in by model_id)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the room4d renderer requires it)
@@ -476,6 +491,22 @@ download_sam2_checkpoint_if_needed() {
   fi
   mv "${tmp}" "${SAM2_CKPT}"
   echo "Done: ${SAM2_CKPT} (${mb} MB)"
+}
+
+download_dinov2_weights_if_needed() {
+  # Pre-cache the DINOv2-L weights into the HF hub cache via transformers. This is
+  # idempotent (from_pretrained reuses an already-downloaded snapshot) and ungated
+  # (DINOv2 is Apache). The gated DINOv3-L swap instead needs `hf auth login` +
+  # granted access — same call, different model_id.
+  echo "Pre-caching DINOv2 weights (${DINOV2_MODEL_ID}) into the HF hub cache..."
+  DINOV2_MODEL_ID="${DINOV2_MODEL_ID}" python - <<'PYEOF'
+import os
+from transformers import AutoImageProcessor, AutoModel
+mid = os.environ["DINOV2_MODEL_ID"]
+AutoImageProcessor.from_pretrained(mid)
+AutoModel.from_pretrained(mid)
+print("DINOv2 weights cached:", mid)
+PYEOF
 }
 
 remove_gsplat_leaked_top_level_packages() {
@@ -868,6 +899,9 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_SAM2 -eq 1 ]]; then
     smoke_test_python_module "SAM2" "sam2" "SAM-2"
   fi
+  if [[ $INSTALL_DINOV2 -eq 1 ]]; then
+    smoke_test_python_module "transformers" "transformers" "transformers"
+  fi
   if [[ $INSTALL_POSE_REFINE -eq 1 ]]; then
     # pose-refinement deps: pycolmap (BA), hydra-core + omegaconf (required by
     # the vendored VGGSfM tracker the refiner drives).
@@ -959,6 +993,12 @@ if [[ $INSTALL_SAM2 -eq 1 ]]; then
   # skipping it keeps the install off the CUDA-toolkit/compiler path.
   SAM2_BUILD_CUDA=0 python -m pip install --no-build-isolation -e "${SAM2_DIR}"
   download_sam2_checkpoint_if_needed
+fi
+
+if [[ $INSTALL_DINOV2 -eq 1 ]]; then
+  echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the DINOv2 reid rung..."
+  python -m pip install "${TRANSFORMERS_SPEC}"
+  download_dinov2_weights_if_needed
 fi
 
 if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
@@ -1120,6 +1160,7 @@ $( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}"
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
+$( [[ $INSTALL_DINOV2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + DINOv2-L weights ${DINOV2_MODEL_ID} cached (FP3 reid rung)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )

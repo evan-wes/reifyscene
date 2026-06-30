@@ -25,8 +25,13 @@ class FloorReid:
         self.decoder = decoder
         self.embedder = embedder
 
-    def run(self, ingest_artifact, instance_artifact: InstanceArtifact) -> dict[str, np.ndarray]:
-        """Return ``{track_id: mean_embedding}``. Frames are decoded once and all
+    def run(self, ingest_artifact, instance_artifact: InstanceArtifact) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+        """Return ``({track_id: mean_embedding}, merge_map)``.
+
+        The floor leaves ``merge_map`` empty — no cross-occlusion gap-merging at
+        this rung (that arrives with the DINO rung at FP3). The tuple shape
+        matches the ladder's reid-runner contract (mirrors segment's
+        ``(observations, mask_arrays)``). Frames are decoded once and all
         instances in a frame are embedded together (the embedder is batched)."""
         stream_lookup = {s.stream_id: s for s in ingest_artifact.streams}
         by_frame: dict[str, list] = {}
@@ -59,4 +64,4 @@ class FloorReid:
             mean = total / max(counts[track_id], 1)
             norm = float(np.linalg.norm(mean))
             out[track_id] = (mean / norm).astype(np.float32) if norm > 1e-8 else mean.astype(np.float32)
-        return out
+        return out, {}
