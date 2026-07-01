@@ -245,7 +245,7 @@ capability:
 
 - **pose ladder:** `VGGT(-Long) joint → COLMAP-SfM (hloc; the calibration arc, needs dyn_mask) → dataset/GT → sync Tier-1 prior → identity`
 - **depth ladder:** `VGGT(-Long) joint → MoGe-2 (MIT, metric) → Metric3D v2/UniDepth → triangulate from tracks+poses → ground-plane`
-- **`dyn_mask` (new, coarse, geometry-free):** `optical-flow motion seg → cheap person/object detector → all-static`. It deliberately does **not** consume `segment`/geometry — that is what breaks the cycle. It exists only to protect SfM; the heavy SAM `segment` stage stays downstream where it legitimately uses geometry.
+- **`dyn_mask` (new, coarse, geometry-free):** `optical-flow motion seg → cheap person/object detector → all-static`. It deliberately does **not** consume `segment`/geometry — that is what breaks the cycle. It exists only to protect SfM; the heavy SAM `segment` stage stays downstream where it legitimately uses geometry. (FP6b spike 2026-07-01: masking is a **size-gated robustness** help — it tightens large-dynamic scenes like a person filling the frame, is neutral on small dynamic regions, and is **not** an unconditional pre-filter; monocular COLMAP already recovers sub-degree egomotion *unmasked* at sufficient frame density.)
 
 `depth` depends on `pose`; **VGGT sits atop both** as the joint rung, which is why "geometry" looked like
 one stage. When VGGT is on top, `dyn_mask` and the SfM pose rung are **no-ops** — VGGT fills pose+depth
@@ -649,7 +649,10 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     frame-intrinsics handling for MoGe depth. Static-superset reorder.
                                     F2's NON-overlapping role (vs COLMAP's own joint BA + pose_refine's
                                     BA) = person-anchored metric scale + Tier-2 sync + dense per-frame.
-                                    Dynamic masks likely needed for SfM to converge — spike first.
+                                    SPIKE CLEARED 2026-07-01 (spike_fp6b_egomotion/): monocular COLMAP
+                                    recovers sub-degree egomotion (100% reg, <1% trans) on spin+windmill;
+                                    frame DENSITY is load-bearing (dense sampler FIRST), dyn_mask is a
+                                    size-gated ROBUSTNESS rung (not a hard gate), fixed intrinsics OK.
                                     Depends on: FP6a.
 
   F1  Real temporal sync            TIER-1 coarse temporal prior (§4B): replace the 0.0 stub

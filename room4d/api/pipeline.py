@@ -21,6 +21,7 @@ from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
 from room4d.geometry.moge_wrapper import MoGeInitializer
+from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -93,6 +94,10 @@ class Room4DPipeline:
             # FP6a: explicit MoGe-2 metric-depth rung (native swap; depth-only, no
             # poses). Not an auto-fallback — reachable only by backend_name='moge'.
             self.geometry_init = MoGeInitializer(geometry_cfg)
+        elif geometry_backend_name == 'colmap':
+            # FP6b step 1: explicit COLMAP-SfM pose rung (native swap; pose-only, no
+            # dense depth). Reachable only by backend_name='colmap'.
+            self.geometry_init = ColmapPoseInitializer(geometry_cfg)
         else:
             self.geometry_init = VGGTInitializer(geometry_cfg)
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
@@ -291,14 +296,15 @@ class Room4DPipeline:
         rung_name = getattr(self.geometry_init, 'backend_name', self.geometry_backend_name)
         fidelity_by_backend = {
             'moge-2': 'metric_depth_no_poses',
+            'colmap': 'sfm_poses_no_depth',
             'vggt': 'joint_reconstruction',
             'vggt-long': 'joint_reconstruction_longseq',
             'dataset': 'dataset_gt',
         }
-        # Only probe-gate the moge rung (verified package name) so a missing MoGe
-        # dep degrades cleanly; the load-bearing vggt/dataset rungs stay probe-free
-        # and rely on the ladder's run-error -> graceful-empty path, never a false skip.
-        probe_by_backend = {'moge-2': importable('moge')}
+        # Probe-gate the model-backed rungs (verified package names) so a missing dep
+        # degrades cleanly; the load-bearing vggt/dataset rungs stay probe-free and rely
+        # on the ladder's run-error -> graceful-empty path, never a false skip.
+        probe_by_backend = {'moge-2': importable('moge'), 'colmap': importable('pycolmap', 'hloc')}
         inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
         ladder = BackendLadder('geometry', [
             BackendRung(
