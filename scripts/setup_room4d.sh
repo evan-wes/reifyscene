@@ -72,6 +72,25 @@ SIGLIP2_MODEL_ID="${SIGLIP2_MODEL_ID:-google/siglip2-so400m-patch14-384}"
 # filename list lives in room4d.perception.humans.sapiens_wrapper._CHECKPOINTS.
 SAPIENS_SIZE="${SAPIENS_SIZE:-0.6b}"
 
+# MoGe-2 (Microsoft, MIT, ungated) — the FP6 `geometry` depth backstop rung: a
+# single-image metric point map (+ depth / normals / intrinsics) that fills the
+# GeometryArtifact depth/pointmap contract below VGGT on the depth ladder
+# (VGGT -> MoGe-2 -> Metric3D/UniDepth -> triangulate -> ground-plane, design
+# §4A). Standalone package (not transformers): cloned into third_party/MoGe and
+# installed with --no-deps (its unpinned torchvision + GUI-only gradio must not
+# fight the locked +cu130 tree — same guard as gsplat), then its real inference-path
+# deps added explicitly so --with-moge is self-contained under any flag combo:
+# utils3d (pinned in MOGE_UTILS3D_SPEC to the commit MoGe requires — co-versioned
+# with MOGE_COMMIT), opencv-python (cv2), and scipy. matplotlib is vis-only, OFF the
+# infer path (verified by tracing the import + a smoke infer). Then the weights are
+# pre-cached AND smoke-inferred from the HF hub (~1.3 GB, ungated). Model id:
+# MOGE_MODEL_ID, which the FP6 wrapper (room4d.geometry.moge_wrapper, once it lands)
+# reads as its default (override to swap to a lighter vit-b/-s variant).
+MOGE_MODEL_ID="${MOGE_MODEL_ID:-Ruicheng/moge-2-vitl-normal}"
+MOGE_UTILS3D_SPEC="${MOGE_UTILS3D_SPEC:-utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183}"
+MOGE_REPO="https://github.com/microsoft/MoGe.git"
+MOGE_COMMIT="07444410f1e33f402353b99d6ccd26bd31e469e8"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -126,6 +145,7 @@ INSTALL_SAM2=0
 INSTALL_DINOV2=0
 INSTALL_SIGLIP2=0
 INSTALL_SAPIENS=0
+INSTALL_MOGE=0
 INSTALL_VGGT_LONG=0
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -144,6 +164,7 @@ SAM2_DIR="${THIRD_PARTY_DIR}/sam2"
 SAM2_CKPT_DIR="${SAM2_DIR}/checkpoints"
 SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
+MOGE_DIR="${THIRD_PARTY_DIR}/MoGe"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
 VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
 VGGT_LONG_WEIGHTS_STAMP="${VGGT_LONG_WEIGHTS_DIR}/.room4d_download_complete"
@@ -173,6 +194,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_SIGLIP2=1; shift ;;
     --with-sapiens)
       INSTALL_SAPIENS=1; shift ;;
+    --with-moge)
+      INSTALL_MOGE=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
@@ -217,6 +240,9 @@ Install options:
                           weights (FP4 semantics top rung; ungated, open-vocab category)
   --with-sapiens          Pre-cache the Sapiens dense checkpoints (FP5 humans top rung:
                           pose/seg/depth/normals; ungated, CC-BY-NC-4.0 non-commercial)
+  --with-moge             Clone/install MoGe-2 into third_party/MoGe at pinned commit
+                          (--no-deps + utils3d) + pre-cache weights (FP6 geometry depth
+                          backstop; MIT, ungated, single-image metric point map)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the room4d renderer requires it)
@@ -561,6 +587,26 @@ size = os.environ["SAPIENS_SIZE"]
 for task, (repo, filename) in _CHECKPOINTS[size].items():
     print(f"  {task}: {hf_hub_download(repo, filename)}")
 print("Sapiens checkpoints cached:", size)
+PYEOF
+}
+
+download_moge_weights_if_needed() {
+  # Pre-cache the MoGe-2 weights into the HF hub cache AND run a tiny inference, so
+  # setup fails HERE (not at first real use) if the --no-deps install is missing an
+  # inference-path dep (utils3d / cv2 / scipy). Idempotent (from_pretrained reuses the
+  # snapshot) and ungated (MoGe is MIT). Model id: MOGE_MODEL_ID.
+  echo "Pre-caching + smoke-testing MoGe-2 weights (${MOGE_MODEL_ID})..."
+  MOGE_MODEL_ID="${MOGE_MODEL_ID}" python - <<'PYEOF'
+import os
+import torch
+from moge.model.v2 import MoGeModel
+mid = os.environ["MOGE_MODEL_ID"]
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+model = MoGeModel.from_pretrained(mid).to(dev).eval()
+with torch.no_grad():
+    out = model.infer(torch.rand(3, 256, 256, device=dev))
+assert {"points", "depth", "mask", "intrinsics"} <= set(out), f"MoGe infer output missing keys: {set(out)}"
+print("MoGe-2 weights cached + infer OK:", mid)
 PYEOF
 }
 
@@ -1072,6 +1118,22 @@ if [[ $INSTALL_SAPIENS -eq 1 ]]; then
   download_sapiens_checkpoints_if_needed
 fi
 
+if [[ $INSTALL_MOGE -eq 1 ]]; then
+  clone_or_update_checkout "${MOGE_REPO}" "${MOGE_DIR}" "${MOGE_COMMIT}"
+  echo "Installing MoGe-2 from ${MOGE_DIR} (--no-deps: keeps its unpinned torchvision + GUI-only gradio off the locked tree)..."
+  # MoGe's INFERENCE path (verified by tracing `from moge.model.v2 import MoGeModel`
+  # + a smoke infer) needs utils3d (its own geometry helpers), opencv-python (cv2),
+  # and scipy; matplotlib is NOT on the infer path and gradio/pipeline are
+  # GUI/training-only. cv2/scipy happen to ship via the default-on vision/geometry
+  # extras, but --with-moge should not silently depend on other flags — so add MoGe's
+  # real infer deps explicitly here. utils3d is --no-deps so it can't drag torch
+  # (mirrors the gsplat guard); opencv/scipy are already-present leaves (no churn).
+  python -m pip install --no-deps -e "${MOGE_DIR}"
+  python -m pip install --no-deps "${MOGE_UTILS3D_SPEC}"
+  python -m pip install "opencv-python>=4.10" "scipy>=1.13"
+  download_moge_weights_if_needed
+fi
+
 if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
   clone_or_update_checkout "${HLOC_REPO}" "${HLOC_DIR}" "${HLOC_TAG}"
   if [[ -f "${HLOC_DIR}/.gitmodules" ]]; then
@@ -1234,6 +1296,7 @@ $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SA
 $( [[ $INSTALL_DINOV2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + DINOv2-L weights ${DINOV2_MODEL_ID} cached (FP3 reid rung)" )
 $( [[ $INSTALL_SIGLIP2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + SigLIP2 weights ${SIGLIP2_MODEL_ID} cached (FP4 semantics rung)" )
 $( [[ $INSTALL_SAPIENS -eq 1 ]] && echo "- Sapiens ${SAPIENS_SIZE} dense checkpoints cached (FP5 humans rung; CC-BY-NC-4.0)" )
+$( [[ $INSTALL_MOGE -eq 1 ]] && echo "- MoGe-2 from commit ${MOGE_COMMIT} at ${MOGE_DIR} (--no-deps + utils3d) + weights ${MOGE_MODEL_ID} cached (FP6 geometry depth backstop; MIT)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )

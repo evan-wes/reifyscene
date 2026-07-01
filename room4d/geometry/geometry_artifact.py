@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 import shutil
 
 import numpy as np
 from PIL import Image, ImageDraw
 from rich.progress import track
 
+from room4d.common.backend_ladder import CapabilityManifest
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
 from room4d.common.types import BaseArtifact, CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
@@ -48,6 +49,16 @@ class GeometryArtifact(BaseArtifact):
     def num_selected_frames(self) -> int:
         """Return the number of frames selected for initialization."""
         return len(self.selected_frames)
+
+    # --- capability manifest (design §4A.1: geometry joins the ladder) -------
+    def attach_manifest(self, manifest: CapabilityManifest) -> None:
+        """Stamp how the geometry ladder resolved into ``metadata['capability']``."""
+        self.metadata['capability'] = manifest.to_dict()
+
+    @property
+    def capability(self) -> Optional[CapabilityManifest]:
+        raw = self.metadata.get('capability')
+        return CapabilityManifest.from_dict(raw) if raw else None
 
     def _progress_iter(self, iterable, *, total: int | None = None, description: str = ""):
         enabled = bool(self.metadata.get('save_depth_pngs', False) or self.metadata.get('save_debug_assets', False) or self.metadata.get('save_debug_html', False))
