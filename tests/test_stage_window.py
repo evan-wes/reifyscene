@@ -17,7 +17,7 @@ def test_default_stop_runs_full_pipeline() -> None:
 
 
 def test_geometry_window_runs_only_through_geometry() -> None:
-    assert _window('ingest', 'geometry') == ['ingest', 'sync', 'geometry']
+    assert _window('ingest', 'geometry') == ['ingest', 'sync', 'dyn_mask', 'geometry']
 
 
 def test_single_stage_window() -> None:
@@ -26,7 +26,7 @@ def test_single_stage_window() -> None:
 
 
 def test_mid_window_excludes_endpoints_outside_range() -> None:
-    assert _window('sync', 'tracking') == ['sync', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking']
+    assert _window('sync', 'tracking') == ['sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking']
 
 
 def test_pose_refine_sits_between_geometry_and_tracking() -> None:
