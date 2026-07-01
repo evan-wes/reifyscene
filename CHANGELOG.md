@@ -7,6 +7,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.26.0] - 2026-06-30
+
+### Added
+- **FP6a — MoGe-2 metric-depth rung (native-swap) + geometry backend ladder.**
+  Adds Microsoft's **MoGe-2** (MIT, ungated) single-image metric point map as an
+  explicitly-selectable depth rung, and gives the `geometry` stage the
+  observable-degradation machinery every other stage already had. The full
+  pose/depth split + calibration-arc SfM pose rung + COLMAP↔MoGe scale
+  reconciliation are scoped as **FP6b** (design §4A.1 / §7).
+  - `geometry/moge_wrapper.MoGeInitializer`: per-frame MoGe-2 (`from moge.model.v2
+    import MoGeModel`) → fills `depthmaps_by_frame` + camera-space
+    `pointmaps_by_frame` + per-frame `intrinsics_by_stream` (normalized→pixel).
+    **Depth-only, honest:** MoGe has no cross-frame poses, so
+    `camera_states_by_stream` is left empty (poses come from a pose source — VGGT
+    / GT / the FP6b COLMAP rung). Lazy + import-safe; shared `infer_frame()` core;
+    releases VRAM after the frame loop.
+  - `geometry/geometry_artifact.GeometryArtifact`: gains `attach_manifest()` /
+    `capability` — the last geometry artifact that lacked a `CapabilityManifest`.
+  - `pipeline.initialize_geometry`: now runs a `BackendLadder('geometry', …)` —
+    the config-selected backend as the top rung + a **graceful-empty floor** (§4A
+    invariant), stamping the manifest. `backend_name='moge'` force-selects the
+    MoGe rung; only that rung is probe-gated (`importable('moge')`) so the
+    load-bearing vggt/dataset rungs never false-skip. Auto-selecting MoGe below
+    VGGT is inert (VGGT/GT already emit depth) — deferred to FP6b with the split.
+  - `scripts/setup_room4d.sh --with-moge`: vendors `microsoft/MoGe` at a pinned
+    commit (`--no-deps` + utils3d/opencv/scipy — self-contained), pre-caches
+    **and smoke-infers** the `Ruicheng/moge-2-vitl-normal` weights (~1.3 GB, ungated).
+  - `scripts/fp6_validate_moge.py`: the native-swap — scores MoGe depth vs the GT
+    depth oracle (metric + scale-invariant). **Result:** depth *structure* is
+    excellent (scale-aligned δ<1.25 ≈ 0.985 spin / 0.998 windmill), but absolute
+    *metric* scale carries a per-scene offset (spin +13%, windmill −35%) —
+    empirically confirming MoGe is a strong structural backstop, not a drop-in
+    metric one (motivates the FP6b scale reconciliation).
+
+### Changed
+- **Design doc §4A.1 (new) + §4/§4A/§7.** After an adversarial review, geometry is
+  reframed as **two fused ladders — pose + depth** (VGGT is a *joint* rung; MoGe /
+  COLMAP are *decomposed*, so stepping down the ladder pulls in upstream inputs the
+  top rung never needed). Adds the coarse geometry-free `dyn_mask` capability
+  (breaks a real `segment`→`geometry` cycle), a fourth **static-superset input
+  ordering** invariant, and resequences **FP6 → FP6a / FP6b**.
+
+### Tests
+- `tests/test_moge_geometry.py`: MoGe `infer_frame` shapes + normalized→pixel
+  intrinsics; empty-in→empty-out; depth-filled/no-poses artifact; geometry ladder
+  selects MoGe + stamps the manifest; and degrades to graceful-empty (with the
+  failed rung observable in the manifest) when the rung raises. Full suite: 320
+  passed, 1 skipped.
+
 ## [0.1.25.0] - 2026-06-30
 
 ### Added

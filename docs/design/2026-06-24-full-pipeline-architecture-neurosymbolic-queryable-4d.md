@@ -138,7 +138,8 @@ principle:** each stage owns exactly one responsibility and communicates only th
 |---|---|---|---|
 | ingest | raw video → frames/keyframes/quality | video paths | `IngestArtifact` |
 | sync | **coarse** per-stream temporal prior (Tier 1, §4B); fine alignment → `optimization` | ingest | `SyncArtifact` |
-| geometry | per-frame poses/intrinsics/depth/pointmaps (**per-stream**) | ingest (+sync Tier-1 prior; not required, §4B) | `GeometryArtifact` |
+| **dyn_mask** *(new, §4A.1)* | coarse **geometry-free** motion mask — protects the SfM pose rung (no-op when VGGT is on top) | ingest | `DynMaskArtifact` *(new, coarse)* |
+| geometry | per-frame poses/intrinsics/depth/pointmaps (**per-stream**; **fused pose+depth ladders, §4A.1**) | ingest, dyn_mask (+sync Tier-1 prior; not required, §4B) | `GeometryArtifact` |
 | pose_refine | BA-refined poses (+ focal) | ingest, geometry | `GeometryArtifact` (refined) |
 | **segment** *(new, §4A)* | open-vocab detect+segment+**track** → instance masks + persistent IDs (objects + humans) | ingest, pose_refine | **`InstanceArtifact`** *(new)* |
 | **reid** *(new, §4A)* | per-tracklet appearance features + cross-occlusion identity merges | ingest, segment | **`ReidArtifact`** *(new)* |
@@ -223,7 +224,60 @@ degradation is *observable*, not silent. This generalizes the existing `backend_
 | `objects` (semantics) | Qwen2.5-VL + SigLIP 2 → SigLIP 2/OpenCLIP zero-shot → CLIP → detector COCO-80 label → `"unknown"` |
 | `humans` | *dense:* Sapiens → Keypoint-RCNN → bbox-only · *SMPL:* GVHMR (world) → 4D-Humans (camera) → Multi-HMR → skip |
 | `tracking` (motion) | CoTracker3 → TAPIR → RAFT flow → all-static · *(dynamic seed from `segment` masks, else motion-threshold)* |
-| depth backstop | VGGT → MoGe-2 (MIT) → Metric3D v2 (BSD)/UniDepth (NC) → triangulate from tracks+poses → ground-plane |
+| `dyn_mask` *(§4A.1)* | optical-flow motion seg → cheap person/object detector → all-static *(coarse, geometry-free — protects the SfM pose rung)* |
+| `geometry · pose` *(§4A.1)* | VGGT(-Long) *joint* → COLMAP-SfM (hloc; **the calibration arc** — needs `dyn_mask`) → dataset/GT → sync Tier-1 prior → identity |
+| `geometry · depth` *(§4A.1)* | VGGT(-Long) *joint* → MoGe-2 (MIT, metric) → Metric3D v2 (BSD)/UniDepth (NC) → ground-plane · *(separate **lift-time** fallback after `tracking`: triangulate from tracks+poses, via `TrackLifter3D`)* |
+
+### 4A.1 Geometry is two fused ladders — pose + depth (2026-06-30)
+
+The geometry rows above hide a subtlety the perception ladders don't have. **VGGT is a *joint* rung** —
+one model, images in, poses **and** depth **and** pointmaps out — so its only upstream need is
+`(ingest, sync)`. The rungs *below* it are **decomposed**: MoGe-2 gives depth only, COLMAP-SfM gives
+poses only, and SfM on a dynamic scene first needs a **motion mask**. So stepping down the geometry
+ladder doesn't merely lower fidelity — it **pulls in upstream inputs the top rung never required.** The
+ladder's fixed-contract guarantee is about the *output* schema (`GeometryArtifact`), **not** the *input*
+dependency set; those are not the same, and geometry is where they diverge.
+
+Handled naively this creates a **dependency cycle**: `geometry`(MoGe) needs poses ← COLMAP needs a motion
+mask ← if that mask came from the `segment` stage, `segment` already depends on `pose_refine` →
+`geometry`. Backward edge. The resolution splits geometry into two ladders and adds one coarse upstream
+capability:
+
+- **pose ladder:** `VGGT(-Long) joint → COLMAP-SfM (hloc; the calibration arc, needs dyn_mask) → dataset/GT → sync Tier-1 prior → identity`
+- **depth ladder:** `VGGT(-Long) joint → MoGe-2 (MIT, metric) → Metric3D v2/UniDepth → triangulate from tracks+poses → ground-plane`
+- **`dyn_mask` (new, coarse, geometry-free):** `optical-flow motion seg → cheap person/object detector → all-static`. It deliberately does **not** consume `segment`/geometry — that is what breaks the cycle. It exists only to protect SfM; the heavy SAM `segment` stage stays downstream where it legitimately uses geometry.
+
+`depth` depends on `pose`; **VGGT sits atop both** as the joint rung, which is why "geometry" looked like
+one stage. When VGGT is on top, `dyn_mask` and the SfM pose rung are **no-ops** — VGGT fills pose+depth
+itself, and (per invariant 3) the no-op `dyn_mask` emits an all-static mask that the pose rung ignores.
+
+**Metric scale (COLMAP ↔ MoGe).** Monocular SfM is scale-free; MoGe is metric. When the pose rung is
+COLMAP and the depth rung is MoGe, a **scale-reconciliation** step solves the global scale that aligns
+COLMAP's translations to MoGe's metric depth at the sparse-point reprojections — a metric-scale
+**initializer**, not a fully-solved reconstruction: a *single* global scale is the right free parameter
+only *after* the ground-plane canonicalizer pins the other 6 of COLMAP's 7 gauge DOF, and since MoGe
+runs independently per frame its metric scale drifts, leaving a per-frame residual. Two things must be
+handled explicitly: **(a)** MoGe estimates its **own per-frame intrinsics**, which disagree with the
+pose source's per-stream intrinsics — store MoGe's points/intrinsics self-consistently (or resample its
+depth into the pose-source camera model); never back-project MoGe depth with someone else's focal.
+**(b)** This is the front-half *initializer*; the calibration arc's **F2** role (in `optimization`) is
+the *non-overlapping* part — **person-anchored metric scale + Tier-2 sync + dense per-frame refinement**,
+**not** the joint multi-stream BA COLMAP already runs (nor `pose_refine`'s BA). Describing F2 as "joint
+BA" would make it read as a duplicate of the calibration arc; its value is the scale/sync/density COLMAP
+does not provide.
+
+**Fourth invariant — static-superset input ordering.** Because rungs can differ in *upstream*
+dependencies, the pipeline order must be a **static superset that satisfies the maximum dependency set
+of every rung *whose dependencies precede the stage***, and the ladder gates *whether each upstream
+stage does real work* — it **never reorders**. Target order:
+`ingest → sync → dyn_mask → geometry(pose,depth) → pose_refine → segment → …`. **Caveat (the invariant's
+scope):** the depth ladder spans **two pipeline positions**. Its geometry-time rungs (VGGT / MoGe /
+Metric3D — deps precede geometry) obey this invariant at geometry's position; its lowest fallback,
+*triangulate from tracks+poses*, is **not** a geometry-time rung — tracks come from `tracking`
+(downstream of geometry), so it is served **lift-time** by the existing `TrackLifter3D` at its own
+position, not squeezed into geometry. The invariant governs same-position rungs; cross-position
+fallbacks live where their inputs exist. This augments the three *output*-completeness invariants below
+with an *input*-ordering guarantee.
 
 ### Back-half contract + resolution guarantee
 
@@ -233,7 +287,8 @@ degradable semantics)**. Crucially, render's dynamic-Gaussian seed depends on `s
 `tracking` labels — **NOT** on the `objects`/`humans`/`reid` enrichment — so those degrade freely
 without touching render; they only lower *graph* richness.
 
-Three invariants make every ladder combination safe: **(1)** per-stage top-down availability probe;
+Three invariants make every ladder combination safe (a **fourth** — static-superset input ordering —
+is added in §4A.1, surfaced by the geometry pose/depth split): **(1)** per-stage top-down availability probe;
 **(2) every rung — including graceful-empty — emits a schema-valid artifact** (the F0 graceful-empty
 render/scene/eval path already exercises this floor); **(3) empty-in → empty-out, never crash**
 (`reid`/`objects`/`humans` consume `InstanceArtifact`; empty → empty enrichment → static-only
@@ -574,7 +629,28 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     Depends on: FP1.
   FP5  Climb humans                 Sapiens (dense) + GVHMR (world-grounded SMPL). SUBSUMES F3.
                                     Depends on: FP1.
-  FP6  Depth backstop               MoGe-2 (MIT, metric point map) into the 2D→3D lift. Depends on: FP1.
+  FP6a Depth rung (MoGe-2,          MoGe-2 (MIT, metric point map) as an explicit config-selectable depth
+       native-swap)                 rung + the pose/depth composition seam + GeometryArtifact capability
+                                    manifest (geometry joins the observable-degradation machinery). NOT
+                                    auto-laddered below VGGT — VGGT/GT already emit their own depth, so
+                                    MoGe fires only by explicit selection. VALIDATE as a native swap vs
+                                    the GT-depth oracle (spin/windmill; direct depth-map comparison, no
+                                    back-projection — sidesteps the intrinsics question). Auto-select +
+                                    world-consistent fused pointmaps + per-frame-intrinsics handling all
+                                    move to FP6b (they need the COLMAP pose rung anyway). Depends on: FP1.
+  FP6b Geometry pose/depth split    Split geometry into pose + depth ladders (§4A.1); add the coarse
+       (calibration arc = SfM       geometry-free `dyn_mask` capability; wire COLMAP-SfM (the calibration
+       pose rung)                   arc's HlocColmapSfMRunner) as the pose rung below VGGT — fed by a NEW
+                                    dense, motion-preserving sampler (the calibration RUNNER's static-
+                                    frame sampler drops the parallax frames SfM needs; only the SfM runner
+                                    is reusable). COLMAP↔MoGe scale reconciliation = a metric-scale
+                                    INITIALIZER (single global scale only after the ground-plane pins the
+                                    other 6 gauge DOF; per-frame scale/intrinsics residual → F2) + per-
+                                    frame-intrinsics handling for MoGe depth. Static-superset reorder.
+                                    F2's NON-overlapping role (vs COLMAP's own joint BA + pose_refine's
+                                    BA) = person-anchored metric scale + Tier-2 sync + dense per-frame.
+                                    Dynamic masks likely needed for SfM to converge — spike first.
+                                    Depends on: FP6a.
 
   F1  Real temporal sync            TIER-1 coarse temporal prior (§4B): replace the 0.0 stub
        (Tier-1 coarse prior, §4B)   (audio_sync.py:11 / motion_sync.py:16) with audio / motion-energy
@@ -636,10 +712,11 @@ HORIZON (coarse; learning reshapes)
                                     The genuine frontier bet. Depends on: P7, P8.
 ```
 
-Milestones: **Foundation = F0–F4 + FP0–FP6 + F0b + G1** (a real, no-stub, multi-stream pipeline
+Milestones: **Foundation = F0–F4 + FP0–FP6b + F0b + G1** (a real, no-stub, multi-stream pipeline
 running end-to-end on the modern perception stack). **Level-1 closed loop = P3–P7** on top of it. The
 frontier is **P8–P9**. Near-term path: **FP0 → FP1 → F0b** (prove the full pipeline on floor rungs),
-then climb FP2–FP6 ungated-first.
+then climb FP2–FP6a ungated-first (FP6b — the geometry pose/depth split + calibration-arc SfM pose rung
+— is structural, sequenced after FP6a).
 
 ## 8. Open questions / risks
 

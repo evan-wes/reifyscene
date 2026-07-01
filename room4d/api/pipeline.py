@@ -20,6 +20,7 @@ from room4d.geometry.world_frame import GroundPlaneCanonicalizer
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from room4d.geometry.moge_wrapper import MoGeInitializer
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -83,10 +84,15 @@ class Room4DPipeline:
         self.sync_solver = GlobalTimeAlignmentSolver()
         geometry_cfg = self.cfg.get('geometry', {})
         geometry_backend_name = str(geometry_cfg.get('backend_name', 'vggt')).lower()
+        self.geometry_backend_name = geometry_backend_name
         if geometry_backend_name == 'vggt-long':
             self.geometry_init = VGGTLongInitializer(geometry_cfg)
         elif geometry_backend_name == 'dataset':
             self.geometry_init = DatasetGeometryInitializer(geometry_cfg)
+        elif geometry_backend_name == 'moge':
+            # FP6a: explicit MoGe-2 metric-depth rung (native swap; depth-only, no
+            # poses). Not an auto-fallback — reachable only by backend_name='moge'.
+            self.geometry_init = MoGeInitializer(geometry_cfg)
         else:
             self.geometry_init = VGGTInitializer(geometry_cfg)
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
@@ -270,13 +276,48 @@ class Room4DPipeline:
             )
 
     def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
-        """Run coarse geometry initialization and persist its heavy outputs."""
+        """Run coarse geometry initialization and persist its heavy outputs.
+
+        The config-selected backend is the ladder's top rung — geometry joins the
+        observable-degradation machinery (design §4A.1): a graceful-empty floor
+        guarantees a schema-valid artifact if the backend is unavailable or fails,
+        and a `CapabilityManifest` records which rung ran, at what fidelity, and why
+        higher rungs were skipped. `backend_name='moge'` force-selects the FP6a
+        MoGe-2 depth rung; the full multi-rung auto-probing pose/depth ladders are FP6b.
+        """
         selected_frames = self._select_geometry_frames(ingest_artifact)
-        artifact = self.geometry_init.initialize(
-            selected_frames,
-            ingest_artifact=ingest_artifact,
-            sync_artifact=sync_artifact,
-        )
+        # Rung name = the backend's own identity so manifest.backend_used matches
+        # the artifact's backend_name ('moge-2'/'vggt'/'vggt-long'/'dataset').
+        rung_name = getattr(self.geometry_init, 'backend_name', self.geometry_backend_name)
+        fidelity_by_backend = {
+            'moge-2': 'metric_depth_no_poses',
+            'vggt': 'joint_reconstruction',
+            'vggt-long': 'joint_reconstruction_longseq',
+            'dataset': 'dataset_gt',
+        }
+        # Only probe-gate the moge rung (verified package name) so a missing MoGe
+        # dep degrades cleanly; the load-bearing vggt/dataset rungs stay probe-free
+        # and rely on the ladder's run-error -> graceful-empty path, never a false skip.
+        probe_by_backend = {'moge-2': importable('moge')}
+        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
+        ladder = BackendLadder('geometry', [
+            BackendRung(
+                rung_name,
+                fidelity_by_backend.get(rung_name, rung_name),
+                runner=lambda inp: self.geometry_init.initialize(
+                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+                probe=probe_by_backend.get(rung_name),
+            ),
+            BackendRung(
+                'empty', 'empty',
+                runner=lambda inp: GeometryArtifact(
+                    run_id=ingest_artifact.run_id, stage_name='geometry',
+                    save_dir=self._stage_dir('geometry'), backend_name='empty',
+                    selected_frames=[], notes=['geometry graceful-empty floor (§4A invariant 2)']),
+            ),
+        ])
+        artifact, manifest = ladder.run(inputs)
+        artifact.attach_manifest(manifest)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
         if estimate is not None:
