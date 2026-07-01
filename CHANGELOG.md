@@ -7,6 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.27.0] - 2026-07-01
+
+### Added
+- **FP6b step 1 — COLMAP-SfM pose rung (native-swap).** The **pose** mirror of FP6a's
+  MoGe depth rung (design §4A.1): monocular hloc+COLMAP camera egomotion, the first
+  piece of the geometry pose/depth split. Gated behind a spike (below) that cleared the
+  one regime the calibration arc never tested (monocular egomotion on dynamic handheld).
+  - `geometry/colmap_wrapper.ColmapPoseInitializer`: runs the calibration arc's
+    `HlocColmapSfMRunner` (SuperPoint + SuperGlue + NetVLAD) over **dense** frames with
+    **intrinsics fixed from the focal prior** (`camera_mode=SINGLE`), reads the binary
+    model via `pycolmap`, and fills `camera_states_by_stream` (poses) +
+    `intrinsics_by_stream`. **Pose-only, honest:** `depthmaps`/`pointmaps` stay empty
+    (depth comes from the MoGe rung). Shared `reconstruct()` core (mirrors MoGe's
+    `infer_frame`) so the in-pipeline path and the validator share one code path.
+  - `pipeline.initialize_geometry`: `backend_name='colmap'` force-selects the rung on the
+    geometry ladder (fidelity `sfm_poses_no_depth`, probe `importable('pycolmap','hloc')`);
+    the load-bearing vggt/dataset rungs stay probe-free.
+  - `scripts/fp6b_validate_colmap.py`: native swap vs GT extrinsics through the shipped
+    `reconstruct()`. **Result (60 frames, fixed intrinsics):** 100% registered, gauge-free
+    pairwise-rel rotation **0.19°/0.09°** median (spin/windmill), Sim(3)-APE <1% translation.
+
+### Changed
+- **Design doc §7 FP6b + §4A.1.** FP6b marked **SPIKE CLEARED** (2026-07-01): monocular
+  COLMAP recovers sub-degree egomotion on spin+windmill; frame **density is load-bearing**
+  (dense sampler first), and `dyn_mask` is a **size-gated robustness rung**, not a hard
+  gate (it tightens large-dynamic scenes, is neutral on small ones) — refining "masks
+  likely needed to converge."
+
+### Tests
+- `tests/test_colmap_geometry.py` (5): empty-in→empty-out; poses-filled/no-depth artifact;
+  partial registration; geometry ladder selects COLMAP + stamps the manifest; and degrades
+  to graceful-empty (failed rung observable) when reconstruction raises. Full suite: 325
+  passed, 1 skipped.
+
 ## [0.1.26.0] - 2026-06-30
 
 ### Added
