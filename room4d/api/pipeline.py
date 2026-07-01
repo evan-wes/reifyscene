@@ -23,6 +23,8 @@ from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
 from room4d.geometry.moge_wrapper import MoGeInitializer
 from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
 from room4d.geometry.compose import GeometryComposer
+from room4d.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from room4d.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -112,6 +114,15 @@ class Room4DPipeline:
             self.geometry_init = self.geometry_pose_init  # nominal top rung for shared helpers
         else:
             self.geometry_init = self._build_geometry_backend(geometry_backend_name, geometry_cfg)
+        # FP6b step 3: coarse geometry-free dyn_mask stage (protects the SfM pose rung).
+        # Default 'all-static' → a no-op that leaves the pose rung unmasked (VGGT-on-top,
+        # or clips that don't need it); 'detector' → COCO Mask R-CNN movable-category masks.
+        dyn_mask_cfg = self.cfg.get('dyn_mask', {})
+        self.dyn_mask_backend_name = str(dyn_mask_cfg.get('backend_name', 'all-static')).lower()
+        self.dyn_mask_init = (
+            DetectorDynMask(dyn_mask_cfg) if self.dyn_mask_backend_name == 'detector'
+            else AllStaticDynMask(dyn_mask_cfg)
+        )
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
         lifting_cfg = self.cfg.get('lifting', {})
         self.track_lifter = TrackLifter3D(point_conf_threshold=float(lifting_cfg.get('point_conf_threshold', 0.0)))
@@ -313,8 +324,53 @@ class Room4DPipeline:
                 f"Added {int(summary['added_camera_states'])} interpolated/extrapolated camera states so tracking frames have camera estimates."
             )
 
+    def compute_dyn_mask(self, ingest_artifact: IngestArtifact, sync_artifact=None) -> DynMaskArtifact:
+        """FP6b step 3: coarse **geometry-free** dynamic masks that protect the SfM pose rung.
+
+        Runs the dyn_mask ladder (selected backend → all-static floor) on the **same** frame
+        set the geometry pose rung will use (so mask keys align), stamps a `CapabilityManifest`,
+        and saves. Default `all-static` is a cheap no-op; only the COLMAP pose rung consumes
+        the result, and only size-gated. Consumes only raw frames — never `segment`/geometry —
+        which is what breaks the segment→geometry cycle (§4A.1).
+        """
+        selected_frames = self._select_geometry_frames(ingest_artifact)
+        rung_name = getattr(self.dyn_mask_init, 'backend_name', self.dyn_mask_backend_name)
+        probe = {'detector': importable('torchvision')}.get(rung_name)
+        dyn_cfg = self.cfg.get('dyn_mask', {})
+        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
+        ladder = BackendLadder('dyn_mask', [
+            BackendRung(
+                rung_name, rung_name,
+                runner=lambda inp: self.dyn_mask_init.initialize(
+                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+                probe=probe,
+            ),
+            BackendRung(
+                'all-static', 'all-static',
+                runner=lambda inp: AllStaticDynMask(dyn_cfg).initialize(
+                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+            ),
+        ])
+        artifact, manifest = ladder.run(inputs)
+        artifact.attach_manifest(manifest)
+        artifact.save_dir = self._stage_dir('dyn_mask')
+        self._stamp_stage_metadata(artifact, 'dyn_mask', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
+    @staticmethod
+    def _geometry_init_call(init, inp):
+        """Call a geometry backend's ``initialize``, passing ``dyn_mask`` only to the pose
+        rung that consumes it (fourth invariant: dyn_mask is the COLMAP rung's dep; other
+        rungs never see it, so their signatures stay untouched)."""
+        kwargs = dict(ingest_artifact=inp['ingest'], sync_artifact=inp['sync'])
+        if getattr(init, 'backend_name', None) == 'colmap':
+            kwargs['dyn_mask_artifact'] = inp.get('dyn_mask')
+        return init.initialize(inp['frames'], **kwargs)
+
     def _geometry_ladder(self, stage_label, init, backend_name, selected_frames,
-                         ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None):
+                         ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None,
+                         dyn_mask_artifact=None):
         """Run one geometry channel as a 2-rung ladder (backend → graceful-empty floor).
 
         Rung name = the backend's own identity so ``manifest.backend_used`` matches the
@@ -328,13 +384,13 @@ class Room4DPipeline:
             'geometry graceful-empty floor (§4A invariant 2)' if channel is None
             else f'geometry {channel} graceful-empty floor (§4A invariant 2)'
         )
-        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
+        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact,
+                  'dyn_mask': dyn_mask_artifact}
         ladder = BackendLadder(stage_label, [
             BackendRung(
                 rung_name,
                 _GEOMETRY_FIDELITY.get(rung_name, rung_name),
-                runner=lambda inp: init.initialize(
-                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+                runner=lambda inp: self._geometry_init_call(init, inp),
                 probe=probe_by_backend.get(rung_name),
             ),
             BackendRung(
@@ -347,7 +403,7 @@ class Room4DPipeline:
         ])
         return ladder.run(inputs)
 
-    def _run_fused_geometry(self, selected_frames, ingest_artifact: IngestArtifact, sync_artifact):
+    def _run_fused_geometry(self, selected_frames, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
         """FP6b two fused ladders (§4A.1): run a pose channel + a depth channel on the
         SAME frames, then compose them (COLMAP↔MoGe scale reconciliation).
 
@@ -357,7 +413,8 @@ class Room4DPipeline:
         """
         pose_art, pose_manifest = self._geometry_ladder(
             'geometry.pose', self.geometry_pose_init, self.geometry_pose_backend,
-            selected_frames, ingest_artifact, sync_artifact, channel='pose')
+            selected_frames, ingest_artifact, sync_artifact, channel='pose',
+            dyn_mask_artifact=dyn_mask_artifact)
         depth_art, depth_manifest = self._geometry_ladder(
             'geometry.depth', self.geometry_depth_init, self.geometry_depth_backend,
             selected_frames, ingest_artifact, sync_artifact, channel='depth')
@@ -379,7 +436,7 @@ class Room4DPipeline:
             manifest.notes.append(result.reconcile.note())
         return result.artifact, manifest
 
-    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
+    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
         """Run coarse geometry initialization and persist its heavy outputs.
 
         The config-selected backend is the ladder's top rung — geometry joins the
@@ -388,15 +445,16 @@ class Room4DPipeline:
         and a `CapabilityManifest` records which rung ran, at what fidelity, and why
         higher rungs were skipped. `backend_name='moge'` force-selects the FP6a
         MoGe-2 depth rung. When `pose_backend`+`depth_backend` are set the stage runs
-        the FP6b two fused ladders (COLMAP poses + MoGe depth, scale-reconciled).
+        the FP6b two fused ladders (COLMAP poses + MoGe depth, scale-reconciled). The
+        FP6b step-3 `dyn_mask` (if provided) protects the COLMAP pose rung, size-gated.
         """
         selected_frames = self._select_geometry_frames(ingest_artifact)
         if self.geometry_fused:
-            artifact, manifest = self._run_fused_geometry(selected_frames, ingest_artifact, sync_artifact)
+            artifact, manifest = self._run_fused_geometry(selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact)
         else:
             artifact, manifest = self._geometry_ladder(
                 'geometry', self.geometry_init, self.geometry_backend_name,
-                selected_frames, ingest_artifact, sync_artifact)
+                selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
         artifact.attach_manifest(manifest)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
@@ -1047,7 +1105,10 @@ class Room4DPipeline:
         """Execute the current end-to-end vertical slice and persist artifacts."""
         ingest_artifact = self.preprocess(video_paths)
         sync_artifact = self.synchronize(ingest_artifact)
-        geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
+        # FP6b step 3: coarse geometry-free dyn_mask (protects the SfM pose rung), between
+        # sync and geometry per the static-superset order (§4A.1). No-op unless enabled.
+        dyn_mask_artifact = self.compute_dyn_mask(ingest_artifact, sync_artifact)
+        geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
         # Pose-refined geometry feeds every downstream stage; the original
         # geometry artifact is still returned under 'geometry' for inspection.
         pose_geometry = self.refine_poses(ingest_artifact, geometry_artifact)
@@ -1065,6 +1126,7 @@ class Room4DPipeline:
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
+            'dyn_mask': dyn_mask_artifact,
             'geometry': geometry_artifact,
             'pose_refine': pose_geometry,
             'segment': instance_artifact,

@@ -35,6 +35,7 @@ from room4d.calibration.hloc_colmap import HlocColmapSfMRunner
 from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from room4d.geometry.base import GeometryInitializer
 from room4d.geometry.geometry_artifact import GeometryArtifact
+from room4d.geometry.reconstruction_health import assess_pose_health
 from room4d.ingest.decoder import VideoDecoder
 
 
@@ -58,6 +59,10 @@ class ColmapPoseInitializer(GeometryInitializer):
         self.fix_intrinsics = bool(self.cfg.get("fix_intrinsics", True)) and self.camera_params is not None
         self.retrieval_top_k = int(self.cfg.get("retrieval_top_k", 20))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        # FP6b step 3: apply the dyn_mask only when the scene is large-dynamic — the spike
+        # found masking is a SIZE-GATED robustness help (tightens large-dynamic scenes,
+        # neutral/worse on small ones). Gate on the median per-frame dynamic fraction.
+        self.mask_size_gate = float(self.cfg.get("mask_size_gate", 0.10))
 
     # -- helpers -----------------------------------------------------------
 
@@ -134,7 +139,20 @@ class ColmapPoseInitializer(GeometryInitializer):
 
     # -- artifact construction --------------------------------------------
 
-    def initialize(self, frames=None, *, ingest_artifact=None, sync_artifact=None) -> GeometryArtifact:
+    def _resolve_masking(self, dyn_mask_artifact):
+        """Decide whether to apply dyn_mask (size-gated) and return (apply, frac, note)."""
+        if dyn_mask_artifact is None:
+            return False, 0.0, "dyn_mask: none provided → unmasked."
+        frac = float(dyn_mask_artifact.aggregate_dynamic_fraction())
+        apply = frac >= self.mask_size_gate
+        gate = (
+            f"dyn_mask '{dyn_mask_artifact.backend_name}': median dynamic fraction {frac:.3f} "
+            f"{'≥' if apply else '<'} gate {self.mask_size_gate:.3f} → "
+            f"{'MASKED (large-dynamic)' if apply else 'unmasked (small-dynamic, size-gated off)'}."
+        )
+        return apply, frac, gate
+
+    def initialize(self, frames=None, *, ingest_artifact=None, sync_artifact=None, dyn_mask_artifact=None) -> GeometryArtifact:
         selected = self._select_frames(frames, ingest_artifact)
         if not selected:
             return GeometryArtifact(
@@ -145,7 +163,11 @@ class ColmapPoseInitializer(GeometryInitializer):
         if ingest_artifact is None:
             raise ValueError("ColmapPoseInitializer requires ingest_artifact to decode frames.")
 
-        # materialize dense frames (flat dir, index-named) for a SINGLE monocular camera
+        apply_mask, dyn_frac, mask_note = self._resolve_masking(dyn_mask_artifact)
+
+        # materialize dense frames (flat dir, index-named) for a SINGLE monocular camera.
+        # Size-gated dyn_mask: black out dynamic pixels so SfM keypoints avoid moving
+        # content (spike: rgb[mask>0.5]=0 before hloc — protects the pose rung).
         img_dir = self.work_dir / "images"
         if img_dir.exists():
             shutil.rmtree(img_dir)
@@ -156,6 +178,11 @@ class ColmapPoseInitializer(GeometryInitializer):
             if stream is None:
                 continue
             rgb = self.decoder.get_frame(stream, frame.frame_idx)
+            if apply_mask:
+                mask = dyn_mask_artifact.mask_for(f"{frame.stream_id}:{frame.frame_idx}")
+                if mask is not None and mask.shape == rgb.shape[:2]:
+                    rgb = rgb.copy()
+                    rgb[np.asarray(mask) > 0.5] = 0
             Image.fromarray(rgb).save(img_dir / f"{idx:06d}.png")
 
         poses = self.reconstruct(img_dir)  # {frame-index: (T_world_cam, intrinsics)}
@@ -192,6 +219,7 @@ class ColmapPoseInitializer(GeometryInitializer):
                 f"COLMAP-SfM pose rung: registered {len(registered)}/{len(selected)} "
                 f"frames ({100 * reg_frac:.0f}%).",
                 f"intrinsics={'fixed' if self.fix_intrinsics else 'free-estimated (up-to-scale; ~13-16% residual, resolve at scale reconciliation)'}.",
+                mask_note,
                 "pose-only rung: camera egomotion + intrinsics; no dense depth "
                 "(depth comes from the MoGe rung on the depth ladder).",
             ],
@@ -200,4 +228,12 @@ class ColmapPoseInitializer(GeometryInitializer):
         # from its 3D-point reprojections (design §4A.1).
         if self._last_model_dir is not None:
             artifact.metadata["colmap_model_dir"] = str(self._last_model_dir)
+        artifact.metadata["dyn_mask_applied"] = bool(apply_mask)
+        artifact.metadata["dyn_mask_fraction"] = float(dyn_frac)
+        # FP6b step 3: stamp a GT-free per-stream trajectory health-check so a degenerate
+        # (silent) SfM draw is observable downstream (design: observable degradation).
+        health = assess_pose_health(camera_states_by_stream)
+        artifact.metadata["pose_health"] = health
+        if not health["healthy"]:
+            artifact.notes.append(f"⚠ pose health: SUSPECT — {health['reason']}")
         return artifact

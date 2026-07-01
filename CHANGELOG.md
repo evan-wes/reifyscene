@@ -7,6 +7,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.29.0] - 2026-07-01
+
+### Added
+- **FP6b step 3 — `dyn_mask` robustness rung + static-superset reorder + reconstruction
+  health-check.** Closes the two robustness gaps step 2 surfaced: protects the COLMAP pose
+  rung from dynamic-content correspondences, and makes its intermittently-degenerate draws
+  *observable*.
+  - **`perception/dyn_mask/`** — a new coarse, **geometry-free** stage emitting per-frame
+    dynamic masks (`DynMaskArtifact`, masks persisted as `.npz`). Ladder:
+    **detector** (COCO Mask R-CNN movable-category masks, reuses `ObjectDetector`) →
+    **all-static** floor (no-op → VGGT-on-top stays a no-op). Consumes only raw frames —
+    never `segment`/geometry — which is what breaks the `segment→geometry` cycle (§4A.1).
+    The general optical-flow motion-seg top rung is a deferred follow-up (no current clip
+    needs it; native-swap discipline).
+  - **`geometry/colmap_wrapper.py`** — the pose rung consumes `dyn_mask`, **size-gated**:
+    blacks out dynamic pixels (`rgb[mask>0.5]=0`, the spike's mechanism) only when the
+    median per-frame dynamic fraction clears `mask_size_gate` (default 0.10). Per the spike,
+    masking is a *size-gated* help (tightens large-dynamic scenes, neutral on small ones),
+    so windmill-type small-dynamic clips are correctly left unmasked. The gate decision is
+    recorded in the artifact notes/metadata.
+  - **`geometry/reconstruction_health.py`** — a GT-free `assess_pose_health` flags
+    degenerate SfM draws via a **per-stream, self-calibrating** outlier test on consecutive
+    pairwise-relative rotation (per-stream so multi-cam large angles don't false-positive;
+    flagged against the stream's own median + k·MAD *and* an absolute physical cap). Stamped
+    into `metadata['pose_health']`; the composer downgrades fused fidelity to
+    `fused_metric_suspect` when suspect. Documented limitation: catches the outlier-jump
+    degenerate type, not a globally-bent-but-locally-smooth one.
+  - **Pipeline reorder (§4A.1 fourth invariant)** — `dyn_mask` slots into `STAGE_ORDER`
+    between `sync` and `geometry`; geometry's deps become `(ingest, sync, dyn_mask)`. The
+    ladder gates work, never reorders — VGGT-on-top runs `dyn_mask` as all-static and
+    ignores it. `dyn_mask` is threaded only to the COLMAP pose rung (other backends'
+    signatures untouched). Default `all-static` → strict superset, existing configs
+    unchanged.
+  - `scripts/fp6b_validate_dynmask.py` — quantifies the hypothesis: detector median dynamic
+    fraction + size-gate decision, then the **degenerate-draw rate** (health-flagged) over N
+    COLMAP runs, unmasked vs detector-masked, on spin (large-dynamic) vs windmill (gated off).
+  - **Validated on spin + windmill** (60 frames; spin 8 runs/arm, windmill 4). Size-gate
+    fires correctly — spin detector fraction **0.351 → MASK**, windmill **0.000 → unmasked**.
+    On spin (large-dynamic), detector-masking **reduced the degenerate-draw rate 1/8 → 0/8**
+    and **tightened the pairwise-max rotation tail 1.09° → 0.33°** (matching the oracle-mask
+    spike), and the health-check **caught the unmasked degenerate draw**; windmill was neutral
+    (0/4 both arms). Caveats: small N (direction clear, matches the spike, not statistically
+    conclusive); windmill gates off via detector fraction 0.000 (COCO-blind to the pinwheel),
+    so the gate's small-but-nonzero branch is exercised by the deferred flow-seg rung, not here.
+
+### Tests
+- `tests/test_dyn_mask.py` (11): `DynMaskArtifact` npz round-trip; all-static empty masks;
+  detector `mask_frame` unions only movable categories (mocked); health-check ok/flagged/
+  too-few-frames; COLMAP size-gate masks-when-large / skips-when-small (verifies pixels
+  blacked out) + stamps `pose_health`; pipeline `dyn_mask` stage (all-static default +
+  manifest); composer downgrades to `fused_metric_suspect` on suspect health. Updated three
+  stage-order tests for the new stage. Full suite: **347 passed, 1 skipped**.
+
 ## [0.1.28.0] - 2026-07-01
 
 ### Added

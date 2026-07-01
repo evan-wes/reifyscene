@@ -219,6 +219,16 @@ class GeometryComposer:
         }
         artifact.metadata["scale_reconcile"] = reconcile.summary()
         artifact.metadata["scale_reconcile_per_frame"] = reconcile.per_frame_residual
+        # FP6b step 3: carry the pose rung's GT-free health-check into the fused artifact and
+        # downgrade fidelity to 'fused_metric_suspect' if the trajectory looks degenerate, so
+        # a silent bad SfM draw is observable (never silently fused as clean).
+        pose_health = pose_artifact.metadata.get("pose_health")
+        fidelity = "fused_metric"
+        if pose_health is not None:
+            artifact.metadata["pose_health"] = pose_health
+            if not pose_health.get("healthy", True):
+                fidelity = "fused_metric_suspect"
+                artifact.notes.append(f"⚠ pose health SUSPECT (degenerate SfM draw?) — {pose_health.get('reason', '')}")
         # provenance: MoGe's own intrinsics (used to build its camera-space points), kept
         # distinct from the pose-source intrinsics the camera_states carry.
         if depth_artifact.intrinsics_by_stream:
@@ -226,4 +236,4 @@ class GeometryComposer:
                 sid: {"fx": intr.fx, "fy": intr.fy, "cx": intr.cx, "cy": intr.cy}
                 for sid, intr in depth_artifact.intrinsics_by_stream.items()
             }
-        return ComposeResult(artifact=artifact, fidelity="fused_metric", reconcile=reconcile)
+        return ComposeResult(artifact=artifact, fidelity=fidelity, reconcile=reconcile)

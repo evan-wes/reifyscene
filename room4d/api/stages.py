@@ -10,6 +10,7 @@ from room4d.common.io import write_json
 from room4d.common.paths import ensure_dir
 from room4d.geometry.geometry_artifact import GeometryArtifact
 from room4d.graph.graph_artifact import GraphArtifact
+from room4d.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
 from room4d.ingest.ingest_artifact import IngestArtifact
 from room4d.optimize.optimization_artifact import OptimizationArtifact
 from room4d.perception.humans.human_artifact import HumanArtifact
@@ -41,6 +42,7 @@ class StageSpec:
 STAGE_ORDER: tuple[str, ...] = (
     'ingest',
     'sync',
+    'dyn_mask',
     'geometry',
     'pose_refine',
     'segment',
@@ -73,11 +75,18 @@ def build_stage_registry() -> dict[str, StageSpec]:
             run_fn=lambda pipeline, outputs, video_paths: pipeline.synchronize(outputs['ingest']),
             load_fn=SyncArtifact.load,
         ),
+        'dyn_mask': StageSpec(
+            name='dyn_mask',
+            dependencies=('ingest', 'sync'),
+            artifact_cls=DynMaskArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_dyn_mask(outputs['ingest'], outputs.get('sync')),
+            load_fn=DynMaskArtifact.load,
+        ),
         'geometry': StageSpec(
             name='geometry',
-            dependencies=('ingest', 'sync'),
+            dependencies=('ingest', 'sync', 'dyn_mask'),
             artifact_cls=GeometryArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.initialize_geometry(outputs['ingest'], outputs['sync']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.initialize_geometry(outputs['ingest'], outputs['sync'], dyn_mask_artifact=outputs.get('dyn_mask')),
             load_fn=GeometryArtifact.load,
         ),
         'pose_refine': StageSpec(
