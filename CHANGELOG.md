@@ -7,6 +7,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.28.0] - 2026-07-01
+
+### Added
+- **FP6b step 2 — geometry pose/depth split + COLMAP↔MoGe scale reconciliation.** Fuses
+  the two decomposed rungs (FP6a MoGe depth + FP6b-step1 COLMAP poses) into a single,
+  *complete* **GT-free, VGGT-free metric** `GeometryArtifact` (design §4A.1). Monocular
+  COLMAP is scale-free, MoGe is metric; a single global scale ties them together.
+  - `geometry/scale_reconcile.py`: solves the COLMAP→metric scale from sparse-point
+    reprojections vs MoGe depth (robust median of per-observation depth ratios). The solve
+    is a **per-frame camera-space** comparison, so it is **gauge-free** and runs *before*
+    ground-plane canonicalization (scale is the one gauge DOF the ground plane doesn't pin,
+    §4A.1). Pure `solve_global_scale` (unit-tested, COLMAP-free) + thin, probe-gated
+    `extract_colmap_observations` (reads the sparse model via `pycolmap`). Emits the
+    **per-frame residual** (→ F2), never a crash: too few samples ⇒ identity fallback.
+  - `geometry/compose.py` (`GeometryComposer`): merges pose channel + depth channel —
+    poses/intrinsics from COLMAP, depth from MoGe — applies the reconciled scale to the
+    camera centers, and **rigidly** transforms MoGe's camera-space points into world via
+    the metric poses (MoGe's own per-frame intrinsics kept self-consistent; never
+    re-projected through COLMAP's focal, §4A.1(a)). Resulting `pointmaps_by_frame` are
+    world-space, matching VGGT's convention so ground-plane + downstream work unchanged.
+    Graceful degradation: a missing channel falls back to `depth_only`/`poses_only`/`empty`.
+  - `pipeline.initialize_geometry`: `geometry.pose_backend` + `geometry.depth_backend`
+    select the **two fused ladders**; each channel is a 2-rung ladder (backend →
+    graceful-empty) and the composite `CapabilityManifest` records both channels'
+    rung statuses (prefixed `pose:`/`depth:`) + the resolved fidelity
+    (`fused_metric`/`poses_only`/`depth_only`/`empty`). A lone `backend_name` still
+    selects the single-backend path — **strict superset, existing configs unchanged.**
+  - `geometry/colmap_wrapper.py`: exposes the persisted sparse model dir
+    (`metadata['colmap_model_dir']`) so the reconciler can read its 3D points +
+    reprojections.
+  - `scripts/fp6b_validate_fused.py`: native-swap validation vs GT through the shipped
+    rungs + reconciler. Reports (1) whether the per-scene offset collapses to one global
+    scale (per-frame residual band — FP6a needed a per-frame oracle scale; this needs one
+    global scale + a small F2 residual), (2) **metric SE(3)-APE** poses (scale fixed = 1,
+    unlike step 1's Sim(3)) with the residual Sim(3) scale ≈ MoGe's per-scene bias (→ F2),
+    and (3) depth vs GT for context.
+  - **Validated on spin + windmill** (60 frames, healthy COLMAP draws, reproducible across
+    2 runs each). Reconciliation collapses the per-scene offset to **one global scale** with
+    a tight per-frame residual (spin [0.92, 1.08] med 1.00; windmill [0.95, 1.10] med 1.02).
+    Trajectory **shape** is excellent — **Sim(3)-APE trans 0.3–0.7%** of extent, rot ~1° —
+    so the *only* remaining metric error is MoGe's own per-scene absolute-scale bias (spin
+    +14%, windmill −34%), which shows up as metric **SE(3)-APE trans (spin 3.4%, windmill
+    12.9%)** and is exactly the F2 person-anchored-scale hand-off. **GT-free, VGGT-free metric
+    geometry, as designed.**
+
+### Known issues
+- **Monocular COLMAP pose rung is intermittently unstable** on these low-parallax dynamic
+  clips: incremental BA occasionally hits `Linear solver failure` (dense Cholesky) and lands
+  a **degenerate** reconstruction (100% registered, low reproj error, but geometrically wrong
+  — observed ~once each on spin and windmill across ~8 runs; healthy draws are the norm and
+  reproduce tightly). **Not introduced by step 2** — a property of the step-1 rung; step 2's
+  fusion is correct on healthy draws. Mitigation → FP6b step 3 (dyn_mask robustness rung +
+  dense motion-preserving sampler) plus a GT-free reconstruction health-check (e.g. reject
+  implausibly large consecutive pairwise-relative rotation) so degenerate draws are
+  *observable* rather than silently fused.
+
+### Tests
+- `tests/test_fused_geometry.py` (11): pure scale solver (recovers a known scale, identity
+  fallback below `min_obs`, skips out-of-bounds/non-finite); `GeometryComposer` full fusion
+  (scale reconciled, poses scaled, world pointmaps, provenance) + all three degradations
+  (`depth_only`/`poses_only`/`empty`); pipeline fused-mode wiring (composite manifest,
+  `pose:`/`depth:` rungs), pose-channel failure ⇒ `depth_only` (no crash), and back-compat
+  (a lone `backend_name` is not fused). Full suite: **336 passed, 1 skipped**.
+
 ## [0.1.27.0] - 2026-07-01
 
 ### Added

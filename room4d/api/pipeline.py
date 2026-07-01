@@ -22,6 +22,7 @@ from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
 from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
 from room4d.geometry.moge_wrapper import MoGeInitializer
 from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
+from room4d.geometry.compose import GeometryComposer
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -48,7 +49,7 @@ from room4d.perception.reid.reid_stage import FloorReid
 from room4d.perception.reid.dino_reid import DinoReid
 from room4d.perception.semantics.semantics_artifact import SemanticsArtifact
 from room4d.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
-from room4d.common.backend_ladder import BackendLadder, BackendRung, importable
+from room4d.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
 from room4d.api.stages import build_stage_registry
@@ -57,6 +58,17 @@ from room4d.scene.assembler import SingleVideoSceneAssembler
 from room4d.eval.benchmark_runner import BenchmarkRunner
 from room4d.sync.global_time_solver import GlobalTimeAlignmentSolver
 from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
+
+
+# Fidelity tag each geometry backend carries in its CapabilityManifest (design §4A.1).
+# Joint rungs (vggt*/dataset) fill poses+depth; moge is depth-only, colmap pose-only.
+_GEOMETRY_FIDELITY = {
+    'moge-2': 'metric_depth_no_poses',
+    'colmap': 'sfm_poses_no_depth',
+    'vggt': 'joint_reconstruction',
+    'vggt-long': 'joint_reconstruction_longseq',
+    'dataset': 'dataset_gt',
+}
 
 
 class Room4DPipeline:
@@ -86,20 +98,20 @@ class Room4DPipeline:
         geometry_cfg = self.cfg.get('geometry', {})
         geometry_backend_name = str(geometry_cfg.get('backend_name', 'vggt')).lower()
         self.geometry_backend_name = geometry_backend_name
-        if geometry_backend_name == 'vggt-long':
-            self.geometry_init = VGGTLongInitializer(geometry_cfg)
-        elif geometry_backend_name == 'dataset':
-            self.geometry_init = DatasetGeometryInitializer(geometry_cfg)
-        elif geometry_backend_name == 'moge':
-            # FP6a: explicit MoGe-2 metric-depth rung (native swap; depth-only, no
-            # poses). Not an auto-fallback — reachable only by backend_name='moge'.
-            self.geometry_init = MoGeInitializer(geometry_cfg)
-        elif geometry_backend_name == 'colmap':
-            # FP6b step 1: explicit COLMAP-SfM pose rung (native swap; pose-only, no
-            # dense depth). Reachable only by backend_name='colmap'.
-            self.geometry_init = ColmapPoseInitializer(geometry_cfg)
+        # FP6b step 2: geometry is two fused ladders (§4A.1). When both `pose_backend`
+        # and `depth_backend` are set the stage runs a *pose* channel + a *depth* channel
+        # and composes them (COLMAP↔MoGe scale reconciliation); otherwise a single joint
+        # backend fills both channels (today's path — strict superset, unchanged).
+        self.geometry_pose_backend = str(geometry_cfg.get('pose_backend', '')).lower() or None
+        self.geometry_depth_backend = str(geometry_cfg.get('depth_backend', '')).lower() or None
+        self.geometry_fused = bool(self.geometry_pose_backend and self.geometry_depth_backend)
+        if self.geometry_fused:
+            self.geometry_pose_init = self._build_geometry_backend(self.geometry_pose_backend, geometry_cfg)
+            self.geometry_depth_init = self._build_geometry_backend(self.geometry_depth_backend, geometry_cfg)
+            self.geometry_composer = GeometryComposer(geometry_cfg.get('compose', {}))
+            self.geometry_init = self.geometry_pose_init  # nominal top rung for shared helpers
         else:
-            self.geometry_init = VGGTInitializer(geometry_cfg)
+            self.geometry_init = self._build_geometry_backend(geometry_backend_name, geometry_cfg)
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
         lifting_cfg = self.cfg.get('lifting', {})
         self.track_lifter = TrackLifter3D(point_conf_threshold=float(lifting_cfg.get('point_conf_threshold', 0.0)))
@@ -124,6 +136,27 @@ class Room4DPipeline:
         self.renderer = build_renderer(self.cfg.get("render", {}))
         self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
         self.calibration_runner = CalibrationRunner(self.cfg.get("calibration", {}), decoder=self.decoder)
+
+    @staticmethod
+    def _build_geometry_backend(name: str, geometry_cfg: dict):
+        """Construct a geometry initializer for a backend name.
+
+        Shared by the single-backend path and the fused pose/depth channels (§4A.1):
+        ``vggt``/``vggt-long``/``dataset`` are *joint* rungs (poses+depth); ``moge`` is a
+        depth-only rung; ``colmap`` a pose-only rung. Unknown names fall through to VGGT.
+        """
+        name = str(name).lower()
+        if name == 'vggt-long':
+            return VGGTLongInitializer(geometry_cfg)
+        if name == 'dataset':
+            return DatasetGeometryInitializer(geometry_cfg)
+        if name == 'moge':
+            # FP6a: MoGe-2 metric-depth rung (native swap; depth-only, no poses).
+            return MoGeInitializer(geometry_cfg)
+        if name == 'colmap':
+            # FP6b step 1: COLMAP-SfM pose rung (native swap; pose-only, no dense depth).
+            return ColmapPoseInitializer(geometry_cfg)
+        return VGGTInitializer(geometry_cfg)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':
@@ -280,37 +313,27 @@ class Room4DPipeline:
                 f"Added {int(summary['added_camera_states'])} interpolated/extrapolated camera states so tracking frames have camera estimates."
             )
 
-    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
-        """Run coarse geometry initialization and persist its heavy outputs.
+    def _geometry_ladder(self, stage_label, init, backend_name, selected_frames,
+                         ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None):
+        """Run one geometry channel as a 2-rung ladder (backend → graceful-empty floor).
 
-        The config-selected backend is the ladder's top rung — geometry joins the
-        observable-degradation machinery (design §4A.1): a graceful-empty floor
-        guarantees a schema-valid artifact if the backend is unavailable or fails,
-        and a `CapabilityManifest` records which rung ran, at what fidelity, and why
-        higher rungs were skipped. `backend_name='moge'` force-selects the FP6a
-        MoGe-2 depth rung; the full multi-rung auto-probing pose/depth ladders are FP6b.
+        Rung name = the backend's own identity so ``manifest.backend_used`` matches the
+        artifact's ``backend_name``. Model-backed rungs are probe-gated (verified package
+        names) so a missing dep degrades cleanly; the load-bearing vggt/dataset rungs stay
+        probe-free and rely on the ladder's run-error → graceful-empty path.
         """
-        selected_frames = self._select_geometry_frames(ingest_artifact)
-        # Rung name = the backend's own identity so manifest.backend_used matches
-        # the artifact's backend_name ('moge-2'/'vggt'/'vggt-long'/'dataset').
-        rung_name = getattr(self.geometry_init, 'backend_name', self.geometry_backend_name)
-        fidelity_by_backend = {
-            'moge-2': 'metric_depth_no_poses',
-            'colmap': 'sfm_poses_no_depth',
-            'vggt': 'joint_reconstruction',
-            'vggt-long': 'joint_reconstruction_longseq',
-            'dataset': 'dataset_gt',
-        }
-        # Probe-gate the model-backed rungs (verified package names) so a missing dep
-        # degrades cleanly; the load-bearing vggt/dataset rungs stay probe-free and rely
-        # on the ladder's run-error -> graceful-empty path, never a false skip.
+        rung_name = getattr(init, 'backend_name', backend_name)
         probe_by_backend = {'moge-2': importable('moge'), 'colmap': importable('pycolmap', 'hloc')}
+        floor_note = (
+            'geometry graceful-empty floor (§4A invariant 2)' if channel is None
+            else f'geometry {channel} graceful-empty floor (§4A invariant 2)'
+        )
         inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
-        ladder = BackendLadder('geometry', [
+        ladder = BackendLadder(stage_label, [
             BackendRung(
                 rung_name,
-                fidelity_by_backend.get(rung_name, rung_name),
-                runner=lambda inp: self.geometry_init.initialize(
+                _GEOMETRY_FIDELITY.get(rung_name, rung_name),
+                runner=lambda inp: init.initialize(
                     inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
                 probe=probe_by_backend.get(rung_name),
             ),
@@ -319,10 +342,61 @@ class Room4DPipeline:
                 runner=lambda inp: GeometryArtifact(
                     run_id=ingest_artifact.run_id, stage_name='geometry',
                     save_dir=self._stage_dir('geometry'), backend_name='empty',
-                    selected_frames=[], notes=['geometry graceful-empty floor (§4A invariant 2)']),
+                    selected_frames=[], notes=[floor_note]),
             ),
         ])
-        artifact, manifest = ladder.run(inputs)
+        return ladder.run(inputs)
+
+    def _run_fused_geometry(self, selected_frames, ingest_artifact: IngestArtifact, sync_artifact):
+        """FP6b two fused ladders (§4A.1): run a pose channel + a depth channel on the
+        SAME frames, then compose them (COLMAP↔MoGe scale reconciliation).
+
+        The composite `CapabilityManifest` records both channels' rung statuses (prefixed
+        ``pose:`` / ``depth:``) and the fused ``backend_used`` / fidelity the composer
+        resolved to (`fused_metric` / `poses_only` / `depth_only` / `empty`).
+        """
+        pose_art, pose_manifest = self._geometry_ladder(
+            'geometry.pose', self.geometry_pose_init, self.geometry_pose_backend,
+            selected_frames, ingest_artifact, sync_artifact, channel='pose')
+        depth_art, depth_manifest = self._geometry_ladder(
+            'geometry.depth', self.geometry_depth_init, self.geometry_depth_backend,
+            selected_frames, ingest_artifact, sync_artifact, channel='depth')
+        # Use the rungs' own identities ('colmap' / 'moge-2') so the composite backend
+        # name matches the manifest's `pose:`/`depth:` rung names.
+        pose_id = getattr(self.geometry_pose_init, 'backend_name', self.geometry_pose_backend)
+        depth_id = getattr(self.geometry_depth_init, 'backend_name', self.geometry_depth_backend)
+        result = self.geometry_composer.compose(
+            pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=selected_frames,
+            pose_backend=pose_id, depth_backend=depth_id,
+            run_id=ingest_artifact.run_id, save_dir=self._stage_dir('geometry'))
+        manifest = CapabilityManifest(stage='geometry')
+        for channel, channel_manifest in (('pose', pose_manifest), ('depth', depth_manifest)):
+            for rung in channel_manifest.rungs:
+                manifest.rungs.append(RungStatus(f'{channel}:{rung.name}', rung.fidelity, rung.status, rung.reason))
+        manifest.backend_used = result.artifact.backend_name
+        manifest.fidelity = result.fidelity
+        if result.reconcile is not None:
+            manifest.notes.append(result.reconcile.note())
+        return result.artifact, manifest
+
+    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
+        """Run coarse geometry initialization and persist its heavy outputs.
+
+        The config-selected backend is the ladder's top rung — geometry joins the
+        observable-degradation machinery (design §4A.1): a graceful-empty floor
+        guarantees a schema-valid artifact if the backend is unavailable or fails,
+        and a `CapabilityManifest` records which rung ran, at what fidelity, and why
+        higher rungs were skipped. `backend_name='moge'` force-selects the FP6a
+        MoGe-2 depth rung. When `pose_backend`+`depth_backend` are set the stage runs
+        the FP6b two fused ladders (COLMAP poses + MoGe depth, scale-reconciled).
+        """
+        selected_frames = self._select_geometry_frames(ingest_artifact)
+        if self.geometry_fused:
+            artifact, manifest = self._run_fused_geometry(selected_frames, ingest_artifact, sync_artifact)
+        else:
+            artifact, manifest = self._geometry_ladder(
+                'geometry', self.geometry_init, self.geometry_backend_name,
+                selected_frames, ingest_artifact, sync_artifact)
         artifact.attach_manifest(manifest)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
