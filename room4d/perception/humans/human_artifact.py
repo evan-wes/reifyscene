@@ -14,6 +14,7 @@ from rich.progress import track
 
 from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
+from room4d.common.backend_ladder import CapabilityManifest
 from room4d.common.types import BaseArtifact, FrameRef, HumanState
 
 COCO_SKELETON = [
@@ -25,7 +26,7 @@ COCO_SKELETON = [
 
 @dataclass
 class HumanArtifact(BaseArtifact):
-    """Store human detections, masks, densepose, and debug exports."""
+    """Store human detections, masks, densepose, Sapiens dense outputs, and debug exports."""
 
     humans: list[HumanState] = field(default_factory=list)
     raw_humans: list[HumanState] = field(default_factory=list)
@@ -34,6 +35,7 @@ class HumanArtifact(BaseArtifact):
     mask_arrays: dict[str, np.ndarray] = field(default_factory=dict)
     densepose_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
     smpl_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
+    dense_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)  # Sapiens seg/depth/normals
     notes: list[str] = field(default_factory=list)
 
     @staticmethod
@@ -57,6 +59,14 @@ class HumanArtifact(BaseArtifact):
         for h in humans:
             frame_index.setdefault(cls._frame_key(h.frame_ref), []).append(h.human_id)
         return frame_index
+
+    def attach_manifest(self, manifest: CapabilityManifest) -> None:
+        self.metadata['capability'] = manifest.to_dict()
+
+    @property
+    def capability(self) -> 'CapabilityManifest | None':
+        raw = self.metadata.get('capability')
+        return CapabilityManifest.from_dict(raw) if raw else None
 
     def summary(self) -> dict[str, Any]:
         unique_ids = sorted({h.human_id for h in self.humans})
@@ -94,6 +104,7 @@ class HumanArtifact(BaseArtifact):
             'keypoints_2d': None if h.keypoints_2d is None else np.asarray(h.keypoints_2d, dtype=float).tolist(),
             'densepose_present': h.densepose is not None,
             'smpl_present': h.smpl_params is not None,
+            'dense_present': h.dense is not None,
             'confidence': float(h.confidence),
             'attributes': h.attributes,
             'detection_id': det_id,
@@ -111,6 +122,7 @@ class HumanArtifact(BaseArtifact):
             smpl_params=self.smpl_payloads.get(det_id),
             confidence=float(raw['confidence']),
             attributes=dict(raw.get('attributes', {})),
+            dense=self.dense_payloads.get(det_id),
         )
 
     def _copy_debug_images(self, image_dir: Path) -> dict[str, str]:
@@ -408,6 +420,10 @@ class HumanArtifact(BaseArtifact):
                 else:
                     save_payload[key] = np.array(value, dtype=object)
             np.savez_compressed(smpl_dir / f"{self._sanitize_key(det_id)}.npz", **save_payload)
+        dense_dir = ensure_dir(self.save_dir / 'dense')
+        for det_id, payload in self.dense_payloads.items():
+            save_payload = {k: np.asarray(v) for k, v in payload.items() if v is not None}
+            np.savez_compressed(dense_dir / f"{self._sanitize_key(det_id)}.npz", **save_payload)
 
         copied_images = self._copy_debug_images(images_dir) if (self.metadata.get('save_debug_assets') or self.metadata.get('save_debug_html')) else {}
         if copied_images:
@@ -428,6 +444,7 @@ class HumanArtifact(BaseArtifact):
             'mask_ids': sorted(self.mask_arrays.keys()),
             'densepose_ids': sorted(self.densepose_payloads.keys()),
             'smpl_ids': sorted(self.smpl_payloads.keys()),
+            'dense_ids': sorted(self.dense_payloads.keys()),
             'notes': self.notes,
         }
         write_json(self.artifact_path(), payload)
@@ -457,6 +474,12 @@ class HumanArtifact(BaseArtifact):
                         arr = np.asarray(npz[k])
                         payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
                     smpl_payloads[det_id] = payload
+        dense_payloads: dict[str, dict[str, Any]] = {}
+        for det_id in raw.get('dense_ids', []):
+            path = save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz"
+            if path.exists():
+                with np.load(path, allow_pickle=True) as npz:
+                    dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         artifact = cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
@@ -469,6 +492,7 @@ class HumanArtifact(BaseArtifact):
             mask_arrays=mask_arrays,
             densepose_payloads=densepose_payloads,
             smpl_payloads=smpl_payloads,
+            dense_payloads=dense_payloads,
             notes=list(raw.get('notes', [])),
         )
         artifact.humans = [artifact._human_from_dict(item) for item in raw.get('humans', [])]

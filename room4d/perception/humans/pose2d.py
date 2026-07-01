@@ -68,19 +68,6 @@ class HumanPose2DEstimator:
         self._model_device = target
         return model
 
-    def _heuristic_keypoints(self, boxes: list[np.ndarray]) -> list[np.ndarray]:
-        out: list[np.ndarray] = []
-        for bbox in boxes:
-            x1, y1, x2, y2 = map(float, np.asarray(bbox, dtype=np.float32).tolist())
-            w = max(x2 - x1, 1.0)
-            h = max(y2 - y1, 1.0)
-            pts = np.array([
-                [x1 + 0.50 * w, y1 + 0.10 * h, 0.3],[x1 + 0.42 * w, y1 + 0.09 * h, 0.2],[x1 + 0.58 * w, y1 + 0.09 * h, 0.2],[x1 + 0.35 * w, y1 + 0.12 * h, 0.2],[x1 + 0.65 * w, y1 + 0.12 * h, 0.2],[x1 + 0.35 * w, y1 + 0.26 * h, 0.5],[x1 + 0.65 * w, y1 + 0.26 * h, 0.5],[x1 + 0.28 * w, y1 + 0.42 * h, 0.4],[x1 + 0.72 * w, y1 + 0.42 * h, 0.4],[x1 + 0.22 * w, y1 + 0.58 * h, 0.3],[x1 + 0.78 * w, y1 + 0.58 * h, 0.3],[x1 + 0.42 * w, y1 + 0.55 * h, 0.5],[x1 + 0.58 * w, y1 + 0.55 * h, 0.5],[x1 + 0.38 * w, y1 + 0.72 * h, 0.5],[x1 + 0.62 * w, y1 + 0.72 * h, 0.5],[x1 + 0.36 * w, y1 + 0.92 * h, 0.4],[x1 + 0.64 * w, y1 + 0.92 * h, 0.4],
-            ], dtype=np.float32)
-            out.append(pts)
-        self._backend_used = 'heuristic'
-        return out
-
     def _run_real(self, frame: np.ndarray, boxes: list[np.ndarray], device: str, max_side: int | None) -> list[np.ndarray]:
         import torch
         model = self._load_real_model(device)
@@ -111,8 +98,8 @@ class HumanPose2DEstimator:
             if best_idx >= 0 and best_iou > 0.05:
                 assigned.append(np.asarray(pred_kpts[best_idx], dtype=np.float32))
             else:
-                assigned.extend(self._heuristic_keypoints([box]))
-        self._backend_used = 'real'
+                assigned.append(None)  # honest: no real detection matched this box (never fabricate)
+        self._backend_used = 'keypoint_rcnn'
         return assigned
 
     def _predict_real(self, frame: np.ndarray, boxes: list[np.ndarray]) -> list[np.ndarray]:
@@ -136,12 +123,11 @@ class HumanPose2DEstimator:
         self._model = None
         self._model_device = None
 
-    def predict(self, frame: np.ndarray, boxes: list[np.ndarray]) -> list[np.ndarray]:
-        if self.backend_mode == 'heuristic':
-            return self._heuristic_keypoints(boxes)
+    def predict(self, frame: np.ndarray, boxes: list[np.ndarray]) -> list[np.ndarray | None]:
         if self.backend_mode == 'real':
             return self._predict_real(frame, boxes)
         try:
             return self._predict_real(frame, boxes)
         except Exception:
-            return self._heuristic_keypoints(boxes)
+            self._backend_used = 'unavailable'
+            return [None] * len(boxes)  # honest: no keypoints (never fabricate a skeleton)

@@ -65,6 +65,13 @@ TRANSFORMERS_SPEC="${TRANSFORMERS_SPEC:-transformers>=4.44}"
 # the weights (~1.5 GB, no manual URL). Fixed-resolution variant -> standard pixel_values.
 SIGLIP2_MODEL_ID="${SIGLIP2_MODEL_ID:-google/siglip2-so400m-patch14-384}"
 
+# Sapiens (Meta, CC-BY-NC-4.0 non-commercial, ungated) — the FP5 `humans` dense top
+# rung: pose / body-part seg / depth / normals via TorchScript checkpoints, loaded
+# directly with torch.jit (no transformers). Install = pre-caching the 4 ungated HF
+# checkpoints for the chosen size into the HF hub cache (~5 GB at 0.6B). The repo +
+# filename list lives in room4d.perception.humans.sapiens_wrapper._CHECKPOINTS.
+SAPIENS_SIZE="${SAPIENS_SIZE:-0.6b}"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -118,6 +125,7 @@ INSTALL_COTRACKER=0
 INSTALL_SAM2=0
 INSTALL_DINOV2=0
 INSTALL_SIGLIP2=0
+INSTALL_SAPIENS=0
 INSTALL_VGGT_LONG=0
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -163,6 +171,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_DINOV2=1; shift ;;
     --with-siglip2)
       INSTALL_SIGLIP2=1; shift ;;
+    --with-sapiens)
+      INSTALL_SAPIENS=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
     --with-gsplat)
@@ -205,6 +215,8 @@ Install options:
                           weights (FP3 reid top rung; DINOv3-L swaps in by model_id)
   --with-siglip2          Install HuggingFace transformers + pre-cache the SigLIP2
                           weights (FP4 semantics top rung; ungated, open-vocab category)
+  --with-sapiens          Pre-cache the Sapiens dense checkpoints (FP5 humans top rung:
+                          pose/seg/depth/normals; ungated, CC-BY-NC-4.0 non-commercial)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the room4d renderer requires it)
@@ -533,6 +545,22 @@ mid = os.environ["SIGLIP2_MODEL_ID"]
 AutoProcessor.from_pretrained(mid)
 AutoModel.from_pretrained(mid)
 print("SigLIP2 weights cached:", mid)
+PYEOF
+}
+
+download_sapiens_checkpoints_if_needed() {
+  # Pre-cache the Sapiens TorchScript checkpoints (pose/seg/depth/normal) for
+  # SAPIENS_SIZE into the HF hub cache. Idempotent + ungated (CC-BY-NC-4.0). Reuses the
+  # repo/filename list from the room4d package so it stays the single source of truth.
+  echo "Pre-caching Sapiens ${SAPIENS_SIZE} checkpoints (pose/seg/depth/normal) into the HF hub cache..."
+  SAPIENS_SIZE="${SAPIENS_SIZE}" python - <<'PYEOF'
+import os
+from huggingface_hub import hf_hub_download
+from room4d.perception.humans.sapiens_wrapper import _CHECKPOINTS
+size = os.environ["SAPIENS_SIZE"]
+for task, (repo, filename) in _CHECKPOINTS[size].items():
+    print(f"  {task}: {hf_hub_download(repo, filename)}")
+print("Sapiens checkpoints cached:", size)
 PYEOF
 }
 
@@ -932,6 +960,9 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
     smoke_test_python_module "transformers" "transformers" "transformers"
   fi
+  if [[ $INSTALL_SAPIENS -eq 1 ]]; then
+    smoke_test_python_module "torch" "torch" "torch"
+  fi
   if [[ $INSTALL_POSE_REFINE -eq 1 ]]; then
     # pose-refinement deps: pycolmap (BA), hydra-core + omegaconf (required by
     # the vendored VGGSfM tracker the refiner drives).
@@ -1035,6 +1066,10 @@ if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the SigLIP2 semantics rung..."
   python -m pip install "${TRANSFORMERS_SPEC}"
   download_siglip2_weights_if_needed
+fi
+
+if [[ $INSTALL_SAPIENS -eq 1 ]]; then
+  download_sapiens_checkpoints_if_needed
 fi
 
 if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
@@ -1198,6 +1233,7 @@ $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_C
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
 $( [[ $INSTALL_DINOV2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + DINOv2-L weights ${DINOV2_MODEL_ID} cached (FP3 reid rung)" )
 $( [[ $INSTALL_SIGLIP2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + SigLIP2 weights ${SIGLIP2_MODEL_ID} cached (FP4 semantics rung)" )
+$( [[ $INSTALL_SAPIENS -eq 1 ]] && echo "- Sapiens ${SAPIENS_SIZE} dense checkpoints cached (FP5 humans rung; CC-BY-NC-4.0)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- hloc from tag ${HLOC_TAG} at ${HLOC_DIR}" )
 $( [[ $INSTALL_VGGT_LONG -eq 1 ]] && echo "- VGGT-Long from commit ${VGGT_LONG_COMMIT} at ${VGGT_LONG_DIR}" )

@@ -63,11 +63,10 @@ def _fr(idx: int) -> FrameRef:
 
 def test_perceive_humans_consumes_instance_and_reid(tmp_path: Path, monkeypatch) -> None:
     """humans = human-kind tracklets, ids canonicalized; pose/SMPL run over segment masks."""
-    pipeline = Room4DPipeline({'run_dir': str(tmp_path)})
+    # use_sapiens=False -> the dense ladder uses the Keypoint-RCNN floor (patched below)
+    pipeline = Room4DPipeline({'run_dir': str(tmp_path), 'humans': {'use_sapiens': False}})
     monkeypatch.setattr(pipeline.decoder, 'get_frame', lambda stream, idx: np.zeros((40, 48, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline.human_pose, 'predict', lambda frame, boxes: [_make_kpts(5, 5) for _ in boxes])
-    monkeypatch.setattr(pipeline.human_densepose, 'predict', lambda frame, boxes, masks=None, keypoints=None: [None for _ in boxes])
-    monkeypatch.setattr(pipeline.human_smpl, 'fit_frame', lambda frame, kpts, mask=None, intrinsics=None: _make_smpl(0.0))
 
     inst = InstanceArtifact(
         run_id='dev', stage_name='segment', save_dir=tmp_path / 'segment',
@@ -83,7 +82,7 @@ def test_perceive_humans_consumes_instance_and_reid(tmp_path: Path, monkeypatch)
 
     video = tmp_path / 'clip.mp4'
     video.touch()
-    out = pipeline.perceive_humans(IngestArtifact(
+    out = pipeline.compute_humans(IngestArtifact(
         run_id='dev', stage_name='ingest', save_dir=tmp_path / 'ingest',
         streams=[VideoStreamRef(stream_id='cam_00', video_path=video, fps=10.0, num_frames=3, width=48, height=40, has_audio=False)],
     ), instance_artifact=inst, reid_artifact=reid)
