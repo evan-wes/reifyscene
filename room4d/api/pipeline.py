@@ -31,6 +31,8 @@ from room4d.perception.humans.detector import HumanDetector
 from room4d.perception.humans.pose2d import HumanPose2DEstimator
 from room4d.perception.humans.densepose_wrapper import DensePoseEstimator
 from room4d.perception.humans.smpl_fitter import SMPLFitter
+from room4d.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, SapiensDenseRung
+from room4d.perception.humans.sapiens_wrapper import sapiens_cached
 from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.objects.detector import ObjectDetector
 from room4d.perception.objects.embedder import InstanceEmbedder
@@ -637,77 +639,79 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def perceive_humans(self, ingest_artifact, instance_artifact=None, reid_artifact=None, geometry_artifact=None):
-        """Build HumanArtifact from human tracklets: pose / DensePose / SMPL over segment masks.
+    def compute_humans(self, ingest_artifact, instance_artifact=None, reid_artifact=None, geometry_artifact=None):
+        """Build HumanArtifact via a dense backend ladder (consumes segment + reid).
 
-        Consumes `segment` (human-kind instances + masks) and `reid` (canonical ids).
-        Detection + identity now live upstream (§4A); the hand-tuned associator is gone.
+        Dense ladder [sapiens -> keypoint_rcnn -> bbox_only]: Sapiens (FP5a) gives
+        pose + body-part seg + depth + normals per person crop; the Keypoint-RCNN
+        floor gives honest pose only; bbox_only is the graceful floor. SMPL stays an
+        honest skip (``smpl_params=None``; GVHMR at FP5b) and DensePose stays a
+        kept-but-unwired seam. Identity is the canonical (reid-merged) track id;
+        always emits a schema-valid artifact + capability manifest.
         """
         humans_cfg = self.cfg.get('humans', {})
-        densepose_stride = max(1, int(humans_cfg.get('densepose_frame_stride', 1)))
-        smpl_stride = max(1, int(humans_cfg.get('smpl_frame_stride', 1)))
-        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        human_states: list[HumanState] = []
-        mask_arrays: dict[str, np.ndarray] = {}
-        densepose_payloads: dict[str, dict[str, Any]] = {}
-        smpl_payloads: dict[str, dict[str, Any]] = {}
+        empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
+        instances = instance_artifact if instance_artifact is not None else empty
+        sapiens_cfg = {**humans_cfg}
+
+        def _sapiens_probe():
+            if not humans_cfg.get('use_sapiens', True):
+                return 'sapiens disabled (humans.use_sapiens=false)'
+            return sapiens_cached(str(humans_cfg.get('sapiens_size', '0.6b')))
+
+        ladder = BackendLadder('humans', [
+            # Sapiens dense (pose+seg+depth+normals), built inside the runner so the
+            # torchscript models load only when this rung is selected; gated by the
+            # checkpoint-presence probe -> degrades to the Keypoint-RCNN floor.
+            BackendRung('sapiens', 'sapiens_dense',
+                        runner=lambda inp: SapiensDenseRung(self.decoder, sapiens_cfg).run(inp['ingest'], inp['instances']),
+                        probe=_sapiens_probe),
+            BackendRung('keypoint_rcnn', 'pose_only',
+                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances'])),
+            BackendRung('bbox_only', 'bbox_only',
+                        runner=lambda inp: BboxOnlyRung(self.decoder).run(inp['ingest'], inp['instances'])),
+        ])
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instances})
+        dense_by_instance = result if result is not None else {}
 
         def _canonical(track_id: str) -> str:
             return reid_artifact.canonical(track_id) if reid_artifact is not None else track_id
 
-        human_obs = [] if instance_artifact is None else [o for o in instance_artifact.observations if o.kind == 'human']
-        by_frame: dict[str, list] = {}
+        human_obs = [o for o in instances.observations if o.kind == 'human']
+        human_states: list[HumanState] = []
+        mask_arrays: dict[str, Any] = {}
+        dense_payloads: dict[str, dict[str, Any]] = {}
         for o in human_obs:
-            by_frame.setdefault(InstanceArtifact._frame_key(o.frame_ref), []).append(o)
-        ordered = sorted(by_frame.keys(), key=lambda k: (k.split(':')[0], int(k.split(':')[1])))
-        for semantic_idx, frame_key in enumerate(ordered):
-            obs_list = by_frame[frame_key]
-            fr = obs_list[0].frame_ref
-            stream = stream_lookup.get(fr.stream_id)
-            if stream is None:
-                continue
-            frame = self.decoder.get_frame(stream, fr.frame_idx)
-            boxes = [np.asarray(o.bbox_xyxy, dtype=np.float32) for o in obs_list]
-            masks = [None if instance_artifact is None else instance_artifact.mask_arrays.get(o.instance_id) for o in obs_list]
-            keypoints = self.human_pose.predict(frame, boxes)
-            run_densepose = (semantic_idx % densepose_stride) == 0
-            run_smpl = (semantic_idx % smpl_stride) == 0
-            denseposes = self.human_densepose.predict(frame, boxes, masks=masks, keypoints=keypoints) if run_densepose else [None] * len(boxes)
-            for det_idx, o in enumerate(obs_list):
-                canonical = _canonical(o.track_id)
-                mask = masks[det_idx] if det_idx < len(masks) else None
-                if mask is not None:
-                    mask_arrays[o.instance_id] = np.asarray(mask, dtype=bool)
-                kpts = keypoints[det_idx] if det_idx < len(keypoints) else None
-                dp = denseposes[det_idx] if det_idx < len(denseposes) else None
-                if dp is not None:
-                    densepose_payloads[o.instance_id] = dp
-                smpl = self.human_smpl.fit_frame(frame, kpts, mask=mask, intrinsics=None) if run_smpl else None
-                if smpl is not None:
-                    smpl_payloads[o.instance_id] = smpl
-                attrs = {
-                    'detection_id': o.instance_id,
-                    'track_id': canonical,
-                    'track_ids': [],  # point-track support decoupled (§4A); empty at FP1
-                    'frame_key': frame_key,
-                    'semantic_frame_index': int(semantic_idx),
-                    'densepose_computed': bool(run_densepose),
-                    'smpl_computed': bool(run_smpl),
-                    'pose_backend': self.human_pose.backend_used,
-                    'densepose_backend': self.human_densepose.backend_used,
-                    'smpl_backend': self.human_smpl.backend_used,
-                }
-                human_states.append(HumanState(
-                    human_id=canonical,
-                    frame_ref=o.frame_ref,
-                    bbox_xyxy=np.asarray(o.bbox_xyxy, dtype=np.float32),
-                    mask_rle=None if mask is None else {'shape': list(np.asarray(mask).shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
-                    keypoints_2d=None if kpts is None else np.asarray(kpts, dtype=np.float32),
-                    densepose=dp,
-                    smpl_params=smpl,
-                    confidence=float(o.confidence),
-                    attributes=attrs,
-                ))
+            canonical = _canonical(o.track_id)
+            mask = instances.mask_arrays.get(o.instance_id)
+            if mask is not None:
+                mask_arrays[o.instance_id] = np.asarray(mask, dtype=bool)
+            rec = dense_by_instance.get(o.instance_id) or {}
+            kpts = rec.get('keypoints_2d')
+            seg, depth, normals = rec.get('seg'), rec.get('depth'), rec.get('normals')
+            dense = None
+            if any(v is not None for v in (seg, depth, normals)):
+                dense = {'seg': seg, 'depth': depth, 'normals': normals}
+                dense_payloads[o.instance_id] = {k: v for k, v in dense.items() if v is not None}
+            attrs = {
+                'detection_id': o.instance_id,
+                'track_id': canonical,
+                'track_ids': [],  # point-track support decoupled (§4A)
+                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'dense_backend': rec.get('backend', manifest.backend_used),
+            }
+            human_states.append(HumanState(
+                human_id=canonical,
+                frame_ref=o.frame_ref,
+                bbox_xyxy=np.asarray(o.bbox_xyxy, dtype=np.float32),
+                mask_rle=None if mask is None else {'shape': list(np.asarray(mask).shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
+                keypoints_2d=None if kpts is None else np.asarray(kpts, dtype=np.float32),
+                densepose=None,
+                smpl_params=None,
+                confidence=float(o.confidence),
+                attributes=attrs,
+                dense=dense,
+            ))
 
         artifact = HumanArtifact(
             run_id=ingest_artifact.run_id,
@@ -718,24 +722,21 @@ class Room4DPipeline:
             linked_ids={},
             frame_index={},
             mask_arrays=mask_arrays,
-            densepose_payloads=densepose_payloads,
-            smpl_payloads=smpl_payloads,
+            densepose_payloads={},
+            smpl_payloads={},
+            dense_payloads=dense_payloads,
             notes=[],
             metadata={
-                'pose_backend': self.human_pose.backend_used,
-                'densepose_backend': self.human_densepose.backend_used,
-                'smpl_backend': self.human_smpl.backend_used,
+                'dense_backend': manifest.backend_used,
                 'save_debug_assets': bool(humans_cfg.get('save_debug_assets', humans_cfg.get('debug', False))),
                 'save_debug_html': bool(humans_cfg.get('save_debug_html', humans_cfg.get('debug', False))),
                 'debug_image_paths': {},
-                'densepose_frame_stride': int(densepose_stride),
-                'smpl_frame_stride': int(smpl_stride),
                 'num_human_tracks': len({h.human_id for h in human_states}),
             },
         )
+        artifact.attach_manifest(manifest)
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
         artifact.notes.append(f"human_instances={len(human_states)} human_tracks={artifact.metadata['num_human_tracks']}")
-        self._attach_human_debug_projections(artifact, None, geometry_artifact)
         self._stamp_stage_metadata(artifact, 'humans', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
@@ -934,7 +935,7 @@ class Room4DPipeline:
         instance_artifact = self.segment(ingest_artifact, geometry_artifact=pose_geometry)
         reid_artifact = self.compute_reid(ingest_artifact, instance_artifact)
         object_artifact = self.perceive_objects(ingest_artifact, instance_artifact=instance_artifact, reid_artifact=reid_artifact)
-        human_artifact = self.perceive_humans(ingest_artifact, instance_artifact=instance_artifact, reid_artifact=reid_artifact, geometry_artifact=pose_geometry)
+        human_artifact = self.compute_humans(ingest_artifact, instance_artifact=instance_artifact, reid_artifact=reid_artifact, geometry_artifact=pose_geometry)
         track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
         graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)

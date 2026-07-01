@@ -100,6 +100,7 @@ class HumanState:
     smpl_params: Optional[dict[str, Any]]
     confidence: float
     attributes: dict[str, Any] = field(default_factory=dict)
+    dense: Optional[dict[str, Any]] = None  # Sapiens dense outputs: {seg, depth, normals}
 
 
 @dataclass

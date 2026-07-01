@@ -119,7 +119,7 @@ def build_stage_registry() -> dict[str, StageSpec]:
             name='humans',
             dependencies=('ingest', 'segment', 'reid', 'pose_refine'),
             artifact_cls=HumanArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.perceive_humans(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid'], geometry_artifact=outputs['pose_refine']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_humans(outputs['ingest'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid'], geometry_artifact=outputs['pose_refine']),
             load_fn=HumanArtifact.load,
         ),
         'tracking': StageSpec(

@@ -7,6 +7,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.25.0] - 2026-06-30
+
+### Added
+- **FP5a — Sapiens dense human rung + F3 de-fabrication (ladder-ified `humans`).**
+  Climbs the `humans` dense sub-ladder (design §4A / §7) with Meta's Sapiens, and
+  executes the F3 subsumption by making the humans wrappers honest. FP5b
+  (GVHMR world-SMPL) is deferred — its blockers (MPI-registered SMPL assets +
+  gravity-aligned poses) and its payoff both live near the back-half graph.
+  - `perception/humans/sapiens_wrapper.SapiensEstimator`: wraps Sapiens-lite
+    **TorchScript** (pose / body-part seg / depth / normals) top-down per person
+    crop — aspect-pad to 768:1024, ImageNet-normalize, decode heatmaps→keypoints
+    (Goliath-308) + seg (28 parts) + depth + normals back to image space. Ungated
+    HF checkpoints (`facebook/sapiens-{task}-0.6b-torchscript`), **CC-BY-NC-4.0**
+    (non-commercial — fine for this no-ship research repo). Lazy + import-safe.
+  - `perception/humans/dense_ladder`: the dense-ladder rung adapters
+    (`SapiensDenseRung` / `KeypointRcnnRung` / `BboxOnlyRung`) — thin glue that
+    does the decode-once-per-frame loop and calls each **tool wrapper's**
+    `predict(frame, boxes)`. The tool wrappers stay separate + swappable.
+  - `pipeline.compute_humans` (renamed from `perceive_humans`): runs
+    `BackendLadder('humans', [sapiens → keypoint_rcnn → bbox_only])` gated by a
+    Sapiens **checkpoint-presence** probe (`--with-sapiens`), degrading to the
+    honest Keypoint-RCNN floor. `HumanArtifact` gains a `CapabilityManifest` (the
+    last stage that lacked one); `HumanState`/`HumanArtifact` carry a `dense`
+    payload (seg/depth/normals).
+  - `scripts/setup_room4d.sh --with-sapiens`: pre-caches the 4 Sapiens 0.6B
+    TorchScript checkpoints (~5 GB, ungated).
+  - `scripts/fp5_validate_humans.py`: runs the Sapiens rung on real segmented
+    `spin` people. **Result:** the real person track gets 308 keypoints (~250
+    visible, **100% inside the box**), **8–9 body-part seg classes**, well-formed
+    depth + unit normals; spurious detections correctly yield near-empty. (Humans
+    output is dead data downstream until the P3 graph re-cut, so there is no
+    render gate.)
+
+### Changed
+- **F3 subsumption — humans wrappers de-fabricated (kept as swappable seams).**
+  `pose2d.HumanPose2DEstimator` no longer splices a fabricated skeleton for
+  unmatched boxes and stamps it `'real'` — it returns `None` with an honest
+  `keypoint_rcnn`/`unavailable` label. `densepose_wrapper` drops the fake
+  bbox-grid colorizer (honest `unavailable`; Sapiens seg is the dense source now)
+  and `smpl_fitter` drops the fabricated betas/pose (honest `skip`; GVHMR at
+  FP5b). This brings the humans wrappers in line with the honest `backend_used`
+  every other wrapper already reports. `detector.py` is left as a kept-but-unused
+  seam (detection lives in `segment`).
+
+### Tests
+- `tests/test_humans_dense.py`: honest wrappers (densepose `unavailable`, smpl
+  `skip`), the dense-ladder rungs (fake estimators, no weights), and the pure
+  Sapiens decode math (heatmap→image mapping, pad removal, resize/unpad).
+- `tests/test_human_perception.py`: updated for the `compute_humans` rename and
+  the `humans.use_sapiens=false` floor path.
+
 ## [0.1.24.0] - 2026-06-30
 
 ### Added
