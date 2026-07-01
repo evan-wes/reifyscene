@@ -48,6 +48,9 @@ class ColmapPoseInitializer(GeometryInitializer):
         self.run_id = str(self.cfg.get("run_id", "colmap"))
         self.save_dir = Path(self.cfg.get("geometry_save_dir", "artifacts/geometry_colmap"))
         self.work_dir = Path(self.cfg.get("colmap_work_dir", ".room4d_cache/colmap_pose"))
+        # Populated by ``reconstruct`` so the FP6b fused path (scale reconciliation) can
+        # re-read the sparse model's 3D points + reprojections. None until a run lands.
+        self._last_model_dir: Path | None = None
         # Intrinsics prior: "fx,fy,cx,cy" fixes intrinsics (calibration-arc lesson:
         # free intrinsics -> ~13-16% scale bias). Absent -> COLMAP free-estimates
         # them (manifest/notes flag the residual-scale caveat downstream).
@@ -126,6 +129,7 @@ class ColmapPoseInitializer(GeometryInitializer):
             runner_cfg["camera_params"] = str(self.camera_params)
         sparse_dir = HlocColmapSfMRunner(runner_cfg).run(img_dir, self.work_dir / "sfm")
         model_dir = self._find_model_dir(Path(sparse_dir))
+        self._last_model_dir = model_dir  # expose the sparse model for scale reconciliation
         return self._load_poses(model_dir) if model_dir is not None else {}
 
     # -- artifact construction --------------------------------------------
@@ -178,8 +182,8 @@ class ColmapPoseInitializer(GeometryInitializer):
 
         reg_frac = len(registered) / max(len(selected), 1)
         # COLMAP is up-to-similarity; if intrinsics were free-estimated, note the
-        # ~13-16% residual-scale caveat (calibration arc) for scale reconciliation (step 5).
-        return GeometryArtifact(
+        # ~13-16% residual-scale caveat (calibration arc) for scale reconciliation (step 2).
+        artifact = GeometryArtifact(
             run_id=self.run_id, stage_name="geometry", save_dir=self.save_dir,
             backend_name=self.backend_name, selected_frames=registered,
             intrinsics_by_stream=intrinsics_by_stream,
@@ -187,8 +191,13 @@ class ColmapPoseInitializer(GeometryInitializer):
             notes=[
                 f"COLMAP-SfM pose rung: registered {len(registered)}/{len(selected)} "
                 f"frames ({100 * reg_frac:.0f}%).",
-                f"intrinsics={'fixed' if self.fix_intrinsics else 'free-estimated (up-to-scale; ~13-16% residual, resolve at step 5)'}.",
+                f"intrinsics={'fixed' if self.fix_intrinsics else 'free-estimated (up-to-scale; ~13-16% residual, resolve at scale reconciliation)'}.",
                 "pose-only rung: camera egomotion + intrinsics; no dense depth "
                 "(depth comes from the MoGe rung on the depth ladder).",
             ],
         )
+        # Expose the sparse model so the FP6b fused path can reconcile COLMAP↔MoGe scale
+        # from its 3D-point reprojections (design §4A.1).
+        if self._last_model_dir is not None:
+            artifact.metadata["colmap_model_dir"] = str(self._last_model_dir)
+        return artifact
