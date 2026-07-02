@@ -7,6 +7,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.0] - 2026-07-02
+
+### Added
+- **Complete, safe GT-oracle geometry + shared depth helper.** The dataset backend now emits
+  the *full* geometry contract (poses + depth + **world point maps** + RGB linkage), so a
+  GT-perfect run flows all the way to a rendered novel view.
+  - `common/depth.py` (new): one definition of **valid depth** (`valid_depth_mask` — finite &
+    `> near`, optional `far`) + a dense `unproject_depth_to_world` (world-from-camera, OpenCV
+    pinhole — the VGGT convention), returning **NaN at invalid depth** with a validity mask.
+  - `geometry/dataset_wrapper.py`: back-projects GT depth → `pointmaps_by_frame` (NaN at holes,
+    confidence = validity), so ground-plane canonicalization and every point-map consumer treat
+    the oracle like any other backend. Also wires `metadata['debug_image_paths']` (the GT RGB
+    frames) so scene/render seeding can find images — the oracle is now **renderable**.
+
+### Fixed
+- **Depth-map consumers are now zero/NaN safe.** Zero depth is *finite*, so a plain `isfinite`
+  guard back-projected depth holes to a spurious point at the camera origin.
+  - `lifting/backproject.py::Backprojector`: flags `~isfinite(z) | z<=near` → NaN (also fixes
+    the optimizer's `_relift_tracks`, which routes through it).
+  - `lifting/geometry_provider.py`: the render frame-stack's `valids` mask now comes from
+    `valid_depth_mask(depth)` instead of unconditional ones — a zero/NaN-depth pixel is no
+    longer fed to the render trainer as valid supervision.
+  - (`render/seed.py` and the fused `compose`/`scale_reconcile` were already safe; verified.)
+
+### Tests
+- `tests/test_depth_safety.py` (4): `valid_depth_mask` excludes zero/NaN/negative + far bound;
+  `unproject_depth_to_world` (identity pose + NaN holes); `Backprojector` zero/NaN → NaN (not
+  origin); dataset oracle emits complete safe point maps + RGB linkage.
+- **Validated end-to-end on spin (GT oracle from frames):** point maps produced (finite frac
+  0.90, NaN holes), `ground_plane_applied: True`, and the full chain runs rc=0 through render →
+  **1.5M seed gaussians + a `flythrough.mp4`** novel view. The whole pipeline consumes NaN-hole
+  depth without a crash. Full suite: **360 passed, 1 skipped**.
+
 ## [0.1.30.0] - 2026-07-02
 
 ### Added

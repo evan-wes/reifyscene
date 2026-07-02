@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from room4d.common.depth import unproject_depth_to_world
 from room4d.common.io import read_json
 from room4d.common.types import (
     CameraIntrinsics,
@@ -200,6 +201,8 @@ class DatasetGeometryInitializer(GeometryInitializer):
         intrinsics_by_stream: dict[str, CameraIntrinsics] = {}
         camera_states_by_stream: dict[str, list[TimedCameraState]] = {}
         depthmaps_by_frame: dict[str, Any] = {}
+        pointmaps_by_frame: dict[str, Any] = {}
+        debug_image_paths: dict[str, str] = {}
         selected_frames: list[FrameRef] = []
 
         for stream_id, frame_idx, time_id in specs:
@@ -207,7 +210,7 @@ class DatasetGeometryInitializer(GeometryInitializer):
             frame_idx = int(frame_idx)
             name = self.frame_name(stream_id, frame_idx)
             intrinsics, t_world_cam, _wh = self.load_camera(name)
-            depth = self.load_depth(name)
+            depth = np.squeeze(np.asarray(self.load_depth(name), dtype=np.float32))
             time_sec = float(time_id) / self.fps
 
             frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx, timestamp_sec=time_sec)
@@ -221,7 +224,19 @@ class DatasetGeometryInitializer(GeometryInitializer):
                     pose=CameraPose(T_world_cam=t_world_cam),
                 )
             )
-            depthmaps_by_frame[f"{stream_id}:{frame_idx}"] = {"depth": depth, "confidence": None}
+            # Complete oracle geometry: back-project GT depth to WORLD points (VGGT
+            # convention), NaN at depth holes with a confidence = validity mask, so
+            # ground-plane + every point-map consumer treat it like any other backend.
+            world_pts, valid = unproject_depth_to_world(depth, intrinsics, t_world_cam)
+            conf = valid.astype(np.float32)
+            key = f"{stream_id}:{frame_idx}"
+            depthmaps_by_frame[key] = {"depth": depth, "confidence": conf}
+            pointmaps_by_frame[key] = {"points": world_pts, "confidence": conf}
+            # Wire the GT RGB frame so scene/render seeding + debug export can find it
+            # (same metadata['debug_image_paths'] contract VGGT populates).
+            rgb_path = self.rgb_dir / f"{name}.png"
+            if rgb_path.exists():
+                debug_image_paths[key] = str(rgb_path.resolve())
 
         return GeometryArtifact(
             run_id=self.run_id,
@@ -232,10 +247,14 @@ class DatasetGeometryInitializer(GeometryInitializer):
             intrinsics_by_stream=intrinsics_by_stream,
             camera_states_by_stream=camera_states_by_stream,
             depthmaps_by_frame=depthmaps_by_frame,
+            pointmaps_by_frame=pointmaps_by_frame,
+            metadata={"debug_image_paths": debug_image_paths},
             notes=[
                 f"dataset_root={self.dataset_root}",
                 f"factor={self.factor}",
                 f"split={self.split}",
                 f"frames={len(selected_frames)}",
+                "GT-oracle geometry: poses + depth + world point maps (depth holes → NaN, "
+                "confidence = validity); matches the VGGT/fused point-map contract.",
             ],
         )
