@@ -145,6 +145,7 @@ class ArtifactGeometryProvider(GeometryProvider):
         import torch
         from PIL import Image
 
+        from room4d.common.depth import valid_depth_mask
         from room4d.lifting.native_track_lift import CameraRecords, FrameStack, _intrinsics_matrix
 
         if split != "train":
@@ -194,7 +195,9 @@ class ArtifactGeometryProvider(GeometryProvider):
             depths.append(torch.as_tensor(depth, device=device))
             rgbs.append(torch.as_tensor(rgb, device=device))
             fgs.append(torch.as_tensor(fg_arr, device=device))
-            valids.append(torch.ones((h, w), dtype=torch.float32, device=device))
+            # Valid only where depth is usable (finite & > near) — a zero/NaN hole must not
+            # be fed to the render trainer as valid supervision (was unconditional ones).
+            valids.append(torch.as_tensor(valid_depth_mask(depth).astype(np.float32), device=device))
 
         n = len(names)
         cameras = CameraRecords(
