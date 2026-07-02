@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.30.0] - 2026-07-02
+
+### Added
+- **Lossless frame-directory ingest + intrinsics-prior wiring** — closes the two P1 gaps the
+  end-to-end run surfaced (fused geometry not pipeline-robust; no dataset/frame-dir ingest).
+  - `ingest/decoder.py`: `decode()` now accepts a **directory** and ingests it as a lossless
+    frame sequence (no re-encode) — `stream_id` + `frame_idx` are **parsed from filenames**
+    (`0_00060.png` → cam `"0"`, idx `60`) so dataset ground-truth (`{cam}_{idx}.ext`) aligns.
+    `get_frame`/`iter_frames` load originals via `cv2.imread`. Single-camera-per-dir scope
+    (multi-camera split deferred). Videos are unchanged.
+  - `run_single_video_room4d.py`: `--frames-dir` (lossless, alternative to `--video`; exactly
+    one required — you can now A/B the same data as frames vs a video) + `--geometry-camera-params
+    "fx,fy,cx,cy"` (sets `geometry.camera_params` + `fix_intrinsics` for the COLMAP pose rung).
+  - **Why it matters (validated on spin):** the earlier lossy re-encode was a *test-harness*
+    artifact, not a pipeline defect. From **raw frames + the GT-focal prior**, COLMAP registers
+    **71/71** and the FP6b fused geometry spans **71 frames / 40,189 obs** (residual median 0.996,
+    healthy) — vs a degraded **3-frame** fused set on the lossy video. The **dataset GT backend**
+    now resolves (`dataset_gt`, `stream_id="0"` aligns) instead of falling to empty. One change,
+    both previously-broken geometry combos fixed. Findings doc updated (gaps #2/#3 → FIXED).
+
+### Tests
+- `tests/test_frame_dir_ingest.py` (9): filename parsing; frame-dir decode (camera + indices +
+  size); **lossless** `get_frame` (exact match to the source, by parsed index not position);
+  missing-index/empty-dir errors; `iter_frames` order; no-camera-prefix fallback; multi-camera
+  single-camera scope; `preprocess` end-to-end on a frame dir (parsed `stream_id` flows through).
+  Full suite: **356 passed, 1 skipped**.
+
 ## [0.1.29.1] - 2026-07-02
 
 ### Fixed
