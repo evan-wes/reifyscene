@@ -588,7 +588,8 @@ and multi-stream integration are explicit Block-1 scope. Each phase is a feature
 intentionally coarse — learning reshapes them.
 
 ```
-BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
+BLOCK 1 — FOUNDATION (no stubs). GATE G1-single (single stream, dynamic 4D) unlocks Block 2;
+          GATE G1-multi (multi-stream) is a parallel track, not a prerequisite for Block 2.
   F0  Renderable core (anchor)      Delete the render toy (Gaussian4DScene / Gaussian4DTrainer); wire
                                     proven Static/DynamicGaussianTrainer into the render stage
                                     (SceneArtifact→seed adapter, static/dynamic select, training-
@@ -655,6 +656,23 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     size-gated ROBUSTNESS rung (not a hard gate), fixed intrinsics OK.
                                     Depends on: FP6a.
 
+  ── GATE G1-single (2026-07-02 two-gate split): the full pipeline (ingest→dyn_mask→geometry→
+              pose_refine→segment→reid→semantics→objects→humans→tracking→graph→optimization→scene→
+              render) RUNS END-TO-END on a SINGLE stream, every stage real, producing a DYNAMIC 4D
+              reconstruction (moving entities with 3D trajectories, not a static scene), validated vs
+              single-stream GT (extrinsics + depth + masked-NVS ~20.7, the F0b target). **UNLOCKS
+              BLOCK 2.** Rationale: the contribution — queryable-graph→query→compiler→round-trip-eval —
+              is single-stream-viable (P3 entities need only per-stream trajectories; P4/P7 diff a graph
+              re-perceived from a re-render; all renderer-agnostic). Multi-stream adds coverage /
+              cross-view fusion / the casual-capture north-star INPUT, NOT a prerequisite for the wedge.
+              STATUS 2026-07-02: chain runs + renders single-stream (combo A + GT oracle); remaining =
+              the DYNAMIC reconstruction (renders were `kind:static`) + NVS scoring. ──
+
+  ── The F1/F2/F4 items below are the MULTI-STREAM track toward GATE G1-multi. They run in PARALLEL
+              with BLOCK 2 (off the critical path to the contribution), NOT before it. F1 is a trivial
+              no-op single-stream; F2's single-stream residual is only metric-scale anchoring (the graph
+              tolerates up-to-scale) — a refinement for G1-single, not a blocker. ──
+
   F1  Real temporal sync            TIER-1 coarse temporal prior (§4B): replace the 0.0 stub
        (Tier-1 coarse prior, §4B)   (audio_sync.py:11 / motion_sync.py:16) with audio / motion-energy
                                     cross-correlation → offset + confidence (may abstain). VALIDATE on
@@ -675,9 +693,11 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
   F4  Multi-stream integration      Whatever G1 surfaces beyond the stubs: geometry fusion across
                                     streams, scene assembly from multiple cams, render from a fused
                                     multi-cam reconstruction. (The end-to-end run is what finds these.)
-  ── GATE G1: the full pipeline (ingest→sync→geometry→pose_refine→segment→reid→objects→humans→
-              tracking→optimization→scene→render) RUNS END-TO-END on multi-stream rig data, every
-              stage real, validated against rig GT (extrinsics + recovered sync offset + masked-NVS). ──
+  ── GATE G1-multi: the full pipeline (ingest→sync→dyn_mask→geometry→pose_refine→segment→reid→
+              objects→humans→tracking→optimization→scene→render) RUNS END-TO-END on MULTI-STREAM rig
+              data, every stage real (incl. F1 sync + F2 fusion + F4 integration), validated against
+              rig GT (extrinsics + recovered sync offset + masked-NVS). The casual-multi-capture
+              north-star; runs in PARALLEL with / after BLOCK 2, NOT a prerequisite for it. ──
 
   (parallel) Grounding spike        Open-vocab language→reconstructed-entity grounding (4D-LangSplat-
                                     style time-varying semantic field, or ConceptGraphs-style),
@@ -686,10 +706,12 @@ BLOCK 1 — FOUNDATION COMPLETE (no stubs; multi-stream; GATE G1 for Block 2)
                                     FP4 (SigLIP2/Qwen-VL per-tracklet semantics) is the front-half
                                     half of this — the spike measures grounding; FP4 builds it.
 
-BLOCK 2 — BACK-HALF REDESIGN (starts only after G1)
+BLOCK 2 — BACK-HALF REDESIGN (starts after G1-single; multi-stream G1-multi is a parallel track)
   P3  Queryable + dual-use graph    Re-cut GraphArtifact (§5a): temporal entity trajectories,
                                     presence, typed time-interval relations, grounding handles;
-                                    deterministic/re-runnable builder (judge). Depends on: G1, grounding.
+                                    deterministic/re-runnable builder (judge). Single-stream graph is
+                                    single-VIEW (occlusion gaps, no cross-view fusion) but real; multi-
+                                    stream enriches it post-G1-multi. Depends on: G1-single, grounding.
   P4  Correspondence-floor experiment  Measure the CROSS-INPUT node-correspondence error between
                                     G'_expected and a G re-perceived from a *re-rendered* answer (NOT
                                     re-run drift on identical input — that bounds the wrong thing,
@@ -715,11 +737,14 @@ HORIZON (coarse; learning reshapes)
                                     The genuine frontier bet. Depends on: P7, P8.
 ```
 
-Milestones: **Foundation = F0–F4 + FP0–FP6b + F0b + G1** (a real, no-stub, multi-stream pipeline
-running end-to-end on the modern perception stack). **Level-1 closed loop = P3–P7** on top of it. The
-frontier is **P8–P9**. Near-term path: **FP0 → FP1 → F0b** (prove the full pipeline on floor rungs),
-then climb FP2–FP6a ungated-first (FP6b — the geometry pose/depth split + calibration-arc SfM pose rung
-— is structural, sequenced after FP6a).
+Milestones (2026-07-02 two-gate split): **Single-stream foundation = F0 + FP0–FP6b + F0b + G1-single**
+(a real, no-stub, DYNAMIC single-stream pipeline on the modern perception stack) — this unlocks the
+back-half. **Level-1 closed loop = P3–P7** builds on **G1-single** (single-view but real). **Multi-stream
+foundation = F1 + F2 + F4 + G1-multi** is a PARALLEL track (the casual-multi-capture north-star input),
+not on the critical path to the contribution. The frontier is **P8–P9**. Near-term path: **FP0 → FP1 →
+F0b** (prove the full pipeline on floor rungs), climb FP2–FP6b ungated-first (all **done**), then close
+**G1-single** (dynamic 4D reconstruction + NVS scoring, single stream) → BLOCK 2. F1/F2/F4 proceed in
+parallel toward G1-multi.
 
 ## 8. Open questions / risks
 
