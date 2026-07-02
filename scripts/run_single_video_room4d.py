@@ -525,18 +525,29 @@ def main() -> None:
     registry = pipeline.stage_registry()
 
     outputs = {}
+    # Labels are DERIVED from STAGE_ORDER (single source of truth) so the numbering and
+    # coverage never drift as stages are added — previously a hardcoded "/11" map that went
+    # stale (missing dyn_mask/segment/reid/semantics → KeyError mid-run).
+    _stage_pretty = {
+        'ingest': 'Ingest / preprocess',
+        'sync': 'Temporal sync',
+        'dyn_mask': 'Dynamic mask (protect SfM)',
+        'geometry': 'Geometry init',
+        'pose_refine': 'Pose refinement (BA)',
+        'segment': 'Segment (masks + IDs)',
+        'reid': 'Re-identification',
+        'semantics': 'Semantics',
+        'objects': 'Object perception',
+        'humans': 'Human perception',
+        'tracking': 'Tracking + lifting + static/dynamic',
+        'graph': 'Scene graph',
+        'optimization': 'Optimization',
+        'scene': '4D scene assembly',
+        'render': 'Novel-view render',
+    }
     stage_labels = {
-        'ingest': 'Stage 1/11 · Ingest / preprocess',
-        'sync': 'Stage 2/11 · Temporal sync',
-        'geometry': 'Stage 3/11 · VGGT geometry',
-        'pose_refine': 'Stage 4/11 · Pose refinement (BA)',
-        'tracking': 'Stage 5/11 · Tracking + lifting + static/dynamic',
-        'humans': 'Stage 6/11 · Human perception',
-        'objects': 'Stage 7/11 · Object perception',
-        'graph': 'Stage 8/11 · Scene graph',
-        'optimization': 'Stage 9/11 · Optimization',
-        'scene': 'Stage 10/11 · 4D scene assembly',
-        'render': 'Stage 11/11 · Novel-view render',
+        name: f"Stage {i + 1}/{len(STAGE_ORDER)} · {_stage_pretty.get(name, name)}"
+        for i, name in enumerate(STAGE_ORDER)
     }
 
     stage_release_names = {
