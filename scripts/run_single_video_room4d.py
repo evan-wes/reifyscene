@@ -55,6 +55,10 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['system_report'] = system_report or collect_system_report()
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
+    if getattr(args, 'geometry_camera_params', None):
+        # Fixed intrinsics prior for the COLMAP pose rung (fused geometry wants this).
+        geometry['camera_params'] = str(args.geometry_camera_params)
+        geometry['fix_intrinsics'] = True
     if args.frame_cache_dir is not None:
         geometry['frame_cache_dir'] = args.frame_cache_dir
     if args.geometry_resize_max_dim is not None:
@@ -369,7 +373,11 @@ def _print_frame_summary(console: Console, outputs: dict, cfg: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
+    parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
+    parser.add_argument('--frames-dir', default=None,
+                        help='Path to a directory of RGB frames (ingested losslessly, no re-encode). '
+                             'Alternative to --video; exactly one is required. Camera id + frame indices '
+                             'are parsed from filenames (e.g. 0_00060.png), so dataset ground-truth aligns.')
     parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
     parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
     parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
@@ -381,6 +389,10 @@ def main() -> None:
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--geometry-camera-params', default=None,
+                        help='Fixed intrinsics prior "fx,fy,cx,cy" (pixels) for the COLMAP pose rung. '
+                             'Load-bearing for fused geometry (free intrinsics → ~13-16% scale bias). '
+                             'Sets geometry.camera_params + fix_intrinsics.')
     parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
     parser.add_argument('--geometry-frame-stride', type=int, default=None, help='Subsample the geometry frame set by original-frame stride after selecting the source timeline.')
     parser.add_argument('--geometry-frame-spacing-sec', type=float, default=None, help='Subsample the geometry frame set by approximate time spacing in seconds. Overrides --geometry-frame-stride when set.')
@@ -446,6 +458,11 @@ def main() -> None:
     parser.add_argument('--debug', action='store_true', help='Enable geometry and tracking debug exports.')
     parser.add_argument('--debug-max-points', type=int, default=5000)
     args = parser.parse_args()
+    # Exactly one input source; downstream uses args.video as the resolved input path
+    # (the decoder ingests a directory as a lossless frame sequence, a file as a video).
+    if bool(args.video) == bool(args.frames_dir):
+        parser.error('provide exactly one of --video or --frames-dir')
+    args.video = args.video or args.frames_dir
 
     start_idx, stop_idx = resolve_stage_window(args.start_stage, args.stop_stage)
     console = Console()
