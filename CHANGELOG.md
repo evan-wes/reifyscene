@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.29.1] - 2026-07-02
+
+### Fixed
+- **Runner crashed mid-run on a stale stage-label map.** `run_single_video_room4d.py` kept a
+  hardcoded `stage_labels` dict (labeled "/11") that had drifted from `STAGE_ORDER` — missing
+  `dyn_mask` (FP6b step 3) plus the earlier `segment`/`reid`/`semantics`, so a full run hit
+  `KeyError: 'dyn_mask'`. Labels are now **derived from `STAGE_ORDER`** (single source of truth),
+  so numbering/coverage can't drift as stages are added. Display-only; no stage behavior changes.
+
+### Docs
+- **`docs/design/2026-07-02-e2e-pipeline-run-findings.md`** — first full end-to-end pipeline run
+  on real data (spin), across the geometry-backend matrix (vggt / fused colmap+moge / dataset).
+  **Combo A (vggt) runs end-to-end → rendered novel-view flythrough.** Combo B (FP6b fused) runs
+  but isn't pipeline-robust (COLMAP erratic on lossy video frames; MoGe reliable; composer degrades
+  correctly). Combo C (dataset GT) is incompatible with video ingest (falls to graceful-empty).
+  Includes a severity-ranked gap ledger + recommended FP6b-hardening next steps (lossless
+  frame-sequence ingest + intrinsics-prior/density as first-class fused config). The ladder's
+  graceful degradation held throughout — no crashes past the label fix.
+
 ## [0.1.29.0] - 2026-07-01
 
 ### Added
