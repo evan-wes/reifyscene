@@ -7,6 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.1] - 2026-07-05
+
+### Fixed
+- **Dynamic 4D reconstruction now runs via the runner** — the G1-single stress test found that
+  *every* runner-driven render came out `kind:static`. Three bugs in the (never-run-in-pipeline)
+  dynamic path:
+  - `api/stages.py`: the **scene stage's registry `run_fn` never passed the segment
+    `instance_artifact`** (defaulted to `None`), and `segment` wasn't a scene dependency — so the
+    runner path always handed the dynamic assembler **zero foreground**. (`pipeline.run()` passed
+    it; the registry the runner uses did not.) *The operative bug.* Now `segment` is a scene dep and
+    the masks are passed through.
+  - `scene/assembler.py`: `_fg_mask_by_frame` read `frame_index`, which is only built at save-time
+    (`rebuild_indices`/`save`) — so an **in-memory (pre-save) segment artifact had it empty** → no
+    foreground. Rebuild from `observations` when empty (mirrors `save()`).
+  - `scene/assembler.py`: `_assemble_dynamic` **crashed at `quantile()` on empty foreground**; now
+    guarded (`frames_with_fg<2` upfront + a try/except backstop) and falls back to a **static** scene
+    (the documented "no foreground → effectively static" intent). Extracted `_assemble_static` as the
+    shared fallback.
+  - **Validated** (GT-oracle geometry, spin, 29 dense keyframes): scene `kind=dynamic` with **35,257
+    fg + 100,000 bg gaussians + 10 SE(3) motion bases**; render → dynamic `flythrough.mp4`. **Known
+    open (next branch):** in-pipeline masked-NVS quality is poor (mPSNR ~5 vs the ~20.7 target) —
+    the held-out val-camera placement / scene-norm path needs its own investigation.
+
+### Changed
+- **Design doc: G1 gate split into G1-single + G1-multi** (§7). The back-half contribution
+  (queryable-graph→query→compiler→round-trip-eval) is **single-stream-viable**, so BLOCK 2 (P3–P7)
+  is re-gated on **G1-single** (single-stream, dynamic 4D). **G1-multi** (multi-stream: F1 sync + F2
+  fusion + F4) becomes a parallel track, off the critical path to the contribution.
+
+### Tests
+- `tests/test_dynamic_scene.py` (3): scene stage depends on `segment`; `_fg_mask_by_frame` rebuilds
+  from observations when `frame_index` is empty (the in-memory case); multi-instance-per-frame union.
+  Full suite: **360 passed, 1 skipped**.
+
 ## [0.1.31.0] - 2026-07-02
 
 ### Added
