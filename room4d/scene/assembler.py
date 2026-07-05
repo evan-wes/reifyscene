@@ -187,6 +187,11 @@ class SingleVideoSceneAssembler:
             return {}
         mask_arrays = getattr(instance_artifact, "mask_arrays", {}) or {}
         frame_index = getattr(instance_artifact, "frame_index", {}) or {}
+        if not frame_index:
+            # frame_index is populated at save-time (rebuild_indices); an in-memory
+            # (pre-save) segment artifact has it empty — rebuild from observations so the
+            # live dynamic scene sees the foreground (mirrors InstanceArtifact.save()).
+            frame_index = instance_artifact._build_frame_index(getattr(instance_artifact, "observations", []) or [])
         out: dict[str, np.ndarray] = {}
         for key, instance_ids in frame_index.items():
             union: np.ndarray | None = None
@@ -275,15 +280,34 @@ class SingleVideoSceneAssembler:
         masks = stack.fg.cpu().numpy()
         frame_names = list(stack.cameras.frame_names)
 
-        all_pairs = TAPIRWrapper(self.tracker_cfg).compute_all_pairs(frames, masks, frame_names, factor=1)
+        # Robustness: the dynamic init lifts tracks only inside the foreground. If the fg
+        # masks don't cover these (geometry-timeline) frames, the lifted foreground is empty
+        # and scene-normalization's quantile crashes on an empty tensor. Gracefully fall back
+        # to a static scene (the documented "no foreground → effectively static" intent).
+        frames_with_fg = int((masks.reshape(len(masks), -1) > 0.5).any(axis=1).sum())
+        if frames_with_fg < 2:
+            return self._assemble_static(
+                run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
+                metadata=metadata, frame_refs=frame_refs, timeline=timeline,
+                extra_notes=[f"dynamic→static fallback: foreground in only {frames_with_fg}/{len(masks)} "
+                             "frames (segment masks don't cover the geometry timeline)."],
+            )
 
-        scene, cams, norm = NativeMotionInitializer(
-            dataset_root="",  # unused once provider + pair_loader supply geometry + tracks
-            factor=1, num_fg=self.dynamic_num_fg, num_bg=self.dynamic_num_bg,
-            num_bases=self.dynamic_num_bases, seed=self.dynamic_seed,
-            provider=provider, pair_loader=all_pairs.pair,
-            motion_gate=self.dynamic_motion_gate,
-        ).build(device=self.device, return_norm=True)
+        try:
+            all_pairs = TAPIRWrapper(self.tracker_cfg).compute_all_pairs(frames, masks, frame_names, factor=1)
+            scene, cams, norm = NativeMotionInitializer(
+                dataset_root="",  # unused once provider + pair_loader supply geometry + tracks
+                factor=1, num_fg=self.dynamic_num_fg, num_bg=self.dynamic_num_bg,
+                num_bases=self.dynamic_num_bases, seed=self.dynamic_seed,
+                provider=provider, pair_loader=all_pairs.pair,
+                motion_gate=self.dynamic_motion_gate,
+            ).build(device=self.device, return_norm=True)
+        except (RuntimeError, ValueError) as exc:
+            return self._assemble_static(
+                run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
+                metadata=metadata, frame_refs=frame_refs, timeline=timeline,
+                extra_notes=[f"dynamic→static fallback: dynamic init failed ({type(exc).__name__}: {exc})."],
+            )
 
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact)
@@ -329,25 +353,26 @@ class SingleVideoSceneAssembler:
                 frame_refs=frame_refs, timeline=timeline,
             )
 
+        return self._assemble_static(
+            run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
+            metadata=metadata, frame_refs=frame_refs, timeline=timeline,
+        )
+
+    def _assemble_static(self, *, run_id, save_dir, geometry_artifact, metadata, frame_refs, timeline,
+                         extra_notes: list[str] | None = None) -> SceneArtifact:
+        """Build a static scene (depth-backprojected seed). Also the graceful fallback for
+        a degenerate dynamic scene (no usable foreground)."""
         seed = self._build_seed(geometry_artifact)
         train_views = self._build_train_views(geometry_artifact)
         render_trajectory = self._orbit_trajectory(seed, train_views)
-        notes = [
+        notes = list(extra_notes or []) + [
             f"seed_gaussians={seed['num_gaussians']}",
             f"train_views={len(train_views)}",
             f"render_cameras={len(render_trajectory)}",
         ]
         return SceneArtifact(
-            run_id=run_id,
-            stage_name="scene",
-            save_dir=save_dir,
-            metadata=dict(metadata or {}),
-            kind="static",
-            render_seed=seed,
-            train_views=train_views,
-            render_trajectory=render_trajectory,
-            dynamic_bundle={},
-            frame_refs=frame_refs,
-            timeline=timeline,
-            notes=notes,
+            run_id=run_id, stage_name="scene", save_dir=save_dir, metadata=dict(metadata or {}),
+            kind="static", render_seed=seed, train_views=train_views,
+            render_trajectory=render_trajectory, dynamic_bundle={},
+            frame_refs=frame_refs, timeline=timeline, notes=notes,
         )
