@@ -23,6 +23,7 @@ class MultiVideoDataset:
         self,
         stride_sec: float = 1.0,
         max_frames_per_stream: int | None = 8,
+        all_frames: bool = False,
     ) -> list[FrameRef]:
         """Sample coarse keyframes for geometry initialization.
 
@@ -30,6 +31,10 @@ class MultiVideoDataset:
         -----
         If a stream does not yet expose frame count metadata, a single frame-0
         reference is emitted so the rest of the pipeline can still run.
+
+        When ``all_frames`` is True, every frame of every stream is emitted as a
+        keyframe and ``stride_sec`` / ``max_frames_per_stream`` are ignored -- the
+        dense path for benchmark-protocol parity (train on the full sequence).
         """
         keyframes: list[FrameRef] = []
         for stream in self.streams:
@@ -37,9 +42,9 @@ class MultiVideoDataset:
                 keyframes.append(FrameRef(stream_id=stream.stream_id, frame_idx=0, timestamp_sec=0.0))
                 continue
 
-            stride_frames = max(int(round(stride_sec * stream.fps)), 1)
+            stride_frames = 1 if all_frames else max(int(round(stride_sec * stream.fps)), 1)
             frame_indices = list(range(0, stream.num_frames, stride_frames))
-            if max_frames_per_stream is not None:
+            if not all_frames and max_frames_per_stream is not None:
                 frame_indices = frame_indices[:max_frames_per_stream]
             for frame_idx in frame_indices:
                 keyframes.append(

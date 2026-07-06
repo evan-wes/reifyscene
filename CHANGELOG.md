@@ -7,6 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.4] - 2026-07-06
+
+### Added
+- **`--keyframes-all` runner flag** — use *every* frame as a keyframe, for dense reconstruction /
+  benchmark-protocol parity (e.g. training the dynamic scene on a sequence's full train split to
+  compare against SoM's per-scene numbers, rather than a sparse keyframe subset). It overrides
+  `--keyframe-stride-sec` / `--max-keyframes` (previously the only way to approximate this was to
+  "game" a tiny stride + a huge cap). Plumbs a `keyframes_all` config flag through
+  `MultiVideoDataset.sample_keyframes(all_frames=...)` (stride 1, no cap) and the pipeline ingest
+  call site.
+  - **Resume-signature is backward-compatible:** `keyframes_all` is only recorded in the ingest
+    stage signature when *enabled*, so the default (strided) signature stays byte-identical to
+    pre-flag artifacts — they resume unchanged; only an actual all-frames run gets a distinct
+    signature that correctly invalidates a strided cache.
+
+### Tests
+- `tests/test_keyframe_sampling.py`: `sample_keyframes(all_frames=True)` emits every frame and
+  ignores stride/cap (single- and multi-stream, zero-frame guard); and the resume-signature
+  backward-compat invariant (default == pre-flag; enabled is distinct). Full suite: **370 passed,
+  1 skipped**.
+
 ## [0.1.31.3] - 2026-07-05
 
 ### Fixed

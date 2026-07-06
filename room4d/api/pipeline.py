@@ -219,6 +219,7 @@ class Room4DPipeline:
         keyframes = dataset.sample_keyframes(
             stride_sec=float(self.cfg.get('keyframe_stride_sec', 1.0)),
             max_frames_per_stream=self.cfg.get('max_keyframes_per_stream', 8),
+            all_frames=bool(self.cfg.get('keyframes_all', False)),
         )
         quality_by_stream = {stream.stream_id: self.quality.score_stream(stream) for stream in streams}
         artifact = IngestArtifact(

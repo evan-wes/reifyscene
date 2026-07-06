@@ -49,10 +49,16 @@ def _video_signatures(video_paths: list[str]) -> list[dict[str, Any]]:
 
 def _stage_cfg_signature(cfg: dict[str, Any], stage_name: str) -> dict[str, Any]:
     if stage_name == 'ingest':
-        return {
+        sig = {
             'max_keyframes_per_stream': int(cfg.get('max_keyframes_per_stream', 8)),
             'keyframe_stride_sec': float(cfg.get('keyframe_stride_sec', 1.0)),
         }
+        # Only record when enabled, so the default (strided) signature stays
+        # byte-identical to pre-flag artifacts -- they resume unchanged; only an
+        # actual all-frames run gets a distinct signature that invalidates them.
+        if bool(cfg.get('keyframes_all', False)):
+            sig['keyframes_all'] = True
+        return sig
     stage_cfg = dict(cfg.get(stage_name, {}))
     for key in VOLATILE_STAGE_KEYS.get(stage_name, set()):
         stage_cfg.pop(key, None)

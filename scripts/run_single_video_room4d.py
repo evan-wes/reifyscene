@@ -41,6 +41,7 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
+    cfg['keyframes_all'] = bool(getattr(args, 'keyframes_all', False))
 
     geometry = cfg.setdefault('geometry', {})
     geometry['backend_name'] = args.geometry_backend_name
@@ -387,6 +388,9 @@ def main() -> None:
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
+    parser.add_argument('--keyframes-all', action='store_true',
+                        help='Use every frame as a keyframe (dense reconstruction / benchmark-protocol '
+                             'parity). Overrides --keyframe-stride-sec and --max-keyframes.')
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-camera-params', default=None,
