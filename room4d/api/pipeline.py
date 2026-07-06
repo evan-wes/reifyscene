@@ -502,6 +502,11 @@ class Room4DPipeline:
         new_intrinsics = dict(geometry_artifact.intrinsics_by_stream)
         new_states = {sid: list(states) for sid, states in geometry_artifact.camera_states_by_stream.items()}
         for stream_id, refinement in refinements.items():
+            # Keep BA's refined focal downstream: BA optimizes poses and the shared
+            # focal jointly, so the refined poses are only consistent with the
+            # refined K -- pairing them with a different (e.g. depth-native) focal
+            # introduces a pose<->K mismatch that empirically hurts NVS more than
+            # the depth<->K seed distortion (which 5000 training iters absorb).
             new_intrinsics[stream_id] = refinement.refined_intrinsics
             keyframes = sorted(
                 (
