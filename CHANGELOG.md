@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.2] - 2026-07-05
+
+### Fixed
+- **Dynamic masked-NVS was garbage (mPSNR ~5) due to held-out-camera *placement*, not
+  reconstruction quality.** Diagnosed: train-view reprojection is **24.3** (great) while held-out
+  val is ~5 → a placement bug. The dynamic init computes `scene_norm` on the *already
+  ground-plane-canonicalized* geometry, so the bundle's `scene_norm.transfm` maps only
+  canonicalized→scene; but val cameras are placed at scoring time from **raw GT** poses, missing
+  the ~45° Z-up ground-plane rotation → they render the wrong place.
+  - `scene/assembler.py::_fold_ground_plane_into_norm`: fold the geometry's ground-plane transform
+    (`metadata['world_frame']['transform_world_old_to_new']`) into `scene_norm.transfm` so the
+    bundle carries the **full raw-world → scene** transform (`transfm @ T_gp`; convention from
+    `world_frame.apply`: `w2c_new = w2c_old @ inv(T_gp)`). No-op when no ground plane ran.
+  - **Validated end-to-end (GT-oracle geometry, spin, 29 dense keyframes):** held-out masked-NVS
+    **mPSNR 4.99 → 15.50** (SSIM 0.36→0.49, LPIPS 0.85→0.43), confirmed both by an isolated
+    orig-vs-fixed comparison on the same trained scene and by a full in-pipeline scene→render→score
+    re-run. **Residual gap to the ~20.7 F0b target** (train 24.3 → val 15.5, ~9 dB) is a separate,
+    smaller matter — likely genuine monocular novel-view difficulty (spin is harder than F0b's
+    windmill) plus training-iteration headroom, not another dominant bug.
+
+### Tests
+- `tests/test_dynamic_scene.py`: `_fold_ground_plane_into_norm` composes the ground-plane transform
+  (identity `scene_norm` ∘ `T_gp` == `T_gp`) and is a no-op when `world_frame` is absent.
+  Full suite: **364 passed, 1 skipped**.
+
 ## [0.1.31.1] - 2026-07-05
 
 ### Fixed

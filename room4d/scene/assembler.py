@@ -175,6 +175,26 @@ class SingleVideoSceneAssembler:
         return traj
 
     # ------------------------------------------------------------ dynamic (F0b)
+    @staticmethod
+    def _fold_ground_plane_into_norm(transfm, geometry_artifact):
+        """Compose the geometry's ground-plane transform into a scene_norm ``transfm``.
+
+        The dynamic init computes ``scene_norm`` on the *already ground-plane-canonicalized*
+        geometry (the provider serves canonicalized poses/points), so ``scene_norm.transfm``
+        only maps canonicalized → scene. Held-out val cameras are placed at scoring time from
+        **raw GT** poses via this transfm; without the Z-up rotation they land ~45° off and
+        render the wrong place (masked-NVS ~5 vs ~15). Convention (``world_frame.apply`` →
+        ``_transform_pose = T_gp @ T_world_cam`` ⇒ ``w2c_new = w2c_old @ inv(T_gp)``): the full
+        raw-world → scene placement transfm is ``scene_norm.transfm @ T_gp``. No-op when no
+        ground plane ran (``world_frame`` absent).
+        """
+        gp = ((geometry_artifact.metadata or {}).get("world_frame") or {}).get("transform_world_old_to_new")
+        if gp is None:
+            return transfm
+        import torch  # noqa: PLC0415 — heavy dep, only reached on the dynamic path
+        t_gp = torch.as_tensor(np.asarray(gp, dtype=np.float32), dtype=transfm.dtype, device=transfm.device)
+        return transfm @ t_gp
+
     def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
         """Per-frame union of all segment instance masks -> the dynamic foreground.
 
@@ -309,6 +329,7 @@ class SingleVideoSceneAssembler:
                 extra_notes=[f"dynamic→static fallback: dynamic init failed ({type(exc).__name__}: {exc})."],
             )
 
+        norm.transfm = self._fold_ground_plane_into_norm(norm.transfm, geometry_artifact)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact)
         render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
