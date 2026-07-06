@@ -7,6 +7,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.3] - 2026-07-05
+
+### Fixed
+- **`pose_refine` inflated the scene by thousands× — a BA gauge-scale drift that made the
+  dynamic reconstruction degenerate on real (VGGT) geometry.** Found during the honest VGGT
+  G1-single pass (spin): with `pose_refine` enabled, held-out masked-NVS collapsed to **~4.6**
+  and the background gaussian count exploded (~2.4M) even though train-view PSNR stayed high
+  (~26). Root cause: pycolmap BA optimizes reprojection, which is invariant to a global
+  similarity of `{poses, points}`; with an unpinned datum the overall **scale walks freely along
+  that null-space** (empirically ~4,000–20,000× the input depth scale). The scene assembler
+  places gaussians from the *untouched* VGGT depth at the input scale, so refined poses at a
+  wildly different scale wreck it. Confirmed uniform (not outlier-driven): per-camera radius
+  ratios were tight around the median.
+  - `geometry/pose_refine.py::_refine_stream`: after BA, **re-anchor the refined poses back onto
+    the input-geometry frame with a single orientation-based Sim(3)** (`_sim3_src_to_dst` /
+    `_apply_sim3_to_c2w`, rotation from camera orientations — well-conditioned for a looking-around
+    rig — scale + translation from centers). Because it is a global similarity it **preserves BA's
+    relative pose gains**, and because reprojection is invariant to it **no re-BA is needed**. Depth
+    and point maps are left as-is (already at input scale). The recovered scale is logged.
+  - **Validated end-to-end (VGGT geometry, spin, 29 keyframes, dynamic path → render → masked-NVS):**
+    held-out val mPSNR **10.29 (pose_refine off) → 11.95 (on + re-anchor)**, a clean **+1.66 dB**
+    pose-refinement win, with per-camera rotation vs GT improved 0.88° → 0.615°. Before the fix,
+    `on` was **4.6** (degenerate); the camera-center span went 12886 → 0.607 (== the input scale)
+    and the bg gaussian count 2.4M → ~300k.
+- **`refine_focal` is *not* the scale trigger, and BA's poses+focal must be kept together.** Two
+  diagnostics fell out of the fix: (1) disabling focal refinement does *not* prevent the blow-up
+  (still ~4,300×) and it makes the poses *worse* (fixed-focal error aliases into pose, 0.615° →
+  1.25°); (2) pairing BA's refined poses with the depth-native focal (instead of BA's refined
+  focal) *hurts* NVS (11.95 → 10.66) — BA optimizes poses and shared focal jointly, so the refined
+  poses are only consistent with the refined K. `pose_refine` keeps BA's refined focal downstream
+  (unchanged behavior; now documented in `pipeline.py::refine_poses`).
+
+### Tests
+- `tests/test_pose_refine.py::test_reanchor_sim3_recovers_gauge_drift`: applies a known
+  global-similarity drift (5000× scale + rotation + translation) to a seed pose set and asserts the
+  orientation-based re-anchor inverts it exactly (recovered inverse scale; poses land back on the
+  seed). Full suite: **365 passed, 1 skipped**.
+
 ## [0.1.31.2] - 2026-07-05
 
 ### Fixed

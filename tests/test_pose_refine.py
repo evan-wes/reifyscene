@@ -144,6 +144,48 @@ def test_refine_poses_falls_back_when_unavailable(tmp_path: Path, monkeypatch) -
     assert np.allclose(new[0].pose.T_world_cam, geom.camera_states_by_stream[STREAM_ID][0].pose.T_world_cam)
 
 
+def test_reanchor_sim3_recovers_gauge_drift() -> None:
+    """The BA-gauge re-anchor recovers a global-similarity drift exactly.
+
+    pycolmap BA optimizes reprojection, which is invariant to a global similarity
+    of {poses, points}; with an unpinned datum the overall scale walks freely
+    (thousands x). The fix maps the refined poses back onto the seed frame with an
+    orientation-based Sim(3). Here we apply a *known* drift (scale + rotation +
+    translation) to a seed pose set and assert the re-anchor inverts it, so the
+    recovered poses land back on the seed (the relative geometry is preserved).
+    """
+    from room4d.geometry.pose_refine import _apply_sim3_to_c2w, _sim3_src_to_dst
+
+    seed_c2w, seed_w2c = {}, {}
+    for i in range(6):
+        ang, tilt = 0.4 * i, 0.15 * i
+        rz = np.array([[np.cos(ang), -np.sin(ang), 0.0], [np.sin(ang), np.cos(ang), 0.0], [0.0, 0.0, 1.0]])
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(tilt), -np.sin(tilt)], [0.0, np.sin(tilt), np.cos(tilt)]])
+        c2w = np.eye(4)
+        c2w[:3, :3] = rz @ rx
+        c2w[:3, 3] = [np.cos(ang), np.sin(ang), 0.3 * i]
+        seed_c2w[str(i)] = c2w
+        seed_w2c[str(i)] = np.linalg.inv(c2w)
+
+    # Known gauge drift: 5000x scale + a global rotation + a translation.
+    s_true, a = 5000.0, 0.7
+    R_true = np.array([[np.cos(a), 0.0, np.sin(a)], [0.0, 1.0, 0.0], [-np.sin(a), 0.0, np.cos(a)]])
+    t_true = np.array([12.0, -3.0, 7.0])
+    drift_w2c = {}
+    for k, c2w in seed_c2w.items():
+        d = np.eye(4)
+        d[:3, :3] = R_true @ c2w[:3, :3]
+        d[:3, 3] = s_true * (R_true @ c2w[:3, 3]) + t_true
+        drift_w2c[k] = np.linalg.inv(d)
+
+    keys = list(seed_w2c)
+    s, R, t = _sim3_src_to_dst(drift_w2c, seed_w2c, keys)
+    assert np.isclose(s, 1.0 / s_true, rtol=1e-6)
+    for k in keys:
+        back = _apply_sim3_to_c2w(np.linalg.inv(drift_w2c[k]), s, R, t)
+        assert np.allclose(back, seed_c2w[k], atol=1e-6)
+
+
 def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None:
     pipeline = Room4DPipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
     geom = _geometry_artifact(tmp_path)

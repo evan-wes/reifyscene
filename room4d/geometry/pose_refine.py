@@ -224,6 +224,47 @@ def _cam_from_world_matrix(image) -> np.ndarray:
     return T
 
 
+def _center_from_w2c(w2c: np.ndarray) -> np.ndarray:
+    return -w2c[:3, :3].T @ w2c[:3, 3]
+
+
+def _sim3_src_to_dst(src_w2c: dict[str, np.ndarray], dst_w2c: dict[str, np.ndarray], keys: list[str]):
+    """Orientation-based Sim(3) mapping the ``src`` world frame onto ``dst``.
+
+    Rotation is estimated from camera ORIENTATIONS (well conditioned for a
+    looking-around rig), not the camera-center cloud, which is near-degenerate
+    for planar/linear sweeps and yields a spurious orientation error. Scale +
+    translation then fit the centers under that rotation. Returns ``(s, R, t)``
+    with ``x_dst = s * R @ x_src + t``.
+    """
+    G = [src_w2c[k][:3, :3].T @ dst_w2c[k][:3, :3] for k in keys]
+    U, _, Vt = np.linalg.svd(np.sum(G, axis=0))
+    Gavg = U @ Vt
+    if np.linalg.det(Gavg) < 0:
+        U[:, -1] *= -1
+        Gavg = U @ Vt
+    R = Gavg.T
+    sc = np.stack([_center_from_w2c(src_w2c[k]) for k in keys])
+    dc = np.stack([_center_from_w2c(dst_w2c[k]) for k in keys])
+    smu, dmu = sc.mean(0), dc.mean(0)
+    sch, dch = sc - smu, dc - dmu
+    s = float(np.sum(dch * (R @ sch.T).T) / np.sum(sch ** 2))
+    t = dmu - s * (R @ smu)
+    return s, R, t
+
+
+def _apply_sim3_to_c2w(c2w: np.ndarray, s: float, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Map a camera-to-world pose through the world similarity ``x' = s*R@x + t``.
+
+    The scale is dropped from the rotation block so it stays orthonormal; only
+    the camera center (a world point) carries the scale + translation.
+    """
+    out = np.eye(4, dtype=np.float64)
+    out[:3, :3] = R @ c2w[:3, :3]
+    out[:3, 3] = s * (R @ c2w[:3, 3]) + t
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Refiner.
 # --------------------------------------------------------------------------- #
@@ -444,15 +485,40 @@ class PoseRefiner:
             )
 
         refined: dict[str, np.ndarray] = {}
+        refined_w2c_by_key: dict[str, np.ndarray] = {}
+        seed_w2c_by_key: dict[str, np.ndarray] = {}
         deltas = []
         for i, fr in enumerate(frames):
             key = f"{stream_id}:{int(fr.frame_idx)}"
             refined_w2c = _cam_from_world_matrix(rec.images[i + 1])
             refined[key] = np.linalg.inv(refined_w2c).astype(np.float64)  # back to T_world_cam
+            refined_w2c_by_key[key] = refined_w2c
+            seed_w2c_by_key[key] = w2c[i]
             r_delta = (np.trace(refined_w2c[:3, :3] @ w2c[i][:3, :3].T) - 1.0) / 2.0
             deltas.append(float(np.degrees(np.arccos(np.clip(r_delta, -1.0, 1.0)))))
 
+        # Re-anchor BA's gauge back onto the input-geometry frame. pycolmap BA
+        # optimizes reprojection, which is invariant to a global similarity of
+        # {poses, points}; with an unpinned datum the overall scale walks freely
+        # along that null-space (empirically 1e3-1e4x the input depth scale).
+        # That inflation is harmless to reprojection but degenerate downstream:
+        # the scene assembler places gaussians from the UNTOUCHED VGGT depth at
+        # the input scale, so poses at a wildly different scale wreck it. A single
+        # orientation-based Sim(3) maps the refined poses back onto the seed
+        # frame; because it is a global similarity it preserves BA's *relative*
+        # pose gains, and because reprojection is invariant to it no re-BA is
+        # needed. Depth/point maps are left as-is (already at input scale).
+        keys = list(refined)
+        s_re, R_re, t_re = _sim3_src_to_dst(refined_w2c_by_key, seed_w2c_by_key, keys)
+        for key in keys:
+            refined[key] = _apply_sim3_to_c2w(refined[key], s_re, R_re, t_re).astype(np.float64)
+        self._log(
+            f"stream {stream_id}: re-anchored BA gauge to input frame "
+            f"(Sim3 s={s_re:.4g} |t|={np.linalg.norm(t_re):.4g})."
+        )
+
         stats = {
+            "reanchor_scale": float(s_re),
             "num_keyframes": int(N),
             "num_points3d": int(rec.num_points3D()),
             "num_obs": int(nobs),
