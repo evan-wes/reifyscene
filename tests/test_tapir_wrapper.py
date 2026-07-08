@@ -133,6 +133,18 @@ def test_default_config_values() -> None:
     assert w.model_type == "bootstapir"
     assert w.grid_size == 4  # SoM's value for the shipped DyCheck tracks
     assert (w.resize_height, w.resize_width) == (256, 256)
+    # Standalone tracker keeps SoM behavior: seed the RNG (deterministic) but no
+    # query budget (track the full grid) -> shipped-track parity.
+    assert w.seed == 0
+    assert w.max_total_queries is None
+
+
+def test_query_budget_and_seed_config() -> None:
+    w = TAPIRWrapper({"max_total_queries": 120_000, "seed": 7})
+    assert w.max_total_queries == 120_000
+    assert w.seed == 7
+    # seed=None restores the legacy nondeterministic behavior.
+    assert TAPIRWrapper({"seed": None}).seed is None
 
 
 def test_missing_checkpoint_raises(tmp_path: Path) -> None:
@@ -170,3 +182,31 @@ def test_compute_all_pairs_forward() -> None:
     assert diag[:, 0].min() >= 16 and diag[:, 1].min() >= 20
     # occ / dist logits are finite
     assert np.isfinite(ap.tracks[0][:, :, 2:]).all()
+
+
+def test_compute_all_pairs_query_budget_caps_and_is_deterministic() -> None:
+    pytest.importorskip("torch")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("tapnet forward needs a CUDA device")
+    # Budget gives a per-frame cap of 20; a stride-4 grid over the FG box seeds
+    # far more than that, so the cap must engage.
+    w = TAPIRWrapper({"grid_size": 4, "max_total_queries": 60, "seed": 0})
+    if not w.checkpoint_path().exists():
+        pytest.skip(f"checkpoint not present: {w.checkpoint_path()}")
+
+    t, h, win = 3, 96, 64
+    rng = np.random.default_rng(0)
+    frames = (rng.random((t, h, win, 3)) * 255).astype(np.uint8)
+    masks = np.zeros((t, h, win), bool)
+    masks[:, 16:80, 16:48] = True  # foreground box
+    ap1 = w.compute_all_pairs(frames, masks, ["a", "b", "c"], factor=1)
+    ap2 = w.compute_all_pairs(frames, masks, ["a", "b", "c"], factor=1)
+
+    per_frame_cap = 60 // t  # max_total_queries // num_frames
+    assert all(n <= per_frame_cap for n in ap1.query_counts())
+    assert max(ap1.query_counts()) == per_frame_cap  # cap actually engaged
+    # Seeded -> bit-identical across runs.
+    for a, b in zip(ap1.tracks, ap2.tracks):
+        assert np.array_equal(a, b)

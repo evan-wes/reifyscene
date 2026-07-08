@@ -62,7 +62,20 @@ class SingleVideoSceneAssembler:
         self.device = str(cfg.get("device", "cuda"))
         # Tracker cfg for the in-assembler all-pairs generation (decision: tracks
         # are produced inside the dynamic init, not the tracking stage, for F0b).
+        # All-pairs seeds a dense grid in every frame and tracks all-to-all, so
+        # query work is O(grid^-2 . T^2). The lift subsamples foreground to
+        # ``dynamic_num_fg`` anyway, so a coarser grid (stride 8 vs SoM's 4) cuts
+        # query points ~4x with negligible init quality impact. SoM's stride-4
+        # default is kept on the standalone tracker (shipped-track parity);
+        # override here via ``scene.tracker.grid_size``.
         self.tracker_cfg = dict(cfg.get("tracker", {}) or {})
+        self.tracker_cfg.setdefault("grid_size", 8)
+        # Cap tracked query points to a few multiples of the foreground budget the
+        # lift keeps (~dynamic_num_fg total, ~num_fg/T per frame). 3x leaves a
+        # comfortable margin for the lift's own random keep + visibility filtering
+        # while cutting the dominant O(T^2) tracking work. Override via
+        # ``scene.tracker.max_total_queries``.
+        self.tracker_cfg.setdefault("max_total_queries", 3 * self.dynamic_num_fg)
         # FP2c motion gate ({"enabled","percentile","threshold"}): keep only
         # ever-moved tracks as deformable fg; static (e.g. SAM-2 background) -> bg.
         self.dynamic_motion_gate = dict(cfg.get("dynamic_motion_gate", {}) or {})

@@ -199,6 +199,18 @@ def test_dynamic_fg_mask_union_matches_provider_keys() -> None:
     assert SingleVideoSceneAssembler(kind="dynamic")._fg_mask_by_frame(None) == {}
 
 
+def test_dynamic_tracker_defaults_cap_query_work() -> None:
+    # The dynamic scene path coarsens the grid and budgets the all-pairs tracker
+    # (the O(T^2) scene-assembly hotspot); the standalone tracker keeps SoM's
+    # stride-4/no-budget defaults for shipped-track parity.
+    asm = SingleVideoSceneAssembler(kind="dynamic", dynamic_num_fg=40_000)
+    assert asm.tracker_cfg["grid_size"] == 8
+    assert asm.tracker_cfg["max_total_queries"] == 3 * 40_000
+    # Explicit tracker config still wins over the defaults.
+    override = SingleVideoSceneAssembler(kind="dynamic", tracker={"grid_size": 4})
+    assert override.tracker_cfg["grid_size"] == 4
+
+
 @requires_gsplat
 def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
     from room4d.render.gaussian4d.render_backend import GaussianRenderBackend

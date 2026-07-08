@@ -7,6 +7,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.1.31.5] - 2026-07-07
+
+### Fixed
+- **4D scene assembly took ~8.3 h on the full-frame (426f) spin oracle — a super-linear (~O(T²))
+  blowup in the in-assembler all-pairs point tracker (`TAPIRWrapper.compute_all_pairs`), not the
+  motion init.** The tracker (a faithful port of Shape-of-Motion's *offline* preproc) seeds a dense
+  foreground query grid in **every** frame and tracks each point to **every** frame, and the model
+  recomputed the full-clip ResNet feature pyramid on **every** 128-point forward. At 426 frames
+  that is ~10⁴ redundant feature passes over ~850k query points — ~95% of which the native lift
+  immediately discards (it keeps only ~`num_fg/T` per frame, uniformly at random). Four fixes take
+  wall-time **8.3 h → 12.5 min (~40×)** while *holding* masked-NVS (spin oracle, full-val n=722:
+  **19.639 → 19.857 mPSNR**, mSSIM 0.585→0.595, mLPIPS 0.331→0.325; `dynamic_fg` 35,835→35,687):
+  - **Hoist the feature pyramid.** `TAPIR.forward` gains an optional `feature_grids=` passthrough;
+    `compute_all_pairs` computes the pyramid **once per clip** and reuses it across every query
+    frame/chunk (bit-identical tracks; verified 0.0px under matched RNG).
+  - **Query budget (the dominant lever, ~7×).** `compute_all_pairs` caps tracked queries to
+    `max_total_queries` (spread evenly per frame), subsampling **before** tracking so we only track
+    what the lift keeps. The dynamic scene path defaults it to `3 × dynamic_num_fg`.
+  - **Coarser grid.** The dynamic tracker defaults to stride 8 (was 4).
+  - **Determinism.** The tracker seeds the global torch RNG before the all-pairs loop —
+    `estimate_trajectories`' unseeded `randperm` previously made tracks vary ~8px run-to-run.
+
+### Changed
+- **Dynamic scene-assembly tracker defaults** (`SingleVideoSceneAssembler` → `TAPIRWrapper`):
+  `grid_size=8`, `max_total_queries=3*dynamic_num_fg`, `seed=0`. The **standalone** `TAPIRWrapper`
+  defaults are unchanged (`grid_size=4`, no budget) to preserve SoM shipped-track parity. All
+  overridable via `scene.tracker.*`.
+
+### Tests
+- `tests/test_tapir_wrapper.py`: new-knob config (`seed`, `max_total_queries` defaults + overrides)
+  and a gated (GPU+checkpoint) behavioral test asserting the per-frame budget cap engages and
+  tracks are bit-identical across runs (determinism). `tests/test_scene_render.py`: the dynamic
+  assembler's coarsened/​budgeted tracker defaults, and that explicit `tracker` config still wins.
+  Full suite: **373 passed, 1 skipped**.
+
 ## [0.1.31.4] - 2026-07-06
 
 ### Added
