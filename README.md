@@ -1,41 +1,68 @@
 # room4d
 
-Starter codebase scaffold for a room-scale dynamic 4D reconstruction system.
+**Single-video dynamic 4D reconstruction** — turn one RGB video of a moving scene into
+a renderable, novel-view-capable 4D (dynamic Gaussian) representation.
 
-Licensed under Apache 2.0
+Licensed under Apache 2.0.
 
-This repository is intentionally a skeleton:
-- package structure is in place
-- artifacts and dataclasses are defined
-- wrappers, solvers, and renderers are stubs with docstrings
-- CLI entrypoints are wired for future implementation
+room4d is a **research / learning project** (not a product): the aim is to build the whole
+reconstruction pipeline end to end and understand every stage. Today the single-video
+dynamic-4D path works end to end on the pipeline's own reconstructed geometry; the
+queryable-scene-graph back-half and multi-stream fusion are designed but not yet built
+(see [Status](#status)).
 
 ## Quick start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+scripts/setup_room4d.sh --with-dev     # editable install + pinned deps
 room4d --help
 ```
 
-## Repository goals
+## Pipeline
 
-The scaffold is organized around these stages:
+A single-video run flows through 15 stages (`room4d/api/stages.py`), driven by
+`scripts/run_single_video_room4d.py`:
 
-1. ingest and preprocessing
-2. synchronization
-3. geometry initialization
-4. tracking
-5. human and object perception
-6. graph construction
-7. joint spatiotemporal optimization
-8. 4D rendering
-9. promptable query and camera planning
+```
+ingest → sync → dyn_mask → geometry → pose_refine → segment → reid → semantics
+→ objects → humans → tracking → graph → optimization → scene → render
+```
+
+- **geometry** — VGGT / VGGT-Long camera + depth + point-map reconstruction (or a
+  ground-truth "oracle" backend for isolating downstream quality).
+- **pose_refine** — robust bundle adjustment of the camera poses (gauge re-anchored to
+  the input scale).
+- **perception band** — SAM-2 segmentation, re-identification, semantics, and object +
+  human perception.
+- **tracking** — CoTracker point tracks lifted to 3D.
+- **scene → render** — assemble a dynamic Gaussian scene (moving foreground + rigid-motion
+  bases + static background), train it, and render a novel-view flythrough, with a
+  covisibility-masked novel-view (mPSNR / SSIM / LPIPS) evaluation.
 
 ## Status
 
-This is a prototype engineering skeleton, not a working reconstruction system yet.
+room4d reconstructs a **single-video dynamic 4D scene end to end** and scores its novel
+views. As of **v0.2.0.0** the dynamic-4D path holds on the pipeline's own (non-oracle)
+geometry at full frame count.
+
+**Works today:**
+- End-to-end single-video pipeline → a trained dynamic Gaussian scene + novel-view
+  flythrough + masked-NVS metrics.
+- Real backends for geometry (VGGT / VGGT-Long), pose refinement (BA), segmentation
+  (SAM-2), re-id, object/human perception, point tracking (CoTracker), and dynamic 4D
+  rendering.
+
+**Partial / scaffold:**
+- The scene **graph** stage builds camera + per-stream track nodes, but relation and
+  uncertainty inference and cross-view entity association are still placeholders.
+- The joint **optimization** stage is a staged scaffold — `pose_refine` does the real
+  bundle adjustment today.
+
+**Designed, not yet built:**
+- The **queryable scene graph** back-half — natural-language query → plan → render an
+  answer → diff the re-perceived result against the original.
+- **Multi-stream** capture (cross-view synchronization + fusion).
+- Live-camera ingest directly into the pipeline.
 
 
 ## Reproducible setup
@@ -47,7 +74,7 @@ scripts/setup_room4d.sh --with-dev
 ```
 
 This installs the local `room4d` package in editable mode and pins the current
-Python dependencies used by the scaffold.
+Python dependencies used by the pipeline.
 
 ### Optional RealSense SDK
 
@@ -68,45 +95,38 @@ If `pyrealsense2` is available, you can also capture through the RealSense SDK:
 python scripts/capture_realsense_rgb.py --output data/test_rgb.mp4 --show
 ```
 
-## Current single-video capability
-
-With one RGB video source, the current code can:
-- decode the video and probe metadata with OpenCV
-- sample keyframes
-- run the VGGT adapter path for coarse camera/depth/point-map initialization
-  when the official VGGT package is installed, or fall back to a heuristic stub
-- emit a `TrackArtifact` with placeholder tracks
-- build a minimal graph with camera and per-stream track nodes
-- run a staged optimization scaffold that records factor diagnostics but does not
-  yet solve a real bundle-adjustment problem
-- initialize a renderer artifact shell
-
-It cannot yet:
-- ingest a live camera stream directly into the pipeline
-- run a real CoTracker backend in the tracker wrapper
-- recover a trustworthy final 4D reconstruction from one video alone
-- use RealSense depth in the pipeline
-- do object/human perception or real graph-conditioned reconstruction end to end
-
-
-## Single-video VGGT geometry path
-
-To validate the current real-geometry slice on a single RGB video, run:
+## Running a single-video reconstruction
 
 ```bash
-python scripts/run_single_video_vggt.py \
-  --video path/to/clip.mp4 \
-  --run-dir artifacts/runs/my_single_video \
-  --backend-mode real
+scripts/run_single_video_room4d.py \
+  --frames-dir path/to/frames \        # or --video path/to/clip.mp4
+  --geometry-backend-name vggt-long \  # vggt | vggt-long | dataset (GT oracle)
+  --geometry-device cuda \
+  --keyframes-all \                    # train on every frame (benchmark parity)
+  --pose-refine-enable \
+  --config configs/base.yaml \
+  --run-dir artifacts/runs/my_run
 ```
 
-If the official `vggt` package is not installed locally, switch `--backend-mode auto` to fall back gracefully. A successful real run writes:
+Each stage persists a self-describing artifact under the run dir (reloadable, e.g.
+`GeometryArtifact.load(...)`). `--start-stage` / `--stop-stage` + `--prior-run-dir` resume
+from a prior run's cached stages — e.g. re-run only `scene` / `render` without recomputing
+geometry. The final render writes `render/trained_dynamic.npz` + a novel-view flythrough,
+and the run records a covisibility-masked novel-view score.
 
-- `artifacts/runs/.../geometry/artifact.json`
-- `artifacts/runs/.../geometry/depthmaps/*.npz`
-- `artifacts/runs/.../geometry/pointmaps/*.npz`
+### Results (v0.2.0.0)
 
-The persisted `GeometryArtifact` can then be reloaded with `GeometryArtifact.load(...)` for downstream tracking, graph building, or optimization.
+Masked novel-view PSNR on the DyCheck "spin" sequence (full held-out set):
+
+| geometry | frames | masked mPSNR |
+|---|---|---|
+| VGGT-Long + pose_refine (native) | 426 (all) | 12.56 |
+| GT-oracle (upper bound) | 426 (all) | ~19 |
+| Shape-of-Motion reference | all | 17.42 |
+
+Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
+drift), not the dynamic modeling; the remaining gap to the oracle is the cost of
+self-reconstructed vs. ground-truth geometry.
 
 
 ## Reference comparison tool (Shape of Motion)
@@ -198,10 +218,11 @@ Prints a side-by-side table with per-metric better-direction (unknown metrics
 are shown with an undefined direction rather than dropped), and warns when
 the two results' sequences or eval protocols differ (e.g. nvidia's 2x vs
 iphone's 1x) instead of silently declaring winners on incomparable numbers. The
-`reference_benchmark_v1` schema is the contract room4d's own renderer
-evaluation **will emit** when the real renderer lands (today `room4d/eval/`
-computes raw PSNR only — the emitter is tracked in TODOS.md), so any two
-results on the same sequence can be scored with one command.
+`reference_benchmark_v1` schema is the common contract for scoring any two
+results on the same sequence with one command. room4d's render stage now
+computes masked novel-view metrics (mPSNR / SSIM / LPIPS) directly (see the
+Results table above); emitting them in this exact schema for a one-command
+`--compare` against a reference run is the remaining wiring.
 
 Reference baseline on DyCheck iPhone `paper-windmill` (RTX 5090, 500 epochs,
 ~69 min): masked mPSNR 19.53 / mSSIM 0.559 / mLPIPS 0.198, 3D-track PCK@10cm

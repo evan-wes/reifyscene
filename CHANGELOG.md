@@ -27,6 +27,12 @@ for the next phase: the queryable 4D scene graph — perceive a moving scene int
 it, render an answer, and diff the re-perceived result against the original *(internally:
 phases P3–P7)*. Per-feature detail lives under the `0.1.x` entries below.
 
+### Docs
+- `README` refreshed to match this release: replaced the earlier v0.1.4 "skeleton / stubs"
+  framing with the current 15-stage single-video dynamic-4D pipeline, an honest
+  works-today / partial / not-yet-built status, the `run_single_video_room4d.py` invocation
+  (superseding `run_single_video_vggt.py`), and the v0.2.0.0 novel-view results.
+
 ## [0.1.31.5] - 2026-07-07
 
 ### Fixed
