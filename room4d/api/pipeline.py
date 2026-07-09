@@ -8,14 +8,23 @@ import numpy as np
 from typing import Any
 
 from room4d.common.io import read_yaml
-from room4d.common.types import FrameRef, HumanState, ObjectState
+from room4d.calibration.runner import CalibrationRunner
+from room4d.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from room4d.common.paths import ensure_dir
 from room4d.common.memory import release_memory
 from room4d.data.dataset import MultiVideoDataset
 from room4d.geometry.camera_interpolation import densify_camera_states_for_frames
+from room4d.geometry.geometry_artifact import GeometryArtifact
+from room4d.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
 from room4d.geometry.world_frame import GroundPlaneCanonicalizer
 from room4d.geometry.vggt_wrapper import VGGTInitializer
 from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
+from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from room4d.geometry.moge_wrapper import MoGeInitializer
+from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
+from room4d.geometry.compose import GeometryComposer
+from room4d.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from room4d.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
 from room4d.graph.builders import DynamicSceneGraphBuilder
 from room4d.ingest.decoder import VideoDecoder
 from room4d.ingest.ingest_artifact import IngestArtifact
@@ -27,22 +36,41 @@ from room4d.perception.humans.detector import HumanDetector
 from room4d.perception.humans.pose2d import HumanPose2DEstimator
 from room4d.perception.humans.densepose_wrapper import DensePoseEstimator
 from room4d.perception.humans.smpl_fitter import SMPLFitter
-from room4d.perception.humans.human_assoc import HumanAssociator
+from room4d.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, SapiensDenseRung
+from room4d.perception.humans.sapiens_wrapper import sapiens_cached
 from room4d.perception.humans.human_artifact import HumanArtifact
 from room4d.perception.objects.detector import ObjectDetector
 from room4d.perception.objects.embedder import InstanceEmbedder
 from room4d.perception.objects.object_artifact import ObjectArtifact
-from room4d.perception.objects.object_assoc import ObjectAssociator
 from room4d.perception.objects.segmenter import ObjectSegmenter
+from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from room4d.perception.instance.segment import FloorInstanceSegmenter
+from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from room4d.perception.reid.reid_artifact import ReidArtifact
+from room4d.perception.reid.reid_stage import FloorReid
+from room4d.perception.reid.dino_reid import DinoReid
+from room4d.perception.semantics.semantics_artifact import SemanticsArtifact
+from room4d.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
+from room4d.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from room4d.query.parser import PromptParser
 from room4d.api.resume import apply_stage_compatibility_metadata
 from room4d.api.stages import build_stage_registry
-from room4d.render.gaussian4d.scene_model import Gaussian4DScene
 from room4d.render.registry import build_renderer
 from room4d.scene.assembler import SingleVideoSceneAssembler
 from room4d.eval.benchmark_runner import BenchmarkRunner
 from room4d.sync.global_time_solver import GlobalTimeAlignmentSolver
 from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
+
+
+# Fidelity tag each geometry backend carries in its CapabilityManifest (design §4A.1).
+# Joint rungs (vggt*/dataset) fill poses+depth; moge is depth-only, colmap pose-only.
+_GEOMETRY_FIDELITY = {
+    'moge-2': 'metric_depth_no_poses',
+    'colmap': 'sfm_poses_no_depth',
+    'vggt': 'joint_reconstruction',
+    'vggt-long': 'joint_reconstruction_longseq',
+    'dataset': 'dataset_gt',
+}
 
 
 class Room4DPipeline:
@@ -71,10 +99,30 @@ class Room4DPipeline:
         self.sync_solver = GlobalTimeAlignmentSolver()
         geometry_cfg = self.cfg.get('geometry', {})
         geometry_backend_name = str(geometry_cfg.get('backend_name', 'vggt')).lower()
-        if geometry_backend_name == 'vggt-long':
-            self.geometry_init = VGGTLongInitializer(geometry_cfg)
+        self.geometry_backend_name = geometry_backend_name
+        # FP6b step 2: geometry is two fused ladders (§4A.1). When both `pose_backend`
+        # and `depth_backend` are set the stage runs a *pose* channel + a *depth* channel
+        # and composes them (COLMAP↔MoGe scale reconciliation); otherwise a single joint
+        # backend fills both channels (today's path — strict superset, unchanged).
+        self.geometry_pose_backend = str(geometry_cfg.get('pose_backend', '')).lower() or None
+        self.geometry_depth_backend = str(geometry_cfg.get('depth_backend', '')).lower() or None
+        self.geometry_fused = bool(self.geometry_pose_backend and self.geometry_depth_backend)
+        if self.geometry_fused:
+            self.geometry_pose_init = self._build_geometry_backend(self.geometry_pose_backend, geometry_cfg)
+            self.geometry_depth_init = self._build_geometry_backend(self.geometry_depth_backend, geometry_cfg)
+            self.geometry_composer = GeometryComposer(geometry_cfg.get('compose', {}))
+            self.geometry_init = self.geometry_pose_init  # nominal top rung for shared helpers
         else:
-            self.geometry_init = VGGTInitializer(geometry_cfg)
+            self.geometry_init = self._build_geometry_backend(geometry_backend_name, geometry_cfg)
+        # FP6b step 3: coarse geometry-free dyn_mask stage (protects the SfM pose rung).
+        # Default 'all-static' → a no-op that leaves the pose rung unmasked (VGGT-on-top,
+        # or clips that don't need it); 'detector' → COCO Mask R-CNN movable-category masks.
+        dyn_mask_cfg = self.cfg.get('dyn_mask', {})
+        self.dyn_mask_backend_name = str(dyn_mask_cfg.get('backend_name', 'all-static')).lower()
+        self.dyn_mask_init = (
+            DetectorDynMask(dyn_mask_cfg) if self.dyn_mask_backend_name == 'detector'
+            else AllStaticDynMask(dyn_mask_cfg)
+        )
         self.tracker = CoTrackerWrapper(self.cfg.get('tracking', {}))
         lifting_cfg = self.cfg.get('lifting', {})
         self.track_lifter = TrackLifter3D(point_conf_threshold=float(lifting_cfg.get('point_conf_threshold', 0.0)))
@@ -87,12 +135,10 @@ class Room4DPipeline:
         self.human_pose = HumanPose2DEstimator(humans_cfg)
         self.human_densepose = DensePoseEstimator(humans_cfg)
         self.human_smpl = SMPLFitter(humans_cfg)
-        self.human_associator = HumanAssociator(humans_cfg)
         objects_cfg = self.cfg.get('objects', {})
         self.object_detector = ObjectDetector(objects_cfg)
         self.object_segmenter = ObjectSegmenter(objects_cfg)
         self.object_embedder = InstanceEmbedder(objects_cfg)
-        self.object_associator = ObjectAssociator(objects_cfg)
         self.graph_builder = DynamicSceneGraphBuilder()
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
@@ -100,6 +146,28 @@ class Room4DPipeline:
         self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
         self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
+        self.calibration_runner = CalibrationRunner(self.cfg.get("calibration", {}), decoder=self.decoder)
+
+    @staticmethod
+    def _build_geometry_backend(name: str, geometry_cfg: dict):
+        """Construct a geometry initializer for a backend name.
+
+        Shared by the single-backend path and the fused pose/depth channels (§4A.1):
+        ``vggt``/``vggt-long``/``dataset`` are *joint* rungs (poses+depth); ``moge`` is a
+        depth-only rung; ``colmap`` a pose-only rung. Unknown names fall through to VGGT.
+        """
+        name = str(name).lower()
+        if name == 'vggt-long':
+            return VGGTLongInitializer(geometry_cfg)
+        if name == 'dataset':
+            return DatasetGeometryInitializer(geometry_cfg)
+        if name == 'moge':
+            # FP6a: MoGe-2 metric-depth rung (native swap; depth-only, no poses).
+            return MoGeInitializer(geometry_cfg)
+        if name == 'colmap':
+            # FP6b step 1: COLMAP-SfM pose rung (native swap; pose-only, no dense depth).
+            return ColmapPoseInitializer(geometry_cfg)
+        return VGGTInitializer(geometry_cfg)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> 'Room4DPipeline':
@@ -126,6 +194,18 @@ class Room4DPipeline:
     def _stamp_stage_metadata(self, artifact, stage_name: str, *, video_paths: list[str]) -> None:
         apply_stage_compatibility_metadata(artifact, self.cfg, stage_name, video_paths)
 
+
+    def calibrate(self, video_paths: list[str]) -> Any:
+        """Run phase-1 static-frame calibration on one or more input videos."""
+        artifact = self.calibration_runner.run(
+            run_id=self.cfg.get('run_id', 'dev'),
+            save_dir=self._stage_dir('calibration'),
+            video_paths=video_paths,
+        )
+        self._stamp_stage_metadata(artifact, 'calibration', video_paths=[str(Path(p).expanduser().resolve()) for p in video_paths])
+        artifact.save()
+        return artifact
+
     def preprocess(self, video_paths: list[str]) -> IngestArtifact:
         """Build an ingest artifact from raw video paths.
 
@@ -139,6 +219,7 @@ class Room4DPipeline:
         keyframes = dataset.sample_keyframes(
             stride_sec=float(self.cfg.get('keyframe_stride_sec', 1.0)),
             max_frames_per_stream=self.cfg.get('max_keyframes_per_stream', 8),
+            all_frames=bool(self.cfg.get('keyframes_all', False)),
         )
         quality_by_stream = {stream.stream_id: self.quality.score_stream(stream) for stream in streams}
         artifact = IngestArtifact(
@@ -244,14 +325,138 @@ class Room4DPipeline:
                 f"Added {int(summary['added_camera_states'])} interpolated/extrapolated camera states so tracking frames have camera estimates."
             )
 
-    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact):
-        """Run coarse geometry initialization and persist its heavy outputs."""
+    def compute_dyn_mask(self, ingest_artifact: IngestArtifact, sync_artifact=None) -> DynMaskArtifact:
+        """FP6b step 3: coarse **geometry-free** dynamic masks that protect the SfM pose rung.
+
+        Runs the dyn_mask ladder (selected backend → all-static floor) on the **same** frame
+        set the geometry pose rung will use (so mask keys align), stamps a `CapabilityManifest`,
+        and saves. Default `all-static` is a cheap no-op; only the COLMAP pose rung consumes
+        the result, and only size-gated. Consumes only raw frames — never `segment`/geometry —
+        which is what breaks the segment→geometry cycle (§4A.1).
+        """
         selected_frames = self._select_geometry_frames(ingest_artifact)
-        artifact = self.geometry_init.initialize(
-            selected_frames,
-            ingest_artifact=ingest_artifact,
-            sync_artifact=sync_artifact,
+        rung_name = getattr(self.dyn_mask_init, 'backend_name', self.dyn_mask_backend_name)
+        probe = {'detector': importable('torchvision')}.get(rung_name)
+        dyn_cfg = self.cfg.get('dyn_mask', {})
+        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact}
+        ladder = BackendLadder('dyn_mask', [
+            BackendRung(
+                rung_name, rung_name,
+                runner=lambda inp: self.dyn_mask_init.initialize(
+                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+                probe=probe,
+            ),
+            BackendRung(
+                'all-static', 'all-static',
+                runner=lambda inp: AllStaticDynMask(dyn_cfg).initialize(
+                    inp['frames'], ingest_artifact=inp['ingest'], sync_artifact=inp['sync']),
+            ),
+        ])
+        artifact, manifest = ladder.run(inputs)
+        artifact.attach_manifest(manifest)
+        artifact.save_dir = self._stage_dir('dyn_mask')
+        self._stamp_stage_metadata(artifact, 'dyn_mask', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
+    @staticmethod
+    def _geometry_init_call(init, inp):
+        """Call a geometry backend's ``initialize``, passing ``dyn_mask`` only to the pose
+        rung that consumes it (fourth invariant: dyn_mask is the COLMAP rung's dep; other
+        rungs never see it, so their signatures stay untouched)."""
+        kwargs = dict(ingest_artifact=inp['ingest'], sync_artifact=inp['sync'])
+        if getattr(init, 'backend_name', None) == 'colmap':
+            kwargs['dyn_mask_artifact'] = inp.get('dyn_mask')
+        return init.initialize(inp['frames'], **kwargs)
+
+    def _geometry_ladder(self, stage_label, init, backend_name, selected_frames,
+                         ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None,
+                         dyn_mask_artifact=None):
+        """Run one geometry channel as a 2-rung ladder (backend → graceful-empty floor).
+
+        Rung name = the backend's own identity so ``manifest.backend_used`` matches the
+        artifact's ``backend_name``. Model-backed rungs are probe-gated (verified package
+        names) so a missing dep degrades cleanly; the load-bearing vggt/dataset rungs stay
+        probe-free and rely on the ladder's run-error → graceful-empty path.
+        """
+        rung_name = getattr(init, 'backend_name', backend_name)
+        probe_by_backend = {'moge-2': importable('moge'), 'colmap': importable('pycolmap', 'hloc')}
+        floor_note = (
+            'geometry graceful-empty floor (§4A invariant 2)' if channel is None
+            else f'geometry {channel} graceful-empty floor (§4A invariant 2)'
         )
+        inputs = {'frames': selected_frames, 'ingest': ingest_artifact, 'sync': sync_artifact,
+                  'dyn_mask': dyn_mask_artifact}
+        ladder = BackendLadder(stage_label, [
+            BackendRung(
+                rung_name,
+                _GEOMETRY_FIDELITY.get(rung_name, rung_name),
+                runner=lambda inp: self._geometry_init_call(init, inp),
+                probe=probe_by_backend.get(rung_name),
+            ),
+            BackendRung(
+                'empty', 'empty',
+                runner=lambda inp: GeometryArtifact(
+                    run_id=ingest_artifact.run_id, stage_name='geometry',
+                    save_dir=self._stage_dir('geometry'), backend_name='empty',
+                    selected_frames=[], notes=[floor_note]),
+            ),
+        ])
+        return ladder.run(inputs)
+
+    def _run_fused_geometry(self, selected_frames, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
+        """FP6b two fused ladders (§4A.1): run a pose channel + a depth channel on the
+        SAME frames, then compose them (COLMAP↔MoGe scale reconciliation).
+
+        The composite `CapabilityManifest` records both channels' rung statuses (prefixed
+        ``pose:`` / ``depth:``) and the fused ``backend_used`` / fidelity the composer
+        resolved to (`fused_metric` / `poses_only` / `depth_only` / `empty`).
+        """
+        pose_art, pose_manifest = self._geometry_ladder(
+            'geometry.pose', self.geometry_pose_init, self.geometry_pose_backend,
+            selected_frames, ingest_artifact, sync_artifact, channel='pose',
+            dyn_mask_artifact=dyn_mask_artifact)
+        depth_art, depth_manifest = self._geometry_ladder(
+            'geometry.depth', self.geometry_depth_init, self.geometry_depth_backend,
+            selected_frames, ingest_artifact, sync_artifact, channel='depth')
+        # Use the rungs' own identities ('colmap' / 'moge-2') so the composite backend
+        # name matches the manifest's `pose:`/`depth:` rung names.
+        pose_id = getattr(self.geometry_pose_init, 'backend_name', self.geometry_pose_backend)
+        depth_id = getattr(self.geometry_depth_init, 'backend_name', self.geometry_depth_backend)
+        result = self.geometry_composer.compose(
+            pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=selected_frames,
+            pose_backend=pose_id, depth_backend=depth_id,
+            run_id=ingest_artifact.run_id, save_dir=self._stage_dir('geometry'))
+        manifest = CapabilityManifest(stage='geometry')
+        for channel, channel_manifest in (('pose', pose_manifest), ('depth', depth_manifest)):
+            for rung in channel_manifest.rungs:
+                manifest.rungs.append(RungStatus(f'{channel}:{rung.name}', rung.fidelity, rung.status, rung.reason))
+        manifest.backend_used = result.artifact.backend_name
+        manifest.fidelity = result.fidelity
+        if result.reconcile is not None:
+            manifest.notes.append(result.reconcile.note())
+        return result.artifact, manifest
+
+    def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
+        """Run coarse geometry initialization and persist its heavy outputs.
+
+        The config-selected backend is the ladder's top rung — geometry joins the
+        observable-degradation machinery (design §4A.1): a graceful-empty floor
+        guarantees a schema-valid artifact if the backend is unavailable or fails,
+        and a `CapabilityManifest` records which rung ran, at what fidelity, and why
+        higher rungs were skipped. `backend_name='moge'` force-selects the FP6a
+        MoGe-2 depth rung. When `pose_backend`+`depth_backend` are set the stage runs
+        the FP6b two fused ladders (COLMAP poses + MoGe depth, scale-reconciled). The
+        FP6b step-3 `dyn_mask` (if provided) protects the COLMAP pose rung, size-gated.
+        """
+        selected_frames = self._select_geometry_frames(ingest_artifact)
+        if self.geometry_fused:
+            artifact, manifest = self._run_fused_geometry(selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact)
+        else:
+            artifact, manifest = self._geometry_ladder(
+                'geometry', self.geometry_init, self.geometry_backend_name,
+                selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
+        artifact.attach_manifest(manifest)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
         if estimate is not None:
@@ -263,6 +468,97 @@ class Room4DPipeline:
         self._stamp_stage_metadata(artifact, 'geometry', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
+
+    def refine_poses(self, ingest_artifact: IngestArtifact, geometry_artifact: GeometryArtifact) -> GeometryArtifact:
+        """BA-refine the geometry camera poses and emit a refined GeometryArtifact.
+
+        Backend-agnostic: consumes the GeometryArtifact contract (poses +
+        intrinsics + per-pixel world points) and the source frames, runs the
+        :class:`PoseRefiner` (VGGSfM tracks -> pycolmap seed -> robust iterative
+        BA, refine shared focal), then rebuilds the affected streams' keyframe
+        camera states from the refined poses and re-densifies interpolated states
+        for the tracking timeline.
+
+        When refinement is disabled (``cfg['pose_refine']['enabled']`` is false)
+        or the refinement runtime is unavailable, this is an identity
+        pass-through that re-emits the geometry unchanged under the ``pose_refine``
+        stage so downstream stages have a stable dependency either way.
+        """
+        pose_cfg = dict(self.cfg.get('pose_refine', {}))
+        enabled = bool(pose_cfg.get('enabled', False))
+        save_dir = self._stage_dir('pose_refine')
+
+        refinements: dict[str, Any] = {}
+        extra_notes: list[str] = []
+        if enabled:
+            refiner = PoseRefiner(pose_cfg)
+            try:
+                refinements = refiner.refine(geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact)
+            except PoseRefineUnavailable as exc:
+                extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
+            extra_notes.extend(refiner.notes)
+        else:
+            extra_notes.append("Pose refinement disabled; emitted geometry unchanged.")
+
+        new_intrinsics = dict(geometry_artifact.intrinsics_by_stream)
+        new_states = {sid: list(states) for sid, states in geometry_artifact.camera_states_by_stream.items()}
+        for stream_id, refinement in refinements.items():
+            # Keep BA's refined focal downstream: BA optimizes poses and the shared
+            # focal jointly, so the refined poses are only consistent with the
+            # refined K -- pairing them with a different (e.g. depth-native) focal
+            # introduces a pose<->K mismatch that empirically hurts NVS more than
+            # the depth<->K seed distortion (which 5000 training iters absorb).
+            new_intrinsics[stream_id] = refinement.refined_intrinsics
+            keyframes = sorted(
+                (
+                    f for f in geometry_artifact.selected_frames
+                    if str(f.stream_id) == stream_id
+                    and f"{stream_id}:{int(f.frame_idx)}" in geometry_artifact.pointmaps_by_frame
+                ),
+                key=lambda fr: int(fr.frame_idx),
+            )
+            rebuilt: list[TimedCameraState] = []
+            for fr in keyframes:
+                key = f"{stream_id}:{int(fr.frame_idx)}"
+                orig = geometry_artifact._find_state_for_frame(fr)
+                rebuilt.append(TimedCameraState(
+                    stream_id=stream_id,
+                    time_sec=float(orig.time_sec) if orig is not None else float(fr.timestamp_sec),
+                    intrinsics=refinement.refined_intrinsics,
+                    pose=CameraPose(T_world_cam=np.asarray(refinement.refined_T_world_cam_by_frame_key[key], dtype=float)),
+                ))
+            new_states[stream_id] = rebuilt
+
+        refined_metadata = dict(geometry_artifact.metadata or {})
+        refined_metadata['pose_refine'] = {
+            'enabled': enabled,
+            'refined_streams': sorted(refinements.keys()),
+            'stats': {sid: refinement.stats for sid, refinement in refinements.items()},
+        }
+        refined = GeometryArtifact(
+            run_id=geometry_artifact.run_id,
+            stage_name='pose_refine',
+            save_dir=save_dir,
+            metadata=refined_metadata,
+            backend_name=geometry_artifact.backend_name,
+            selected_frames=list(geometry_artifact.selected_frames),
+            intrinsics_by_stream=new_intrinsics,
+            camera_states_by_stream=new_states,
+            pointmaps_by_frame=geometry_artifact.pointmaps_by_frame,
+            depthmaps_by_frame=geometry_artifact.depthmaps_by_frame,
+            pairwise_matches=geometry_artifact.pairwise_matches,
+            view_graph_edges=geometry_artifact.view_graph_edges,
+            notes=list(geometry_artifact.notes) + extra_notes,
+        )
+        # Re-derive interpolated tracking-frame states from the refined keyframes
+        # (mirrors initialize_geometry). Skipped on pass-through, where the copied
+        # states are already correct for the un-refined poses.
+        if refinements:
+            self._densify_geometry_cameras_for_tracking(refined, ingest_artifact)
+        refined.save_dir = save_dir
+        self._stamp_stage_metadata(refined, 'pose_refine', video_paths=self._video_paths_for_stage(ingest_artifact))
+        refined.save()
+        return refined
 
     def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
         """Run point tracking, 3D lifting, and static/dynamic partitioning."""
@@ -396,119 +692,211 @@ class Room4DPipeline:
             selected.extend(by_stream[stream_id][::semantic_stride])
         return selected
 
-    def perceive_humans(self, ingest_artifact, track_artifact=None, geometry_artifact=None):
-        """Run single-video human detection, pose, DensePose, SMPL, and association."""
+    def segment(self, ingest_artifact, geometry_artifact=None):
+        """Detect+segment+track all instances → InstanceArtifact (masks + persistent ids).
+
+        The shared mask + identity source of the perception band (design §4A). Runs a
+        backend ladder; the FP1 floor rung is COCO Mask R-CNN + greedy-IoU association
+        (`person`→human-kind, else object-kind). SAM 3 is the top rung at FP2. Always
+        emits a schema-valid (possibly empty) artifact + a capability manifest.
+        """
+        objects_cfg = self.cfg.get('objects', {})
+        selected_frames = self._select_perception_frames(ingest_artifact, None, objects_cfg, default_source='keyframes')
+        floor = FloorInstanceSegmenter(self.decoder, self.object_detector, self.object_segmenter, objects_cfg)
+        ladder = BackendLadder('segment', [
+            # SAM 3 (gated) is the eventual top rung (design §4A); SAM 2 is the
+            # ungated stand-in: prompt-free class-agnostic discovery + video
+            # propagation. The segmenter is built inside the runner so SAM 2 is
+            # imported + loaded only when this rung is actually selected (and the
+            # model is released after the stage). Falls to the Mask R-CNN floor
+            # when `sam2` is not installed.
+            BackendRung(
+                'sam2', 'class_agnostic_propagation',
+                runner=lambda inp: SAM2InstanceSegmenter(self.decoder, self.object_detector, objects_cfg).run(inp['ingest'], inp['frames']),
+                probe=importable('sam2'),
+            ),
+            BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames'])),
+            BackendRung('empty', 'empty', runner=lambda inp: ([], {})),
+        ])
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'frames': selected_frames})
+        observations, mask_arrays = result if result is not None else ([], {})
+        artifact = InstanceArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='segment',
+            save_dir=self._stage_dir('segment'),
+            observations=observations or [],
+            mask_arrays=mask_arrays or {},
+            metadata={
+                'detector_backend': self.object_detector.backend_used,
+                'selected_frame_count': int(len(selected_frames)),
+            },
+        )
+        artifact.rebuild_indices()
+        artifact.attach_manifest(manifest)
+        artifact.notes.append(f"selected_frames={len(selected_frames)}")
+        artifact.notes.append(f"instances={len(artifact.observations)} tracks={len(artifact.track_index)}")
+        self._stamp_stage_metadata(artifact, 'segment', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
+    def compute_reid(self, ingest_artifact, instance_artifact=None):
+        """Per-tracklet appearance embeddings + cross-gap merges → ReidArtifact.
+
+        Consumes the `InstanceArtifact` track ids. Runs a backend ladder: the
+        DINOv2-L top rung (FP3) emits DINO features + a cross-occlusion merge_map;
+        the ResNet18 floor rung emits mean embeddings with an empty merge_map.
+        DINOv3-L swaps into the top rung by model_id once HF access lands. Always
+        emits a schema-valid artifact.
+        """
+        floor = FloorReid(self.decoder, self.object_embedder)
+        reid_cfg = self.cfg.get('reid', {})
+        ladder = BackendLadder('reid', [
+            # DINOv2-L (ungated, Apache) appearance features + cross-occlusion gap
+            # merges, above the ResNet18 floor; DINOv3-L swaps in by model_id once
+            # HF access lands. Built inside the runner so transformers is imported
+            # + the model loaded only when this rung is selected. If the weights
+            # can't load, run() raises and the ladder degrades to the floor.
+            BackendRung(
+                'dinov2', 'dino_features',
+                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
+                probe=importable('transformers'),
+            ),
+            BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
+            BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
+        ])
+        empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instance_artifact if instance_artifact is not None else empty})
+        embeddings, merge_map = result if result is not None else ({}, {})
+        artifact = ReidArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='reid',
+            save_dir=self._stage_dir('reid'),
+            embeddings=embeddings or {},
+            merge_map=merge_map or {},
+            metadata={'embedder_backend': self.object_embedder.backend_used},
+        )
+        artifact.attach_manifest(manifest)
+        artifact.notes.append(f"embedded_tracks={len(artifact.embeddings)}")
+        self._stamp_stage_metadata(artifact, 'reid', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
+    def compute_semantics(self, ingest_artifact, instance_artifact=None, reid_artifact=None):
+        """Open-vocab category (+ SigLIP embedding) per canonical tracklet → SemanticsArtifact.
+
+        Consumes `segment` masks + `reid` canonical ids. Runs a backend ladder: the
+        SigLIP2 top rung (FP4a) zero-shot names each tracklet from its masked crops;
+        the COCO-80 floor rung carries the detector's `concept` string, degrading to
+        "unknown". Qwen2.5-VL attributes/captions arrive at FP4b. Always emits a
+        schema-valid artifact.
+        """
+        semantics_cfg = self.cfg.get('semantics', {})
+        empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
+        instances = instance_artifact if instance_artifact is not None else empty
+        floor = FloorSemantics(reid_artifact)
+        ladder = BackendLadder('semantics', [
+            # SigLIP2 open-vocab category + image embedding. Built inside the runner so
+            # transformers is imported + the model loaded only when this rung is
+            # selected; if the weights can't load, run() raises and the ladder degrades
+            # to the COCO-80 detector floor (then to "unknown").
+            BackendRung(
+                'siglip2', 'open_vocab',
+                runner=lambda inp: SiglipSemantics(self.decoder, reid_artifact, semantics_cfg).run(inp['ingest'], inp['instances']),
+                probe=importable('transformers'),
+            ),
+            BackendRung('coco80', 'closed_vocab', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
+            BackendRung('unknown', 'empty', runner=lambda inp: ({}, {})),
+        ])
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instances})
+        records, embeddings = result if result is not None else ({}, {})
+        artifact = SemanticsArtifact(
+            run_id=ingest_artifact.run_id,
+            stage_name='semantics',
+            save_dir=self._stage_dir('semantics'),
+            records=records or {},
+            embeddings=embeddings or {},
+            metadata={},
+        )
+        artifact.attach_manifest(manifest)
+        named = sum(1 for r in artifact.records.values() if r.category != 'unknown')
+        artifact.notes.append(f"named_tracks={named}/{len(artifact.records)}")
+        self._stamp_stage_metadata(artifact, 'semantics', video_paths=self._video_paths_for_stage(ingest_artifact))
+        artifact.save()
+        return artifact
+
+    def compute_humans(self, ingest_artifact, instance_artifact=None, reid_artifact=None, geometry_artifact=None):
+        """Build HumanArtifact via a dense backend ladder (consumes segment + reid).
+
+        Dense ladder [sapiens -> keypoint_rcnn -> bbox_only]: Sapiens (FP5a) gives
+        pose + body-part seg + depth + normals per person crop; the Keypoint-RCNN
+        floor gives honest pose only; bbox_only is the graceful floor. SMPL stays an
+        honest skip (``smpl_params=None``; GVHMR at FP5b) and DensePose stays a
+        kept-but-unwired seam. Identity is the canonical (reid-merged) track id;
+        always emits a schema-valid artifact + capability manifest.
+        """
         humans_cfg = self.cfg.get('humans', {})
-        selected_frames = self._select_perception_frames(ingest_artifact, track_artifact, humans_cfg, default_source='tracking')
-        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        densepose_stride = max(1, int(humans_cfg.get('densepose_frame_stride', 1)))
-        smpl_stride = max(1, int(humans_cfg.get('smpl_frame_stride', 1)))
-        effective_stride = self._effective_sample_stride(humans_cfg)
+        empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
+        instances = instance_artifact if instance_artifact is not None else empty
+        sapiens_cfg = {**humans_cfg}
+
+        def _sapiens_probe():
+            if not humans_cfg.get('use_sapiens', True):
+                return 'sapiens disabled (humans.use_sapiens=false)'
+            return sapiens_cached(str(humans_cfg.get('sapiens_size', '0.6b')))
+
+        ladder = BackendLadder('humans', [
+            # Sapiens dense (pose+seg+depth+normals), built inside the runner so the
+            # torchscript models load only when this rung is selected; gated by the
+            # checkpoint-presence probe -> degrades to the Keypoint-RCNN floor.
+            BackendRung('sapiens', 'sapiens_dense',
+                        runner=lambda inp: SapiensDenseRung(self.decoder, sapiens_cfg).run(inp['ingest'], inp['instances']),
+                        probe=_sapiens_probe),
+            BackendRung('keypoint_rcnn', 'pose_only',
+                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances'])),
+            BackendRung('bbox_only', 'bbox_only',
+                        runner=lambda inp: BboxOnlyRung(self.decoder).run(inp['ingest'], inp['instances'])),
+        ])
+        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instances})
+        dense_by_instance = result if result is not None else {}
+
+        def _canonical(track_id: str) -> str:
+            return reid_artifact.canonical(track_id) if reid_artifact is not None else track_id
+
+        human_obs = [o for o in instances.observations if o.kind == 'human']
         human_states: list[HumanState] = []
-        mask_arrays: dict[str, np.ndarray] = {}
-        densepose_payloads: dict[str, dict[str, Any]] = {}
-        smpl_payloads: dict[str, dict[str, Any]] = {}
-        notes: list[str] = []
-
-        track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
-
-        def _frame_track_support(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> dict[str, Any]:
-            payload = track_payloads.get(stream_id, {})
-            points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
-            visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
-            track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
-            frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
-            if points_xy.ndim != 3 or frame_indices.size == 0:
-                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
-            matches = np.where(frame_indices == int(frame_idx))[0]
-            if matches.size == 0:
-                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
-            t = int(matches[0])
-            visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
-            pts = points_xy[t]
-            bbox = np.asarray(bbox_xyxy, dtype=np.float32)
-            x1, y1, x2, y2 = bbox.tolist()
-            inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
-            bbox_keep = visible & inside_bbox
-            mask_keep = bbox_keep.copy()
+        mask_arrays: dict[str, Any] = {}
+        dense_payloads: dict[str, dict[str, Any]] = {}
+        for o in human_obs:
+            canonical = _canonical(o.track_id)
+            mask = instances.mask_arrays.get(o.instance_id)
             if mask is not None:
-                mask_arr = np.asarray(mask, dtype=bool)
-                if mask_arr.ndim == 2 and mask_arr.shape[0] > 0 and mask_arr.shape[1] > 0:
-                    xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
-                    yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
-                    mask_keep &= mask_arr[yi, xi]
-            keep = mask_keep if int(mask_keep.sum()) > 0 else bbox_keep
-            support_points = pts[keep] if np.any(keep) else np.zeros((0, 2), dtype=np.float32)
-            selected_ids = [int(tid) for tid in track_ids[keep].tolist()]
-            return {
-                'track_ids': selected_ids,
-                'support_points_xy': np.asarray(support_points, dtype=np.float32).tolist(),
-                'visible_track_count': int(visible.sum()),
-                'bbox_support_count': int(bbox_keep.sum()),
-                'mask_support_count': int(mask_keep.sum()),
-                'support_track_count': int(len(selected_ids)),
+                mask_arrays[o.instance_id] = np.asarray(mask, dtype=bool)
+            rec = dense_by_instance.get(o.instance_id) or {}
+            kpts = rec.get('keypoints_2d')
+            seg, depth, normals = rec.get('seg'), rec.get('depth'), rec.get('normals')
+            dense = None
+            if any(v is not None for v in (seg, depth, normals)):
+                dense = {'seg': seg, 'depth': depth, 'normals': normals}
+                dense_payloads[o.instance_id] = {k: v for k, v in dense.items() if v is not None}
+            attrs = {
+                'detection_id': o.instance_id,
+                'track_id': canonical,
+                'track_ids': [],  # point-track support decoupled (§4A)
+                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'dense_backend': rec.get('backend', manifest.backend_used),
             }
-
-        for semantic_idx, frame_ref in enumerate(selected_frames):
-            stream = stream_lookup[frame_ref.stream_id]
-            frame = self.decoder.get_frame(stream, frame_ref.frame_idx)
-            detections = self.human_detector.detect(frame)
-            boxes = [np.asarray(det['bbox_xyxy'], dtype=np.float32) for det in detections]
-            masks = []
-            for det_idx, det in enumerate(detections):
-                logits = det.get('mask_logits')
-                mask = None if logits is None else (np.asarray(logits, dtype=np.float32) >= 0.5)
-                det['mask'] = mask
-                masks.append(mask)
-            keypoints = self.human_pose.predict(frame, boxes)
-            run_densepose = (semantic_idx % densepose_stride) == 0
-            run_smpl = (semantic_idx % smpl_stride) == 0
-            denseposes = self.human_densepose.predict(frame, boxes, masks=masks, keypoints=keypoints) if run_densepose else [None] * len(boxes)
-            for det_idx, det in enumerate(detections):
-                detection_id = f"hum:{frame_ref.stream_id}:{int(frame_ref.frame_idx)}:{det_idx}"
-                mask = masks[det_idx] if det_idx < len(masks) else None
-                if mask is not None:
-                    mask_arrays[detection_id] = np.asarray(mask, dtype=bool)
-                kpts = keypoints[det_idx] if det_idx < len(keypoints) else None
-                dp = denseposes[det_idx] if det_idx < len(denseposes) else None
-                if dp is not None:
-                    densepose_payloads[detection_id] = dp
-                smpl = self.human_smpl.fit_frame(frame, kpts, mask=mask, intrinsics=None) if run_smpl else None
-                if smpl is not None:
-                    smpl_payloads[detection_id] = smpl
-                support = _frame_track_support(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
-                attrs = {
-                    'detection_id': detection_id,
-                    'track_ids': list(support['track_ids']),
-                    'support_points_xy': list(support['support_points_xy']),
-                    'visible_track_count': int(support['visible_track_count']),
-                    'bbox_support_count': int(support['bbox_support_count']),
-                    'mask_support_count': int(support['mask_support_count']),
-                    'support_track_count': int(support['support_track_count']),
-                    'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
-                    'semantic_frame_index': int(semantic_idx),
-                    'semantic_frame_source': str(humans_cfg.get('frame_source', 'tracking')),
-                    'densepose_computed': bool(run_densepose),
-                    'smpl_computed': bool(run_smpl),
-                    'frame_stride': int(effective_stride),
-                    'detector_backend': self.human_detector.backend_used,
-                    'pose_backend': self.human_pose.backend_used,
-                    'densepose_backend': self.human_densepose.backend_used,
-                    'smpl_backend': self.human_smpl.backend_used,
-                }
-                human_states.append(
-                    HumanState(
-                        human_id=detection_id,
-                        frame_ref=frame_ref,
-                        bbox_xyxy=np.asarray(det['bbox_xyxy'], dtype=np.float32),
-                        mask_rle=None if mask is None else {'shape': list(mask.shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
-                        keypoints_2d=None if kpts is None else np.asarray(kpts, dtype=np.float32),
-                        densepose=dp,
-                        smpl_params=smpl,
-                        confidence=float(det['score']),
-                        attributes=attrs,
-                    )
-                )
+            human_states.append(HumanState(
+                human_id=canonical,
+                frame_ref=o.frame_ref,
+                bbox_xyxy=np.asarray(o.bbox_xyxy, dtype=np.float32),
+                mask_rle=None if mask is None else {'shape': list(np.asarray(mask).shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
+                keypoints_2d=None if kpts is None else np.asarray(kpts, dtype=np.float32),
+                densepose=None,
+                smpl_params=None,
+                confidence=float(o.confidence),
+                attributes=attrs,
+                dense=dense,
+            ))
 
         artifact = HumanArtifact(
             run_id=ingest_artifact.run_id,
@@ -519,141 +907,78 @@ class Room4DPipeline:
             linked_ids={},
             frame_index={},
             mask_arrays=mask_arrays,
-            densepose_payloads=densepose_payloads,
-            smpl_payloads=smpl_payloads,
-            notes=notes,
+            densepose_payloads={},
+            smpl_payloads={},
+            dense_payloads=dense_payloads,
+            notes=[],
             metadata={
-                'detector_backend': self.human_detector.backend_used,
-                'pose_backend': self.human_pose.backend_used,
-                'densepose_backend': self.human_densepose.backend_used,
-                'smpl_backend': self.human_smpl.backend_used,
+                'dense_backend': manifest.backend_used,
                 'save_debug_assets': bool(humans_cfg.get('save_debug_assets', humans_cfg.get('debug', False))),
                 'save_debug_html': bool(humans_cfg.get('save_debug_html', humans_cfg.get('debug', False))),
-                'debug_image_paths': dict((track_artifact.metadata.get('debug_image_paths', {}) if track_artifact is not None else {})),
-                'frame_source': str(humans_cfg.get('frame_source', 'tracking')),
-                'frame_stride': int(humans_cfg.get('frame_stride', 1)),
-                'densepose_frame_stride': int(densepose_stride),
-                'smpl_frame_stride': int(smpl_stride),
-                'selected_frame_count': int(len(selected_frames)),
+                'debug_image_paths': {},
+                'num_human_tracks': len({h.human_id for h in human_states}),
             },
         )
-        artifact.notes.extend([
-            f"selected_semantic_frames={len(selected_frames)}",
-            f"frame_source={humans_cfg.get('frame_source', 'tracking')}",
-            f"densepose_stride={densepose_stride}",
-            f"smpl_stride={smpl_stride}",
-        ])
-        artifact.raw_humans = [HumanState(
-            human_id=h.human_id,
-            frame_ref=h.frame_ref,
-            bbox_xyxy=np.asarray(h.bbox_xyxy, dtype=np.float32).copy(),
-            mask_rle=h.mask_rle,
-            keypoints_2d=None if h.keypoints_2d is None else np.asarray(h.keypoints_2d, dtype=np.float32).copy(),
-            densepose=h.densepose,
-            smpl_params=h.smpl_params,
-            confidence=float(h.confidence),
-            attributes=dict(h.attributes),
-        ) for h in human_states]
+        artifact.attach_manifest(manifest)
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
-        artifact = self.human_associator.associate_across_views(artifact)
-        self._attach_human_debug_projections(artifact, track_artifact, geometry_artifact)
+        artifact.notes.append(f"human_instances={len(human_states)} human_tracks={artifact.metadata['num_human_tracks']}")
         self._stamp_stage_metadata(artifact, 'humans', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
-    def perceive_objects(self, ingest_artifact, track_artifact=None):
-        """Run single-video object detection, segmentation, and re-identification."""
+    def perceive_objects(self, ingest_artifact, instance_artifact=None, reid_artifact=None, semantics_artifact=None):
+        """Build ObjectArtifact from non-human tracklets (consumes segment + reid + semantics).
+
+        Category is the open-vocab label from the `semantics` stage (SigLIP2 at FP4a),
+        falling back to the COCO `concept` string when semantics is absent/"unknown".
+        Identity is the canonical (reid-merged) track id; the per-track embedding and
+        the deleted hand-tuned associator are unchanged (§4A).
+        """
         objects_cfg = self.cfg.get('objects', {})
-        selected_frames = self._select_perception_frames(ingest_artifact, track_artifact, objects_cfg, default_source='tracking')
-        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
-        effective_stride = self._effective_sample_stride(objects_cfg)
         object_states: list[ObjectState] = []
         mask_arrays: dict[str, Any] = {}
         embedding_vectors: dict[str, Any] = {}
-        notes: list[str] = []
 
-        track_payloads = {} if track_artifact is None else track_artifact.track_payloads_by_stream
+        def _canonical(track_id: str) -> str:
+            return reid_artifact.canonical(track_id) if reid_artifact is not None else track_id
 
-        def _frame_track_support(stream_id: str, frame_idx: int, mask: Any, bbox_xyxy: Any) -> dict[str, Any]:
-            payload = track_payloads.get(stream_id, {})
-            points_xy = np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
-            visibility = np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool)))
-            track_ids = np.asarray(payload.get('track_ids', np.arange(points_xy.shape[1] if points_xy.ndim == 3 else 0)), dtype=int)
-            frame_indices = np.asarray(payload.get('frame_indices', []), dtype=int)
-            if points_xy.ndim != 3 or frame_indices.size == 0:
-                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
-            matches = np.where(frame_indices == int(frame_idx))[0]
-            if matches.size == 0:
-                return {'track_ids': [], 'support_points_xy': [], 'visible_track_count': 0, 'bbox_support_count': 0, 'mask_support_count': 0, 'support_track_count': 0}
-            t = int(matches[0])
-            visible = visibility[t].astype(bool) if visibility.size else np.ones((points_xy.shape[1],), dtype=bool)
-            pts = points_xy[t]
-            bbox = np.asarray(bbox_xyxy, dtype=np.float32)
-            x1, y1, x2, y2 = bbox.tolist()
-            inside_bbox = (pts[:, 0] >= x1) & (pts[:, 0] <= x2) & (pts[:, 1] >= y1) & (pts[:, 1] <= y2)
-            bbox_keep = visible & inside_bbox
-            mask_keep = bbox_keep.copy()
+        def _semantic(canonical: str, concept: str):
+            """Open-vocab (category, topk) from the semantics stage; COCO-concept fallback."""
+            if semantics_artifact is not None:
+                rec = semantics_artifact.records.get(canonical)
+                if rec is not None and rec.category and rec.category != 'unknown':
+                    return rec.category, list(rec.category_topk)
+            return str(concept), []
+
+        observations = [] if instance_artifact is None else [o for o in instance_artifact.observations if o.kind != 'human']
+        for o in observations:
+            canonical = _canonical(o.track_id)
+            mask = None if instance_artifact is None else instance_artifact.mask_arrays.get(o.instance_id)
             if mask is not None:
-                mask_arr = np.asarray(mask, dtype=bool)
-                if mask_arr.ndim == 2 and mask_arr.shape[0] > 0 and mask_arr.shape[1] > 0:
-                    xi = np.clip(np.round(pts[:, 0]).astype(int), 0, mask_arr.shape[1] - 1)
-                    yi = np.clip(np.round(pts[:, 1]).astype(int), 0, mask_arr.shape[0] - 1)
-                    mask_keep &= mask_arr[yi, xi]
-            keep = mask_keep if int(mask_keep.sum()) > 0 else bbox_keep
-            support_points = pts[keep] if np.any(keep) else np.zeros((0, 2), dtype=np.float32)
-            selected_ids = [int(tid) for tid in track_ids[keep].tolist()]
-            return {
-                'track_ids': selected_ids,
-                'support_points_xy': np.asarray(support_points, dtype=np.float32).tolist(),
-                'visible_track_count': int(visible.sum()),
-                'bbox_support_count': int(bbox_keep.sum()),
-                'mask_support_count': int(mask_keep.sum()),
-                'support_track_count': int(len(selected_ids)),
+                mask_arrays[o.instance_id] = np.asarray(mask, dtype=bool)
+            embedding = None if reid_artifact is None else reid_artifact.embeddings.get(canonical)
+            if embedding is not None:
+                embedding_vectors[canonical] = np.asarray(embedding, dtype=np.float32)
+            category, semantic_topk = _semantic(canonical, o.concept)
+            attrs = {
+                'detection_id': o.instance_id,
+                'track_id': canonical,
+                'track_ids': [],  # point-track support decoupled (§4A); empty at FP1
+                'label_id': int(o.attributes.get('label_id', -1)),
+                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'detector_backend': (instance_artifact.metadata.get('detector_backend') if instance_artifact is not None else None),
+                'semantic_topk': semantic_topk,
             }
-
-        for semantic_idx, frame_ref in enumerate(selected_frames):
-            stream = stream_lookup[frame_ref.stream_id]
-            frame = self.decoder.get_frame(stream, frame_ref.frame_idx)
-            detections = self.object_detector.detect(frame)
-            detections = self.object_segmenter.segment(frame, detections)
-            embeddings = self.object_embedder.embed(frame, detections)
-            for det_idx, det in enumerate(detections):
-                detection_id = f"det:{frame_ref.stream_id}:{int(frame_ref.frame_idx)}:{det_idx}"
-                mask = np.asarray(det.get('mask'), dtype=bool) if det.get('mask') is not None else None
-                if mask is not None:
-                    mask_arrays[detection_id] = mask.astype(bool)
-                embedding = embeddings[det_idx] if det_idx < embeddings.shape[0] else None
-                if embedding is not None:
-                    embedding_vectors[detection_id] = np.asarray(embedding, dtype=np.float32)
-                support = _frame_track_support(frame_ref.stream_id, frame_ref.frame_idx, mask, det['bbox_xyxy'])
-                attrs = {
-                    'detection_id': detection_id,
-                    'label_id': int(det.get('label_id', -1)),
-                    'track_ids': list(support['track_ids']),
-                    'support_points_xy': list(support['support_points_xy']),
-                    'visible_track_count': int(support['visible_track_count']),
-                    'bbox_support_count': int(support['bbox_support_count']),
-                    'mask_support_count': int(support['mask_support_count']),
-                    'support_track_count': int(support['support_track_count']),
-                    'frame_key': f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}",
-                    'semantic_frame_index': int(semantic_idx),
-                    'semantic_frame_source': str(objects_cfg.get('frame_source', 'tracking')),
-                    'frame_stride': int(effective_stride),
-                    'detector_backend': self.object_detector.backend_used,
-                    'embedder_backend': self.object_embedder.backend_used,
-                }
-                object_states.append(
-                    ObjectState(
-                        object_id=detection_id,
-                        frame_ref=frame_ref,
-                        category=str(det['category']),
-                        bbox_xyxy=np.asarray(det['bbox_xyxy'], dtype=np.float32),
-                        mask_rle=None if mask is None else {'shape': list(mask.shape), 'sum': int(mask.sum())},
-                        embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),
-                        confidence=float(det['score']),
-                        attributes=attrs,
-                    )
-                )
+            object_states.append(ObjectState(
+                object_id=canonical,
+                frame_ref=o.frame_ref,
+                category=category,
+                bbox_xyxy=np.asarray(o.bbox_xyxy, dtype=np.float32),
+                mask_rle=None if mask is None else {'shape': list(np.asarray(mask).shape), 'sum': int(np.asarray(mask, dtype=bool).sum())},
+                embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),
+                confidence=float(o.confidence),
+                attributes=attrs,
+            ))
 
         artifact = ObjectArtifact(
             run_id=ingest_artifact.run_id,
@@ -664,24 +989,18 @@ class Room4DPipeline:
             frame_index={},
             mask_arrays=mask_arrays,
             embedding_vectors=embedding_vectors,
-            notes=notes,
+            notes=[],
             metadata={
                 'detector_backend': self.object_detector.backend_used,
                 'embedder_backend': self.object_embedder.backend_used,
                 'save_debug_assets': bool(objects_cfg.get('save_debug_assets', objects_cfg.get('debug', False))),
                 'save_debug_html': bool(objects_cfg.get('save_debug_html', objects_cfg.get('debug', False))),
-                'debug_image_paths': dict((track_artifact.metadata.get('debug_image_paths', {}) if track_artifact is not None else {})),
-                'frame_source': str(objects_cfg.get('frame_source', 'tracking')),
-                'frame_stride': int(objects_cfg.get('frame_stride', 1)),
-                'selected_frame_count': int(len(selected_frames)),
+                'debug_image_paths': {},
+                'num_object_tracks': len({s.object_id for s in object_states}),
             },
         )
-        artifact.notes.extend([
-            f"selected_semantic_frames={len(selected_frames)}",
-            f"frame_source={objects_cfg.get('frame_source', 'tracking')}",
-        ])
         artifact.frame_index = artifact._build_frame_index(artifact.objects)
-        artifact = self.object_associator.associate(artifact, track_artifact=track_artifact)
+        artifact.notes.append(f"object_instances={len(object_states)} object_tracks={artifact.metadata['num_object_tracks']}")
         self._stamp_stage_metadata(artifact, 'objects', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
@@ -709,8 +1028,12 @@ class Room4DPipeline:
         artifact.save()
         return artifact
 
-    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None):
-        """Assemble a lightweight static/dynamic single-video 4D scene."""
+    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
+        """Assemble a lightweight static/dynamic single-video 4D scene.
+
+        ``instance_artifact`` (segment stage) supplies the per-frame foreground
+        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from.
+        """
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -718,6 +1041,7 @@ class Room4DPipeline:
             track_artifact=track_artifact,
             human_artifact=human_artifact,
             object_artifact=object_artifact,
+            instance_artifact=instance_artifact,
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
@@ -728,27 +1052,28 @@ class Room4DPipeline:
         return artifact
 
     def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None, track_artifact=None, human_artifact=None):
-        """Fit a renderable 4D scene model and export novel-view playback."""
-        scene = Gaussian4DScene(self.cfg.get('render', {}))
-        scene.initialize_from_scene(scene_artifact)
+        """Train + render the self-contained SceneArtifact (proven Gaussian trainer).
+
+        The render stage consumes ONLY the SceneArtifact (dense seed + persisted
+        train views + render trajectory). The optimization/geometry/track/human
+        artifacts are accepted for stage-signature compatibility but unused here;
+        masked-NVS scoring against held-out GT is the eval stage's job (F0 follow-up).
+        """
         render_dir = self._stage_dir('render')
-        artifact = self.renderer.fit(
-            scene,
-            optimization_artifact=optimization_artifact,
-            geometry_artifact=geometry_artifact,
-            save_dir=render_dir,
-        )
-        evaluation = self.benchmark_runner.run(
-            geometry_artifact=geometry_artifact,
-            track_artifact=track_artifact,
-            human_artifact=human_artifact,
-            scene_artifact=scene_artifact,
-            render_artifact=artifact,
-            renderer=self.renderer,
-            output_dir=render_dir,
-        )
-        artifact.scene_state['evaluation'] = evaluation.get('metrics', {})
-        artifact.metadata['failure_report'] = evaluation.get('failure_report', {})
+        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
+        # Masked-NVS scoring against held-out GT runs only on a benchmark dataset
+        # (covisibility masks / held-out cameras don't exist for arbitrary video).
+        eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
+        if eval_cfg.get('dataset_root'):
+            device = str(self.cfg.get('render', {}).get('device', 'cuda'))
+            if str(artifact.scene_state.get('kind', 'static')) == 'dynamic':
+                from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+                metrics = score_render_artifact_masked_nvs_dynamic(artifact, eval_cfg, device=device)
+            else:
+                from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
+                metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+            if metrics:
+                artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir
         self._stamp_stage_metadata(artifact, 'render', video_paths=self._video_paths_for_stage())
         artifact.save()
@@ -761,6 +1086,8 @@ class Room4DPipeline:
         components: list[Any] = []
         if stage_name == 'geometry':
             components = [self.geometry_init]
+        elif stage_name == 'pose_refine':
+            components = []  # the refiner holds no persistent backend; just release memory below
         elif stage_name == 'tracking':
             components = [self.tracker]
         elif stage_name == 'humans':
@@ -784,21 +1111,35 @@ class Room4DPipeline:
         """Execute the current end-to-end vertical slice and persist artifacts."""
         ingest_artifact = self.preprocess(video_paths)
         sync_artifact = self.synchronize(ingest_artifact)
-        geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact)
-        track_artifact = self.track(ingest_artifact, geometry_artifact=geometry_artifact)
-        human_artifact = self.perceive_humans(ingest_artifact, track_artifact=track_artifact, geometry_artifact=geometry_artifact)
-        object_artifact = self.perceive_objects(ingest_artifact, track_artifact=track_artifact)
-        graph_artifact = self.build_graph(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
-        optimization_artifact = self.optimize(sync_artifact, geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        scene_artifact = self.assemble_scene(geometry_artifact, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact)
-        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=geometry_artifact, track_artifact=track_artifact, human_artifact=human_artifact)
+        # FP6b step 3: coarse geometry-free dyn_mask (protects the SfM pose rung), between
+        # sync and geometry per the static-superset order (§4A.1). No-op unless enabled.
+        dyn_mask_artifact = self.compute_dyn_mask(ingest_artifact, sync_artifact)
+        geometry_artifact = self.initialize_geometry(ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
+        # Pose-refined geometry feeds every downstream stage; the original
+        # geometry artifact is still returned under 'geometry' for inspection.
+        pose_geometry = self.refine_poses(ingest_artifact, geometry_artifact)
+        # Perception band (§4A): segment+reid own identity; objects/humans enrich;
+        # tracking is motion-only and now runs *after* perception.
+        instance_artifact = self.segment(ingest_artifact, geometry_artifact=pose_geometry)
+        reid_artifact = self.compute_reid(ingest_artifact, instance_artifact)
+        object_artifact = self.perceive_objects(ingest_artifact, instance_artifact=instance_artifact, reid_artifact=reid_artifact)
+        human_artifact = self.compute_humans(ingest_artifact, instance_artifact=instance_artifact, reid_artifact=reid_artifact, geometry_artifact=pose_geometry)
+        track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
+        graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
+        optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
+        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
+        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
+            'dyn_mask': dyn_mask_artifact,
             'geometry': geometry_artifact,
-            'tracks': track_artifact,
-            'humans': human_artifact,
+            'pose_refine': pose_geometry,
+            'segment': instance_artifact,
+            'reid': reid_artifact,
             'objects': object_artifact,
+            'humans': human_artifact,
+            'tracks': track_artifact,
             'graph': graph_artifact,
             'optimization': optimization_artifact,
             'scene': scene_artifact,

@@ -1,0 +1,79 @@
+# Render-proof config for DyCheck paper-windmill (moving monocular camera).
+# The proper static-training regime: train camera 0 moves, giving multi-view
+# coverage of the static background; val cameras 1/2 are held out. SoM baseline
+# on this sequence is masked NV mPSNR 19.53 (the Checkpoint-2 yardstick, scored
+# with masked metrics in PR 3).
+render_proof:
+  device: cuda
+
+  dataset:
+    factor: 2
+    split: train
+    train_cameras: ["0"]
+    eval_cameras: ["1", "2"]
+    seed_time: 0
+    seed_times: [0, 35, 70, 105, 140, 175, 210, 245]  # cover the moving trajectory
+    train_times: null
+    max_train_views: null
+    eval_time: 0
+    eval_train_times: [0, 138, 270]
+
+  seed:
+    pixel_stride: 1
+    scale_mult: 1.5
+    scale_min: 1.0e-5
+    scale_max: 0.05
+    max_points: 2000000
+    opacity: 0.9
+    depth_near: 0.001
+    depth_far: null
+
+  rasterizer:
+    rasterizer_backend: gsplat
+    absgrad: false
+
+  trainer:
+    iters: 7000
+    color_model: rgb
+    lambda_l1: 0.8
+    lambda_ssim: 0.2
+    lr_means: 1.6e-4
+    lr_means_final: 1.6e-6
+    lr_scales: 5.0e-3
+    lr_quats: 1.0e-3
+    lr_opacities: 5.0e-2
+    lr_colors: 2.5e-3
+    means_lr_decay_steps: 7000
+    random_seed: 0
+    log_every: 250
+
+  densify:
+    enabled: true
+    start_iter: 500
+    stop_iter: 5000
+    refine_every: 100
+    reset_opacity_every: 3000
+    pause_refine_after_reset: 0
+    grad2d_threshold: 0.0002
+    grow_scale3d: 0.01
+    prune_opacity: 0.005
+    prune_scale3d: 0.1
+    split_count: 2
+    split_scale_divider: 1.6
+    reset_opacity_value: 0.01
+    absgrad: false
+    scene_extent: null
+    max_gaussians: 3000000
+
+  eval:
+    save_panels: true
+    checkpoint1_psnr_min: 24.0
+
+  benchmark:                  # covisibility-masked NVS (DyCheck protocol) vs SoM
+    enabled: true
+    eval_split: val
+    max_eval_frames: null     # null = all val frames (matches SoM); cap for smoke
+    dataset_format: iphone
+    method_name: room4d
+    lpips_net: alex
+    compare_to: null          # path to a SoM reference_benchmark.json (or --compare-to)

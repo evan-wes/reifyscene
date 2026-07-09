@@ -16,6 +16,7 @@ from room4d.common.io import read_json, write_json
 from room4d.common.paths import ensure_dir
 from room4d.common.types import BaseArtifact, FrameRef, TrackObservation
 from room4d.geometry.geometry_artifact import GeometryArtifact
+from room4d.tracking.all_pairs import AllPairsTracks
 
 
 @dataclass
@@ -33,6 +34,10 @@ class TrackArtifact(BaseArtifact):
     visibility_masks: dict[str, Any] = field(default_factory=dict)
     static_dynamic_hints: dict[str, Any] = field(default_factory=dict)
     track_payloads_by_stream: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # All-pairs 2D tracks (SoM 2d_tracks format) the native bootstapir tracker
+    # produces and native_track_lift consumes. Distinct from the single-query
+    # track_payloads_by_stream above; empty for the CoTracker/scaffold path.
+    all_pairs_by_stream: dict[str, AllPairsTracks] = field(default_factory=dict)
     selected_frames: list[FrameRef] = field(default_factory=list)
     depthmaps_by_frame: dict[str, Any] = field(default_factory=dict)
     pointmaps_by_frame: dict[str, Any] = field(default_factory=dict)
@@ -46,6 +51,25 @@ class TrackArtifact(BaseArtifact):
     def total_observations(self) -> int:
         """Return the total number of 2D point observations."""
         return sum(len(obs) for obs in self.per_stream_observations.values())
+
+    def write_2d_tracks(self, out_dir: Path | str, stream_id: str | None = None) -> Path:
+        """Emit a stream's all-pairs tracks in the SoM ``2d_tracks`` layout.
+
+        Writes ``<out_dir>/<name_i>_<name_j>.npy`` (one file per ordered frame pair)
+        that :func:`room4d.lifting.native_track_lift.lift_tracks_3d` reads directly.
+        ``out_dir`` is the ``<factor>x`` directory itself. With one all-pairs stream,
+        ``stream_id`` may be omitted; otherwise it must be given.
+        """
+        if not self.all_pairs_by_stream:
+            raise ValueError("artifact has no all-pairs tracks to write")
+        if stream_id is None:
+            if len(self.all_pairs_by_stream) != 1:
+                raise ValueError(
+                    "stream_id is required when the artifact has multiple all-pairs streams: "
+                    f"{sorted(self.all_pairs_by_stream)}"
+                )
+            stream_id = next(iter(self.all_pairs_by_stream))
+        return self.all_pairs_by_stream[stream_id].write_som_pairs(out_dir)
 
     def _progress_iter(self, iterable, *, total: int | None = None, description: str = ""):
         enabled = bool(self.metadata.get('save_debug_assets', False) or self.metadata.get('save_debug_html', False))
@@ -649,6 +673,22 @@ class TrackArtifact(BaseArtifact):
             )
             track_index[stream_id] = filename
 
+        # All-pairs tracks round-trip through their canonical SoM 2d_tracks
+        # layout (<name_i>_<name_j>.npy), the same format the native lift reads
+        # and that is byte-comparable to the shipped borrowed tracks.
+        all_pairs_index: dict[str, dict[str, Any]] = {}
+        if self.all_pairs_by_stream:
+            all_pairs_root = ensure_dir(self.save_dir / '2d_tracks')
+            for stream_id, ap in self.all_pairs_by_stream.items():
+                sub = f"{self._sanitize_key(stream_id)}/{ap.factor}x"
+                ap.write(all_pairs_root / sub)
+                all_pairs_index[stream_id] = {
+                    'dir': f"2d_tracks/{sub}",
+                    'frame_names': list(ap.frame_names),
+                    'factor': int(ap.factor),
+                    'image_hw': [int(ap.image_hw[0]), int(ap.image_hw[1])],
+                }
+
         depth_index: dict[str, str] = {}
         for frame_key, payload in self.depthmaps_by_frame.items():
             if depth_dir is None:
@@ -702,6 +742,7 @@ class TrackArtifact(BaseArtifact):
             'notes': self.notes,
             'track_index': track_index,
             'track_payload_meta': track_payload_meta,
+            'all_pairs_index': all_pairs_index,
             'depth_index': depth_index,
             'point_index': point_index,
             'debug_exports': debug_exports,
@@ -757,6 +798,10 @@ class TrackArtifact(BaseArtifact):
                 'confidence': None if confidence.size == 0 else confidence,
             }
 
+        all_pairs_by_stream: dict[str, AllPairsTracks] = {}
+        for stream_id, info in raw.get('all_pairs_index', {}).items():
+            all_pairs_by_stream[stream_id] = AllPairsTracks.load(save_dir / info['dir'])
+
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
@@ -768,6 +813,7 @@ class TrackArtifact(BaseArtifact):
             visibility_masks=raw.get('visibility_masks', {}),
             static_dynamic_hints=raw.get('static_dynamic_hints', {}),
             track_payloads_by_stream=payloads,
+            all_pairs_by_stream=all_pairs_by_stream,
             selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw.get('selected_frames', [])],
             depthmaps_by_frame=depthmaps_by_frame,
             pointmaps_by_frame=pointmaps_by_frame,

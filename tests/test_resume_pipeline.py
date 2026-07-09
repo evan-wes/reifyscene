@@ -70,9 +70,16 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
 
 
 def test_stage_registry_and_materialize_stage_from_prior(tmp_path: Path) -> None:
-    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'geometry', 'tracking', 'humans', 'objects', 'graph', 'optimization', 'scene', 'render')
+    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking', 'graph', 'optimization', 'scene', 'render')
     registry = build_stage_registry()
-    assert registry['tracking'].dependencies == ('ingest', 'geometry')
+    assert registry['dyn_mask'].dependencies == ('ingest', 'sync')
+    assert registry['geometry'].dependencies == ('ingest', 'sync', 'dyn_mask')
+    assert registry['pose_refine'].dependencies == ('ingest', 'geometry')
+    assert registry['segment'].dependencies == ('ingest', 'pose_refine')
+    assert registry['reid'].dependencies == ('ingest', 'segment')
+    assert registry['semantics'].dependencies == ('ingest', 'segment', 'reid')
+    assert registry['objects'].dependencies == ('ingest', 'segment', 'reid', 'semantics')
+    assert registry['tracking'].dependencies == ('ingest', 'pose_refine', 'segment')
 
     video = _touch_video(tmp_path / 'clip.mp4')
     prior_run = tmp_path / 'prior_run'

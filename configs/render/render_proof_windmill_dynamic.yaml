@@ -1,0 +1,59 @@
+# Dynamic render-proof config for DyCheck paper-windmill (Checkpoint 3).
+# Trains a borrowed SoM motion init (fg deformed by SE(3) motion bases + static
+# bg). The borrowed cameras are full-res; rendering at factor 2 scales K by 1/2,
+# reusing the factor-2 covisible masks (directly comparable to the static
+# Checkpoint-2 number, 18.51).
+render_proof:
+  device: cuda
+
+  dataset:
+    factor: 2                 # render/eval factor; borrowed K scaled by 1/factor
+    train_cameras: ["0"]
+    eval_cameras: ["1", "2"]
+
+  dynamic:
+    iters: 5000               # matches SoM's max_steps so the schedule lines up
+    lambda_l1: 0.8
+    lambda_ssim: 0.2
+    lambda_smooth: 1.0        # temporal motion-bases smoothness
+    lr_means: 1.6e-4
+    lr_scales: 5.0e-3
+    lr_quats: 1.0e-3
+    lr_opacities: 5.0e-2
+    lr_colors: 2.5e-3
+    lr_motion_coefs: 1.0e-2
+    lr_motion_bases: 1.6e-4
+    random_seed: 0
+    log_every: 250
+
+  densify:                    # standard 3DGS adaptive density control (fg + bg)
+    enabled: true
+    # Schedule (start_iter / refine_every / reset_opacity_every / stop_iter /
+    # pause_refine_after_reset) is derived from `iters` (SoM-shaped) — see
+    # densify.py::densify_schedule. At iters=5000 it resolves to SoM's exact
+    # 200 / 100 / 3000 / 4000 / num_frames. Set any of them here to override.
+    grad2d_threshold: 0.0002
+    grow_scale3d: 0.01
+    prune_opacity: 0.005
+    prune_scale3d: 0.1
+    split_count: 2
+    split_scale_divider: 1.6
+    reset_opacity_value: 0.01
+    absgrad: false
+    scene_extent: null
+    max_gaussians: 4000000
+
+  benchmark:
+    enabled: true
+    dataset_format: iphone
+    method_name: room4d-dynamic
+    lpips_net: alex
+    max_eval_frames: null
+    compare_to: null
+
+  flythrough:                 # render flythrough.mp4 along a hand-authored path
+    enabled: true
+    path: orbit               # orbit (near-trajectory arc) | replay (input cameras)
+    num_frames: 120
+    fps: 24
+    arc_degrees: 90.0         # orbit sweep; kept near the input trajectory

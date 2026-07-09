@@ -1,0 +1,17 @@
+calibration:
+  sampling:
+    sample_spacing_sec: 0.75
+    max_frames_per_stream: 48
+    image_max_dim: 960
+    prefer_static_frames: true
+    static_diff_threshold: 16.0
+    min_sharpness: 8.0
+  hloc_colmap:
+    retrieval_conf: netvlad
+    feature_conf: superpoint_aachen
+    matcher_conf: superglue
+    retrieval_top_k: 20
+    camera_mode: PER_FOLDER
+    camera_model: SIMPLE_RADIAL
+    fix_intrinsics: false
+    verbose: false

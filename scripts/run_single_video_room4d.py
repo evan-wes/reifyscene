@@ -16,7 +16,7 @@ from time import perf_counter
 from rich.console import Console
 from rich.table import Table
 from room4d.api.pipeline import Room4DPipeline
-from room4d.api.resume import ensure_start_stage, materialize_stage_from_prior
+from room4d.api.resume import materialize_stage_from_prior, resolve_stage_window
 from room4d.api.stages import STAGE_ORDER, write_run_manifest
 from room4d.common.io import read_yaml
 from room4d.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
@@ -41,6 +41,7 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
+    cfg['keyframes_all'] = bool(getattr(args, 'keyframes_all', False))
 
     geometry = cfg.setdefault('geometry', {})
     geometry['backend_name'] = args.geometry_backend_name
@@ -55,6 +56,10 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['system_report'] = system_report or collect_system_report()
     if args.geometry_device is not None:
         geometry['device'] = args.geometry_device
+    if getattr(args, 'geometry_camera_params', None):
+        # Fixed intrinsics prior for the COLMAP pose rung (fused geometry wants this).
+        geometry['camera_params'] = str(args.geometry_camera_params)
+        geometry['fix_intrinsics'] = True
     if args.frame_cache_dir is not None:
         geometry['frame_cache_dir'] = args.frame_cache_dir
     if args.geometry_resize_max_dim is not None:
@@ -75,6 +80,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cpu_threads = getattr(args, 'cpu_threads', None)
     if cpu_threads is not None:
         geometry['cpu_threads'] = int(cpu_threads)
+
+    pose_refine = cfg.setdefault('pose_refine', {})
+    pose_refine['enabled'] = bool(getattr(args, 'pose_refine_enable', False))
+    pose_refine['device'] = getattr(args, 'pose_refine_device', None) or 'cuda'
+    pose_refine['vis_thresh'] = float(getattr(args, 'pose_refine_vis_thresh', 0.2))
+    pose_refine['max_reproj_error'] = float(getattr(args, 'pose_refine_max_reproj_error', 8.0))
+    pose_refine['ba_iters'] = int(getattr(args, 'pose_refine_ba_iters', 3))
+    pose_refine['ba_max_err'] = float(getattr(args, 'pose_refine_ba_max_err', 4.0))
+    pose_refine['ba_loss_scale'] = float(getattr(args, 'pose_refine_ba_loss_scale', 1.0))
+    pose_refine['max_query_pts'] = int(getattr(args, 'pose_refine_max_query_pts', 2048))
+    pose_refine['query_frame_num'] = int(getattr(args, 'pose_refine_query_frame_num', 6))
+    pose_refine['max_points_num'] = int(getattr(args, 'pose_refine_max_points_num', 20480))
+    pose_refine['fine_tracking'] = bool(getattr(args, 'pose_refine_fine_tracking', False))
+    pose_refine['refine_focal'] = not bool(getattr(args, 'pose_refine_no_refine_focal', False))
+    pose_refine['refine_pp'] = bool(getattr(args, 'pose_refine_refine_pp', False))
 
     tracking = cfg.setdefault('tracking', {})
     tracking_device = args.tracking_device or args.geometry_device or tracking.get('device', 'cpu')
@@ -156,35 +176,21 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
 
     render_cfg = cfg.setdefault('render', {})
     render_presets = {
-        'lowmem': {'width': 800, 'height': 450, 'point_limit': 10000, 'dynamic_point_budget': 180, 'frame_stride': 1, 'max_frames_per_path': 32},
-        'balanced': {'width': 960, 'height': 540, 'point_limit': 16000, 'dynamic_point_budget': 300, 'frame_stride': 1, 'max_frames_per_path': 48},
-        'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'dynamic_point_budget': 600, 'frame_stride': 1, 'max_frames_per_path': None},
+        'lowmem': {'width': 800, 'height': 450, 'point_limit': 10000, 'frame_stride': 1, 'max_frames_per_path': 32},
+        'balanced': {'width': 960, 'height': 540, 'point_limit': 16000, 'frame_stride': 1, 'max_frames_per_path': 48},
+        'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'frame_stride': 1, 'max_frames_per_path': None},
     }
     render_preset = render_presets.get((rec or {}).get('profile', 'lowmem'), render_presets['lowmem'])
-    render_cfg.setdefault('backend_name', 'gaussian_layered')
-    render_cfg.setdefault('quality_mode', 'realtime')
+    render_cfg.setdefault('backend_name', 'gaussian4d')
     render_cfg.setdefault('debug_triptych', True)
-    render_cfg.setdefault('offline_high_quality', {
-        'render_scale': 2,
-        'filter_radius': 1.1,
-        'detail_strength': 0.12,
-        'nerf_refinement': {
-            'enabled': True,
-            'blend_weight': 0.28,
-            'detail_strength': 0.18,
-            'sharpen_radius': 1.1,
-            'max_dynamic_boost': 0.45,
-        },
-    })
+    render_cfg.setdefault('render_scale', 1)
     render_cfg.setdefault('width', render_preset['width'])
     render_cfg.setdefault('height', render_preset['height'])
     render_cfg.setdefault('point_limit', render_preset['point_limit'])
-    render_cfg.setdefault('dynamic_point_budget', render_preset['dynamic_point_budget'])
     render_cfg.setdefault('frame_stride', render_preset['frame_stride'])
     render_cfg.setdefault('max_frames_per_path', render_preset['max_frames_per_path'])
-    render_cfg.setdefault('cpu_threads', int(cpu_threads if cpu_threads is not None else rec.get('cpu_threads', 2) if rec else 2))
-    render_cfg.setdefault('device', 'cuda' if ((cfg['objects'].get('device') == 'cuda') or (cfg['humans'].get('device') == 'cuda')) else 'cpu')
-    render_cfg.setdefault('use_gpu_projection', True)
+    # The renderer is gsplat-backed and GPU-only; there is no CPU render path.
+    render_cfg.setdefault('device', 'cuda')
     render_cfg.setdefault('enabled_paths', {
         'orbit': True,
         'overhead': True,
@@ -368,17 +374,29 @@ def _print_frame_summary(console: Console, outputs: dict, cfg: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--video', required=True, help='Path to a single RGB video file.')
+    parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
+    parser.add_argument('--frames-dir', default=None,
+                        help='Path to a directory of RGB frames (ingested losslessly, no re-encode). '
+                             'Alternative to --video; exactly one is required. Camera id + frame indices '
+                             'are parsed from filenames (e.g. 0_00060.png), so dataset ground-truth aligns.')
     parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
     parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
     parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
+    parser.add_argument('--stop-stage', default=STAGE_ORDER[-1], choices=list(STAGE_ORDER), help='Last stage to run, inclusive. Stages after it are skipped. Default: the final stage (full pipeline).')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
-    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long'])
+    parser.add_argument('--keyframes-all', action='store_true',
+                        help='Use every frame as a keyframe (dense reconstruction / benchmark-protocol '
+                             'parity). Overrides --keyframe-stride-sec and --max-keyframes.')
+    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
+    parser.add_argument('--geometry-camera-params', default=None,
+                        help='Fixed intrinsics prior "fx,fy,cx,cy" (pixels) for the COLMAP pose rung. '
+                             'Load-bearing for fused geometry (free intrinsics → ~13-16% scale bias). '
+                             'Sets geometry.camera_params + fix_intrinsics.')
     parser.add_argument('--geometry-frame-source', default='keyframes', choices=['keyframes', 'tracking', 'all'], help='Which timeline geometry should run on. Use tracking or all to process the full sequence with VGGT-Long chunking.')
     parser.add_argument('--geometry-frame-stride', type=int, default=None, help='Subsample the geometry frame set by original-frame stride after selecting the source timeline.')
     parser.add_argument('--geometry-frame-spacing-sec', type=float, default=None, help='Subsample the geometry frame set by approximate time spacing in seconds. Overrides --geometry-frame-stride when set.')
@@ -393,6 +411,19 @@ def main() -> None:
     parser.add_argument('--vggt-long-use-dbow', action='store_true')
     parser.add_argument('--vggt-long-delete-temp-files', action='store_true')
     parser.add_argument('--vggt-long-output-cache-dir', default=None)
+    parser.add_argument('--pose-refine-enable', action='store_true', help='BA-refine geometry camera poses (seed pycolmap with backend geometry + VGGSfM tracks, robust iterative BA) before tracking. Off by default; needs CUDA + pycolmap.')
+    parser.add_argument('--pose-refine-device', default=None, help='Device for the VGGSfM tracker during pose refinement (default: cuda). BA itself runs on CPU.')
+    parser.add_argument('--pose-refine-vis-thresh', type=float, default=0.2, help='Track visibility threshold for BA observations.')
+    parser.add_argument('--pose-refine-max-reproj-error', type=float, default=8.0, help='Drop seed observations whose reprojection error vs the seed poses exceeds this (px).')
+    parser.add_argument('--pose-refine-ba-iters', type=int, default=3, help='Iterative robust BA + outlier-filter rounds.')
+    parser.add_argument('--pose-refine-ba-max-err', type=float, default=4.0, help='Drop 3D points with reprojection error above this between BA rounds (px).')
+    parser.add_argument('--pose-refine-ba-loss-scale', type=float, default=1.0, help='Cauchy robust-loss scale (px).')
+    parser.add_argument('--pose-refine-max-query-pts', type=int, default=2048, help='VGGSfM tracker max query points.')
+    parser.add_argument('--pose-refine-query-frame-num', type=int, default=6, help='VGGSfM tracker query frame count.')
+    parser.add_argument('--pose-refine-max-points-num', type=int, default=20480, help='VGGSfM track-transformer chunk size (peak GPU memory scales with this).')
+    parser.add_argument('--pose-refine-fine-tracking', action='store_true', help='Enable the VGGSfM fine tracker (slower, more accurate).')
+    parser.add_argument('--pose-refine-no-refine-focal', action='store_true', help='Disable shared-focal refinement in BA (focal refinement is on by default; pp stays fixed).')
+    parser.add_argument('--pose-refine-refine-pp', action='store_true', help='Also refine the principal point in BA (known to drift and hurt render registration; off by default).')
     parser.add_argument('--tracking-backend-mode', default='auto', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--tracking-device', default=None)
     parser.add_argument('--tracking-grid-size', type=int, default=12)
@@ -431,8 +462,13 @@ def main() -> None:
     parser.add_argument('--debug', action='store_true', help='Enable geometry and tracking debug exports.')
     parser.add_argument('--debug-max-points', type=int, default=5000)
     args = parser.parse_args()
+    # Exactly one input source; downstream uses args.video as the resolved input path
+    # (the decoder ingests a directory as a lossless frame sequence, a file as a video).
+    if bool(args.video) == bool(args.frames_dir):
+        parser.error('provide exactly one of --video or --frames-dir')
+    args.video = args.video or args.frames_dir
 
-    ensure_start_stage(args.start_stage)
+    start_idx, stop_idx = resolve_stage_window(args.start_stage, args.stop_stage)
     console = Console()
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
@@ -486,6 +522,12 @@ def main() -> None:
             f"objects: {cfg['objects']['backend_mode']} on {cfg['objects']['device']}  score_threshold: {cfg['objects']['score_threshold']}  "
             f"max_detections: {cfg['objects']['max_detections']}  frame_source: {cfg['objects']['frame_source']} stride: {cfg['objects']['frame_stride']}  embedder: {cfg['objects']['embedder_backend_mode']}"
         )
+        pr = cfg.get('pose_refine', {})
+        console.print(
+            f"pose_refine: {'on' if pr.get('enabled') else 'off'} on {pr.get('device')}  "
+            f"refine_focal: {pr.get('refine_focal')}  refine_pp: {pr.get('refine_pp')}  "
+            f"ba_iters: {pr.get('ba_iters')}  vis_thresh: {pr.get('vis_thresh')}"
+        )
         console.print(f"scene timeline source: {cfg.get('scene', {}).get('timeline_source', 'geometry')}")
 
     write_run_manifest(
@@ -495,6 +537,7 @@ def main() -> None:
             'run_dir': str(Path(args.run_dir).expanduser().resolve()),
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
+            'stop_stage': args.stop_stage,
             'config': cfg,
         },
     )
@@ -503,32 +546,46 @@ def main() -> None:
     registry = pipeline.stage_registry()
 
     outputs = {}
+    # Labels are DERIVED from STAGE_ORDER (single source of truth) so the numbering and
+    # coverage never drift as stages are added — previously a hardcoded "/11" map that went
+    # stale (missing dyn_mask/segment/reid/semantics → KeyError mid-run).
+    _stage_pretty = {
+        'ingest': 'Ingest / preprocess',
+        'sync': 'Temporal sync',
+        'dyn_mask': 'Dynamic mask (protect SfM)',
+        'geometry': 'Geometry init',
+        'pose_refine': 'Pose refinement (BA)',
+        'segment': 'Segment (masks + IDs)',
+        'reid': 'Re-identification',
+        'semantics': 'Semantics',
+        'objects': 'Object perception',
+        'humans': 'Human perception',
+        'tracking': 'Tracking + lifting + static/dynamic',
+        'graph': 'Scene graph',
+        'optimization': 'Optimization',
+        'scene': '4D scene assembly',
+        'render': 'Novel-view render',
+    }
     stage_labels = {
-        'ingest': 'Stage 1/10 · Ingest / preprocess',
-        'sync': 'Stage 2/10 · Temporal sync',
-        'geometry': 'Stage 3/10 · VGGT geometry',
-        'tracking': 'Stage 4/10 · Tracking + lifting + static/dynamic',
-        'humans': 'Stage 5/10 · Human perception',
-        'objects': 'Stage 6/10 · Object perception',
-        'graph': 'Stage 7/10 · Scene graph',
-        'optimization': 'Stage 8/10 · Optimization',
-        'scene': 'Stage 9/10 · 4D scene assembly',
-        'render': 'Stage 10/10 · Novel-view render',
+        name: f"Stage {i + 1}/{len(STAGE_ORDER)} · {_stage_pretty.get(name, name)}"
+        for i, name in enumerate(STAGE_ORDER)
     }
 
     stage_release_names = {
         'geometry': 'geometry',
+        'pose_refine': 'pose_refine',
         'tracking': 'tracking',
         'humans': 'humans',
         'objects': 'objects',
         'render': 'render',
     }
 
-    start_idx = list(STAGE_ORDER).index(args.start_stage)
     if start_idx > 0 and not args.prior_run_dir:
         raise ValueError('--prior-run-dir is required when --start-stage is later than ingest.')
 
     for idx, stage_name in enumerate(STAGE_ORDER):
+        if idx > stop_idx:
+            break
         spec = registry[stage_name]
         label = stage_labels[stage_name]
         if idx < start_idx:
@@ -563,7 +620,9 @@ def main() -> None:
     _print_frame_summary(console, outputs, cfg)
 
     for name in STAGE_ORDER:
-        artifact = outputs[name]
+        artifact = outputs.get(name)
+        if artifact is None:
+            continue
         print(f'{name}: {artifact.summary()}')
         print(f'  save_dir: {artifact.save_dir}')
 

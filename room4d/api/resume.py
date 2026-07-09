@@ -13,6 +13,7 @@ from room4d.common.paths import ensure_dir
 
 VOLATILE_STAGE_KEYS: dict[str, set[str]] = {
     'geometry': {'device', 'system_report', 'frame_cache_dir', 'output_cache_dir', 'cpu_threads', 'debug_shapes', 'debug_max_points'},
+    'pose_refine': {'device'},
     'tracking': {'device', 'cpu_threads', 'allow_github', 'debug', 'debug_max_points'},
     'humans': {'device'},
     'objects': {'device'},
@@ -48,10 +49,16 @@ def _video_signatures(video_paths: list[str]) -> list[dict[str, Any]]:
 
 def _stage_cfg_signature(cfg: dict[str, Any], stage_name: str) -> dict[str, Any]:
     if stage_name == 'ingest':
-        return {
+        sig = {
             'max_keyframes_per_stream': int(cfg.get('max_keyframes_per_stream', 8)),
             'keyframe_stride_sec': float(cfg.get('keyframe_stride_sec', 1.0)),
         }
+        # Only record when enabled, so the default (strided) signature stays
+        # byte-identical to pre-flag artifacts -- they resume unchanged; only an
+        # actual all-frames run gets a distinct signature that invalidates them.
+        if bool(cfg.get('keyframes_all', False)):
+            sig['keyframes_all'] = True
+        return sig
     stage_cfg = dict(cfg.get(stage_name, {}))
     for key in VOLATILE_STAGE_KEYS.get(stage_name, set()):
         stage_cfg.pop(key, None)
@@ -115,3 +122,28 @@ def materialize_stage_from_prior(prior_run_dir: str | Path, current_run_dir: str
 def ensure_start_stage(stage_name: str) -> None:
     if stage_name not in STAGE_ORDER:
         raise ValueError(f"Unknown stage '{stage_name}'. Expected one of: {', '.join(STAGE_ORDER)}")
+
+
+def ensure_stop_stage(stage_name: str) -> None:
+    if stage_name not in STAGE_ORDER:
+        raise ValueError(f"Unknown stage '{stage_name}'. Expected one of: {', '.join(STAGE_ORDER)}")
+
+
+def resolve_stage_window(start_stage: str, stop_stage: str) -> tuple[int, int]:
+    """Resolve and validate an inclusive ``[start, stop]`` stage window.
+
+    Returns the ``(start_idx, stop_idx)`` pair into ``STAGE_ORDER``. Stages
+    before ``start`` are loaded from a prior run; stages in ``[start, stop]``
+    run; stages after ``stop`` are skipped. Raises ``ValueError`` if either
+    name is unknown or if ``stop_stage`` precedes ``start_stage``.
+    """
+    ensure_start_stage(start_stage)
+    ensure_stop_stage(stop_stage)
+    start_idx = STAGE_ORDER.index(start_stage)
+    stop_idx = STAGE_ORDER.index(stop_stage)
+    if stop_idx < start_idx:
+        raise ValueError(
+            f"--stop-stage '{stop_stage}' precedes --start-stage '{start_stage}'; "
+            f"the stage window must run forward through: {', '.join(STAGE_ORDER)}."
+        )
+    return start_idx, stop_idx

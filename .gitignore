@@ -18,6 +18,15 @@ artifacts/
 datasets/
 *.zip
 
+# Render-proof / checkpoint render outputs
+checkpoint0_*/
+train_out/
+*_train_out/
+dynamic_out/
+*_dynamic_out/
+render_proof/
+*_render_proof/
+
 # Third-party source checkouts
 third_party/
 
@@ -27,3 +36,4 @@ third_party/
 
 # Internal cache
 .room4d_cache
+.claude/

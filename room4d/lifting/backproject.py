@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from room4d.common.depth import valid_depth_mask
+
 
 @dataclass
 class Backprojector:
@@ -43,7 +45,9 @@ class Backprojector:
         R = T_world_cam[:3, :3]
         t = T_world_cam[:3, 3]
         xyz_world = xyz_cam @ R.T + t[None, :]
-        invalid = ~np.isfinite(z)
+        # A zero/negative depth is finite — guard it (else a hole back-projects to the
+        # camera origin). Shared definition of valid depth (finite & > near).
+        invalid = ~valid_depth_mask(z)
         xyz_world[invalid] = np.nan
         return xyz_world.astype(np.float32)
 
