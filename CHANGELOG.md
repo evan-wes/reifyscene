@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.0.0] - 2026-07-08
+
+**First release to `main`** — ships the accumulated `develop` batch (the FP6 perception
+redesign → e2e robustness → frame-dir ingest → G1-single gate split → dynamic-4D enablement
+→ dynamic-NVS ground-plane + `pose_refine` gauge fixes → `--keyframes-all` → the
+scene-assembly speedup arc). No code change over `0.1.31.5`; the MINOR bump marks the
+**release milestone: passing the G1-single-stream gate.**
+
+The single-stream dynamic-4D pipeline holds on *native* (VGGT-Long) geometry, is now
+practical (scene assembly **8.3 h → 12.5 min, ~40×**), and its novel-view quality ceiling is
+characterized and liftable: held-out NVS is geometry-limited by VGGT-Long chunk-stitch drift,
+which `pose_refine` (BA) cuts 2.3°→0.71° (native-competitive). Honest full-frame native
+number: **VGGT-Long + pose_refine = 12.56 masked-mPSNR** (vs GT-oracle ~19 and SoM ref 17.42,
+the gap attributable to native-geometry cost). This unblocks the back-half contribution work
+(P3–P7: queryable scene graph → query → compiler → round-trip graph-diff eval). See the
+release PR for the full findings. Per-feature detail lives under the `0.1.x` entries below.
+
 ## [0.1.31.5] - 2026-07-07
 
 ### Fixed
