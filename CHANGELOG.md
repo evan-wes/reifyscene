@@ -9,20 +9,23 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [0.2.0.0] - 2026-07-08
 
-**First release to `main`** — ships the accumulated `develop` batch (the FP6 perception
-redesign → e2e robustness → frame-dir ingest → G1-single gate split → dynamic-4D enablement
-→ dynamic-NVS ground-plane + `pose_refine` gauge fixes → `--keyframes-all` → the
-scene-assembly speedup arc). No code change over `0.1.31.5`; the MINOR bump marks the
-**release milestone: passing the G1-single-stream gate.**
+**First release to `main`** — ships the accumulated `develop` batch (perception-stack
+redesign → end-to-end pipeline robustness → frame-directory ingest → single-video dynamic-4D
+reconstruction → novel-view-quality fixes → `--keyframes-all` → the scene-assembly speedup).
+No code change over `0.1.31.5`; the MINOR bump marks the milestone: **single-video (monocular)
+dynamic-4D reconstruction now works end-to-end on real, self-reconstructed geometry**
+*(internally: the G1-single gate)*.
 
-The single-stream dynamic-4D pipeline holds on *native* (VGGT-Long) geometry, is now
-practical (scene assembly **8.3 h → 12.5 min, ~40×**), and its novel-view quality ceiling is
-characterized and liftable: held-out NVS is geometry-limited by VGGT-Long chunk-stitch drift,
-which `pose_refine` (BA) cuts 2.3°→0.71° (native-competitive). Honest full-frame native
-number: **VGGT-Long + pose_refine = 12.56 masked-mPSNR** (vs GT-oracle ~19 and SoM ref 17.42,
-the gap attributable to native-geometry cost). This unblocks the back-half contribution work
-(P3–P7: queryable scene graph → query → compiler → round-trip graph-diff eval). See the
-release PR for the full findings. Per-feature detail lives under the `0.1.x` entries below.
+The pipeline holds on *native* (VGGT-Long) geometry, is now practical (scene assembly
+**8.3 h → 12.5 min, ~40×**), and its novel-view quality ceiling is characterized and liftable:
+held-out novel-view quality is limited by the reconstruction's chunk-stitch pose drift, which
+`pose_refine` (bundle adjustment) cuts 2.3°→0.71° (competitive with a single-pass VGGT
+reconstruction). Honest full-frame native number: **VGGT-Long + pose_refine = 12.56
+masked-mPSNR** (vs a GT-oracle upper bound ~19 and the Shape-of-Motion reference 17.42; the gap
+is the cost of using self-reconstructed rather than ground-truth geometry). This clears the way
+for the next phase: the queryable 4D scene graph — perceive a moving scene into a graph, query
+it, render an answer, and diff the re-perceived result against the original *(internally:
+phases P3–P7)*. Per-feature detail lives under the `0.1.x` entries below.
 
 ## [0.1.31.5] - 2026-07-07
 
