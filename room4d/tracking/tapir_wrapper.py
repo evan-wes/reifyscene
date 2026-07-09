@@ -75,6 +75,20 @@ class TAPIRWrapper(PointTracker):
         self.resize_width = int(self.cfg.get("resize_width", 256))
         self.chunk_size = int(self.cfg.get("chunk_size", 128))
         self.pyramid_level = int(self.cfg.get("pyramid_level", 1))
+        # Reproducibility: the model's per-forward query permutation
+        # (estimate_trajectories' torch.randperm) makes tracks vary run-to-run
+        # (~8px). Seeding the global torch RNG before the all-pairs loop pins
+        # them. ``None`` restores the legacy nondeterministic behavior.
+        _seed = self.cfg.get("seed", 0)
+        self.seed = None if _seed is None else int(_seed)
+        # Query budget: cap the total number of tracked query points to
+        # ``max_total_queries`` (spread evenly per frame). All-pairs seeds a dense
+        # grid in every frame, but the native lift keeps only ~num_fg/T of them per
+        # frame -- tracking the whole grid and discarding ~95% is the residual
+        # O(T^2) cost. ``None`` (default) tracks the full grid (SoM behavior); the
+        # dynamic scene path sets a budget (see SingleVideoSceneAssembler).
+        _mtq = self.cfg.get("max_total_queries", None)
+        self.max_total_queries = None if _mtq is None else int(_mtq)
         self._device_cfg = str(self.cfg.get("device", "cuda"))
         self._model = None
         self._torch = None
@@ -183,6 +197,18 @@ class TAPIRWrapper(PointTracker):
         frames_t = torch.from_numpy(resized).to(device).float()
         frames_t = (frames_t / 255.0 * 2 - 1)[None]
 
+        # Reproducibility: pin the model's per-forward query permutation.
+        if self.seed is not None:
+            torch.manual_seed(self.seed)
+
+        # The feature pyramid depends only on the clip (not the query points), so
+        # compute it ONCE and reuse it for every query frame/chunk below. The
+        # shipped SoM loop recomputed the full-clip ResNet pass on every 128-pt
+        # forward -> O(T^2) feature extraction, the scene-assembly hotspot at high
+        # frame counts. Reuse makes it O(T); tracks are bit-identical.
+        with torch.inference_mode():
+            feature_grids = model.get_feature_grids(frames_t, False)
+
         # Full-res query grid, and its model-resolution counterpart.
         y, x = np.mgrid[0 : height : self.grid_size, 0 : width : self.grid_size]
         y_resize = y / (height - 1) * (rh - 1)
@@ -190,12 +216,27 @@ class TAPIRWrapper(PointTracker):
 
         from room4d.tracking.tapnet import transforms
 
+        # D: per-frame query cap derived from the total budget. Subsampling here
+        # (before tracking) mirrors the lift's own per-frame random keep, so we
+        # only track what downstream consumes. Seeded rng -> deterministic.
+        per_frame_cap = (
+            max(1, self.max_total_queries // max(1, num_frames))
+            if self.max_total_queries is not None else None
+        )
+        rng = np.random.default_rng(self.seed)
+
         tracks_per_query: list[np.ndarray] = []
         for t in range(num_frames):
             in_mask = masks[t][y, x] > 0.5
+            xm, ym = x[in_mask], y[in_mask]                            # full-res query px
+            xm_model, ym_model = x_resize[in_mask], y_resize[in_mask]  # model-res query px
+            if per_frame_cap is not None and xm.shape[0] > per_frame_cap:
+                sel = np.sort(rng.choice(xm.shape[0], size=per_frame_cap, replace=False))
+                xm, ym, xm_model, ym_model = xm[sel], ym[sel], xm_model[sel], ym_model[sel]
             all_points_t = np.stack(
-                [t * np.ones_like(y), y_resize, x_resize], axis=-1
-            )[in_mask]  # (N_t, 3) = (t, y_model, x_model)
+                [np.full(xm_model.shape, t, dtype=xm_model.dtype), ym_model, xm_model],
+                axis=-1,
+            )  # (M, 3) = (t, y_model, x_model)
 
             if len(all_points_t) > 0:
                 outputs: list[np.ndarray] = []
@@ -203,7 +244,7 @@ class TAPIRWrapper(PointTracker):
                 for points in np.array_split(all_points_t, num_chunks, axis=0):
                     pts = torch.from_numpy(points.astype(np.float32))[None].to(device)
                     with torch.inference_mode():
-                        preds = model(frames_t, pts)
+                        preds = model(frames_t, pts, feature_grids=feature_grids)
                     trk = preds["tracks"][0].detach().cpu().numpy()  # (n, T, 2) xy
                     occ = preds["occlusion"][0].detach().cpu().numpy()  # (n, T)
                     dist = preds["expected_dist"][0].detach().cpu().numpy()  # (n, T)
@@ -220,7 +261,7 @@ class TAPIRWrapper(PointTracker):
             # Diagonal: overwrite the query frame's own slot with the exact
             # integer query pixel coords (as SoM does).
             if out.shape[0] > 0:
-                out[:, t, :2] = np.stack([x[in_mask], y[in_mask]], axis=-1)
+                out[:, t, :2] = np.stack([xm, ym], axis=-1)
             tracks_per_query.append(out)
 
         return AllPairsTracks(

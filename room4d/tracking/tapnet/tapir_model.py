@@ -142,6 +142,7 @@ class TAPIR(nn.Module):
       query_chunk_size: Optional[int] = 64,
       get_query_feats: bool = False,
       refinement_resolutions: Optional[List[Tuple[int, int]]] = None,
+      feature_grids: Optional[FeatureGrids] = None,
   ) -> Mapping[str, torch.Tensor]:
     """Runs a forward pass of the model.
 
@@ -173,11 +174,15 @@ class TAPIR(nn.Module):
     if get_query_feats:
       raise ValueError('Get query feats not supported in TAPIR.')
 
-    feature_grids = self.get_feature_grids(
-        video,
-        is_training,
-        refinement_resolutions,
-    )
+    # The feature pyramid depends only on the clip, not the query points, so a
+    # caller tracking many query batches over the same video can compute it once
+    # (self.get_feature_grids) and pass it in to skip the per-call ResNet pass.
+    if feature_grids is None:
+      feature_grids = self.get_feature_grids(
+          video,
+          is_training,
+          refinement_resolutions,
+      )
 
     query_features = self.get_query_features(
         video,
