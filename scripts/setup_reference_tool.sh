@@ -76,6 +76,9 @@ GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-13}"
 CUDA_HOST_GXX_MAX_MAJOR=14   # exclusive upper bound enforced below
 PINNED_PYTHON="${PINNED_PYTHON:-3.10}"
+# Upper bound for the bootstrap setuptools install; must satisfy the pinned torch
+# (2.11.0+cu128 declares setuptools<82). Bump alongside a torch pin bump.
+SETUPTOOLS_MAX_SPEC="${SETUPTOOLS_MAX_SPEC:-<82}"
 
 # ------------------------------------------------------------------------------
 # Config
@@ -505,7 +508,12 @@ if [[ ${INSTALL_MOSCA} -eq 1 ]]; then
 fi
 
 activate_or_create_env
-python -m pip install --upgrade pip setuptools wheel
+# Bounded, not floating: this runs before the pinned tree, and an unbounded
+# `--upgrade setuptools` installs whatever is newest that day. The pinned torch
+# here (2.11.0+cu128) declares `setuptools<82`, so a fresh build today would land
+# on 84 and violate it — this env sits on 70.2.0 only because that was current
+# when it was last built. Same escape setup_reifyscene.sh had.
+python -m pip install --upgrade pip wheel "setuptools${SETUPTOOLS_MAX_SPEC}"
 
 install_torch
 ensure_cuda_toolkit

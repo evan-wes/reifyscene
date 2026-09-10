@@ -78,6 +78,14 @@ version scheme (canonical version in the `VERSION` file, read by
   (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
+- **`setup_reference_tool.sh` had the same unbounded-`setuptools` escape** and is bounded the same
+  way. Its pinned torch (2.11.0+cu128) also declares `setuptools<82`; that env sat on 70.2.0 only
+  because that was current when it was last built, so a fresh build today would have installed 84
+  and violated it. Verified by re-running the script: setuptools now lands on 81.0.0. That is the
+  fourth package found escaping a lockfile this way. (The script was already correct about the
+  other big one — `run_conda_relaxed()` guards `set -u` around conda calls, the very bug that made
+  `setup_reifyscene.sh` runnable only once per env; the fix pattern existed here and had simply
+  not been carried across.)
 - **The Shape-of-Motion reference conda env is renamed `room4d_som_ref` -> `reifyscene_som_ref`**
   (renamed in place with `conda rename`, 21 GB, verified: torch 2.11.0+cu128, CUDA available),
   along with its lockfile and every reference — `gen_env_locks.sh`'s mapping,
