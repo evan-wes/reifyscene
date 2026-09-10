@@ -46,6 +46,19 @@ version scheme (canonical version in the `VERSION` file, read by
   reinstall, which is every version-bump PR), dist metadata as the fallback for a built
   wheel, which does not ship `VERSION`.
 
+- **An unbounded `setuptools` upgrade escaped the lock the same way.** The bootstrap ran
+  `pip install --upgrade pip setuptools wheel`, so a fresh env landed on setuptools 84
+  while the pinned torch declares `setuptools<82`; the long-lived env sat on 81 only
+  because that was current when it was built. Now bounded by `SETUPTOOLS_MAX_SPEC`
+  (default `<82`), to be raised alongside a torch pin bump.
+- **The regenerated lockfile was itself unusable, twice**, and nothing checked. `pip freeze`
+  records whatever the env contains — including an internally inconsistent state — and emits
+  unportable direct-URL lines for anything installed from a local path. Both shipped: a lock
+  pinning `mypy==2.3.1` beside `pathspec==0.12.1` (mypy needs `pathspec>=1`) that pip could
+  not resolve at all, and a `detectron2 @ file:///tmp/...` line pointing at an already-deleted
+  build directory. `gen_env_locks.sh` now rejects `@ file://` lines and resolves the lock with
+  `pip install --dry-run` before writing it, so an uninstallable lock cannot be committed.
+
 ### Added
 - **`--create-env`** creates the conda environment when it does not exist. Previously the
   installer could only *activate* an env, so "run the setup script" silently assumed one
@@ -66,6 +79,18 @@ version scheme (canonical version in the `VERSION` file, read by
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
 ### Changed
+- **detectron2 is no longer part of the standard install, and is pinned to a `main` commit**
+  (`a2f4a877`, 2026-08-19) rather than the `v0.6` tag. v0.6 (Nov 2021) pins `black==21.4b2`,
+  which requires `pathspec<1` and so cannot coexist with a modern mypy — that pair is what
+  made the generated lock unresolvable. It had also been building on every full setup since
+  the FP5a Sapiens rung landed, for a backend that has never existed: `detectron2` is imported
+  by no Python file in the repo, in any commit, and `densepose_wrapper.py` reports
+  `unavailable` unconditionally. The `--with-detectron2` flag is retained, off by default:
+  DensePose is intended as the dense **top rung on the commercial path**, since Sapiens is
+  CC-BY-NC-4.0 and the dense ladder currently drops straight from Sapiens to 17 sparse
+  Keypoint-RCNN points. Wiring that rung (and resolving detectron2's `iopath<0.1.10` cap
+  against SAM-2's `iopath>=0.1.10`) is follow-up work. The Sapiens-unavailable fallback is
+  unaffected — `pose2d.py`'s Keypoint-RCNN rung is torchvision-backed, not detectron2.
 - `pyproject.toml` description no longer reads "Prototype room-scale 4D reconstruction
   pipeline scaffold".
 

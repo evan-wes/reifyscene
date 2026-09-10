@@ -28,7 +28,11 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 
 DETECTRON2_REPO="https://github.com/facebookresearch/detectron2.git"
-DETECTRON2_TAG="v0.6"
+# Pinned to a main commit, NOT the v0.6 tag (Nov 2021): v0.6 pins black==21.4b2,
+# which requires pathspec<1 and therefore cannot coexist with a modern mypy — it
+# made the generated lockfile unresolvable. On main, `black` is unpinned in
+# install_requires (black==22.3.0 lives only in the dev extra).
+DETECTRON2_COMMIT="a2f4a8771ab77e8411c26b27f24f9489a28a2453"  # main @ 2026-08-19
 
 VGGT_REPO="https://github.com/facebookresearch/vggt.git"
 VGGT_COMMIT="44b3afbd1869d8bde4894dd8ea1e293112dd5eba"
@@ -57,6 +61,9 @@ SAM2_CKPT_MIN_MB="${SAM2_CKPT_MIN_MB:-700}"
 # `hf auth login` + a transformers build with Dinov3 support.
 DINOV2_MODEL_ID="${DINOV2_MODEL_ID:-facebook/dinov2-large}"
 TRANSFORMERS_SPEC="${TRANSFORMERS_SPEC:-transformers>=4.44}"
+# Upper bound for the bootstrap setuptools install. Must satisfy the pinned
+# torch (2.11.0+cu130 declares setuptools<82); bump alongside a torch pin bump.
+SETUPTOOLS_MAX_SPEC="${SETUPTOOLS_MAX_SPEC:-<82}"
 
 # SigLIP2 (Google, Apache-2.0, ungated) — the FP4 `semantics` top rung: a frozen
 # ViT image+text encoder for per-tracklet open-vocab category (zero-shot match vs a
@@ -238,7 +245,11 @@ Environment options:
   --venv PATH             Virtualenv path (default: .venv)
 
 Install options:
-  --with-detectron2       Install detectron2 from official tag v0.6
+  --with-detectron2       Install detectron2 (pinned main commit) for DensePose.
+                          OFF by default and not yet consumed by any ladder rung;
+                          intended as the dense top rung on the commercial path,
+                          since Sapiens is CC-BY-NC-4.0. Downgrades iopath below
+                          what SAM-2 declares — see the note at the install site.
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-sam2             Clone/install SAM 2 into third_party/sam2 at pinned commit
@@ -973,7 +984,14 @@ setup_python_env() {
   fi
 
   echo "Python executable: $(command -v python)"
-  python -m pip install --upgrade pip setuptools wheel
+  # Bootstrap the build frontend, but do NOT let setuptools float to whatever is
+  # newest today: this runs before the pinned tree, and an unbounded upgrade is
+  # how a fresh env ended up on setuptools 84 while the pinned torch declares
+  # `setuptools<82` (the long-lived env sat on 81 only because that was current
+  # when it was built). Bounded by the same constraint torch states; raise it
+  # when the pinned torch does. Same failure mode as the transformers/safetensors
+  # escape — see pip_install_constrained().
+  python -m pip install --upgrade pip wheel "setuptools${SETUPTOOLS_MAX_SPEC}"
 }
 
 install_vggt_long_requirements() {
@@ -1190,20 +1208,32 @@ else
 fi
 
 if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
-  # detectron2 is installed NON-editable, unlike the third_party checkouts.
-  # Those are editable because the installer patches them and we want the patched
-  # tree to be the imported one; detectron2 is used unmodified. It was previously
+  # OFF BY DEFAULT and not part of the standard install. detectron2 exists here
+  # for DensePose, which is intended as the dense top rung on the COMMERCIAL path
+  # (Sapiens, the current top rung, is CC-BY-NC-4.0). Nothing consumes it yet:
+  # densepose_wrapper.py reports `unavailable` unconditionally and the dense
+  # ladder has no DensePose rung, so wiring one is follow-up work.
+  #
+  # Known caveat when you DO enable it: detectron2 caps iopath<0.1.10 while SAM-2
+  # requires >=0.1.10, so installing it downgrades iopath and pip check reports the
+  # conflict. SAM-2 uses iopath only for `g_pathmgr` and runs fine on 0.1.9, but
+  # the declared constraint is genuinely unsatisfiable — resolve it properly when
+  # the DensePose rung lands.
+  #
+  # Installed NON-editable, unlike the third_party checkouts. Those are editable
+  # because the installer patches them and we want the patched tree to be the
+  # imported one; detectron2 is used unmodified. It was previously
   # `pip install -e` against a mktemp -d clone, which left the module permanently
   # resolving into /tmp — so the env broke as soon as that directory was reaped,
   # and the temp tree leaked because nothing removed it.
-  echo "Installing detectron2 from official tag ${DETECTRON2_TAG}..."
-  TMP_DIR="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '${TMP_DIR}'" RETURN EXIT
-  git clone --depth 1 --branch "${DETECTRON2_TAG}" --single-branch "${DETECTRON2_REPO}" "${TMP_DIR}/detectron2"
-  python -m pip install --no-build-isolation "${TMP_DIR}/detectron2"
-  rm -rf "${TMP_DIR}"
-  trap - RETURN EXIT
+  echo "Installing detectron2 from main @ ${DETECTRON2_COMMIT:0:12}..."
+  # Installed straight from the pinned tag rather than a local clone: a
+  # `mktemp -d` clone left the module resolving into /tmp (editable) or recorded
+  # a dead file:///tmp/... direct_url (non-editable, which then leaked into the
+  # lockfile and made it unportable), and the temp tree leaked either way.
+  # Like gsplat, detectron2 is excluded from the lock — it is owned by this
+  # script, pinned to a tag, and needs --no-build-isolation.
+  python -m pip install --no-build-isolation "git+${DETECTRON2_REPO}@${DETECTRON2_COMMIT}"
 fi
 
 if [[ $INSTALL_VGGT -eq 1 ]]; then
@@ -1414,7 +1444,7 @@ Installed:
 - reifyscene in editable mode from:
     ${ROOT_DIR}
 - Python dependencies from pyproject.toml
-$( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}" )
+$( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from main @ ${DETECTRON2_COMMIT:0:12}" )
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
