@@ -7,6 +7,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.0.2] - 2026-09-10
+
+### Fixed
+- **The lockfile did not lock the environment.** `TRANSFORMERS_SPEC` is an open-ended
+  lower bound (`transformers>=4.44`) and transformers is not in the lockfile, so those
+  installs run *after* the pinned tree and escape it — a fresh machine resolves whatever
+  is newest that day. Today that is transformers 5.17.0, which requires
+  `safetensors>=0.8.0` while the lock pins `safetensors==0.7.0`; transformers rejects
+  that combination at import, breaking test collection outright. The long-lived env was
+  unaffected only because it had been sitting on 5.12.1 since June. Now installed via a
+  new `pip_install_constrained` that passes the lockfile as a pip constraints file, so
+  the resolver honours the pins (resolves to 5.12.1 — the version that works).
+- **`cmd | grep -q` is unsafe under `set -o pipefail`**: `grep -q` exits at the first
+  match and closes the pipe, the producer dies of SIGPIPE (141), and pipefail reports the
+  pipeline as failed *even though the match succeeded*. Two permanent (not flaky)
+  consequences: the ffmpeg install guard never fired, so conda reinstalled ffmpeg on
+  every run; and the ffmpeg smoke test could never pass, so the script always exited 1 at
+  the final step after all real work had succeeded. Fixed by capturing output then
+  matching, here and in `gen_env_locks.sh` / `setup_reference_tool.sh` (where the same
+  pattern is racy rather than deterministic).
+- **`setup_reifyscene.sh` could only ever be run once per environment.** conda's
+  `activate.d` hooks are not `set -u` safe — the cuda-nvcc hook expands
+  `${NVCC_PREPEND_FLAGS}` unconditionally — so under `set -euo pipefail` activation
+  aborted with "unbound variable", but only once cuda-nvcc was installed. The first run
+  activates a bare env and installs the hook; every later run died. `conda activate` is
+  now wrapped in `set +u`/`set -u`. This also masked the pipefail bug above: you could not
+  re-run the script to discover that re-running was broken.
+- **detectron2 was installed editable against a `mktemp -d` clone**, leaving the module
+  permanently resolving into `/tmp` — the environment broke as soon as that directory was
+  reaped — and the temp tree leaked because nothing removed it. Now a non-editable install
+  with cleanup. (The `third_party/` checkouts stay editable deliberately: the installer
+  patches them and the patched tree must be the imported one. detectron2 is unmodified.)
+- **`reifyscene.__version__` had been stale at `0.1.0` for 49 releases.** `VERSION` is the
+  single source of truth — `pyproject.toml` reads it at build time and the release workflow
+  reads it to name the tag — so a hardcoded `__version__` was a fourth copy nothing kept in
+  sync. Now resolved: `VERSION` file first (never stale between a bump and the next
+  reinstall, which is every version-bump PR), dist metadata as the fallback for a built
+  wheel, which does not ship `VERSION`.
+
+### Added
+- **`--create-env`** creates the conda environment when it does not exist. Previously the
+  installer could only *activate* an env, so "run the setup script" silently assumed one
+  someone had already built by hand — the repo was not reproducible from scratch.
+  Deliberately opt-in: without the flag a missing env is a hard error naming it, so a typo
+  in `--conda-env` fails loudly instead of silently building a multi-GB environment.
+  `--conda-env` now defaults to `reifyscene`.
+- The Python version for a created env is read from the lockfile header rather than
+  hardcoded, so the script and the pins cannot drift. An existing env is checked against
+  it: MAJOR.MINOR must match (wheels are tagged `cp311`, so a 3.11 tree cannot install on
+  3.12), while a PATCH difference is reported and allowed — the patch level is not part of
+  the ABI, and requiring an exact match would fail on a working env every time Python is
+  updated. (A fresh `--create-env` produced 3.11.16 against a lockfile captured under
+  3.11.15, exercising exactly this path.)
+- `scripts/locks/reifyscene.lock`, a copy of `room4d.lock` under the new name so the
+  installer is fully on the new naming. `room4d.lock` remains until the new environment is
+  confirmed, then it can be removed.
+
+### Changed
+- `pyproject.toml` description no longer reads "Prototype room-scale 4D reconstruction
+  pipeline scaffold".
+
 ## [0.2.0.1] - 2026-09-10
 
 ### Changed
