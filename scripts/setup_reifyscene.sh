@@ -705,11 +705,19 @@ ensure_ffmpeg() {
   fi
 
   local ffmpeg_bin="${CONDA_PREFIX}/bin/ffmpeg"
-  if [[ -x "${ffmpeg_bin}" ]] \
-     && "${ffmpeg_bin}" -version 2>/dev/null | head -n 1 | grep -q "ffmpeg version ${FFMPEG_VERSION}" \
-     && "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
-    echo "ffmpeg ${FFMPEG_VERSION} (with libx264) already present at ${ffmpeg_bin} — skipping."
-    return
+  # NOTE: `cmd | grep -q` is unsafe under `set -o pipefail`. grep -q exits at the
+  # first match and closes the pipe, so the producer dies of SIGPIPE (141) and
+  # pipefail reports the pipeline as FAILED even though the match succeeded.
+  # This guard therefore never fired, and ffmpeg was reinstalled on every run.
+  # Capture first, match second.
+  if [[ -x "${ffmpeg_bin}" ]]; then
+    local ff_ver ff_enc
+    ff_ver="$("${ffmpeg_bin}" -version 2>/dev/null | head -n 1 || true)"
+    ff_enc="$("${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null || true)"
+    if [[ "${ff_ver}" == *"ffmpeg version ${FFMPEG_VERSION}"* && "${ff_enc}" == *libx264* ]]; then
+      echo "ffmpeg ${FFMPEG_VERSION} (with libx264) already present at ${ffmpeg_bin} — skipping."
+      return
+    fi
   fi
 
   echo "Installing ffmpeg ${FFMPEG_VERSION} into env '${CONDA_DEFAULT_ENV:-unknown}' (conda-forge, GPL build with libx264)..."
@@ -839,7 +847,9 @@ activate_conda_env() {
       return
     fi
 
-    if ! conda env list | awk '{print $1}' | grep -qx "${target_env}"; then
+    local existing_envs
+    existing_envs="$(conda env list | awk '{print $1}' || true)"
+    if ! grep -qx "${target_env}" <<<"${existing_envs}"; then
       # Creating an env is a multi-GB, multi-minute operation, so it is opt-in:
       # without --create-env a typo in --conda-env fails here rather than
       # silently building an environment the caller never asked for.
@@ -863,10 +873,20 @@ activate_conda_env() {
     fi
 
     echo "Activating conda environment: ${target_env}"
+    # conda's activate.d hooks are not written to be `set -u` safe: the
+    # cuda-nvcc hook expands ${NVCC_PREPEND_FLAGS} unconditionally, so under
+    # `set -euo pipefail` activation aborts with "unbound variable" — but only
+    # once cuda-nvcc is installed. That made this script runnable exactly ONCE
+    # per environment: the first run activates a bare env and installs the hook,
+    # and every later run dies on activation. Relax nounset across activation
+    # only, then restore it.
+    set +u
     if ! conda activate "${target_env}"; then
+      set -u
       echo "Failed to activate conda environment '${target_env}'." >&2
       exit 1
     fi
+    set -u
     check_env_python_version
     return
   fi
@@ -883,6 +903,24 @@ activate_conda_env() {
 # Read the Python version the lockfile was captured under, from its header:
 #   "# Platform: Linux/x86_64 | Python 3.11.15 | torch ..."
 # lockfile_python_full  -> 3.11.15   lockfile_python_minor -> 3.11
+# Install a package while honouring the pinned tree.
+#
+# TRANSFORMERS_SPEC is an open-ended lower bound (`transformers>=4.44`) and
+# transformers is NOT in the lockfile, so these installs run *after* the locked
+# tree and silently escape it: a fresh machine resolves whatever is newest that
+# day. That is how a from-scratch env ended up with transformers 5.17.0 against
+# the lockfile's safetensors==0.7.0 — a combination transformers rejects at
+# import, breaking every test that touches it, while the older working env sat
+# happily on 5.12.1. Passing the lockfile as a pip constraints file makes the
+# resolver honour the existing pins and pick a compatible version instead.
+pip_install_constrained() {
+  if [[ $UNLOCKED -eq 0 && -f "${REIFYSCENE_LOCK_FILE}" ]]; then
+    python -m pip install -c "${REIFYSCENE_LOCK_FILE}" "$@"
+  else
+    python -m pip install "$@"
+  fi
+}
+
 lockfile_python_full() {
   [[ -f "${REIFYSCENE_LOCK_FILE}" ]] || return 0
   sed -n 's/.*| *Python \([0-9][0-9.]*\) *|.*/\1/p' "${REIFYSCENE_LOCK_FILE}" | head -n 1
@@ -1043,8 +1081,12 @@ smoke_test_ffmpeg() {
     echo "[smoke-test] FAIL ffmpeg: binary not found after install" >&2
     exit 1
   fi
-  if ! "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
+  # Capture then match — see the pipefail/SIGPIPE note in ensure_ffmpeg().
+  local encoders
+  encoders="$("${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null || true)"
+  if [[ "${encoders}" != *libx264* ]]; then
     echo "[smoke-test] FAIL ffmpeg: libx264 encoder missing (need the GPL build for -crf 0 H.264)" >&2
+    echo "  probed: ${ffmpeg_bin}" >&2
     exit 1
   fi
   local ver
@@ -1148,10 +1190,20 @@ else
 fi
 
 if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
-  TMP_DIR=$(mktemp -d)
+  # detectron2 is installed NON-editable, unlike the third_party checkouts.
+  # Those are editable because the installer patches them and we want the patched
+  # tree to be the imported one; detectron2 is used unmodified. It was previously
+  # `pip install -e` against a mktemp -d clone, which left the module permanently
+  # resolving into /tmp — so the env broke as soon as that directory was reaped,
+  # and the temp tree leaked because nothing removed it.
   echo "Installing detectron2 from official tag ${DETECTRON2_TAG}..."
-  git clone --depth 1 --branch "${DETECTRON2_TAG}" --single-branch "${DETECTRON2_REPO}" "$TMP_DIR/detectron2"
-  python -m pip install --no-build-isolation -e "$TMP_DIR/detectron2"
+  TMP_DIR="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${TMP_DIR}'" RETURN EXIT
+  git clone --depth 1 --branch "${DETECTRON2_TAG}" --single-branch "${DETECTRON2_REPO}" "${TMP_DIR}/detectron2"
+  python -m pip install --no-build-isolation "${TMP_DIR}/detectron2"
+  rm -rf "${TMP_DIR}"
+  trap - RETURN EXIT
 fi
 
 if [[ $INSTALL_VGGT -eq 1 ]]; then
@@ -1177,13 +1229,13 @@ fi
 
 if [[ $INSTALL_DINOV2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the DINOv2 reid rung..."
-  python -m pip install "${TRANSFORMERS_SPEC}"
+  pip_install_constrained "${TRANSFORMERS_SPEC}"
   download_dinov2_weights_if_needed
 fi
 
 if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the SigLIP2 semantics rung..."
-  python -m pip install "${TRANSFORMERS_SPEC}"
+  pip_install_constrained "${TRANSFORMERS_SPEC}"
   download_siglip2_weights_if_needed
 fi
 

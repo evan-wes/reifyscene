@@ -52,7 +52,8 @@ for entry in "${ENVS[@]}"; do
   lock_name="${entry##*:}"
   lock_path="${LOCK_DIR}/${lock_name}"
 
-  if ! "${CONDA_BIN}" env list | awk '{print $1}' | grep -qx "${env_name}"; then
+  _envs="$("${CONDA_BIN}" env list | awk '{print $1}' || true)"
+  if ! grep -qx "${env_name}" <<<"${_envs}"; then
     echo "Skipping ${env_name}: conda env not found on this machine." >&2
     continue
   fi

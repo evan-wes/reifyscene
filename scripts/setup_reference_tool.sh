@@ -198,7 +198,8 @@ activate_or_create_env() {
   # shellcheck disable=SC1091
   source "$(conda_base_dir)/etc/profile.d/conda.sh"
 
-  if ! conda env list | awk '{print $1}' | grep -qx "${CONDA_ENV_NAME}"; then
+  _envs="$(conda env list | awk '{print $1}' || true)"
+  if ! grep -qx "${CONDA_ENV_NAME}" <<<"${_envs}"; then
     echo "Creating conda env '${CONDA_ENV_NAME}' (python=${PINNED_PYTHON})..."
     run_conda_relaxed create -y -n "${CONDA_ENV_NAME}" "python=${PINNED_PYTHON}"
   fi
