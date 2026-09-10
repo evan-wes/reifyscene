@@ -86,9 +86,10 @@ version scheme (canonical version in the `VERSION` file, read by
   the FP5a Sapiens rung landed, for a backend that has never existed: `detectron2` is imported
   by no Python file in the repo, in any commit, and `densepose_wrapper.py` reports
   `unavailable` unconditionally. The `--with-detectron2` flag is retained, off by default:
-  DensePose is intended as the dense **top rung on the commercial path**, since Sapiens is
-  CC-BY-NC-4.0 and the dense ladder currently drops straight from Sapiens to 17 sparse
-  Keypoint-RCNN points. Wiring that rung (and resolving detectron2's `iopath<0.1.10` cap
+  DensePose is intended as the **permissively-licensed dense top rung** — the one to reach
+  for when Sapiens is ruled out by its CC-BY-NC-4.0 licence, its gated weights, or its size
+  — since the dense ladder currently drops straight from Sapiens' four dense modalities to
+  17 sparse Keypoint-RCNN points. Wiring that rung (and resolving detectron2's `iopath<0.1.10` cap
   against SAM-2's `iopath>=0.1.10`) is follow-up work. The Sapiens-unavailable fallback is
   unaffected — `pose2d.py`'s Keypoint-RCNN rung is torchvision-backed, not detectron2.
 - `pyproject.toml` description no longer reads "Prototype room-scale 4D reconstruction

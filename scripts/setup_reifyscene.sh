@@ -246,10 +246,11 @@ Environment options:
 
 Install options:
   --with-detectron2       Install detectron2 (pinned main commit) for DensePose.
-                          OFF by default and not yet consumed by any ladder rung;
-                          intended as the dense top rung on the commercial path,
-                          since Sapiens is CC-BY-NC-4.0. Downgrades iopath below
-                          what SAM-2 declares — see the note at the install site.
+                          OFF by default and not yet consumed by any ladder rung.
+                          Intended as the permissively-licensed dense top rung,
+                          for when Sapiens is ruled out by its CC-BY-NC-4.0
+                          licence, its gated weights, or its size. Downgrades
+                          iopath below what SAM-2 declares — see the install site.
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-sam2             Clone/install SAM 2 into third_party/sam2 at pinned commit
@@ -1209,8 +1210,10 @@ fi
 
 if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
   # OFF BY DEFAULT and not part of the standard install. detectron2 exists here
-  # for DensePose, which is intended as the dense top rung on the COMMERCIAL path
-  # (Sapiens, the current top rung, is CC-BY-NC-4.0). Nothing consumes it yet:
+  # for DensePose, intended as the dense top rung whenever Sapiens is ruled out:
+  # Sapiens is CC-BY-NC-4.0 (non-commercial), its weights are gated behind manual
+  # approval, and it is a large ViT. DensePose is Apache-2.0, ungated and lighter,
+  # so it is the PERMISSIVELY-LICENSED dense rung. Nothing consumes it yet:
   # densepose_wrapper.py reports `unavailable` unconditionally and the dense
   # ladder has no DensePose rung, so wiring one is follow-up work.
   #
