@@ -78,6 +78,16 @@ version scheme (canonical version in the `VERSION` file, read by
   (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
+- **`setup_reference_tool.sh` gains `--create-env` too**, so both installers behave the same way:
+  creation is opt-in, a missing env without the flag is a hard error naming it, and the Python
+  version comes from the lockfile header rather than a hardcoded `PINNED_PYTHON` (now only a
+  fallback). It previously created the env *automatically* — a typo in `--conda-env` would
+  silently build ~21 GB including a gsplat source build. **Verified from scratch**: a clean
+  `--create-env` build exits 0 with all three smoke tests green (torch GPU matmul on the 5090,
+  cuML KMeans on GPU, gsplat rasterization) and reproduces the existing environment *exactly* —
+  261 packages on both sides, zero differences. conda produced Python 3.10.21 against a lockfile
+  captured under 3.10.20, exercising the patch-tolerance path a second time; an exact-match check
+  would have failed a perfectly good build.
 - **`setup_reference_tool.sh` had the same unbounded-`setuptools` escape** and is bounded the same
   way. Its pinned torch (2.11.0+cu128) also declares `setuptools<82`; that env sat on 70.2.0 only
   because that was current when it was last built, so a fresh build today would have installed 84

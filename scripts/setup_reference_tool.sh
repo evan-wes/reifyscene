@@ -79,6 +79,7 @@ PINNED_PYTHON="${PINNED_PYTHON:-3.10}"
 # Upper bound for the bootstrap setuptools install; must satisfy the pinned torch
 # (2.11.0+cu128 declares setuptools<82). Bump alongside a torch pin bump.
 SETUPTOOLS_MAX_SPEC="${SETUPTOOLS_MAX_SPEC:-<82}"
+CREATE_ENV=0
 
 # ------------------------------------------------------------------------------
 # Config
@@ -99,6 +100,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --conda-env)
       CONDA_ENV_NAME="$2"; shift 2 ;;
+    --create-env)
+      CREATE_ENV=1; shift ;;
     --python)
       PINNED_PYTHON="$2"; shift 2 ;;
     --no-shape-of-motion)
@@ -115,7 +118,13 @@ Sets up an isolated conda env with reference 4D reconstruction methods for
 benchmarking reifyscene's renderer.
 
 Options:
-  --conda-env NAME        Conda env to create/use (default: reifyscene_som_ref)
+  --conda-env NAME        Conda env to use (default: reifyscene_som_ref)
+  --create-env            Create the conda env if it does not exist. Opt-in for the
+                          same reason as setup_reifyscene.sh: creating this env is a
+                          ~21 GB, multi-minute operation including a gsplat source
+                          build, so a typo in --conda-env must fail loudly rather
+                          than silently build one. Python version comes from the
+                          lockfile header.
   --python VERSION        Python version if the env must be created (default: 3.10)
   --no-shape-of-motion    Skip the Shape of Motion install
   --unlocked              Resolve dependencies fresh instead of installing from
@@ -184,6 +193,44 @@ conda_base_dir() {
   fi
 }
 
+# Read the Python version this lockfile was captured under, from its header:
+#   "# Platform: Linux/x86_64 | Python 3.10.20 | torch ..."
+# Mirrors the same helpers in setup_reifyscene.sh; these are standalone scripts
+# with no shared library, so the parsing lives in both.
+lockfile_python_full() {
+  [[ -f "${LOCK_FILE}" ]] || return 0
+  sed -n 's/.*| *Python \([0-9][0-9.]*\) *|.*/\1/p' "${LOCK_FILE}" | head -n 1
+}
+
+lockfile_python_minor() {
+  local full; full="$(lockfile_python_full)"
+  [[ -n "${full}" ]] || return 0
+  echo "${full}" | cut -d. -f1,2
+}
+
+# MAJOR.MINOR must match the lockfile: wheels are tagged by minor version, so a
+# 3.10-pinned tree will not install on 3.11. A PATCH difference is reported and
+# allowed - the patch level is not part of the ABI, and demanding an exact match
+# would fail on a perfectly good env every time Python is updated.
+check_env_python_version() {
+  local want_minor want_full have_full have_minor
+  want_minor="$(lockfile_python_minor)"
+  want_full="$(lockfile_python_full)"
+  [[ -n "${want_minor}" ]] || return 0
+  have_full="$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)" || return 0
+  have_minor="$(echo "${have_full}" | cut -d. -f1,2)"
+
+  if [[ "${have_minor}" != "${want_minor}" ]]; then
+    echo "Python version mismatch: env has ${have_full}, lockfile pins ${want_full}." >&2
+    echo "  The pinned wheels are built for Python ${want_minor} and will not install on ${have_minor}." >&2
+    echo "  Use an env with Python ${want_minor}, or re-resolve with --unlocked." >&2
+    exit 1
+  fi
+  if [[ "${have_full}" != "${want_full}" ]]; then
+    echo "Note: env Python ${have_full}, lockfile captured under ${want_full} (same ${want_minor} series - fine)."
+  fi
+}
+
 activate_or_create_env() {
   # Safety: this script only ever sets up an ISOLATED reference env. Refuse to
   # target protected envs so it can never modify the main reifyscene environment.
@@ -203,8 +250,20 @@ activate_or_create_env() {
 
   _envs="$(conda env list | awk '{print $1}' || true)"
   if ! grep -qx "${CONDA_ENV_NAME}" <<<"${_envs}"; then
-    echo "Creating conda env '${CONDA_ENV_NAME}' (python=${PINNED_PYTHON})..."
-    run_conda_relaxed create -y -n "${CONDA_ENV_NAME}" "python=${PINNED_PYTHON}"
+    # Creating this env is ~21 GB and includes a gsplat source build, so it is
+    # opt-in: without --create-env a typo in --conda-env fails here instead of
+    # silently building an environment nobody asked for. Matches
+    # setup_reifyscene.sh.
+    if [[ ${CREATE_ENV} -eq 0 ]]; then
+      echo "Conda environment '${CONDA_ENV_NAME}' does not exist." >&2
+      echo "Re-run with --create-env to create it, or pass an existing --conda-env NAME." >&2
+      exit 1
+    fi
+    local create_py
+    create_py="$(lockfile_python_minor)"
+    [[ -n "${create_py}" ]] || create_py="${PINNED_PYTHON}"
+    echo "Creating conda env '${CONDA_ENV_NAME}' (python=${create_py})..."
+    run_conda_relaxed create -y -n "${CONDA_ENV_NAME}" "python=${create_py}"
   fi
 
   echo "Activating conda environment: ${CONDA_ENV_NAME}"
@@ -221,6 +280,7 @@ activate_or_create_env() {
   fi
   echo "Confirmed active env: ${CONDA_DEFAULT_ENV} (${CONDA_PREFIX})"
   echo "Python executable: $(command -v python)"
+  check_env_python_version
 }
 
 ensure_cuda_home_exports() {
