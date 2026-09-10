@@ -4,12 +4,12 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.calibration.artifact import CalibrationArtifact
-from room4d.calibration.model_io import parse_colmap_text_model
-from room4d.calibration.runner import CalibrationRunner
-from room4d.common.io import write_json
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, VideoStreamRef
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.calibration.artifact import CalibrationArtifact
+from reifyscene.calibration.model_io import parse_colmap_text_model
+from reifyscene.calibration.runner import CalibrationRunner
+from reifyscene.common.io import write_json
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, VideoStreamRef
 
 
 def _write_fake_colmap_model(model_dir: Path) -> None:
@@ -110,7 +110,7 @@ def test_calibration_runner_exports_report_and_viewer(tmp_path: Path) -> None:
 
 
 def test_pipeline_calibrate_uses_runner_and_stamps_metadata(tmp_path: Path) -> None:
-    pipeline = Room4DPipeline({"run_dir": str(tmp_path / "run"), "run_id": "demo"})
+    pipeline = ReifyScenePipeline({"run_dir": str(tmp_path / "run"), "run_id": "demo"})
     artifact = CalibrationArtifact(
         run_id="demo",
         stage_name="calibration",

@@ -6,13 +6,13 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, TrackObservation
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.optimize.factors.reprojection import ReprojectionFactor
-from room4d.optimize.optimization_artifact import OptimizationArtifact
-from room4d.optimize.solver import JointSpatiotemporalSolver
-from room4d.sync.sync_artifact import SyncArtifact
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, TrackObservation
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.optimize.factors.reprojection import ReprojectionFactor
+from reifyscene.optimize.optimization_artifact import OptimizationArtifact
+from reifyscene.optimize.solver import JointSpatiotemporalSolver
+from reifyscene.sync.sync_artifact import SyncArtifact
+from reifyscene.tracking.track_artifact import TrackArtifact
 
 
 def test_reprojection_factor_placeholder() -> None:

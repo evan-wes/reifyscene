@@ -15,9 +15,9 @@ This script runs the shipped rungs + reconciler on a dataset and answers three q
 3. Depth vs GT for context (identical to FP6a — reconciliation moves poses, not depth).
 
 Reuses the shipped `ColmapPoseInitializer.reconstruct`, `MoGeInitializer.infer_frame`, and
-`room4d.geometry.scale_reconcile` so it exercises production code, not a re-implementation.
+`reifyscene.geometry.scale_reconcile` so it exercises production code, not a re-implementation.
 
-Run (GPU; hloc/pycolmap + MoGe via setup_room4d.sh --with-calibration --with-moge):
+Run (GPU; hloc/pycolmap + MoGe via setup_reifyscene.sh --with-calibration --with-moge):
     python scripts/fp6b_validate_fused.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 60
 """
 
@@ -29,10 +29,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.geometry.moge_wrapper import MoGeInitializer
-from room4d.geometry.scale_reconcile import extract_colmap_observations, solve_global_scale
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.scale_reconcile import extract_colmap_observations, solve_global_scale
 
 
 def geodesic_deg(Ra: np.ndarray, Rb: np.ndarray) -> float:

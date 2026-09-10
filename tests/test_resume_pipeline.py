@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from room4d.api.resume import materialize_stage_from_prior
-from room4d.api.stages import STAGE_ORDER, build_stage_registry
-from room4d.common.types import FrameRef, GraphEdge, GraphNode, VideoStreamRef
-from room4d.graph.graph_artifact import GraphArtifact
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.sync.sync_artifact import SyncArtifact
+from reifyscene.api.resume import materialize_stage_from_prior
+from reifyscene.api.stages import STAGE_ORDER, build_stage_registry
+from reifyscene.common.types import FrameRef, GraphEdge, GraphNode, VideoStreamRef
+from reifyscene.graph.graph_artifact import GraphArtifact
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.sync.sync_artifact import SyncArtifact
 
 
 def _touch_video(path: Path) -> Path:
-    path.write_bytes(b'room4d-test-video')
+    path.write_bytes(b'reifyscene-test-video')
     return path
 
 

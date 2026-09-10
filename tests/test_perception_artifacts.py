@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from room4d.common.backend_ladder import CapabilityManifest, RungStatus
-from room4d.common.types import FrameRef
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.perception.reid.reid_artifact import ReidArtifact
+from reifyscene.common.backend_ladder import CapabilityManifest, RungStatus
+from reifyscene.common.types import FrameRef
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.reid.reid_artifact import ReidArtifact
 
 
 def _frame(idx: int) -> FrameRef:

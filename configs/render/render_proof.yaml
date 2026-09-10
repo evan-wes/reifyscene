@@ -71,6 +71,6 @@ render_proof:
     eval_split: val
     max_eval_frames: null     # null = all val frames (matches SoM); cap for smoke
     dataset_format: nvidia
-    method_name: room4d
+    method_name: reifyscene
     lpips_net: alex
     compare_to: null          # path to a SoM reference_benchmark.json (or --compare-to)

@@ -7,12 +7,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import FrameRef, HumanState, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.humans.human_artifact import HumanArtifact
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.perception.reid.reid_artifact import ReidArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import FrameRef, HumanState, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.humans.human_artifact import HumanArtifact
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.reid.reid_artifact import ReidArtifact
 
 
 def _make_kpts(cx: float, cy: float) -> np.ndarray:
@@ -64,7 +64,7 @@ def _fr(idx: int) -> FrameRef:
 def test_perceive_humans_consumes_instance_and_reid(tmp_path: Path, monkeypatch) -> None:
     """humans = human-kind tracklets, ids canonicalized; pose/SMPL run over segment masks."""
     # use_sapiens=False -> the dense ladder uses the Keypoint-RCNN floor (patched below)
-    pipeline = Room4DPipeline({'run_dir': str(tmp_path), 'humans': {'use_sapiens': False}})
+    pipeline = ReifyScenePipeline({'run_dir': str(tmp_path), 'humans': {'use_sapiens': False}})
     monkeypatch.setattr(pipeline.decoder, 'get_frame', lambda stream, idx: np.zeros((40, 48, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline.human_pose, 'predict', lambda frame, boxes: [_make_kpts(5, 5) for _ in boxes])
 

@@ -5,9 +5,9 @@ import json
 import numpy as np
 from PIL import Image
 
-from room4d.common.types import CameraIntrinsics
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.render.gaussian4d.seed import _backproject_view
+from reifyscene.common.types import CameraIntrinsics
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.render.gaussian4d.seed import _backproject_view
 
 
 def _write_sequence(root, *, orientation, position, depth_value=2.0, size=10) -> None:

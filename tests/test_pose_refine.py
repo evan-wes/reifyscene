@@ -13,22 +13,22 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import (
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import (
     CameraIntrinsics,
     CameraPose,
     FrameRef,
     TimedCameraState,
     VideoStreamRef,
 )
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.pose_refine import (
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.pose_refine import (
     PoseRefineConfig,
     PoseRefiner,
     PoseRefineUnavailable,
     StreamRefinement,
 )
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 STREAM_ID = "cam_00"
 
@@ -72,7 +72,7 @@ def _geometry_artifact(tmp_path: Path, *, with_pointmaps: bool = True) -> Geomet
 
 def _ingest_artifact(tmp_path: Path) -> IngestArtifact:
     video = tmp_path / "clip.mp4"
-    video.write_bytes(b"room4d-test-video")
+    video.write_bytes(b"reifyscene-test-video")
     return IngestArtifact(
         run_id="dev",
         stage_name="ingest",
@@ -105,7 +105,7 @@ def test_stream_frames_selects_keyframes_with_pointmaps(tmp_path: Path) -> None:
 
 
 def test_refine_poses_passthrough_when_disabled(tmp_path: Path) -> None:
-    pipeline = Room4DPipeline({"run_dir": tmp_path / "run"})
+    pipeline = ReifyScenePipeline({"run_dir": tmp_path / "run"})
     geom = _geometry_artifact(tmp_path)
     ingest = _ingest_artifact(tmp_path)
 
@@ -127,7 +127,7 @@ def test_refine_poses_passthrough_when_disabled(tmp_path: Path) -> None:
 
 
 def test_refine_poses_falls_back_when_unavailable(tmp_path: Path, monkeypatch) -> None:
-    pipeline = Room4DPipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
+    pipeline = ReifyScenePipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
     geom = _geometry_artifact(tmp_path)
     ingest = _ingest_artifact(tmp_path)
 
@@ -154,7 +154,7 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
     translation) to a seed pose set and assert the re-anchor inverts it, so the
     recovered poses land back on the seed (the relative geometry is preserved).
     """
-    from room4d.geometry.pose_refine import _apply_sim3_to_c2w, _sim3_src_to_dst
+    from reifyscene.geometry.pose_refine import _apply_sim3_to_c2w, _sim3_src_to_dst
 
     seed_c2w, seed_w2c = {}, {}
     for i in range(6):
@@ -187,7 +187,7 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
 
 
 def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None:
-    pipeline = Room4DPipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
+    pipeline = ReifyScenePipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
     geom = _geometry_artifact(tmp_path)
     ingest = _ingest_artifact(tmp_path)
 
@@ -208,7 +208,7 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
         PoseRefiner, "refine", lambda self, geometry, *, decoder, ingest_artifact: {STREAM_ID: fake}
     )
     # isolate the keyframe-rebuild logic from the tracker-backed densification
-    monkeypatch.setattr(Room4DPipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
+    monkeypatch.setattr(ReifyScenePipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
 
     refined = pipeline.refine_poses(ingest, geom)
 

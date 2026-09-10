@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible installer for the room4d reference comparison tool.
+# Reproducible installer for the reifyscene reference comparison tool.
 #
 # Purpose:
 #   Stand up an ISOLATED conda environment containing third-party reference 4D
-#   reconstruction methods, so room4d's own renderer can be benchmarked against
+#   reconstruction methods, so reifyscene's own renderer can be benchmarked against
 #   a known-good implementation (and published numbers) on shared datasets
 #   (DyCheck iPhone, NVIDIA Dynamic Scenes). This env is intentionally separate
 #   from the main `room4d` env: the reference repos pin older torch/CUDA, and we
@@ -29,7 +29,7 @@ set -euo pipefail
 #     errors out if asked for it until that work is scoped.
 #
 # Environment behavior:
-#   - conda-only, mirroring scripts/setup_room4d.sh (no silent venv fallback).
+#   - conda-only, mirroring scripts/setup_reifyscene.sh (no silent venv fallback).
 #   - Provide --conda-env NAME (default: room4d_som_ref).
 #   - The env is created with the pinned Python if it does not already exist.
 
@@ -109,7 +109,7 @@ while [[ $# -gt 0 ]]; do
 Usage: scripts/setup_reference_tool.sh [options]
 
 Sets up an isolated conda env with reference 4D reconstruction methods for
-benchmarking room4d's renderer.
+benchmarking reifyscene's renderer.
 
 Options:
   --conda-env NAME        Conda env to create/use (default: room4d_som_ref)
@@ -134,7 +134,7 @@ EOF
 done
 
 # ------------------------------------------------------------------------------
-# Helpers (mirrors scripts/setup_room4d.sh conventions)
+# Helpers (mirrors scripts/setup_reifyscene.sh conventions)
 # ------------------------------------------------------------------------------
 
 run_conda_relaxed() {
@@ -185,7 +185,7 @@ activate_or_create_env() {
   # Safety: this script only ever sets up an ISOLATED reference env. Refuse to
   # target protected envs so it can never modify the main room4d environment.
   case "${CONDA_ENV_NAME}" in
-    room4d|base|"")
+    reifyscene|base|"")
       echo "Refusing to run against protected/empty env '${CONDA_ENV_NAME}'." >&2
       echo "This script is for an isolated reference env (e.g. room4d_som_ref)." >&2
       exit 1 ;;
@@ -324,8 +324,8 @@ install_som_requirements() {
   # cannot influence unrelated packages) and (b) split out RAPIDS, moving it
   # from cu11/24.6 to a Blackwell-capable cu12 release.
   local upstream="${SOM_DIR}/requirements.txt"
-  local patched="${SOM_DIR}/requirements.room4d.txt"
-  local rapids="${SOM_DIR}/requirements.room4d-rapids.txt"
+  local patched="${SOM_DIR}/requirements.reifyscene.txt"
+  local rapids="${SOM_DIR}/requirements.reifyscene-rapids.txt"
   [[ -f "${upstream}" ]] || { echo "Missing ${upstream}" >&2; exit 1; }
 
   sed -E \

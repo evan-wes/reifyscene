@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import torch
 
-from room4d.lifting.native_track_lift import gate_tracks_by_motion
-from room4d.lifting.tracks_3d import StaticPoints3D, Tracks3D
+from reifyscene.lifting.native_track_lift import gate_tracks_by_motion
+from reifyscene.lifting.tracks_3d import StaticPoints3D, Tracks3D
 
 T = 40
 

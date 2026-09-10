@@ -3,13 +3,13 @@
 Runs in the SoM reference env (room4d_som_ref): builds the iPhone dataset, runs
 SoM's `init_model_from_tracks` (3D tracks -> cuML clustering + Procrustes ->
 motion bases + coefs + canonical fg + static bg), and dumps the init tensors +
-the normalized train/val cameras to an .npz that room4d loads via
+the normalized train/val cameras to an .npz that reifyscene loads via
 `render/gaussian4d/motion_init.py`.
 
 This borrows the heavy motion-init machinery the way we borrow poses/depth — it
-is NOT room4d's own implementation; replacing it with a native MotionInitializer
+is NOT reifyscene's own implementation; replacing it with a native MotionInitializer
 is tracked follow-up work. SoM stores params as means(raw)/scales(log)/
-colors(logit)/opacities(logit)/coefs(raw), which match room4d's fields exactly.
+colors(logit)/opacities(logit)/coefs(raw), which match reifyscene's fields exactly.
 
 Example (in room4d_som_ref):
     python scripts/borrow_som_motion_init.py \
@@ -38,7 +38,7 @@ def _np(t: torch.Tensor) -> np.ndarray:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Dump SoM's motion init for room4d (stopgap borrow)")
+    parser = argparse.ArgumentParser(description="Dump SoM's motion init for reifyscene (stopgap borrow)")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--num-fg", type=int, default=40_000)
     parser.add_argument("--num-bg", type=int, default=100_000)
@@ -47,7 +47,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # SoM's iphone loader runs at factor 1 (full res); cameras/Gaussians are in
-    # that frame. room4d scales the dumped Ks when it renders at a coarser factor.
+    # that frame. reifyscene scales the dumped Ks when it renders at a coarser factor.
     data_cfg = iPhoneDataConfig(data_dir=args.data_dir)
     train_ds, _train_video, val_ds, _val_kpt = get_train_val_datasets(data_cfg, load_val=True)
 
@@ -59,8 +59,8 @@ def main() -> None:
         # foreground (deformable) canonical params + motion coefficients
         "fg_means": _np(fg.params["means"]),
         "fg_quats": _np(fg.params["quats"]),
-        "fg_scales": _np(fg.params["scales"]),       # log-space (matches room4d)
-        "fg_colors": _np(fg.params["colors"]),       # logit (matches room4d)
+        "fg_scales": _np(fg.params["scales"]),       # log-space (matches reifyscene)
+        "fg_colors": _np(fg.params["colors"]),       # logit (matches reifyscene)
         "fg_opacities": _np(fg.params["opacities"]), # logit
         "fg_motion_coefs": _np(fg.params["motion_coefs"]),  # raw (softmax at use)
         # motion bases

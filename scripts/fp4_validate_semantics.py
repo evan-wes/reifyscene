@@ -28,11 +28,11 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.perception.instance.instance_artifact import InstanceArtifact
-from room4d.perception.semantics.siglip_semantics import DEFAULT_VOCAB, FloorSemantics, SiglipSemantics
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.semantics.siglip_semantics import DEFAULT_VOCAB, FloorSemantics, SiglipSemantics
 
 WINDMILL_EXTRA_VOCAB = [
     'pinwheel', 'windmill', 'paper windmill', 'toy', 'fan', 'flower', 'star', 'origami', 'umbrella', 'kite',
@@ -64,9 +64,9 @@ def _ingest_and_decoder(rgbs: np.ndarray):
 
 
 def coco_agreement(args) -> None:
-    from room4d.perception.instance.segment import FloorInstanceSegmenter
-    from room4d.perception.objects.detector import ObjectDetector
-    from room4d.perception.objects.segmenter import ObjectSegmenter
+    from reifyscene.perception.instance.segment import FloorInstanceSegmenter
+    from reifyscene.perception.objects.detector import ObjectDetector
+    from reifyscene.perception.objects.segmenter import ObjectSegmenter
 
     print(f"[coco] loading {args.max_frames} frames from {args.coco_root}")
     rgbs = _load_frames(args.coco_root, args.max_frames)
@@ -108,7 +108,7 @@ def coco_agreement(args) -> None:
 
 
 def windmill_qualitative(args) -> None:
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     print(f"\n[windmill] loading {args.max_frames} frames from {args.windmill_root}")
     rgbs = _load_frames(args.windmill_root, args.max_frames)

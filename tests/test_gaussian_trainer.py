@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from room4d.render.gaussian4d.densify import (
+from reifyscene.render.gaussian4d.densify import (
     DensificationController,
     DensifyConfig,
     compute_scene_extent,
 )
-from room4d.render.gaussian4d.gaussian_field import PARAM_NAMES, GaussianField, logit
-from room4d.render.gaussian4d.gaussian_trainer import image_psnr, image_ssim, ssim
-from room4d.render.gaussian4d.rasterizer import GaussianCloud
+from reifyscene.render.gaussian4d.gaussian_field import PARAM_NAMES, GaussianField, logit
+from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, image_ssim, ssim
+from reifyscene.render.gaussian4d.rasterizer import GaussianCloud
 
 
 def _make_field(n: int = 12, scale: float = 0.005, opacity: float = 0.9) -> GaussianField:

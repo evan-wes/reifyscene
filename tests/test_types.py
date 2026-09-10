@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from room4d.common.types import BaseArtifact
+from reifyscene.common.types import BaseArtifact
 
 
 def test_base_artifact_summary() -> None:

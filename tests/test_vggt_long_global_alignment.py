@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from room4d.common.types import FrameRef
-from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.common.types import FrameRef
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
 
 
 def _c2w(R: np.ndarray, center: np.ndarray) -> np.ndarray:

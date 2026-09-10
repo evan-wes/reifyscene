@@ -1,4 +1,4 @@
-"""Render-proof harness for the room4d Gaussian renderer (Track 2).
+"""Render-proof harness for the reifyscene Gaussian renderer (Track 2).
 
 Two modes:
 
@@ -31,24 +31,24 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from room4d.common.io import read_yaml
-from room4d.common.types import FrameRef
-from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
+from reifyscene.common.io import read_yaml
+from reifyscene.common.types import FrameRef
+from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
     build_record,
     compare,
     write_record,
 )
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.render.camera_paths import orbit_cameras
-from room4d.render.eval.novel_view import score_masked_dynamic_views, score_masked_novel_views
-from room4d.render.export import write_video
-from room4d.render.gaussian4d.densify import DensifyConfig
-from room4d.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
-from room4d.render.gaussian4d.gaussian_field import GaussianField
-from room4d.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
-from room4d.render.gaussian4d.motion_init import build_native_init, load_borrowed_init
-from room4d.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
-from room4d.render.gaussian4d.seed import seed_cloud_from_geometry
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.render.camera_paths import orbit_cameras
+from reifyscene.render.eval.novel_view import score_masked_dynamic_views, score_masked_novel_views
+from reifyscene.render.export import write_video
+from reifyscene.render.gaussian4d.densify import DensifyConfig
+from reifyscene.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
+from reifyscene.render.gaussian4d.gaussian_field import GaussianField
+from reifyscene.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig
+from reifyscene.render.gaussian4d.motion_init import build_native_init, load_borrowed_init
+from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
+from reifyscene.render.gaussian4d.seed import seed_cloud_from_geometry
 
 
 # -- shared helpers -------------------------------------------------------
@@ -245,11 +245,11 @@ def cmd_train(args) -> None:
             rasterizer, field.to_cloud(), _val_views(), device=device, lpips_net=bm.get("lpips_net", "alex")
         )
         record = build_record(
-            method=bm.get("method_name", "room4d"),
+            method=bm.get("method_name", "reifyscene"),
             sequence=Path(args.dataset_root).name,
             dataset_format=bm.get("dataset_format", "iphone"),
             metrics=metrics,
-            eval={"source": "room4d_render_proof", "resolution_factor": ds["factor"]},
+            eval={"source": "reifyscene_render_proof", "resolution_factor": ds["factor"]},
             extra={"run_dir": str(out_dir), "iters": iters, "num_gaussians": field.num_gaussians},
         )
         bench_path = write_record(record, out_dir / "reference_benchmark.json")
@@ -285,10 +285,10 @@ def cmd_dynamic(args) -> None:
         # factor is applied via k_scale below, exactly as for borrowed cameras.
         tracks_dir = None
         if args.own_tracker:
-            # Drop the last borrowed input: generate the 2D tracks with room4d's
+            # Drop the last borrowed input: generate the 2D tracks with reifyscene's
             # own tapnet tracker. Reuse an existing dir (the all-pairs pass is
             # expensive) unless it is empty.
-            from room4d.lifting.native_track_lift import generate_native_tracks
+            from reifyscene.lifting.native_track_lift import generate_native_tracks
 
             tracks_root = Path(args.own_tracks_dir) if args.own_tracks_dir else out_dir / "own_tracks"
             factor_dir = tracks_root / "1x"
@@ -373,11 +373,11 @@ def cmd_dynamic(args) -> None:
 
         metrics = score_masked_dynamic_views(rasterizer, scene, _val_views(), device=device, lpips_net=bm.get("lpips_net", "alex"))
         record = build_record(
-            method=bm.get("method_name", "room4d-dynamic"),
+            method=bm.get("method_name", "reifyscene-dynamic"),
             sequence=Path(args.dataset_root).name,
             dataset_format=bm.get("dataset_format", "iphone"),
             metrics=metrics,
-            eval={"source": "room4d_render_proof_dynamic", "resolution_factor": factor},
+            eval={"source": "reifyscene_render_proof_dynamic", "resolution_factor": factor},
             extra={"run_dir": str(out_dir), "iters": iters, "num_gaussians": scene.num_gaussians},
         )
         bench_path = write_record(record, out_dir / "reference_benchmark.json")
@@ -445,7 +445,7 @@ def cmd_dynamic(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="room4d render-proof harness (Track 2)")
+    parser = argparse.ArgumentParser(description="reifyscene render-proof harness (Track 2)")
     sub = parser.add_subparsers(dest="mode", required=True)
 
     c0 = sub.add_parser("checkpoint0", help="coordinate sanity (untrained splat)")
@@ -475,7 +475,7 @@ def main() -> None:
     dy.add_argument("--init", default=None, help="borrowed motion-init .npz (scripts/borrow_som_motion_init.py)")
     dy.add_argument("--native", action="store_true", help="build the motion init natively instead of loading --init")
     dy.add_argument("--own-tracker", action="store_true",
-                    help="native: produce the 2D tracks with room4d's own tapnet tracker (drops the last borrowed input)")
+                    help="native: produce the 2D tracks with reifyscene's own tapnet tracker (drops the last borrowed input)")
     dy.add_argument("--own-tracks-dir", default=None,
                     help="native+own-tracker: dir to write/reuse generated tracks (default: <out-dir>/own_tracks)")
     dy.add_argument("--num-fg", type=int, default=40_000, help="native: foreground tracks to lift")

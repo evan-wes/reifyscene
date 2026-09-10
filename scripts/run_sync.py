@@ -1,6 +1,6 @@
 """Command-line helper script for `run_sync`."""
 
-from room4d.cli.sync import main
+from reifyscene.cli.sync import main
 
 
 if __name__ == "__main__":

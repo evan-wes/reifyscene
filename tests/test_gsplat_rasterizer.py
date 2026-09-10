@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from room4d.common.types import CameraIntrinsics
-from room4d.render.gaussian4d.rasterizer import (
+from reifyscene.common.types import CameraIntrinsics
+from reifyscene.render.gaussian4d.rasterizer import (
     GaussianCloud,
     GsplatRasterizer,
     Rasterizer,

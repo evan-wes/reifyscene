@@ -12,16 +12,16 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry import compose as compose_mod
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.compose import GeometryComposer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.moge_wrapper import MoGeInitializer
-from room4d.geometry.scale_reconcile import solve_global_scale
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry import compose as compose_mod
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.compose import GeometryComposer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.scale_reconcile import solve_global_scale
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +236,7 @@ def test_pipeline_fused_mode_composes_and_manifests(tmp_path, monkeypatch):
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_colmap_poses([0, 1]))
     monkeypatch.setattr(MoGeInitializer, "infer_frame", _fake_moge_infer)
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({
+    pipe = ReifyScenePipeline({
         "run_dir": tmp_path / "run",
         "geometry": {"pose_backend": "colmap", "depth_backend": "moge", "compose": {"scale_min_obs": 1}},
     })
@@ -264,7 +264,7 @@ def test_pipeline_fused_pose_failure_degrades_to_depth_only(tmp_path, monkeypatc
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", _boom)
     monkeypatch.setattr(MoGeInitializer, "infer_frame", _fake_moge_infer)
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({
+    pipe = ReifyScenePipeline({
         "run_dir": tmp_path / "run",
         "geometry": {"pose_backend": "colmap", "depth_backend": "moge"},
     })
@@ -279,7 +279,7 @@ def test_single_backend_path_not_fused(tmp_path, monkeypatch):
     # back-compat: a lone backend_name still selects the single pose-only path.
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_colmap_poses([0, 1]))
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
     assert not pipe.geometry_fused
     art = pipe.initialize_geometry(ingest, sync_artifact=None)
     assert art.backend_name == "colmap" and art.capability.backend_used == "colmap"

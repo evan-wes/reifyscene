@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from room4d.common.types import FrameRef
-from scripts.run_single_video_room4d import _build_frame_summary_rows
+from reifyscene.common.types import FrameRef
+from scripts.run_single_video_reifyscene import _build_frame_summary_rows
 
 
 def test_frame_summary_rows_tracking_vs_scene():

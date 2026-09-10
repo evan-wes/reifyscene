@@ -1,6 +1,6 @@
 """Command-line helper script for `run_pipeline`."""
 
-from room4d.cli.preprocess import main
+from reifyscene.cli.preprocess import main
 
 
 if __name__ == "__main__":

@@ -7,6 +7,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.0.1] - 2026-09-10
+
+### Changed
+- **Renamed the project and the Python package `room4d` → `reifyscene`.** "room4d"
+  ("room-sized 4D") was a working name; the scope has grown to an *interpretable,
+  queryable, semantically editable* 4D reconstruction, and "reify" — to make something
+  abstract concrete and manipulable — names that goal. Mechanical and literal, not a
+  rebrand: no behavior changes, and the test suite is unchanged at 373 passed / 1 skipped
+  before and after.
+  - package directory `room4d/` → `reifyscene/` (226 files); all imports updated
+  - `Room4DPipeline` → `ReifyScenePipeline` (`reifyscene/api/pipeline.py`)
+  - distribution name and CLI entry point: `reifyscene = "reifyscene.cli.main:app"`,
+    so the command is now `reifyscene` (was `room4d`)
+  - scripts renamed: `setup_room4d.sh` → `setup_reifyscene.sh`,
+    `run_single_video_room4d.py` → `run_single_video_reifyscene.py`,
+    `run_calibration_room4d.py` → `run_calibration_reifyscene.py`
+  - env vars `ROOM4D_*` → `REIFYSCENE_*` (`REIFYSCENE_LOCK_FILE`, `REIFYSCENE_RUN_VGGT`,
+    `REIFYSCENE_DATA`)
+  - benchmark `method_name` (and its Python fallbacks in `run_render_proof.py`):
+    `room4d` → `reifyscene`, `room4d-dynamic` → `reifyscene-dynamic`. This is only the
+    display label in `reference_benchmark.json`; records written before this release
+    carry the old label but remain directly comparable.
+  - default run name / output dir: `artifacts/runs/room4d_dev` → `artifacts/runs/reifyscene_dev`
+
+**Everything above this entry is left untouched, deliberately.** Prior CHANGELOG entries
+describe what shipped *as `room4d`* at the time; rewriting them would falsify the record.
+Expect to see the old name throughout the history below.
+
+**Deliberately NOT renamed:**
+- **The internal cache path is now `.reifyscene_cache`**, so a fresh cache is built going
+  forward. The existing `.room4d_cache/` is left on disk (and still gitignored) until it
+  is confirmed disposable, then deleted. Nothing reads it any more.
+- **The conda environments** `room4d` and `room4d_som_ref` keep their names, along with
+  `scripts/locks/room4d.lock` / `room4d_som_ref.lock` and every reference to them
+  (`gen_env_locks.sh`, `run_reference_benchmark.py`'s `DEFAULT_CONDA_ENV`,
+  `setup_reference_tool.sh`). These name *external* machine state, not code; renaming
+  them means recreating the environments, which is a separate decision.
+- **The repository working directory** `the project folder`, which is why
+  `tests/test_gt_scoring.py`'s `data` default and one `TODOS.md` path still say
+  `project`. Both need updating when that directory is renamed.
+
 ## [0.2.0.0] - 2026-07-08
 
 **First release to `main`** — ships the accumulated `develop` batch (perception-stack

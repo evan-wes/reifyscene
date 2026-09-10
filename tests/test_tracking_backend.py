@@ -5,14 +5,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.backproject import TrackLifter3D
-from room4d.lifting.static_dynamic import StaticDynamicPartitioner
-from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.backproject import TrackLifter3D
+from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
+from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
+from reifyscene.tracking.track_artifact import TrackArtifact
 from tests.conftest import write_test_video
 
 

@@ -14,9 +14,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from room4d.tracking.all_pairs import AllPairsTracks
-from room4d.tracking.tapir_wrapper import TAPIRWrapper
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.tracking.all_pairs import AllPairsTracks
+from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
+from reifyscene.tracking.track_artifact import TrackArtifact
 
 
 def _ragged_all_pairs(seed: int = 0) -> AllPairsTracks:

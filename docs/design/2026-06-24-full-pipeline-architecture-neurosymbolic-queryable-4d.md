@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-24
 **Status:** DRAFT — for review (not yet eng-reviewed; not yet built)
-**Framing source:** the 2026-06-21 reframe (room4d = research/learning vehicle) + the lit-review
+**Framing source:** the 2026-06-21 reframe (reifyscene = research/learning vehicle) + the lit-review
 `docs/research/2026-06-21-neurosymbolic-queryable-4d-scene-graphs-and-query-conditioned-generation.md`.
 **Supersedes:** the renderer-productionization design as a standalone effort
 (`a private design note`) — folded in here as F0.
@@ -11,7 +11,7 @@
 
 ## 0. Decisions locked this session
 
-1. **room4d is a research/learning vehicle, not a product.** Optimize for depth / correctness /
+1. **reifyscene is a research/learning vehicle, not a product.** Optimize for depth / correctness /
    reproducibility / a novel contribution. The "complete pipeline" is the apparatus.
 2. **Build the complete pipeline; re-cut the *back-half* contracts; keep the proven front-half and
    the stage/artifact/resume machinery.** Strangler-fig against new contracts, reuse all proven pieces.
@@ -19,16 +19,16 @@
    classic compiler — a shared front-end + IR (`query → queryable 4D graph → render-plan IR`) and
    per-target back-end lowering. **The compiler seam *is* the contribution.**
 4. **Render-as-answer, own-renderer first (Level 1).** v1's answer is a novel view/video rendered
-   from the *reconstructed* 4D Gaussian scene via room4d's own proven trainers, along a
+   from the *reconstructed* 4D Gaussian scene via reifyscene's own proven trainers, along a
    query-generated camera path. A **frozen-backbone world-model adapter (Level 2)** is a
    designed-but-unbuilt second lowering target behind the same IR.
 5. **Eval = round-trip (cycle) consistency in scene-graph space.** `generate answer → re-perceive
-   with room4d's own stack → diff the graph`. The perception→graph stack is **dual-use: builder
+   with reifyscene's own stack → diff the graph`. The perception→graph stack is **dual-use: builder
    *and* judge**.
 6. **Doc altitude:** lock the full 11-stage map + contracts at a high level (proven front-half
    mostly as-is); go deep only on the redesigned back-half (graph / query / compiler / render /
    eval).
-7. **No-ship / aim-high framing (eng-review recalibration, 2026-06-24).** room4d is a personal
+7. **No-ship / aim-high framing (eng-review recalibration, 2026-06-24).** reifyscene is a personal
    learning project — **nothing to ship, no plan to publish** unless something genuinely novel
    surfaces. So the plan is *not* optimized to cut scope or hit a milestone; it sequences so
    **validation compounds**, treats hard risks as **experiment/learning checkpoints (not gates)**,
@@ -58,13 +58,13 @@
 
 ## 1. Purpose
 
-room4d's north star artifact is a **promptable, context-aware novel video**: type *"orbit the
+reifyscene's north star artifact is a **promptable, context-aware novel video**: type *"orbit the
 person in the red jacket between t=2s and t=5s"* or *"remove the red car"* and get a rendered
 free-viewpoint answer. The *purpose* of building it is to **understand the literature, reproduce
 what's proven, and push the frontier** — not to ship.
 
 This document re-derives the pipeline so that the genuine research frontier (a queryable 4D scene
-graph whose query *answer* is a generated novel view/video) is first-class, and so that room4d's
+graph whose query *answer* is a generated novel view/video) is first-class, and so that reifyscene's
 proven reconstruction/render backbone is reused rather than rebuilt.
 
 ## 2. Contribution thesis — the wedge
@@ -76,7 +76,7 @@ work (4D LangSplat, Instruct-4DGS) *queries/edits* a reconstruction but does not
 *answer*. **No 2024–2026 system closes** `query → temporal/4D scene graph → neurosymbolic reasoning
 → generated novel-view video answer`.
 
-The unclaimed ground is the **conditioning interface** plus its **evaluation**. room4d's two
+The unclaimed ground is the **conditioning interface** plus its **evaluation**. reifyscene's two
 candidate contributions:
 
 - **(C1) A graph→geometry compiler.** Turn a *4D scene-graph query plan* into the explicit control
@@ -91,15 +91,15 @@ candidate contributions:
 
 Relation to literature: the **bridge** papers (DyST-XL, LVD, VideoDirectorGPT, SceneCraft) already
 compile an LLM-invented graph down to *2D layout* control, training-free, **not grounded in a
-reconstructed scene**. room4d's differentiators: the graph is **4D and grounded in a real
+reconstructed scene**. reifyscene's differentiators: the graph is **4D and grounded in a real
 reconstruction**, and the loop is **closed by a graph-space eval**. (See §6 for a forward-looking
 third thread.)
 
 ## 3. Current architecture inventory (verified 2026-06-24)
 
-Eleven stages, declared in `room4d/api/stages.py::build_stage_registry` (`StageSpec`:
+Eleven stages, declared in `reifyscene/api/stages.py::build_stage_registry` (`StageSpec`:
 name / dependencies / artifact_cls / run_fn / load_fn), orchestrated by
-`room4d/api/pipeline.py::Room4DPipeline`. Resume + stage-window machinery is solid and stays.
+`reifyscene/api/pipeline.py::ReifyScenePipeline`. Resume + stage-window machinery is solid and stays.
 
 | # | Stage | Status | Note |
 |---|---|---|---|
@@ -115,7 +115,7 @@ name / dependencies / artifact_cls / run_fn / load_fn), orchestrated by
 | 10 | `scene` | **Re-cut** | `SceneArtifact` (renderable repr) — clean its boundary vs render |
 | 11 | `render` | **Replace toy + extend** | `Gaussian4DScene`/`Gaussian4DTrainer` is a **no-train placeholder**; proven `Static/DynamicGaussianTrainer` exist but are only driven by `scripts/run_render_proof.py` |
 
-Net-new (not in the registry today): the **query** stage (`room4d/query/` is all stubs —
+Net-new (not in the registry today): the **query** stage (`reifyscene/query/` is all stubs —
 `PromptParser.parse` returns a placeholder dict), the **compiler**, and the **query-conditioned
 eval**. Also net-new from the perception redesign (§4A): the **`segment`** (SAM 3) and **`reid`**
 (DINOv3) stages + their `InstanceArtifact` / `ReidArtifact`.
@@ -313,7 +313,7 @@ all-static), never *completeness*. Worked traces:
 
 Gating means **register-to-download only** — models run **fully offline locally, no data egress**.
 **Request `facebook/sam3` + `facebook/dinov3` access early** (manual approval, reported days-to-weeks
-wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_room4d.sh`
+wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_reifyscene.sh`
 (`a private note`, `a private note`); the gated weights need
 a pre-authorized HF token — the one step that isn't fully scriptable.
 
@@ -391,7 +391,7 @@ No temporal trajectories, no typed relations over time, no grounding handle, no 
 
 ### 5b. `query` — neurosymbolic NL → program → query plan
 
-**Today:** `room4d/query/` is stubs (`parser.py`, `node_retrieval.py`, `event_retrieval.py`,
+**Today:** `reifyscene/query/` is stubs (`parser.py`, `node_retrieval.py`, `event_retrieval.py`,
 `trajectory_planner.py`, ~300 bytes each); not wired into `run()`.
 
 **Target:** a **VisProg / NS-VideoQA-style** parse-to-program-to-execute stage:
@@ -551,11 +551,11 @@ across appearance/disappearance. Resolve by **lifting discreteness into continuo
 4. **Temporal smoothness + (exotic) topological-persistence priors** — Lipschitz attribute
    trajectories; penalize rapid component births/deaths (perception flicker).
 
-**Composition (the room4d-shaped candidate):** run `generate → re-perceive → recover the graph
+**Composition (the reifyscene-shaped candidate):** run `generate → re-perceive → recover the graph
 trajectory`, then require it to be **(i) correct** w.r.t. the intended edit (cycle-consistency, §5e)
 **and (ii) continuous with conserved identities** (no popping). (ii) is **query-independent,
 self-supervised**, applies to *any* generated 4D video, and directly punishes the most visible
-world-model failure (flickering / identity swaps). room4d is well-positioned because it owns the
+world-model failure (flickering / identity swaps). reifyscene is well-positioned because it owns the
 perception→graph **judge** that computes the loss. Path: **eval in v1 → soft training loss for a
 Level-2 adapter later** (soft constraint, analogous to physics-informed losses vs. baked-in
 equivariance).
@@ -579,7 +579,7 @@ real research bet, not a sure thing.
 
 ## 7. Build plan (foundation-complete gate → back-half)
 
-room4d is a no-ship/no-publish learning project (§0.7–0.8). **Block 1 builds the entire front-half to
+reifyscene is a no-ship/no-publish learning project (§0.7–0.8). **Block 1 builds the entire front-half to
 a real, no-stub state and runs it end-to-end on multi-stream rig data — that is GATE G1, the
 precondition for any back-half work.** Block 2 (queryable graph / query / compiler / eval) starts
 only after G1. The stub stages (`sync`, `optimization`, `pose2d`), the **perception redesign (§4A)**,
@@ -770,7 +770,7 @@ sequencing, not a go/no-go.
   under-specifying Lowering B. Mitigation: specify the Lowering B control schema in P4 even though it
   isn't built.
 - **Paired-data cost** — any future Level-2 adapter needs (control-signal, video) pairs; producing
-  them is itself a reconstruction pipeline (which room4d is) — a hidden cost, not just compute.
+  them is itself a reconstruction pipeline (which reifyscene is) — a hidden cost, not just compute.
 - **`optimization` is a verified no-op** (all geometric factors `return 0.0,{}`) and **`sync` is
   hardcoded** — both are now **Block-1 foundation scope** (F1 Tier-1 coarse sync prior; F2 real
   multi-stream joint-opt fusion = calibration-arc M2/M3, which *also* estimates Tier-2 fine sync),
@@ -792,20 +792,20 @@ sequencing, not a go/no-go.
 
 ## 9. Repo landing
 
-- **New:** `room4d/compile/` (render-plan IR + lowering), expand `room4d/query/` (parser + executor +
+- **New:** `reifyscene/compile/` (render-plan IR + lowering), expand `reifyscene/query/` (parser + executor +
   `QueryPlanArtifact`), `eval/benchmarks/query_conditioned_generation/`, plus `compile`/`query`/`eval`
-  entries in `room4d/api/stages.py::STAGE_ORDER` + registry and `Room4DPipeline.run`.
-- **New (perception, §4A):** `room4d/perception/segment/` (SAM 3) + `room4d/perception/reid/`
+  entries in `reifyscene/api/stages.py::STAGE_ORDER` + registry and `ReifyScenePipeline.run`.
+- **New (perception, §4A):** `reifyscene/perception/segment/` (SAM 3) + `reifyscene/perception/reid/`
   (DINOv3) stages, `InstanceArtifact` / `ReidArtifact`, a shared **backend-ladder base** (top-down
   availability probe → `backend_used` + capability manifest), and `segment`/`reid` STAGE_ORDER +
   registry entries with the reordered perception band.
-- **Re-cut:** `room4d/graph/` (`GraphArtifact`, `DynamicSceneGraphBuilder`, node/edge types in
-  `room4d/common/types.py`); `room4d/scene/` (boundary cleanup); **`room4d/perception/objects/` +
-  `room4d/perception/humans/`** (delete the hand-tuned associators; SigLIP2/Qwen-VL semantics +
-  Sapiens/GVHMR over `segment` masks); **`room4d/tracking/`** (motion-only, reordered, dynamic split
+- **Re-cut:** `reifyscene/graph/` (`GraphArtifact`, `DynamicSceneGraphBuilder`, node/edge types in
+  `reifyscene/common/types.py`); `reifyscene/scene/` (boundary cleanup); **`reifyscene/perception/objects/` +
+  `reifyscene/perception/humans/`** (delete the hand-tuned associators; SigLIP2/Qwen-VL semantics +
+  Sapiens/GVHMR over `segment` masks); **`reifyscene/tracking/`** (motion-only, reordered, dynamic split
   seeded by `segment` fg).
-- **Replace/delete:** `room4d/render/gaussian4d/scene_model.py::Gaussian4DScene`,
-  `room4d/render/gaussian4d/trainer.py::Gaussian4DTrainer` (the toy); the render stage drives the
+- **Replace/delete:** `reifyscene/render/gaussian4d/scene_model.py::Gaussian4DScene`,
+  `reifyscene/render/gaussian4d/trainer.py::Gaussian4DTrainer` (the toy); the render stage drives the
   proven `gaussian_trainer.py` / `dynamic_trainer.py`.
 - **Reuse unchanged:** ingest / sync / geometry / pose_refine (perception *consumes* pose_refine,
   doesn't change it); the `StageSpec` registry + resume + stage-window; the masked-NVS eval machinery.
@@ -819,7 +819,7 @@ sequencing, not a go/no-go.
 - **Superseded render design:** `a private design note`
   (its findings — train-supervision masks, dataset-coupled motion init, world-frame trap — feed F0/F2).
 - **Proven baselines:** SoM reference benchmark (masked NVS mPSNR 19.53 on paper-windmill);
-  room4d-dynamic beats it (20.7) via `run_render_proof.py`. The render stage must reproduce this
+  reifyscene-dynamic beats it (20.7) via `run_render_proof.py`. The render stage must reproduce this
   in-pipeline (F0).
 
 ## GSTACK REVIEW REPORT
@@ -832,7 +832,7 @@ sequencing, not a go/no-go.
 | Outside Voice | independent Claude reviewer | 2nd opinion (codex unavailable) | 1 | issues_found | 5 substantive findings on eval validity + IR framing, all folded in |
 
 **Recalibration:** the review's default lens (ship-first / scope-cut / minimize innovation tokens)
-was retired — room4d is a no-ship/no-publish learning project (§0.7). Lens became contract
+was retired — reifyscene is a no-ship/no-publish learning project (§0.7). Lens became contract
 correctness + sequencing for compounding validation + risks-as-experiments.
 
 **Findings (all incorporated):**

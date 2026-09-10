@@ -10,7 +10,7 @@ aligned, tests depth *structure*), plus focal agreement.
 Reuses `DatasetGeometryInitializer`'s loaders for GT rgb/depth/camera and the actual
 `MoGeInitializer.infer_frame` inference core, so it exercises the shipped rung.
 
-Run (GPU; weights via `setup_room4d.sh --with-moge`):
+Run (GPU; weights via `setup_reifyscene.sh --with-moge`):
     python scripts/fp6_validate_moge.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 12
 """
 
@@ -23,8 +23,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
 
 
 def _depth_metrics(pred: np.ndarray, gt: np.ndarray, valid: np.ndarray) -> tuple[float, float, float]:

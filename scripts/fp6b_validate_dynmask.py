@@ -27,11 +27,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.common.types import CameraIntrinsics, CameraPose, TimedCameraState
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.geometry.reconstruction_health import assess_pose_health
-from room4d.perception.dyn_mask.rungs import DetectorDynMask
+from reifyscene.common.types import CameraIntrinsics, CameraPose, TimedCameraState
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.reconstruction_health import assess_pose_health
+from reifyscene.perception.dyn_mask.rungs import DetectorDynMask
 
 
 def geodesic_deg(Ra, Rb):
