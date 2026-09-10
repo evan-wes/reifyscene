@@ -127,7 +127,8 @@ CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-reifyscene}"
+CREATE_ENV=0
 USE_VENV=0
 UNLOCKED=0
 
@@ -135,7 +136,7 @@ UNLOCKED=0
 # editable reifyscene install so the transitive dependency tree replays the
 # known-good snapshot instead of re-resolving. torch +cu130 wheels only exist
 # on the pytorch index, so the lock install needs it on a fresh env.
-REIFYSCENE_LOCK_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/locks/room4d.lock"
+REIFYSCENE_LOCK_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/locks/reifyscene.lock"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
 INSTALL_DETECTRON2=0
@@ -180,6 +181,8 @@ while [[ $# -gt 0 ]]; do
       CONDA_ENV_NAME="$2"; shift 2 ;;
     --use-venv)
       USE_VENV=1; shift ;;
+    --create-env)
+      CREATE_ENV=1; shift ;;
     --with-detectron2)
       INSTALL_DETECTRON2=1; shift ;;
     --with-vggt)
@@ -224,6 +227,12 @@ Usage: scripts/setup_reifyscene.sh [options]
 
 Environment options:
   --conda-env NAME        Require / activate this conda environment
+                          (default: reifyscene)
+  --create-env            Create the conda env if it does not exist. Without
+                          this flag a missing env is an error, so a typo in
+                          --conda-env fails loudly instead of silently building
+                          a multi-GB environment. Python version is read from
+                          the lockfile header.
   --use-venv              Explicitly use a repo-local venv instead of conda
   --python PATH           Python executable to use (default: python3)
   --venv PATH             Virtualenv path (default: .venv)
@@ -256,7 +265,7 @@ Install options:
   --no-pose-refine        Skip pose-refinement extras (pycolmap, hydra-core, omegaconf, scipy)
   --no-ffmpeg             Skip the ffmpeg (conda-forge) dataset-prep install
   --unlocked              Resolve dependencies fresh instead of installing the
-                          pinned tree from scripts/locks/room4d.lock
+                          pinned tree from scripts/locks/reifyscene.lock
                           (regenerate locks with scripts/gen_env_locks.sh)
 
 Behavior:
@@ -826,7 +835,31 @@ activate_conda_env() {
   if [[ -n "${target_env}" ]]; then
     if [[ "${CONDA_DEFAULT_ENV:-}" == "${target_env}" ]]; then
       echo "Using already-active conda environment: ${target_env}"
+      check_env_python_version
       return
+    fi
+
+    if ! conda env list | awk '{print $1}' | grep -qx "${target_env}"; then
+      # Creating an env is a multi-GB, multi-minute operation, so it is opt-in:
+      # without --create-env a typo in --conda-env fails here rather than
+      # silently building an environment the caller never asked for.
+      if [[ $CREATE_ENV -eq 0 ]]; then
+        echo "Conda environment '${target_env}' does not exist." >&2
+        echo "Re-run with --create-env to create it, or pass an existing --conda-env NAME." >&2
+        exit 1
+      fi
+      local create_py
+      create_py="$(lockfile_python_minor)"
+      if [[ -z "${create_py}" ]]; then
+        echo "Could not read a Python version from ${REIFYSCENE_LOCK_FILE}." >&2
+        echo "Fix the lockfile header, or use --conda-env with an existing env." >&2
+        exit 1
+      fi
+      echo "Creating conda env '${target_env}' with python=${create_py} (from lockfile)..."
+      if ! conda create -y -n "${target_env}" "python=${create_py}"; then
+        echo "Failed to create conda environment '${target_env}'." >&2
+        exit 1
+      fi
     fi
 
     echo "Activating conda environment: ${target_env}"
@@ -834,6 +867,7 @@ activate_conda_env() {
       echo "Failed to activate conda environment '${target_env}'." >&2
       exit 1
     fi
+    check_env_python_version
     return
   fi
 
@@ -844,6 +878,45 @@ activate_conda_env() {
 
   echo "No active conda environment detected. Provide --conda-env NAME or use --use-venv." >&2
   exit 1
+}
+
+# Read the Python version the lockfile was captured under, from its header:
+#   "# Platform: Linux/x86_64 | Python 3.11.15 | torch ..."
+# lockfile_python_full  -> 3.11.15   lockfile_python_minor -> 3.11
+lockfile_python_full() {
+  [[ -f "${REIFYSCENE_LOCK_FILE}" ]] || return 0
+  sed -n 's/.*| *Python \([0-9][0-9.]*\) *|.*/\1/p' "${REIFYSCENE_LOCK_FILE}" | head -n 1
+}
+
+lockfile_python_minor() {
+  local full; full="$(lockfile_python_full)"
+  [[ -n "${full}" ]] || return 0
+  echo "${full}" | cut -d. -f1,2
+}
+
+# Compare the active interpreter against the lockfile.
+#
+# MAJOR.MINOR must match: wheels are tagged by minor version (cp311), so a
+# 3.11-pinned tree simply will not install on 3.12. The PATCH level is not part
+# of the ABI, so a difference there is reported and allowed — requiring an exact
+# patch match would fail on a perfectly good env every time Python is updated.
+check_env_python_version() {
+  local want_minor want_full have_full have_minor
+  want_minor="$(lockfile_python_minor)"
+  want_full="$(lockfile_python_full)"
+  [[ -n "${want_minor}" ]] || return 0
+  have_full="$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)" || return 0
+  have_minor="$(echo "${have_full}" | cut -d. -f1,2)"
+
+  if [[ "${have_minor}" != "${want_minor}" ]]; then
+    echo "Python version mismatch: env has ${have_full}, lockfile pins ${want_full}." >&2
+    echo "  The pinned wheels are built for Python ${want_minor} and will not install on ${have_minor}." >&2
+    echo "  Use an env with Python ${want_minor}, or re-resolve with --unlocked." >&2
+    exit 1
+  fi
+  if [[ "${have_full}" != "${want_full}" ]]; then
+    echo "Note: env Python ${have_full}, lockfile captured under ${want_full} (same ${want_minor} series — fine)."
+  fi
 }
 
 setup_python_env() {
