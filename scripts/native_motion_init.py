@@ -6,10 +6,10 @@ bundle layout as ``scripts/borrow_som_motion_init.py`` — so the native bundle 
 be inspected, diffed against the borrowed one, and loaded back through
 ``render/gaussian4d/motion_init.py::load_borrowed_init``.
 
-Unlike the borrow script, this runs in the plain ``room4d`` env (no SoM reference
+Unlike the borrow script, this runs in the plain ``reifyscene`` env (no SoM reference
 env, no cuML): the only borrowed input is the 2D point tracker output.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/native_motion_init.py \
         --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --num-bases 10 --seed 0 \

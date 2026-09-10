@@ -8,7 +8,7 @@ set -euo pipefail
 #   reconstruction methods, so reifyscene's own renderer can be benchmarked against
 #   a known-good implementation (and published numbers) on shared datasets
 #   (DyCheck iPhone, NVIDIA Dynamic Scenes). This env is intentionally separate
-#   from the main `room4d` env: the reference repos pin older torch/CUDA, and we
+#   from the main `reifyscene` env: the reference repos pin older torch/CUDA, and we
 #   do not want them downgrading the main env's torch (which must keep sm_120).
 #
 # What this installs today (Shape of Motion):
@@ -30,7 +30,7 @@ set -euo pipefail
 #
 # Environment behavior:
 #   - conda-only, mirroring scripts/setup_reifyscene.sh (no silent venv fallback).
-#   - Provide --conda-env NAME (default: room4d_som_ref).
+#   - Provide --conda-env NAME (default: reifyscene_som_ref).
 #   - The env is created with the pinned Python if it does not already exist.
 
 # ------------------------------------------------------------------------------
@@ -41,7 +41,7 @@ SOM_REPO="https://github.com/vye16/shape-of-motion.git"
 SOM_COMMIT="579753e1c7ba96f60cd7690e5b835627bd1935e9"   # 2025-08-02 "update iccv v2"
 
 # PyTorch: cu128 build is the lowest CUDA that ships sm_120 (Blackwell) kernels
-# AND aligns with RAPIDS cu12 wheels. (The main room4d env uses cu130; these
+# AND aligns with RAPIDS cu12 wheels. (The main reifyscene env uses cu130; these
 # envs are isolated, so they need not match.)
 TORCH_VERSION="2.11.0"
 TORCHVISION_VERSION="0.26.0"
@@ -82,7 +82,7 @@ PINNED_PYTHON="${PINNED_PYTHON:-3.10}"
 # ------------------------------------------------------------------------------
 
 # Must match DEFAULT_CONDA_ENV in scripts/run_reference_benchmark.py.
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-room4d_som_ref}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-reifyscene_som_ref}"
 INSTALL_SOM=1
 INSTALL_MOSCA=0
 UNLOCKED=0
@@ -90,7 +90,7 @@ UNLOCKED=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 SOM_DIR="${THIRD_PARTY_DIR}/shape-of-motion"
-LOCK_FILE="${ROOT_DIR}/scripts/locks/room4d_som_ref.lock"
+LOCK_FILE="${ROOT_DIR}/scripts/locks/reifyscene_som_ref.lock"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -112,11 +112,11 @@ Sets up an isolated conda env with reference 4D reconstruction methods for
 benchmarking reifyscene's renderer.
 
 Options:
-  --conda-env NAME        Conda env to create/use (default: room4d_som_ref)
+  --conda-env NAME        Conda env to create/use (default: reifyscene_som_ref)
   --python VERSION        Python version if the env must be created (default: 3.10)
   --no-shape-of-motion    Skip the Shape of Motion install
   --unlocked              Resolve dependencies fresh instead of installing from
-                          scripts/locks/room4d_som_ref.lock (regenerate locks
+                          scripts/locks/reifyscene_som_ref.lock (regenerate locks
                           with scripts/gen_env_locks.sh)
   --with-mosca            (NOT YET IMPLEMENTED) set up MoSca — errors out
 
@@ -183,11 +183,11 @@ conda_base_dir() {
 
 activate_or_create_env() {
   # Safety: this script only ever sets up an ISOLATED reference env. Refuse to
-  # target protected envs so it can never modify the main room4d environment.
+  # target protected envs so it can never modify the main reifyscene environment.
   case "${CONDA_ENV_NAME}" in
     reifyscene|base|"")
       echo "Refusing to run against protected/empty env '${CONDA_ENV_NAME}'." >&2
-      echo "This script is for an isolated reference env (e.g. room4d_som_ref)." >&2
+      echo "This script is for an isolated reference env (e.g. reifyscene_som_ref)." >&2
       exit 1 ;;
   esac
 

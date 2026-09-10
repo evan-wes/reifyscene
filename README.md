@@ -1,12 +1,12 @@
 # reifyscene
 
-**Single-video dynamic 4D reconstruction** — turn one RGB video of a moving scene into
-a renderable, novel-view-capable 4D (dynamic Gaussian) representation.
+**Dynamic 4D reconstruction from casually captured, uncalibrated video** — one clip or
+several, of a moving scene, turned into a renderable, novel-view-capable 4D (dynamic
+Gaussian) representation.
 
 *To reify* is to make something abstract concrete and manipulable. The aim is a scene
 representation you can **interpret, query, and semantically edit** — not an opaque
-neural blob. (The project was previously named `room4d`, for "room-sized 4D"; the name
-changed when the scope outgrew it.)
+neural blob. ([Renamed from `room4d`.](CHANGELOG.md#0201---2026-09-10))
 
 Licensed under Apache 2.0.
 
@@ -139,13 +139,13 @@ self-reconstructed vs. ground-truth geometry.
 To benchmark reifyscene's renderer against a known-good 4D reconstruction method,
 the repo can vendor [Shape of Motion](https://github.com/vye16/shape-of-motion)
 into `third_party/shape-of-motion` and run it in an **isolated** conda
-environment (it pins different torch/CUDA than the main `room4d` env and must
+environment (it pins different torch/CUDA than the main `reifyscene` env and must
 never share it).
 
 ### Setup
 
 ```bash
-scripts/setup_reference_tool.sh            # creates conda env room4d_som_ref
+scripts/setup_reference_tool.sh            # creates conda env reifyscene_som_ref
 ```
 
 This installs an sm_120-capable torch (cu128), a matching CUDA toolkit,
@@ -257,7 +257,7 @@ python scripts/score_calibration_gt.py --dataset nvidia --fix-intrinsics \
 ```
 
 `--dataset iphone` scores a DyCheck capture the same way (24 frames sampled
-along the trajectory by default). The scorer runs in the main `room4d` env
+along the trajectory by default). The scorer runs in the main `reifyscene` env
 (calibration extras install by default in `scripts/setup_reifyscene.sh`, which
 also patches the vendored hloc for pycolmap >= 3.10; `--no-calibration`
 skips them).

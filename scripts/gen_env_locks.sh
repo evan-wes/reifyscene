@@ -34,7 +34,7 @@ mkdir -p "${LOCK_DIR}"
 # env_name -> lock filename
 ENVS=(
   "reifyscene:reifyscene.lock"
-  "room4d_som_ref:room4d_som_ref.lock"
+  "reifyscene_som_ref:reifyscene_som_ref.lock"
 )
 
 find_conda() {

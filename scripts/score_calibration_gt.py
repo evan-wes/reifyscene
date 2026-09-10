@@ -4,7 +4,7 @@
 M0-minimal of the calibration arc (design doc D2–D12): collect dataset
 frames with their GT poses, run the existing static SfM, and report
 pairwise-relative pose errors (primary) plus guarded Sim(3) APE
-(secondary). Runs in the ``room4d`` env (numpy + calibration module — this
+(secondary). Runs in the ``reifyscene`` env (numpy + calibration module — this
 script is NOT stdlib-only, unlike run_reference_benchmark.py).
 
 Examples:

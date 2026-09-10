@@ -6,11 +6,11 @@ layout ``reifyscene.lifting.native_track_lift.lift_tracks_3d`` reads and that sh
 borrowed as ``flow3d_preprocessed/2d_tracks/``. This is the last borrowed input
 in the native motion-init path; point the lift at this output to drop it.
 
-Runs in the plain ``room4d`` env (no SoM reference env): the model is the
+Runs in the plain ``reifyscene`` env (no SoM reference env): the model is the
 vendored ``reifyscene.tracking.tapnet`` TAPIR with the checkpoint fetched by
 ``scripts/fetch_tapir_checkpoint.sh``.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/compute_tracks_native.py \
         --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
         --out ../data/tapnet/native_tracks/paper-windmill

@@ -78,6 +78,20 @@ version scheme (canonical version in the `VERSION` file, read by
   (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
+- **The Shape-of-Motion reference conda env is renamed `room4d_som_ref` -> `reifyscene_som_ref`**
+  (renamed in place with `conda rename`, 21 GB, verified: torch 2.11.0+cu128, CUDA available),
+  along with its lockfile and every reference — `gen_env_locks.sh`'s mapping,
+  `run_reference_benchmark.py`'s `DEFAULT_CONDA_ENV`, and `setup_reference_tool.sh`'s default.
+  Prose that pointed at "the `room4d` env" for day-to-day work now points at `reifyscene`, which
+  is the development environment going forward. The only old-name references left in the repo
+  are deliberate: the `.room4d_cache` gitignore line (so the not-yet-deleted cache stays
+  ignored), the two paths naming the `project` working directory (renamed separately),
+  and the README's link to the rename entry.
+- **README** now leads with reconstruction from casually captured, uncalibrated video — *one clip
+  or several* — rather than "single-video", matching the multi-stream architecture (`stream_id`
+  runs through the core types and the `sync` stage); the works-today / designed-not-built split
+  below it is unchanged and still says multi-stream fusion is not built. The inline rename note
+  is replaced by a link to the `0.2.0.1` entry.
 ### Changed
 - **detectron2 is no longer part of the standard install, and is pinned to a `main` commit**
   (`a2f4a877`, 2026-08-19) rather than the `v0.6` tag. v0.6 (Nov 2021) pins `black==21.4b2`,

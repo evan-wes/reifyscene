@@ -1,6 +1,6 @@
 """Borrow Shape-of-Motion's track-based motion initialization (STOPGAP).
 
-Runs in the SoM reference env (room4d_som_ref): builds the iPhone dataset, runs
+Runs in the SoM reference env (reifyscene_som_ref): builds the iPhone dataset, runs
 SoM's `init_model_from_tracks` (3D tracks -> cuML clustering + Procrustes ->
 motion bases + coefs + canonical fg + static bg), and dumps the init tensors +
 the normalized train/val cameras to an .npz that reifyscene loads via
@@ -11,7 +11,7 @@ is NOT reifyscene's own implementation; replacing it with a native MotionInitial
 is tracked follow-up work. SoM stores params as means(raw)/scales(log)/
 colors(logit)/opacities(logit)/coefs(raw), which match reifyscene's fields exactly.
 
-Example (in room4d_som_ref):
+Example (in reifyscene_som_ref):
     python scripts/borrow_som_motion_init.py \
         --data-dir ../data/shape_of_motion/iphone/paper-windmill \
         --factor 2 --out ../data/shape_of_motion/borrowed_init/paper-windmill.npz
