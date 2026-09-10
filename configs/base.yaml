@@ -1,6 +1,6 @@
 run:
-  name: room4d_dev
-  output_dir: artifacts/runs/room4d_dev
+  name: reifyscene_dev
+  output_dir: artifacts/runs/reifyscene_dev
 
 dataset:
   input_dir: data/raw

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from room4d.common.types import VideoStreamRef
-from room4d.data.dataset import MultiVideoDataset
+from reifyscene.common.types import VideoStreamRef
+from reifyscene.data.dataset import MultiVideoDataset
 
 
 def _stream(stream_id: str = "0", num_frames: int = 100, fps: float = 30.0) -> VideoStreamRef:
@@ -43,7 +43,7 @@ def test_zero_frame_stream_still_emits_frame0() -> None:
 def test_keyframes_all_resume_signature_is_backward_compatible() -> None:
     """Default (strided) signature stays identical to pre-flag artifacts; only an
     actual all-frames run gets a distinct signature that invalidates them."""
-    from room4d.api.resume import _stage_cfg_signature
+    from reifyscene.api.resume import _stage_cfg_signature
 
     base = {"max_keyframes_per_stream": 4, "keyframe_stride_sec": 1.0}
     default_sig = _stage_cfg_signature(base, "ingest")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from room4d.render.gaussian4d.densify import DensifyConfig, densify_schedule
+from reifyscene.render.gaussian4d.densify import DensifyConfig, densify_schedule
 
 
 def test_schedule_reproduces_som_at_5000() -> None:

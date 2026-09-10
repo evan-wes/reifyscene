@@ -46,7 +46,7 @@ render_proof:
   benchmark:
     enabled: true
     dataset_format: iphone
-    method_name: room4d-dynamic
+    method_name: reifyscene-dynamic
     lpips_net: alex
     max_eval_frames: null
     compare_to: null

@@ -1,6 +1,6 @@
 """Basic tests for graph scaffolding."""
 
-from room4d.graph.nodes import NodeFactory
+from reifyscene.graph.nodes import NodeFactory
 
 
 def test_node_factory_camera() -> None:

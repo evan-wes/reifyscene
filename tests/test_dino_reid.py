@@ -13,10 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.perception.reid.dino_reid import DinoReid, build_cross_occlusion_merge_map
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.reid.dino_reid import DinoReid, build_cross_occlusion_merge_map
 
 
 def _unit(*xs: float) -> np.ndarray:

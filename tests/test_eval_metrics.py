@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
+from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
 
 
 class _Art:

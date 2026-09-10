@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from room4d.calibration.gt_scoring import (
+from reifyscene.calibration.gt_scoring import (
     DATASETS,
     DEFAULT_NUM_FRAMES,
     DEFAULT_TIMESTEPS,
@@ -40,8 +40,8 @@ from room4d.calibration.gt_scoring import (
     select_frames,
     shared_intrinsics,
 )
-from room4d.calibration.hloc_colmap import HlocColmapSfMRunner
-from room4d.calibration.model_io import parse_colmap_text_model
+from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
+from reifyscene.calibration.model_io import parse_colmap_text_model
 
 
 def ensure_text_model(sparse_dir: Path, out_dir: Path) -> Path:

@@ -7,16 +7,16 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.compose import GeometryComposer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.reconstruction_health import assess_pose_health
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
-from room4d.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.compose import GeometryComposer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.reconstruction_health import assess_pose_health
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +189,7 @@ def test_colmap_stamps_pose_health(tmp_path, monkeypatch):
 
 def test_pipeline_dyn_mask_stage_all_static_default(tmp_path):
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run"})  # default → all-static
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run"})  # default → all-static
     art = pipe.compute_dyn_mask(ingest, sync_artifact=None)
     assert art.backend_name == "all-static"
     assert art.capability is not None and art.capability.backend_used == "all-static"

@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import pytest
 
-from room4d.ingest.decoder import VideoDecoder, _parse_frame_name
+from reifyscene.ingest.decoder import VideoDecoder, _parse_frame_name
 
 
 def _write_frames(dir_path, names, *, h=8, w=6):
@@ -86,9 +86,9 @@ def test_empty_dir_raises(tmp_path):
 
 
 def test_preprocess_ingests_frame_dir(tmp_path):
-    from room4d.api.pipeline import Room4DPipeline
+    from reifyscene.api.pipeline import ReifyScenePipeline
     _write_frames(tmp_path / "rgb", [f"0_{i:05d}" for i in range(4)], h=16, w=12)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run"})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run"})
     ingest = pipe.preprocess([str(tmp_path / "rgb")])
     assert ingest.num_streams() == 1
     assert ingest.streams[0].stream_id == "0"        # parsed camera id flows through ingest

@@ -1,13 +1,13 @@
-"""Generate room4d's *native* 2D point tracks (SoM ``2d_tracks`` format).
+"""Generate reifyscene's *native* 2D point tracks (SoM ``2d_tracks`` format).
 
-Runs room4d's own tapnet (bootstapir) tracker over a DyCheck-format sequence's
+Runs reifyscene's own tapnet (bootstapir) tracker over a DyCheck-format sequence's
 train split and writes all-pairs ``<name_i>_<name_j>.npy`` tracks — the exact
-layout ``room4d.lifting.native_track_lift.lift_tracks_3d`` reads and that ships
+layout ``reifyscene.lifting.native_track_lift.lift_tracks_3d`` reads and that ships
 borrowed as ``flow3d_preprocessed/2d_tracks/``. This is the last borrowed input
 in the native motion-init path; point the lift at this output to drop it.
 
 Runs in the plain ``room4d`` env (no SoM reference env): the model is the
-vendored ``room4d.tracking.tapnet`` TAPIR with the checkpoint fetched by
+vendored ``reifyscene.tracking.tapnet`` TAPIR with the checkpoint fetched by
 ``scripts/fetch_tapir_checkpoint.sh``.
 
 Example (room4d env):
@@ -26,11 +26,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from room4d.lifting.native_track_lift import generate_native_tracks
+from reifyscene.lifting.native_track_lift import generate_native_tracks
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate room4d's native 2D tracks (SoM 2d_tracks format)")
+    ap = argparse.ArgumentParser(description="Generate reifyscene's native 2D tracks (SoM 2d_tracks format)")
     ap.add_argument("--dataset-root", required=True)
     ap.add_argument("--out", required=True, help="output root; tracks land in <out>/<factor>x/")
     ap.add_argument("--model-type", default="bootstapir", choices=["bootstapir", "tapir"])

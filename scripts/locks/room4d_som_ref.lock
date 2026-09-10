@@ -5,7 +5,7 @@
 # Install: handled by the setup scripts by default; --unlocked re-resolves.
 # Index notes: RAPIDS wheels need --extra-index-url https://pypi.nvidia.com;
 # torch +cuXXX builds need the matching pytorch index when the lock itself
-# installs torch (setup_room4d.sh passes both; setup_reference_tool.sh
+# installs torch (setup_reifyscene.sh passes both; setup_reference_tool.sh
 # installs torch from its pinned index before the lock runs).
 absl-py==2.4.0
 addict==2.4.0

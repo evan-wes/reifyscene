@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from room4d.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile
+from reifyscene.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile
 
 
 def test_system_report_and_tracking_recommendation() -> None:

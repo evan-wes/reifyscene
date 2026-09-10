@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from room4d.render.camera_paths import orbit_cameras
-from room4d.render.export import write_video
+from reifyscene.render.camera_paths import orbit_cameras
+from reifyscene.render.export import write_video
 
 
 def test_orbit_cameras_geometry() -> None:

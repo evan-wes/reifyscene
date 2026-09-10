@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fetch the tapnet point-tracker checkpoint used by room4d's native bootstapir
-# tracker backend (room4d/tracking/tapir_wrapper.py -> room4d/tracking/tapnet/).
+# Fetch the tapnet point-tracker checkpoint used by reifyscene's native bootstapir
+# tracker backend (reifyscene/tracking/tapir_wrapper.py -> reifyscene/tracking/tapnet/).
 #
 # These are the same DeepMind torch checkpoints Shape of Motion's preproc uses
 # (third_party/shape-of-motion/preproc/setup_dependencies.sh +
@@ -30,7 +30,7 @@ FORCE=0
 # Minimum plausible checkpoint size (MB). Both checkpoints are ~120 MB; a
 # truncated/HTML-error download is far smaller, so this guards against a
 # half-written file masquerading as complete (same idea as the VGGT-Long
-# weights size guard in setup_room4d.sh).
+# weights size guard in setup_reifyscene.sh).
 MIN_MB="${TAPNET_CKPT_MIN_MB:-80}"
 
 while [[ $# -gt 0 ]]; do
@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
       cat <<'EOF'
 Usage: scripts/fetch_tapir_checkpoint.sh [--model {bootstapir|tapir}] [--out-dir DIR] [--force]
 
-Downloads a tapnet torch checkpoint for room4d's native point tracker.
+Downloads a tapnet torch checkpoint for reifyscene's native point tracker.
 Idempotent: skips when a plausibly-sized file already exists (use --force to
 re-download). Default target dir: <repo>/../data/tapnet/checkpoints
 (override with --out-dir or the TAPNET_CKPT_DIR env var).

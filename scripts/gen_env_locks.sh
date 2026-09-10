@@ -10,7 +10,7 @@ set -euo pipefail
 # replay the known-good tree instead of resolving whatever is newest.
 #
 # What is EXCLUDED from each lock (owned by the setup scripts instead):
-# - editable installs (-e ...): room4d itself and the third_party checkouts
+# - editable installs (-e ...): reifyscene itself and the third_party checkouts
 #   (vggt, co-tracker, hloc, VGGT-Long, ...) are pinned by commit in the
 #   setup scripts and installed editable from the local tree.
 # - gsplat: built from source for sm_120 at a pinned commit by
@@ -73,7 +73,7 @@ for entry in "${ENVS[@]}"; do
     echo "# Install: handled by the setup scripts by default; --unlocked re-resolves."
     echo "# Index notes: RAPIDS wheels need --extra-index-url https://pypi.nvidia.com;"
     echo "# torch +cuXXX builds need the matching pytorch index when the lock itself"
-    echo "# installs torch (setup_room4d.sh passes both; setup_reference_tool.sh"
+    echo "# installs torch (setup_reifyscene.sh passes both; setup_reference_tool.sh"
     echo "# installs torch from its pinned index before the lock runs)."
     # pip freeze emits VCS installs as 'name @ git+...' (not 'name=='), so the
     # gsplat exclusion must match BOTH forms — a leaked 'gsplat @ git+...@SHA'

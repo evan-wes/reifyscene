@@ -11,7 +11,7 @@ Two scene sources (the only thing that differs from the reference):
 * ``borrowed-init`` -- load the pre-dumped SoM init bundle (no TAPIR; a fast
   smoke of the serialize -> reload -> render -> score wiring).
 * ``own-tracker`` -- the gate (A): oracle ``DyCheckGeometryProvider`` geometry +
-  in-memory packed all-pairs tracks (room4d's own tapnet tracker) ->
+  in-memory packed all-pairs tracks (reifyscene's own tapnet tracker) ->
   ``NativeMotionInitializer``. Reproduces the native+own-tracker number through
   the F0b artifact seam.
 
@@ -35,17 +35,17 @@ import numpy as np
 import torch
 import yaml
 
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
-from room4d.render.gaussian4d.motion_init import (
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+from reifyscene.render.gaussian4d.motion_init import (
     NativeMotionInitializer,
     dump_bundle,
     load_borrowed_init,
 )
-from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
-from room4d.scene.scene_artifact import SceneArtifact
-from room4d.tracking.tapir_wrapper import TAPIRWrapper
+from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
+from reifyscene.scene.scene_artifact import SceneArtifact
+from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
 
 
 def _build_borrowed(init_npz: str, device: str):
@@ -55,12 +55,12 @@ def _build_borrowed(init_npz: str, device: str):
 
 
 def _slice_cameras(c, n: int):
-    from room4d.lifting.native_track_lift import CameraRecords
+    from reifyscene.lifting.native_track_lift import CameraRecords
     return CameraRecords(frame_names=c.frame_names[:n], time_ids=c.time_ids[:n], w2cs=c.w2cs[:n], Ks=c.Ks[:n])
 
 
 def _slice_stack(s, n: int):
-    from room4d.lifting.native_track_lift import FrameStack
+    from reifyscene.lifting.native_track_lift import FrameStack
     return FrameStack(cameras=_slice_cameras(s.cameras, n), depths=s.depths[:n], rgbs=s.rgbs[:n], fg=s.fg[:n], valid=s.valid[:n])
 
 
@@ -87,8 +87,8 @@ class _WindmillProvider:
 
 def _sam2_fg(rgbs_np: np.ndarray, device: str) -> "torch.Tensor":
     """Run the SAM 2 segmenter over the frames -> per-frame union foreground (N, H, W)."""
-    from room4d.common.types import FrameRef
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.common.types import FrameRef
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     images = [rgbs_np[i] for i in range(rgbs_np.shape[0])]
 

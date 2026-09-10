@@ -11,10 +11,10 @@ import json
 
 import numpy as np
 
-from room4d.common.depth import unproject_depth_to_world, valid_depth_mask
-from room4d.common.types import CameraIntrinsics, CameraPose, TimedCameraState
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.lifting.backproject import Backprojector
+from reifyscene.common.depth import unproject_depth_to_world, valid_depth_mask
+from reifyscene.common.types import CameraIntrinsics, CameraPose, TimedCameraState
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.lifting.backproject import Backprojector
 
 
 def test_valid_depth_mask_excludes_zero_nan_negative():

@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from room4d.api.stages import build_stage_registry
-from room4d.common.types import FrameRef
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.scene.assembler import SingleVideoSceneAssembler
+from reifyscene.api.stages import build_stage_registry
+from reifyscene.common.types import FrameRef
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.scene.assembler import SingleVideoSceneAssembler
 
 
 def test_scene_stage_wires_segment_instance_artifact():
@@ -42,7 +42,7 @@ def test_fg_mask_rebuilds_from_observations_when_frame_index_empty():
 
 def test_fold_ground_plane_into_norm():
     import torch
-    from room4d.geometry.geometry_artifact import GeometryArtifact
+    from reifyscene.geometry.geometry_artifact import GeometryArtifact
     # a non-trivial ground-plane transform (45° about x + a translation)
     c, s = float(np.cos(np.pi / 4)), float(np.sin(np.pi / 4))
     t_gp = np.array([[1, 0, 0, 0], [0, c, -s, 0.5], [0, s, c, 0], [0, 0, 0, 1]], np.float32)

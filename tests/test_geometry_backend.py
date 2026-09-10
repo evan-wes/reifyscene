@@ -11,12 +11,12 @@ import pytest
 import numpy as np
 import torch
 
-from room4d.common.types import FrameRef
-from room4d.geometry.vggt_wrapper import VGGTInitializer
-from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
-from room4d.api.pipeline import Room4DPipeline
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.ingest.decoder import VideoDecoder
+from reifyscene.common.types import FrameRef
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.ingest.decoder import VideoDecoder
 
 
 def _write_test_video(path: Path, *, width: int = 32, height: int = 24, num_frames: int = 2, fps: float = 5.0) -> None:
@@ -95,7 +95,7 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
     assert artifact.depthmaps_by_frame["cam_00:0"]["depth"].shape == (4, 4, 1)
 
 
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
 
 
 def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
@@ -181,7 +181,7 @@ def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
 
 
 def test_pipeline_selects_vggt_long_initializer(tmp_path: Path) -> None:
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
     assert isinstance(pipe.geometry_init, VGGTLongInitializer)
 
 
@@ -226,7 +226,7 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         if not self._is_loaded:
             self.load_checkpoint()
         selected_frames = self._select_frames(frames, ingest_artifact)
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path('.room4d_cache') / 'vggt_long_inputs'
+        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path('.reifyscene_cache') / 'vggt_long_inputs'
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
         backend_output_root = cache_root.parent / 'vggt_long_run'
         backend_output_root.mkdir(parents=True, exist_ok=True)
@@ -405,7 +405,7 @@ def test_pipeline_dense_camera_interpolation_matches_tracking_timeline(tmp_path:
         ],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_dense",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "keyframes"},
@@ -438,7 +438,7 @@ def test_pipeline_geometry_frame_source_tracking_uses_tracker_timeline(tmp_path:
         ],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_tracking",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "tracking"},
@@ -467,7 +467,7 @@ def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) ->
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_all",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "all"},
@@ -551,7 +551,7 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
     monkeypatch.setattr(initializer, "_run_runner", lambda runner: (_ for _ in ()).throw(RuntimeError("CUDA out of memory")))
     monkeypatch.setattr(initializer, "_release_runner_references", lambda runner: None)
     monkeypatch.setattr(
-        "room4d.geometry.vggt_long_wrapper.process_memory_snapshot",
+        "reifyscene.geometry.vggt_long_wrapper.process_memory_snapshot",
         lambda: {
             "rss_bytes": 3 * 1024 ** 3,
             "swap_bytes": 1024 ** 3,
@@ -559,7 +559,7 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
             "cuda_reserved_bytes": 4 * 1024 ** 3,
         },
     )
-    monkeypatch.setattr("room4d.geometry.vggt_long_wrapper.release_memory", lambda: None)
+    monkeypatch.setattr("reifyscene.geometry.vggt_long_wrapper.release_memory", lambda: None)
 
     with pytest.raises(RuntimeError):
         initializer._run_auto_tuned(
