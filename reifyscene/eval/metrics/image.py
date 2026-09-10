@@ -6,7 +6,7 @@ ported verbatim from Shape-of-Motion's ``flow3d/metrics.py`` (which itself
 follows the DyCheck reference) so reifyscene's numbers are directly comparable to
 the SoM/published baselines: per-frame masked MSE pooled into mPSNR, a
 mask-aware Gaussian-window SSIM, and LPIPS (AlexNet, spatial) over masked images.
-Only torch + torchmetrics are required (both in the room4d env); gsplat/flow3d
+Only torch + torchmetrics are required (both in the reifyscene env); gsplat/flow3d
 are never imported.
 
 Convention everywhere: ``preds``/``targets`` are float32 in [0, 1] with shape

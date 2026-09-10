@@ -11,7 +11,7 @@ come from a random track subsample, so they're checked for agreement within a
 tolerance rather than equality. This is the PR-A acceptance check; the full
 mPSNR≈20.7 validation lands with the initializer in PR-B.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/check_native_lift.py \
         --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --seed 0

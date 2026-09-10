@@ -28,7 +28,11 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 
 DETECTRON2_REPO="https://github.com/facebookresearch/detectron2.git"
-DETECTRON2_TAG="v0.6"
+# Pinned to a main commit, NOT the v0.6 tag (Nov 2021): v0.6 pins black==21.4b2,
+# which requires pathspec<1 and therefore cannot coexist with a modern mypy — it
+# made the generated lockfile unresolvable. On main, `black` is unpinned in
+# install_requires (black==22.3.0 lives only in the dev extra).
+DETECTRON2_COMMIT="a2f4a8771ab77e8411c26b27f24f9489a28a2453"  # main @ 2026-08-19
 
 VGGT_REPO="https://github.com/facebookresearch/vggt.git"
 VGGT_COMMIT="44b3afbd1869d8bde4894dd8ea1e293112dd5eba"
@@ -57,6 +61,9 @@ SAM2_CKPT_MIN_MB="${SAM2_CKPT_MIN_MB:-700}"
 # `hf auth login` + a transformers build with Dinov3 support.
 DINOV2_MODEL_ID="${DINOV2_MODEL_ID:-facebook/dinov2-large}"
 TRANSFORMERS_SPEC="${TRANSFORMERS_SPEC:-transformers>=4.44}"
+# Upper bound for the bootstrap setuptools install. Must satisfy the pinned
+# torch (2.11.0+cu130 declares setuptools<82); bump alongside a torch pin bump.
+SETUPTOOLS_MAX_SPEC="${SETUPTOOLS_MAX_SPEC:-<82}"
 
 # SigLIP2 (Google, Apache-2.0, ungated) — the FP4 `semantics` top rung: a frozen
 # ViT image+text encoder for per-tracklet open-vocab category (zero-shot match vs a
@@ -127,7 +134,8 @@ CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-11}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-reifyscene}"
+CREATE_ENV=0
 USE_VENV=0
 UNLOCKED=0
 
@@ -135,7 +143,7 @@ UNLOCKED=0
 # editable reifyscene install so the transitive dependency tree replays the
 # known-good snapshot instead of re-resolving. torch +cu130 wheels only exist
 # on the pytorch index, so the lock install needs it on a fresh env.
-REIFYSCENE_LOCK_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/locks/room4d.lock"
+REIFYSCENE_LOCK_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/locks/reifyscene.lock"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
 INSTALL_DETECTRON2=0
@@ -180,6 +188,8 @@ while [[ $# -gt 0 ]]; do
       CONDA_ENV_NAME="$2"; shift 2 ;;
     --use-venv)
       USE_VENV=1; shift ;;
+    --create-env)
+      CREATE_ENV=1; shift ;;
     --with-detectron2)
       INSTALL_DETECTRON2=1; shift ;;
     --with-vggt)
@@ -224,12 +234,23 @@ Usage: scripts/setup_reifyscene.sh [options]
 
 Environment options:
   --conda-env NAME        Require / activate this conda environment
+                          (default: reifyscene)
+  --create-env            Create the conda env if it does not exist. Without
+                          this flag a missing env is an error, so a typo in
+                          --conda-env fails loudly instead of silently building
+                          a multi-GB environment. Python version is read from
+                          the lockfile header.
   --use-venv              Explicitly use a repo-local venv instead of conda
   --python PATH           Python executable to use (default: python3)
   --venv PATH             Virtualenv path (default: .venv)
 
 Install options:
-  --with-detectron2       Install detectron2 from official tag v0.6
+  --with-detectron2       Install detectron2 (pinned main commit) for DensePose.
+                          OFF by default and not yet consumed by any ladder rung.
+                          Intended as the permissively-licensed dense top rung,
+                          for when Sapiens is ruled out by its CC-BY-NC-4.0
+                          licence, its gated weights, or its size. Downgrades
+                          iopath below what SAM-2 declares — see the install site.
   --with-vggt             Clone/install VGGT into third_party/vggt at pinned commit
   --with-cotracker        Clone/install CoTracker into third_party/co-tracker at pinned commit
   --with-sam2             Clone/install SAM 2 into third_party/sam2 at pinned commit
@@ -256,7 +277,7 @@ Install options:
   --no-pose-refine        Skip pose-refinement extras (pycolmap, hydra-core, omegaconf, scipy)
   --no-ffmpeg             Skip the ffmpeg (conda-forge) dataset-prep install
   --unlocked              Resolve dependencies fresh instead of installing the
-                          pinned tree from scripts/locks/room4d.lock
+                          pinned tree from scripts/locks/reifyscene.lock
                           (regenerate locks with scripts/gen_env_locks.sh)
 
 Behavior:
@@ -696,11 +717,19 @@ ensure_ffmpeg() {
   fi
 
   local ffmpeg_bin="${CONDA_PREFIX}/bin/ffmpeg"
-  if [[ -x "${ffmpeg_bin}" ]] \
-     && "${ffmpeg_bin}" -version 2>/dev/null | head -n 1 | grep -q "ffmpeg version ${FFMPEG_VERSION}" \
-     && "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
-    echo "ffmpeg ${FFMPEG_VERSION} (with libx264) already present at ${ffmpeg_bin} — skipping."
-    return
+  # NOTE: `cmd | grep -q` is unsafe under `set -o pipefail`. grep -q exits at the
+  # first match and closes the pipe, so the producer dies of SIGPIPE (141) and
+  # pipefail reports the pipeline as FAILED even though the match succeeded.
+  # This guard therefore never fired, and ffmpeg was reinstalled on every run.
+  # Capture first, match second.
+  if [[ -x "${ffmpeg_bin}" ]]; then
+    local ff_ver ff_enc
+    ff_ver="$("${ffmpeg_bin}" -version 2>/dev/null | head -n 1 || true)"
+    ff_enc="$("${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null || true)"
+    if [[ "${ff_ver}" == *"ffmpeg version ${FFMPEG_VERSION}"* && "${ff_enc}" == *libx264* ]]; then
+      echo "ffmpeg ${FFMPEG_VERSION} (with libx264) already present at ${ffmpeg_bin} — skipping."
+      return
+    fi
   fi
 
   echo "Installing ffmpeg ${FFMPEG_VERSION} into env '${CONDA_DEFAULT_ENV:-unknown}' (conda-forge, GPL build with libx264)..."
@@ -826,14 +855,51 @@ activate_conda_env() {
   if [[ -n "${target_env}" ]]; then
     if [[ "${CONDA_DEFAULT_ENV:-}" == "${target_env}" ]]; then
       echo "Using already-active conda environment: ${target_env}"
+      check_env_python_version
       return
     fi
 
+    local existing_envs
+    existing_envs="$(conda env list | awk '{print $1}' || true)"
+    if ! grep -qx "${target_env}" <<<"${existing_envs}"; then
+      # Creating an env is a multi-GB, multi-minute operation, so it is opt-in:
+      # without --create-env a typo in --conda-env fails here rather than
+      # silently building an environment the caller never asked for.
+      if [[ $CREATE_ENV -eq 0 ]]; then
+        echo "Conda environment '${target_env}' does not exist." >&2
+        echo "Re-run with --create-env to create it, or pass an existing --conda-env NAME." >&2
+        exit 1
+      fi
+      local create_py
+      create_py="$(lockfile_python_minor)"
+      if [[ -z "${create_py}" ]]; then
+        echo "Could not read a Python version from ${REIFYSCENE_LOCK_FILE}." >&2
+        echo "Fix the lockfile header, or use --conda-env with an existing env." >&2
+        exit 1
+      fi
+      echo "Creating conda env '${target_env}' with python=${create_py} (from lockfile)..."
+      if ! conda create -y -n "${target_env}" "python=${create_py}"; then
+        echo "Failed to create conda environment '${target_env}'." >&2
+        exit 1
+      fi
+    fi
+
     echo "Activating conda environment: ${target_env}"
+    # conda's activate.d hooks are not written to be `set -u` safe: the
+    # cuda-nvcc hook expands ${NVCC_PREPEND_FLAGS} unconditionally, so under
+    # `set -euo pipefail` activation aborts with "unbound variable" — but only
+    # once cuda-nvcc is installed. That made this script runnable exactly ONCE
+    # per environment: the first run activates a bare env and installs the hook,
+    # and every later run dies on activation. Relax nounset across activation
+    # only, then restore it.
+    set +u
     if ! conda activate "${target_env}"; then
+      set -u
       echo "Failed to activate conda environment '${target_env}'." >&2
       exit 1
     fi
+    set -u
+    check_env_python_version
     return
   fi
 
@@ -844,6 +910,63 @@ activate_conda_env() {
 
   echo "No active conda environment detected. Provide --conda-env NAME or use --use-venv." >&2
   exit 1
+}
+
+# Read the Python version the lockfile was captured under, from its header:
+#   "# Platform: Linux/x86_64 | Python 3.11.15 | torch ..."
+# lockfile_python_full  -> 3.11.15   lockfile_python_minor -> 3.11
+# Install a package while honouring the pinned tree.
+#
+# TRANSFORMERS_SPEC is an open-ended lower bound (`transformers>=4.44`) and
+# transformers is NOT in the lockfile, so these installs run *after* the locked
+# tree and silently escape it: a fresh machine resolves whatever is newest that
+# day. That is how a from-scratch env ended up with transformers 5.17.0 against
+# the lockfile's safetensors==0.7.0 — a combination transformers rejects at
+# import, breaking every test that touches it, while the older working env sat
+# happily on 5.12.1. Passing the lockfile as a pip constraints file makes the
+# resolver honour the existing pins and pick a compatible version instead.
+pip_install_constrained() {
+  if [[ $UNLOCKED -eq 0 && -f "${REIFYSCENE_LOCK_FILE}" ]]; then
+    python -m pip install -c "${REIFYSCENE_LOCK_FILE}" "$@"
+  else
+    python -m pip install "$@"
+  fi
+}
+
+lockfile_python_full() {
+  [[ -f "${REIFYSCENE_LOCK_FILE}" ]] || return 0
+  sed -n 's/.*| *Python \([0-9][0-9.]*\) *|.*/\1/p' "${REIFYSCENE_LOCK_FILE}" | head -n 1
+}
+
+lockfile_python_minor() {
+  local full; full="$(lockfile_python_full)"
+  [[ -n "${full}" ]] || return 0
+  echo "${full}" | cut -d. -f1,2
+}
+
+# Compare the active interpreter against the lockfile.
+#
+# MAJOR.MINOR must match: wheels are tagged by minor version (cp311), so a
+# 3.11-pinned tree simply will not install on 3.12. The PATCH level is not part
+# of the ABI, so a difference there is reported and allowed — requiring an exact
+# patch match would fail on a perfectly good env every time Python is updated.
+check_env_python_version() {
+  local want_minor want_full have_full have_minor
+  want_minor="$(lockfile_python_minor)"
+  want_full="$(lockfile_python_full)"
+  [[ -n "${want_minor}" ]] || return 0
+  have_full="$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)" || return 0
+  have_minor="$(echo "${have_full}" | cut -d. -f1,2)"
+
+  if [[ "${have_minor}" != "${want_minor}" ]]; then
+    echo "Python version mismatch: env has ${have_full}, lockfile pins ${want_full}." >&2
+    echo "  The pinned wheels are built for Python ${want_minor} and will not install on ${have_minor}." >&2
+    echo "  Use an env with Python ${want_minor}, or re-resolve with --unlocked." >&2
+    exit 1
+  fi
+  if [[ "${have_full}" != "${want_full}" ]]; then
+    echo "Note: env Python ${have_full}, lockfile captured under ${want_full} (same ${want_minor} series — fine)."
+  fi
 }
 
 setup_python_env() {
@@ -862,7 +985,14 @@ setup_python_env() {
   fi
 
   echo "Python executable: $(command -v python)"
-  python -m pip install --upgrade pip setuptools wheel
+  # Bootstrap the build frontend, but do NOT let setuptools float to whatever is
+  # newest today: this runs before the pinned tree, and an unbounded upgrade is
+  # how a fresh env ended up on setuptools 84 while the pinned torch declares
+  # `setuptools<82` (the long-lived env sat on 81 only because that was current
+  # when it was built). Bounded by the same constraint torch states; raise it
+  # when the pinned torch does. Same failure mode as the transformers/safetensors
+  # escape — see pip_install_constrained().
+  python -m pip install --upgrade pip wheel "setuptools${SETUPTOOLS_MAX_SPEC}"
 }
 
 install_vggt_long_requirements() {
@@ -970,8 +1100,12 @@ smoke_test_ffmpeg() {
     echo "[smoke-test] FAIL ffmpeg: binary not found after install" >&2
     exit 1
   fi
-  if ! "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q "libx264"; then
+  # Capture then match — see the pipefail/SIGPIPE note in ensure_ffmpeg().
+  local encoders
+  encoders="$("${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null || true)"
+  if [[ "${encoders}" != *libx264* ]]; then
     echo "[smoke-test] FAIL ffmpeg: libx264 encoder missing (need the GPL build for -crf 0 H.264)" >&2
+    echo "  probed: ${ffmpeg_bin}" >&2
     exit 1
   fi
   local ver
@@ -1075,10 +1209,34 @@ else
 fi
 
 if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
-  TMP_DIR=$(mktemp -d)
-  echo "Installing detectron2 from official tag ${DETECTRON2_TAG}..."
-  git clone --depth 1 --branch "${DETECTRON2_TAG}" --single-branch "${DETECTRON2_REPO}" "$TMP_DIR/detectron2"
-  python -m pip install --no-build-isolation -e "$TMP_DIR/detectron2"
+  # OFF BY DEFAULT and not part of the standard install. detectron2 exists here
+  # for DensePose, intended as the dense top rung whenever Sapiens is ruled out:
+  # Sapiens is CC-BY-NC-4.0 (non-commercial), its weights are gated behind manual
+  # approval, and it is a large ViT. DensePose is Apache-2.0, ungated and lighter,
+  # so it is the PERMISSIVELY-LICENSED dense rung. Nothing consumes it yet:
+  # densepose_wrapper.py reports `unavailable` unconditionally and the dense
+  # ladder has no DensePose rung, so wiring one is follow-up work.
+  #
+  # Known caveat when you DO enable it: detectron2 caps iopath<0.1.10 while SAM-2
+  # requires >=0.1.10, so installing it downgrades iopath and pip check reports the
+  # conflict. SAM-2 uses iopath only for `g_pathmgr` and runs fine on 0.1.9, but
+  # the declared constraint is genuinely unsatisfiable — resolve it properly when
+  # the DensePose rung lands.
+  #
+  # Installed NON-editable, unlike the third_party checkouts. Those are editable
+  # because the installer patches them and we want the patched tree to be the
+  # imported one; detectron2 is used unmodified. It was previously
+  # `pip install -e` against a mktemp -d clone, which left the module permanently
+  # resolving into /tmp — so the env broke as soon as that directory was reaped,
+  # and the temp tree leaked because nothing removed it.
+  echo "Installing detectron2 from main @ ${DETECTRON2_COMMIT:0:12}..."
+  # Installed straight from the pinned tag rather than a local clone: a
+  # `mktemp -d` clone left the module resolving into /tmp (editable) or recorded
+  # a dead file:///tmp/... direct_url (non-editable, which then leaked into the
+  # lockfile and made it unportable), and the temp tree leaked either way.
+  # Like gsplat, detectron2 is excluded from the lock — it is owned by this
+  # script, pinned to a tag, and needs --no-build-isolation.
+  python -m pip install --no-build-isolation "git+${DETECTRON2_REPO}@${DETECTRON2_COMMIT}"
 fi
 
 if [[ $INSTALL_VGGT -eq 1 ]]; then
@@ -1104,13 +1262,13 @@ fi
 
 if [[ $INSTALL_DINOV2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the DINOv2 reid rung..."
-  python -m pip install "${TRANSFORMERS_SPEC}"
+  pip_install_constrained "${TRANSFORMERS_SPEC}"
   download_dinov2_weights_if_needed
 fi
 
 if [[ $INSTALL_SIGLIP2 -eq 1 ]]; then
   echo "Installing HuggingFace transformers (${TRANSFORMERS_SPEC}) for the SigLIP2 semantics rung..."
-  python -m pip install "${TRANSFORMERS_SPEC}"
+  pip_install_constrained "${TRANSFORMERS_SPEC}"
   download_siglip2_weights_if_needed
 fi
 
@@ -1289,7 +1447,7 @@ Installed:
 - reifyscene in editable mode from:
     ${ROOT_DIR}
 - Python dependencies from pyproject.toml
-$( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from ${DETECTRON2_TAG}" )
+$( [[ $INSTALL_DETECTRON2 -eq 1 ]] && echo "- detectron2 from main @ ${DETECTRON2_COMMIT:0:12}" )
 $( [[ $INSTALL_VGGT -eq 1 ]] && echo "- VGGT from commit ${VGGT_COMMIT} at ${VGGT_DIR}" )
 $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_COMMIT} at ${COTRACKER_DIR}" )
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )

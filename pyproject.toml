@@ -7,7 +7,7 @@ name = "reifyscene"
 # Canonical version lives in the VERSION file (single source of truth, read
 # by the tag workflows and gstack tooling); setuptools reads it at build time.
 dynamic = ["version"]
-description = "Prototype room-scale 4D reconstruction pipeline scaffold."
+description = "Single-video dynamic 4D reconstruction with an interpretable, queryable, semantically editable scene representation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

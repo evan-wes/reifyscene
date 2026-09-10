@@ -63,7 +63,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOM_DIR = REPO_ROOT / "third_party" / "shape-of-motion"
 # Must match the CONDA_ENV_NAME default in scripts/setup_reference_tool.sh.
-DEFAULT_CONDA_ENV = "room4d_som_ref"
+DEFAULT_CONDA_ENV = "reifyscene_som_ref"
 
 # The reference_benchmark_v1 contract (schema id, metric directions, compare)
 # lives in reifyscene so this Shape-of-Motion emitter and reifyscene's own renderer eval

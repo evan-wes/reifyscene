@@ -7,6 +7,136 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.0.2] - 2026-09-10
+
+### Fixed
+- **The lockfile did not lock the environment.** `TRANSFORMERS_SPEC` is an open-ended
+  lower bound (`transformers>=4.44`) and transformers is not in the lockfile, so those
+  installs run *after* the pinned tree and escape it — a fresh machine resolves whatever
+  is newest that day. Today that is transformers 5.17.0, which requires
+  `safetensors>=0.8.0` while the lock pins `safetensors==0.7.0`; transformers rejects
+  that combination at import, breaking test collection outright. The long-lived env was
+  unaffected only because it had been sitting on 5.12.1 since June. Now installed via a
+  new `pip_install_constrained` that passes the lockfile as a pip constraints file, so
+  the resolver honours the pins (resolves to 5.12.1 — the version that works).
+- **`cmd | grep -q` is unsafe under `set -o pipefail`**: `grep -q` exits at the first
+  match and closes the pipe, the producer dies of SIGPIPE (141), and pipefail reports the
+  pipeline as failed *even though the match succeeded*. Two permanent (not flaky)
+  consequences: the ffmpeg install guard never fired, so conda reinstalled ffmpeg on
+  every run; and the ffmpeg smoke test could never pass, so the script always exited 1 at
+  the final step after all real work had succeeded. Fixed by capturing output then
+  matching, here and in `gen_env_locks.sh` / `setup_reference_tool.sh` (where the same
+  pattern is racy rather than deterministic).
+- **`setup_reifyscene.sh` could only ever be run once per environment.** conda's
+  `activate.d` hooks are not `set -u` safe — the cuda-nvcc hook expands
+  `${NVCC_PREPEND_FLAGS}` unconditionally — so under `set -euo pipefail` activation
+  aborted with "unbound variable", but only once cuda-nvcc was installed. The first run
+  activates a bare env and installs the hook; every later run died. `conda activate` is
+  now wrapped in `set +u`/`set -u`. This also masked the pipefail bug above: you could not
+  re-run the script to discover that re-running was broken.
+- **detectron2 was installed editable against a `mktemp -d` clone**, leaving the module
+  permanently resolving into `/tmp` — the environment broke as soon as that directory was
+  reaped — and the temp tree leaked because nothing removed it. Now a non-editable install
+  with cleanup. (The `third_party/` checkouts stay editable deliberately: the installer
+  patches them and the patched tree must be the imported one. detectron2 is unmodified.)
+- **`reifyscene.__version__` had been stale at `0.1.0` for 49 releases.** `VERSION` is the
+  single source of truth — `pyproject.toml` reads it at build time and the release workflow
+  reads it to name the tag — so a hardcoded `__version__` was a fourth copy nothing kept in
+  sync. Now resolved: `VERSION` file first (never stale between a bump and the next
+  reinstall, which is every version-bump PR), dist metadata as the fallback for a built
+  wheel, which does not ship `VERSION`.
+
+- **An unbounded `setuptools` upgrade escaped the lock the same way.** The bootstrap ran
+  `pip install --upgrade pip setuptools wheel`, so a fresh env landed on setuptools 84
+  while the pinned torch declares `setuptools<82`; the long-lived env sat on 81 only
+  because that was current when it was built. Now bounded by `SETUPTOOLS_MAX_SPEC`
+  (default `<82`), to be raised alongside a torch pin bump.
+- **The regenerated lockfile was itself unusable, twice**, and nothing checked. `pip freeze`
+  records whatever the env contains — including an internally inconsistent state — and emits
+  unportable direct-URL lines for anything installed from a local path. Both shipped: a lock
+  pinning `mypy==2.3.1` beside `pathspec==0.12.1` (mypy needs `pathspec>=1`) that pip could
+  not resolve at all, and a `detectron2 @ file:///tmp/...` line pointing at an already-deleted
+  build directory. `gen_env_locks.sh` now rejects `@ file://` lines and resolves the lock with
+  `pip install --dry-run` before writing it, so an uninstallable lock cannot be committed.
+
+### Added
+- **`--create-env`** creates the conda environment when it does not exist. Previously the
+  installer could only *activate* an env, so "run the setup script" silently assumed one
+  someone had already built by hand — the repo was not reproducible from scratch.
+  Deliberately opt-in: without the flag a missing env is a hard error naming it, so a typo
+  in `--conda-env` fails loudly instead of silently building a multi-GB environment.
+  `--conda-env` now defaults to `reifyscene`.
+- The Python version for a created env is read from the lockfile header rather than
+  hardcoded, so the script and the pins cannot drift. An existing env is checked against
+  it: MAJOR.MINOR must match (wheels are tagged `cp311`, so a 3.11 tree cannot install on
+  3.12), while a PATCH difference is reported and allowed — the patch level is not part of
+  the ABI, and requiring an exact match would fail on a working env every time Python is
+  updated. (A fresh `--create-env` produced 3.11.16 against a lockfile captured under
+  3.11.15, exercising exactly this path.)
+- `scripts/locks/reifyscene.lock` replaces `room4d.lock`, which is **removed** now that a
+  from-scratch `reifyscene` env reaches the same suite result as the long-lived one
+  (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
+  `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
+
+- **The working directory is renamed** `room4d` ->
+  `reifyscene`, completing the rename. This breaks things and the
+  repair is part of the change: seven **editable installs** hardcode the absolute repo path, so
+  `vggt`, `cotracker`, `sam2`, `hloc` and `moge` all stopped importing until
+  `setup_reifyscene.sh` was re-run to reinstall them against the new location. 39 repo (and 51
+  `third_party`) `__pycache__` directories also held the old path baked into `.pyc` files, which
+  made pytest report tests at `../../project/...`; cleared. The Shape-of-Motion env is
+  unaffected — it has no editable installs bound to the repo path. `tests/test_gt_scoring.py`'s
+  `data` default and one `TODOS.md` path are updated. Suite verified at 373 passed / 1 skipped,
+  including the 33 real-data `data` tests that would silently skip if that path were wrong.
+- **`setup_reference_tool.sh` gains `--create-env` too**, so both installers behave the same way:
+  creation is opt-in, a missing env without the flag is a hard error naming it, and the Python
+  version comes from the lockfile header rather than a hardcoded `PINNED_PYTHON` (now only a
+  fallback). It previously created the env *automatically* — a typo in `--conda-env` would
+  silently build ~21 GB including a gsplat source build. **Verified from scratch**: a clean
+  `--create-env` build exits 0 with all three smoke tests green (torch GPU matmul on the 5090,
+  cuML KMeans on GPU, gsplat rasterization) and reproduces the existing environment *exactly* —
+  261 packages on both sides, zero differences. conda produced Python 3.10.21 against a lockfile
+  captured under 3.10.20, exercising the patch-tolerance path a second time; an exact-match check
+  would have failed a perfectly good build.
+- **`setup_reference_tool.sh` had the same unbounded-`setuptools` escape** and is bounded the same
+  way. Its pinned torch (2.11.0+cu128) also declares `setuptools<82`; that env sat on 70.2.0 only
+  because that was current when it was last built, so a fresh build today would have installed 84
+  and violated it. Verified by re-running the script: setuptools now lands on 81.0.0. That is the
+  fourth package found escaping a lockfile this way. (The script was already correct about the
+  other big one — `run_conda_relaxed()` guards `set -u` around conda calls, the very bug that made
+  `setup_reifyscene.sh` runnable only once per env; the fix pattern existed here and had simply
+  not been carried across.)
+- **The Shape-of-Motion reference conda env is renamed `room4d_som_ref` -> `reifyscene_som_ref`**
+  (renamed in place with `conda rename`, 21 GB, verified: torch 2.11.0+cu128, CUDA available),
+  along with its lockfile and every reference — `gen_env_locks.sh`'s mapping,
+  `run_reference_benchmark.py`'s `DEFAULT_CONDA_ENV`, and `setup_reference_tool.sh`'s default.
+  Prose that pointed at "the `room4d` env" for day-to-day work now points at `reifyscene`, which
+  is the development environment going forward. The only old-name references left in the repo
+  are deliberate: the `.room4d_cache` gitignore line (so the not-yet-deleted cache stays
+  ignored), the two paths naming the `project` working directory (renamed separately),
+  and the README's link to the rename entry.
+- **README** now leads with reconstruction from casually captured, uncalibrated video — *one clip
+  or several* — rather than "single-video", matching the multi-stream architecture (`stream_id`
+  runs through the core types and the `sync` stage); the works-today / designed-not-built split
+  below it is unchanged and still says multi-stream fusion is not built. The inline rename note
+  is replaced by a link to the `0.2.0.1` entry.
+### Changed
+- **detectron2 is no longer part of the standard install, and is pinned to a `main` commit**
+  (`a2f4a877`, 2026-08-19) rather than the `v0.6` tag. v0.6 (Nov 2021) pins `black==21.4b2`,
+  which requires `pathspec<1` and so cannot coexist with a modern mypy — that pair is what
+  made the generated lock unresolvable. It had also been building on every full setup since
+  the FP5a Sapiens rung landed, for a backend that has never existed: `detectron2` is imported
+  by no Python file in the repo, in any commit, and `densepose_wrapper.py` reports
+  `unavailable` unconditionally. The `--with-detectron2` flag is retained, off by default:
+  DensePose is intended as the **permissively-licensed dense top rung** — the one to reach
+  for when Sapiens is ruled out by its CC-BY-NC-4.0 licence, its gated weights, or its size
+  — since the dense ladder currently drops straight from Sapiens' four dense modalities to
+  17 sparse Keypoint-RCNN points. Wiring that rung (and resolving detectron2's `iopath<0.1.10` cap
+  against SAM-2's `iopath>=0.1.10`) is follow-up work. The Sapiens-unavailable fallback is
+  unaffected — `pose2d.py`'s Keypoint-RCNN rung is torchvision-backed, not detectron2.
+- `pyproject.toml` description no longer reads "Prototype room-scale 4D reconstruction
+  pipeline scaffold".
+
 ## [0.2.0.1] - 2026-09-10
 
 ### Changed
