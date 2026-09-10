@@ -78,6 +78,16 @@ version scheme (canonical version in the `VERSION` file, read by
   (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
+- **The working directory is renamed** `room4d` ->
+  `reifyscene`, completing the rename. This breaks things and the
+  repair is part of the change: seven **editable installs** hardcode the absolute repo path, so
+  `vggt`, `cotracker`, `sam2`, `hloc` and `moge` all stopped importing until
+  `setup_reifyscene.sh` was re-run to reinstall them against the new location. 39 repo (and 51
+  `third_party`) `__pycache__` directories also held the old path baked into `.pyc` files, which
+  made pytest report tests at `../../project/...`; cleared. The Shape-of-Motion env is
+  unaffected — it has no editable installs bound to the repo path. `tests/test_gt_scoring.py`'s
+  `data` default and one `TODOS.md` path are updated. Suite verified at 373 passed / 1 skipped,
+  including the 33 real-data `data` tests that would silently skip if that path were wrong.
 - **`setup_reference_tool.sh` gains `--create-env` too**, so both installers behave the same way:
   creation is opt-in, a missing env without the flag is a hard error naming it, and the Python
   version comes from the lockfile header rather than a hardcoded `PINNED_PYTHON` (now only a
