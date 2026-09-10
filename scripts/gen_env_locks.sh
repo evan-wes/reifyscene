@@ -28,7 +28,7 @@ mkdir -p "${LOCK_DIR}"
 
 # env_name -> lock filename
 ENVS=(
-  "room4d:room4d.lock"
+  "reifyscene:reifyscene.lock"
   "room4d_som_ref:room4d_som_ref.lock"
 )
 

@@ -60,9 +60,10 @@ version scheme (canonical version in the `VERSION` file, read by
   the ABI, and requiring an exact match would fail on a working env every time Python is
   updated. (A fresh `--create-env` produced 3.11.16 against a lockfile captured under
   3.11.15, exercising exactly this path.)
-- `scripts/locks/reifyscene.lock`, a copy of `room4d.lock` under the new name so the
-  installer is fully on the new naming. `room4d.lock` remains until the new environment is
-  confirmed, then it can be removed.
+- `scripts/locks/reifyscene.lock` replaces `room4d.lock`, which is **removed** now that a
+  from-scratch `reifyscene` env reaches the same suite result as the long-lived one
+  (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
+  `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
 ### Changed
 - `pyproject.toml` description no longer reads "Prototype room-scale 4D reconstruction

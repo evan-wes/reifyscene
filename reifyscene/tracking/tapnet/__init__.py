@@ -14,7 +14,7 @@ Apache-2.0 headers. Do NOT edit them in place: to update, re-copy from the
 pinned ``third_party/shape-of-motion`` checkout and re-run the parity check.
 
 The single non-torch dependency is ``einshape`` (declared in the ``vision``
-extra in ``pyproject.toml`` / pinned in ``scripts/locks/room4d.lock``), kept as
+extra in ``pyproject.toml`` / pinned in ``scripts/locks/reifyscene.lock``), kept as
 a real dependency specifically so this port stays byte-faithful.
 
 Usage
