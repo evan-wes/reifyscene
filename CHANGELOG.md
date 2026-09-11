@@ -27,7 +27,14 @@ version scheme (canonical version in the `VERSION` file, read by
   (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views). The
   12.56 could not be reproduced from the repo before: its eval block lived only in one run's
   recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file is
-  `base.yaml` plus `evaluation.masked_nvs`.
+  `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
+
+### Docs
+- **`base.yaml` builds a static scene, and the README now says so.** The README's run command
+  used `configs/base.yaml` and described the output as `render/trained_dynamic.npz`, but
+  `base.yaml` has no `scene.kind`, so the command builds a *static* scene
+  (`render/trained_gaussians.npz`); the dynamic 4D scene needs `scene: {kind: dynamic}`. Found
+  when the first run of the new experiment config (which lacked it too) built a static scene.
 
 ### Changed
 - **Held-out camera placement is shared, not duplicated.** `heldout_placements` (with

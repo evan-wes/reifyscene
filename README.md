@@ -116,8 +116,12 @@ scripts/run_single_video_reifyscene.py \
 Each stage persists a self-describing artifact under the run dir (reloadable, e.g.
 `GeometryArtifact.load(...)`). `--start-stage` / `--stop-stage` + `--prior-run-dir` resume
 from a prior run's cached stages — e.g. re-run only `scene` / `render` without recomputing
-geometry. The final render writes `render/trained_dynamic.npz` + a novel-view flythrough,
-and the run records a covisibility-masked novel-view score.
+geometry. The final render writes the trained scene + a novel-view flythrough, and the run
+records a covisibility-masked novel-view score.
+
+`configs/base.yaml` builds a **static** scene (`render/trained_gaussians.npz`). The dynamic
+4D scene (`render/trained_dynamic.npz`) needs `scene: {kind: dynamic}` in the config, as in
+`configs/experiment/spin_native_full.yaml`.
 
 ### Results (v0.2.0.0)
 
