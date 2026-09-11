@@ -123,19 +123,30 @@ records a covisibility-masked novel-view score.
 4D scene (`render/trained_dynamic.npz`) needs `scene: {kind: dynamic}` in the config, as in
 `configs/experiment/spin_native_full.yaml`.
 
-### Results (v0.2.0.0)
+### Results
 
-Masked novel-view PSNR on the DyCheck "spin" sequence (full held-out set):
+Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views):
 
 | geometry | frames | masked mPSNR |
 |---|---|---|
-| VGGT-Long + pose_refine (native) | 426 (all) | 12.56 |
-| GT-oracle (upper bound) | 426 (all) | ~19 |
+| VGGT-Long + pose_refine (native) | 426 (all) | 12.37 ¹ |
+| GT-oracle (upper bound) | 426 (all) | 19.64 |
 | Shape-of-Motion reference | all | 17.42 |
+
+¹ A self-reconstructed scene lives in its own coordinate frame, so its held-out cameras are
+placed through a similarity (rotation, translation, scale) fitted on the training cameras,
+whose poses are known in both frames — the usual way to score a method that estimates its own
+cameras. The fit absorbs one global offset; per-camera drift still counts (median rotation left
+after the fit: 0.60°), and so do parts of the room a held-out camera sees that VGGT-Long's
+centre crop never did.
 
 Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
 drift), not the dynamic modeling; the remaining gap to the oracle is the cost of
 self-reconstructed vs. ground-truth geometry.
+
+Reproduce the native row with `configs/experiment/spin_native_full.yaml` (the full command is
+in its header). To see a trained scene rather than only its score, export held-out views, a
+replay and the score with `scripts/export_checkpoint_views.py RUN_DIR --dataset-root DATASET`.
 
 
 ## Reference comparison tool (Shape of Motion)

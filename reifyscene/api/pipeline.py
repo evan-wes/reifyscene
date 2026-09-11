@@ -1067,7 +1067,13 @@ class ReifyScenePipeline:
         if eval_cfg.get('dataset_root'):
             device = str(self.cfg.get('render', {}).get('device', 'cuda'))
             if str(artifact.scene_state.get('kind', 'static')) == 'dynamic':
-                from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+                from reifyscene.render.eval.masked_nvs_benchmark import (
+                    default_alignment,
+                    score_render_artifact_masked_nvs_dynamic,
+                )
+                # Self-reconstructed geometry lives in its own frame: align held-out cameras
+                # through the training cameras unless the scene was built on the dataset's.
+                eval_cfg.setdefault('align', default_alignment(self.geometry_backend_name))
                 metrics = score_render_artifact_masked_nvs_dynamic(artifact, eval_cfg, device=device)
             else:
                 from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs

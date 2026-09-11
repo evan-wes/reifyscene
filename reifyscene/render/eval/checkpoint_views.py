@@ -6,8 +6,8 @@ run's ``render/trained_dynamic.npz``.
 
 - **Held-out views.** For evenly spaced views of the benchmark's held-out split:
   the render, the real photo, the covisibility mask, and that view's masked PSNR.
-  Cameras are placed by the scorer's own :func:`heldout_placements`, so an exported
-  view is exactly a view that was scored.
+  Cameras are placed by the scorer's own :func:`place_heldout_views`, so an
+  exported view is exactly a view that was scored.
 - **Replay.** The scene re-rendered from every training camera at its own time:
   the path the camera actually took. It shows reconstruction fidelity, not novel
   views, and should be labelled that way.
@@ -24,7 +24,7 @@ import torch
 from PIL import Image
 
 from reifyscene.eval.metrics.image import MaskedPSNR
-from reifyscene.render.eval.masked_nvs_benchmark import heldout_placements, load_heldout_view
+from reifyscene.render.eval.masked_nvs_benchmark import load_heldout_view, place_heldout_views
 from reifyscene.render.export import write_video
 
 
@@ -78,13 +78,16 @@ def export_heldout_views(
     """Write render / photo / mask PNGs for ``count`` evenly spaced held-out views.
 
     Also writes ``index.json`` with each view's frame, time and masked PSNR (the
-    same per-frame formula the benchmark averages). Returns those records.
+    same per-frame formula the benchmark averages) and how the cameras were placed
+    (``eval_cfg["align"]``). Returns those records. Raises ``AlignmentFailed`` when
+    an alignment is asked for but refused.
     """
-    placements = heldout_placements(data, cams, eval_cfg, backend)
-    if placements is None:
+    views = place_heldout_views(data, cams, eval_cfg, backend)
+    if views is None:
         raise ValueError(
             "cannot place held-out cameras: the bundle has no val cameras and no scene-norm"
         )
+    placements = views.placements
     eval_split = str(eval_cfg.get("eval_split", "val"))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +96,7 @@ def export_heldout_views(
     for index in pick_evenly(len(placements), count):
         placement = placements[index]
         camera, gt, mask = load_heldout_view(placement, backend, eval_split, device)
-        pred = _render(rasterizer, scene, camera, placement.time_id)
+        pred = _render(rasterizer, scene, camera, placement.scene_time)
         psnr = MaskedPSNR().to(device)
         psnr.update(pred[None], gt.to(device)[None], mask.to(device).float()[None])
 
@@ -123,6 +126,7 @@ def export_heldout_views(
             {
                 "eval_split": eval_split,
                 "num_heldout_views": len(placements),
+                "alignment": views.alignment,
                 "views": records,
             },
             indent=2,

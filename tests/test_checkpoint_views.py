@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import torch
 
+from reifyscene.geometry.similarity import apply_similarity_to_c2w
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
     export_replay,
@@ -23,7 +24,10 @@ from reifyscene.render.eval.checkpoint_views import (
     replay_size,
 )
 from reifyscene.render.eval.masked_nvs_benchmark import (
-    heldout_placements,
+    AlignmentFailed,
+    default_alignment,
+    place_heldout_views,
+    score_dynamic_bundle,
     score_render_artifact_masked_nvs_dynamic,
 )
 from reifyscene.render.gaussian4d.motion_init import BorrowedCamera
@@ -92,35 +96,136 @@ def _val_cams(n: int) -> list[BorrowedCamera]:
 
 
 def test_placements_from_bundle_val_scale_k_by_factor_ratio():
-    placements = heldout_placements(
+    views = place_heldout_views(
         {"factor": np.int64(1)},
         {"train": [], "val": _val_cams(4)},
         {"factor": 2, "max_eval_frames": 3},
         _Dataset(),
     )
-    assert [p.frame_name for p in placements] == ["1_00000", "1_00001", "1_00002"]
-    camera = placements[0].camera(W // 2, H // 2)
+    assert views.alignment == {"method": "bundle_val"}
+    assert [p.frame_name for p in views.placements] == ["1_00000", "1_00001", "1_00002"]
+    camera = views.placements[0].camera(W // 2, H // 2)
     assert (camera.width, camera.height) == (W // 2, H // 2)
     assert camera.K[0, 0] == pytest.approx(50.0)  # bundle factor 1 / eval factor 2
 
 
 def test_placements_from_dataset_use_the_bundle_scene_norm():
-    placements = heldout_placements(
+    views = place_heldout_views(
         _norm_bundle(scale=2.0), {"train": [], "val": []}, {}, _Dataset(n=3)
     )
-    assert [(p.frame_name, p.time_id) for p in placements] == [
+    assert views.alignment["method"] == "none"
+    assert [(p.frame_name, p.time_id) for p in views.placements] == [
         ("1_00000", 0),
         ("1_00010", 10),
         ("1_00020", 20),
     ]
-    camera = placements[0].camera(1, 1)  # dataset cameras keep their own size
+    camera = views.placements[0].camera(1, 1)  # dataset cameras keep their own size
     assert (camera.width, camera.height) == (W, H)
     # world->cam of a camera at z=-4 translates by +4; scene-norm scale 2 halves it
     assert camera.viewmat[2, 3] == pytest.approx(2.0)
 
 
 def test_placements_none_without_val_cameras_or_scene_norm():
-    assert heldout_placements({}, {"train": [], "val": []}, {}, _Dataset()) is None
+    assert place_heldout_views({}, {"train": [], "val": []}, {}, _Dataset()) is None
+
+
+def test_default_alignment_by_geometry_backend():
+    assert default_alignment("dataset") == "none"  # built on the benchmark's own geometry
+    assert default_alignment("vggt-long") == "sim3"
+    assert default_alignment(None) == "sim3"
+
+
+# -- alignment for self-reconstructed scenes ------------------------------------
+
+
+def _orbit_c2w(frame: int) -> np.ndarray:
+    """A camera looking around a room: turning, tilting and moving along an arc."""
+    ang, tilt = 0.05 * frame, 0.02 * frame
+    rz = np.array([[np.cos(ang), -np.sin(ang), 0], [np.sin(ang), np.cos(ang), 0], [0, 0, 1]])
+    rx = np.array([[1, 0, 0], [0, np.cos(tilt), -np.sin(tilt)], [0, np.sin(tilt), np.cos(tilt)]])
+    c2w = np.eye(4)
+    c2w[:3, :3] = rz @ rx
+    c2w[:3, 3] = [2 * np.cos(ang), 2 * np.sin(ang), 0.02 * frame]
+    return c2w
+
+
+class _PosedDataset(_Dataset):
+    """Training camera '0' on an orbit; held-out camera '1' offset from it."""
+
+    def __init__(self, val_frames: list[int]) -> None:
+        self.val_frames = val_frames
+
+    def split_frames(self, split=None):
+        return [("1", t) for t in self.val_frames]
+
+    def load_camera(self, name):
+        cam, frame = name.split("_")
+        c2w = _orbit_c2w(int(frame))
+        if cam == "1":
+            c2w[:3, 3] += [0.3, -0.2, 0.1]
+        intr = SimpleNamespace(fx=100.0, fy=100.0, cx=W / 2, cy=H / 2)
+        return intr, c2w.astype(np.float32), (W, H)
+
+
+# A self-reconstruction's frame: the dataset world rotated, shifted and scaled 3x.
+S_TRUE, T_TRUE = 3.0, np.array([1.0, -2.0, 0.5])
+R_TRUE = np.array([[1, 0, 0], [0, np.cos(0.5), -np.sin(0.5)], [0, np.sin(0.5), np.cos(0.5)]])
+
+
+def _scene_train_cams(frames: list[int]) -> list[BorrowedCamera]:
+    K = np.eye(3, dtype=np.float32)
+    return [
+        BorrowedCamera(
+            f"0:{f}",
+            i,  # scene time counts keyframes, not frames
+            np.linalg.inv(apply_similarity_to_c2w(_orbit_c2w(f), S_TRUE, R_TRUE, T_TRUE)),
+            K,
+        )
+        for i, f in enumerate(frames)
+    ]
+
+
+def test_sim3_places_heldout_cameras_through_the_training_cameras():
+    train = _scene_train_cams(list(range(0, 60, 5)))
+    views = place_heldout_views(
+        {}, {"train": train, "val": []}, {"align": "sim3"}, _PosedDataset([7, 33])
+    )
+    assert views.alignment["method"] == "sim3"
+    assert views.alignment["scale"] == pytest.approx(S_TRUE)
+    assert views.alignment["rotation_residual_deg_median"] < 0.05  # float32 poses in, ~0.003
+    for p in views.placements:
+        _, t_world_cam, _ = _PosedDataset([]).load_camera(p.frame_name)
+        expected = np.linalg.inv(
+            apply_similarity_to_c2w(t_world_cam.astype(np.float64), S_TRUE, R_TRUE, T_TRUE)
+        )
+        assert np.allclose(p.camera(W, H).viewmat, expected, atol=1e-4)
+
+
+def test_sparse_keyframes_render_at_the_nearest_keyframe():
+    train = _scene_train_cams([0, 15, 30])  # scene times 0, 1, 2
+    views = place_heldout_views(
+        {}, {"train": train, "val": []}, {"align": "sim3"}, _PosedDataset([0, 10, 20, 23, 29])
+    )
+    assert [p.time_id for p in views.placements] == [0, 10, 20, 23, 29]
+    assert [p.scene_time for p in views.placements] == [0, 1, 1, 2, 2]
+
+
+def test_untrustworthy_alignment_is_refused_and_scores_nothing():
+    rng = np.random.default_rng(0)
+    K = np.eye(3, dtype=np.float32)
+    unrelated = []
+    for i in range(12):  # scene cameras with no relation to the dataset's
+        q = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+        c2w = np.eye(4)
+        c2w[:3, :3] = q * np.sign(np.linalg.det(q))
+        c2w[:3, 3] = rng.normal(size=3) * 5
+        unrelated.append(BorrowedCamera(f"0:{5 * i}", i, np.linalg.inv(c2w), K))
+    cams, cfg = {"train": unrelated, "val": []}, {"align": "sim3", "dataset_root": "spin"}
+    with pytest.raises(AlignmentFailed):
+        place_heldout_views({}, cams, cfg, _PosedDataset([7]))
+    result = score_dynamic_bundle({}, None, cams, cfg, backend=_PosedDataset([7]), device="cpu")
+    assert "masked_mpsnr" not in result
+    assert result["alignment"]["status"] == "refused" and result["alignment"]["reason"]
 
 
 def test_dynamic_scorer_returns_empty_when_views_cannot_be_placed(tmp_path: Path):

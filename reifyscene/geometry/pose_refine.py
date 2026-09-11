@@ -37,6 +37,7 @@ import numpy as np
 
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.similarity import apply_similarity_to_c2w, camera_center, fit_similarity
 
 
 class PoseRefineUnavailable(RuntimeError):
@@ -224,45 +225,11 @@ def _cam_from_world_matrix(image) -> np.ndarray:
     return T
 
 
-def _center_from_w2c(w2c: np.ndarray) -> np.ndarray:
-    return -w2c[:3, :3].T @ w2c[:3, 3]
-
-
-def _sim3_src_to_dst(src_w2c: dict[str, np.ndarray], dst_w2c: dict[str, np.ndarray], keys: list[str]):
-    """Orientation-based Sim(3) mapping the ``src`` world frame onto ``dst``.
-
-    Rotation is estimated from camera ORIENTATIONS (well conditioned for a
-    looking-around rig), not the camera-center cloud, which is near-degenerate
-    for planar/linear sweeps and yields a spurious orientation error. Scale +
-    translation then fit the centers under that rotation. Returns ``(s, R, t)``
-    with ``x_dst = s * R @ x_src + t``.
-    """
-    G = [src_w2c[k][:3, :3].T @ dst_w2c[k][:3, :3] for k in keys]
-    U, _, Vt = np.linalg.svd(np.sum(G, axis=0))
-    Gavg = U @ Vt
-    if np.linalg.det(Gavg) < 0:
-        U[:, -1] *= -1
-        Gavg = U @ Vt
-    R = Gavg.T
-    sc = np.stack([_center_from_w2c(src_w2c[k]) for k in keys])
-    dc = np.stack([_center_from_w2c(dst_w2c[k]) for k in keys])
-    smu, dmu = sc.mean(0), dc.mean(0)
-    sch, dch = sc - smu, dc - dmu
-    s = float(np.sum(dch * (R @ sch.T).T) / np.sum(sch ** 2))
-    t = dmu - s * (R @ smu)
-    return s, R, t
-
-
-def _apply_sim3_to_c2w(c2w: np.ndarray, s: float, R: np.ndarray, t: np.ndarray) -> np.ndarray:
-    """Map a camera-to-world pose through the world similarity ``x' = s*R@x + t``.
-
-    The scale is dropped from the rotation block so it stays orthonormal; only
-    the camera center (a world point) carries the scale + translation.
-    """
-    out = np.eye(4, dtype=np.float64)
-    out[:3, :3] = R @ c2w[:3, :3]
-    out[:3, 3] = s * (R @ c2w[:3, 3]) + t
-    return out
+# The Sim(3) helpers live in geometry/similarity.py (masked-NVS scoring uses them too);
+# these names are kept for the re-anchor below and its test.
+_center_from_w2c = camera_center
+_sim3_src_to_dst = fit_similarity
+_apply_sim3_to_c2w = apply_similarity_to_c2w
 
 
 # --------------------------------------------------------------------------- #

@@ -18,16 +18,48 @@ version scheme (canonical version in the `VERSION` file, read by
   - **held-out views**, evenly spaced over the benchmark's held-out split: the render, the real
     photo, the covisibility mask, and that view's masked PSNR (`heldout/index.json`);
   - **a replay video**: the scene re-rendered from every training camera at its own time, i.e.
-    the captured path. It shows reconstruction fidelity, not novel views.
+    the captured path. It shows reconstruction fidelity, not novel views;
+  - **`score.json`**: the full held-out split's masked mPSNR / mSSIM / mLPIPS with how the
+    cameras were placed, so an old run can be re-scored without touching its records.
 
-  On the spin oracle run: 8 held-out views at 17.3–21.1 dB (its full-split average is 19.64)
-  and a 426-frame replay, in 6 s on the GPU. The logic is in
+  `--align auto` (default) reads the run's geometry backend from its manifest, as the pipeline
+  does. On the spin oracle run: 8 held-out views at 17.3–21.1 dB (its full-split average is
+  19.64) and a 426-frame replay, in 6 s on the GPU. The logic is in
   `reifyscene/render/eval/checkpoint_views.py`.
-- **`configs/experiment/spin_native_full.yaml`**, the config for the README's headline run
-  (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views). The
-  12.56 could not be reproduced from the repo before: its eval block lived only in one run's
-  recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file is
-  `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
+- **`configs/experiment/spin_native_full.yaml`**, the config for the headline native run
+  (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views: masked
+  mPSNR **12.37**). No config for it was in the repo before; its eval block lived only in one
+  run's recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file
+  is `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
+
+### Fixed
+- **Self-reconstructed scenes could not be scored: every native run's held-out renders were
+  black.** The dynamic scorer placed the dataset's held-out cameras in the scene through the
+  bundle's scene-norm, which is only right when the scene was built on the dataset's own
+  geometry (the oracle). A VGGT / VGGT-Long reconstruction lives in its own frame (for today's
+  run: scale 1.21 and 43° of rotation from the dataset's world), so the held-out cameras looked
+  at empty space and every native run on disk scored 4.5–4.6 whatever its quality. The scorer
+  now places them through a similarity fitted on the training cameras, whose poses are known in
+  both frames (`align: sim3`, the pipeline's default for any non-`dataset` geometry backend) —
+  the usual way to score a method that estimates its own cameras. The fit absorbs one global
+  offset; per-camera drift still counts. Fits whose scale is not positive, or whose median
+  rotation / centre residual exceeds 5° / 0.2 of the trajectory, are refused: the score
+  records why and gives no number. Every score now carries an `alignment` record (method,
+  scale, residuals). The oracle keeps its placement (`align: none`) and scores bit-identically
+  (19.638906478881836).
+- **Sparse-keyframe scenes rendered held-out views at the wrong time.** Scene time counts
+  keyframes, but views were rendered at the dataset frame number, which the scene clamps to its
+  last keyframe — every held-out view past it showed the scene's final state. Each view now
+  renders at the nearest training keyframe's time. Full-frame scenes are unaffected.
+
+### Correction
+- **The native numbers in 0.1.31.3 (10.29 / 11.95) and 0.2.0.0 (12.56) were never scored by
+  the repo.** Re-scoring the surviving checkpoints with the scorer of the day (0.1.31.3) and of
+  today both gives ~4.6. They came from an aligned scoring step run outside the repo: its pose
+  errors (0.88° / 0.615° / 2.3° / 0.71°) are exactly the median rotation residuals of the
+  training-camera fit, and the aligned scorer now reproduces its scores within 0.03–0.36 dB
+  (10.06 / 11.92 / 9.19 / 12.20). The headline native number is replaced by the reproducible
+  **12.37** from a fresh full run of `spin_native_full.yaml` (0.60° residual).
 
 ### Docs
 - **`base.yaml` builds a static scene, and the README now says so.** The README's run command
@@ -37,23 +69,28 @@ version scheme (canonical version in the `VERSION` file, read by
   when the first run of the new experiment config (which lacked it too) built a static scene.
 
 ### Changed
-- **Held-out camera placement is shared, not duplicated.** `heldout_placements` (with
-  `load_heldout_view` and `eval_dataset`) in `masked_nvs_benchmark.py` now does the placement
-  that `score_render_artifact_masked_nvs_dynamic` did inline, and the exporter calls the same
-  function, so an exported view is exactly a scored view. That placement has had a real bug
-  before (0.1.31.2's missing ground-plane rotation); a second copy would be a second place for
-  one to hide. **No change in results:** scoring the spin oracle checkpoint on all 722 views
-  with the old and new scorer in one process gives identical mPSNR / mSSIM / mLPIPS
-  (19.638906…). The dataset path now reads every held-out camera's JSON up front instead of
-  one per view.
+- **Held-out camera placement is shared, not duplicated.** `place_heldout_views` (with
+  `load_heldout_view`, `eval_dataset` and `score_dynamic_bundle`) in `masked_nvs_benchmark.py`
+  now does the placement that `score_render_artifact_masked_nvs_dynamic` did inline, and the
+  exporter calls the same function, so an exported view is exactly a scored view. That placement
+  has had real bugs before (0.1.31.2's missing ground-plane rotation; the missing alignment
+  above); a second copy would be a second place for one to hide. The refactor alone changed no
+  result: scoring the oracle checkpoint on all 722 views with the old and new scorer in one
+  process gave identical mPSNR / mSSIM / mLPIPS.
+- **The Sim(3) helpers moved to `reifyscene/geometry/similarity.py`** (`fit_similarity`,
+  `apply_similarity_to_c2w`, `camera_center`, plus `similarity_residuals`), shared by
+  `pose_refine`'s gauge re-anchor and the scorer's alignment; `pose_refine` keeps its old names.
 
 ### Tests
 - `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
   factor ratio; truncation) and from the dataset through the scene-norm; unplaceable bundles
-  (the scorer returns `{}`, the exporter refuses); even view picking; the replay's image size
-  from the principal point; the held-out export's files, index and per-view masked PSNR
-  (checked against a closed form); replay order and size. CPU-only stand-ins for the
-  rasterizer, scene and dataset reader. Full suite: **382 passed, 1 skipped**.
+  (the scorer returns `{}`, the exporter refuses); the default alignment per geometry backend;
+  a known similarity recovered from synthetic training cameras and the held-out cameras placed
+  through it; sparse keyframes rendered at the nearest keyframe; an unrelated camera set refused
+  with no score; even view picking; the replay's image size from the principal point; the
+  held-out export's files, index and per-view masked PSNR (checked against a closed form);
+  replay order and size. CPU-only stand-ins for the rasterizer, scene and dataset reader.
+  Full suite: **386 passed, 1 skipped**.
 
 ## [0.2.0.2] - 2026-09-10
 
