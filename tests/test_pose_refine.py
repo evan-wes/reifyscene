@@ -228,3 +228,21 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
     assert refined.intrinsics_by_stream[STREAM_ID].fx == 310.0
     # the original geometry artifact must be left untouched (refined is a new artifact)
     assert geom.intrinsics_by_stream[STREAM_ID].fx == 300.0
+
+
+def test_a_refused_refinement_keeps_the_seed_poses_and_says_why(tmp_path: Path, monkeypatch) -> None:
+    pipeline = ReifyScenePipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
+    geom = _geometry_artifact(tmp_path)
+    ingest = _ingest_artifact(tmp_path)
+
+    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+        self.rejected[STREAM_ID] = "final mean reprojection error 6.2e+149 px exceeds 8 px"
+        return {}
+
+    monkeypatch.setattr(PoseRefiner, "refine", fake_refine)
+    monkeypatch.setattr(ReifyScenePipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
+    refined = pipeline.refine_poses(ingest, geom)
+    info = refined.metadata["pose_refine"]
+    assert info["refined_streams"] == [] and "6.2e+149" in info["rejected_streams"][STREAM_ID]
+    for before, after in zip(geom.camera_states_by_stream[STREAM_ID], refined.camera_states_by_stream[STREAM_ID]):
+        assert np.allclose(before.pose.T_world_cam, after.pose.T_world_cam)

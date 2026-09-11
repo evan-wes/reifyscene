@@ -74,12 +74,46 @@ class PoseRefineConfig:
     refine_pp: bool = False
     min_reg_frames: int = 2
     min_points: int = 2
+    # The tracker shuffles its query points (torch.randperm): seeded, a run repeats.
+    seed: int = 0
+    # A bundle adjustment that ends above this mean reprojection error, or turns any camera
+    # further than this from its seed pose, diverged: its poses are refused (a converged
+    # spin run ends near 0.9 px, its largest turn 35 degrees).
+    max_final_reproj_px: float = 8.0
+    max_rot_delta_deg: float = 90.0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "PoseRefineConfig":
         raw = dict(raw or {})
         fields = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in raw.items() if k in fields})
+
+
+def _seed_everything(seed: int) -> None:
+    import random
+
+    import torch
+
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))  # every device, CUDA's generator included
+
+
+def bundle_adjustment_diverged(
+    mean_reproj_px: float, rot_deltas_deg: list[float], *, max_reproj_px: float, max_rot_delta_deg: float
+) -> str | None:
+    """Why a bundle adjustment's result is not a refinement, or ``None`` when it is.
+
+    A diverged BA can end with an astronomical reprojection error and cameras turned
+    half-way round (one spin run: 6e149 px, a camera 160 degrees from its seed); its
+    poses must not replace the seed's.
+    """
+    if not np.isfinite(mean_reproj_px) or mean_reproj_px > max_reproj_px:
+        return f"final mean reprojection error {mean_reproj_px:.4g} px exceeds {max_reproj_px:g} px"
+    worst = max(rot_deltas_deg) if rot_deltas_deg else 0.0
+    if not np.isfinite(worst) or worst > max_rot_delta_deg:
+        return f"a camera turned {worst:.1f} degrees from its seed pose (limit {max_rot_delta_deg:g})"
+    return None
 
 
 @dataclass
@@ -241,6 +275,8 @@ class PoseRefiner:
     def __init__(self, cfg: dict[str, Any] | PoseRefineConfig | None = None) -> None:
         self.cfg = cfg if isinstance(cfg, PoseRefineConfig) else PoseRefineConfig.from_dict(cfg)
         self.notes: list[str] = []
+        # stream -> why its refinement was refused (it keeps the seed poses).
+        self.rejected: dict[str, str] = {}
 
     # -- public API -------------------------------------------------------- #
     def refine(
@@ -399,6 +435,7 @@ class PoseRefiner:
             )
 
         self._log(f"stream {stream_id}: {len(frames)} keyframes at {W}x{H}; predicting VGGSfM tracks.")
+        _seed_everything(self.cfg.seed)
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
             pred_tracks, pred_vis, _, pred_pts3d, pred_rgb = predict_tracks(
                 images,
@@ -471,6 +508,15 @@ class PoseRefiner:
         # frame; because it is a global similarity it preserves BA's *relative*
         # pose gains, and because reprojection is invariant to it no re-BA is
         # needed. Depth/point maps are left as-is (already at input scale).
+        diverged = bundle_adjustment_diverged(
+            float(rec.compute_mean_reprojection_error()), deltas,
+            max_reproj_px=self.cfg.max_final_reproj_px, max_rot_delta_deg=self.cfg.max_rot_delta_deg,
+        )
+        if diverged is not None:
+            self.rejected[str(stream_id)] = diverged
+            self._log(f"stream {stream_id}: refinement refused, kept the seed poses: {diverged}.")
+            return None
+
         keys = list(refined)
         s_re, R_re, t_re = _sim3_src_to_dst(refined_w2c_by_key, seed_w2c_by_key, keys)
         for key in keys:

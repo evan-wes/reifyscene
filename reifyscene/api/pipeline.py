@@ -619,6 +619,8 @@ class ReifyScenePipeline:
             'enabled': enabled,
             'refined_streams': sorted(refinements.keys()),
             'stats': {sid: refinement.stats for sid, refinement in refinements.items()},
+            # Streams whose bundle adjustment diverged: they keep the seed poses.
+            'rejected_streams': dict(refiner.rejected) if enabled else {},
         }
         refined = GeometryArtifact(
             run_id=geometry_artifact.run_id,

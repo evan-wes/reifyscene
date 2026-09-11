@@ -103,6 +103,18 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **Pose refinement was not repeatable, and a diverged bundle adjustment was used anyway.** Two
+  runs of `spin_native_full.yaml` got identical VGGT-Long geometry and pixel-identical tracker
+  images, yet one bundle adjustment converged (final reprojection 0.88 px) and the other diverged
+  (6·10¹⁴⁹ px, one camera turned 160°) — and its poses went downstream: that run scored 12.67
+  against 14.96 on the converged geometry. The tracker shuffles its query points with an
+  unseeded `torch.randperm`; pose refinement now seeds it (`pose_refine.seed`, default 0). A
+  bundle adjustment that ends above `pose_refine.max_final_reproj_px` (8) or turns a camera more
+  than `max_rot_delta_deg` (90°) from its seed pose is refused: the stream keeps its seed poses
+  and `metadata.pose_refine.rejected_streams` says why. A resume rejects a pose_refine artifact
+  that kept a diverged stream (restart at pose_refine) and loads one that refused it. Seeding
+  does not bump pose_refine's contract version: an unseeded refinement that converged is as good
+  as a seeded one.
 - **Our no-upscale VGGT-Long loader squashed portrait frames.** Below a 518 target it scaled by
   a floating-point ratio (720 at 252 floored to 238) and clamped *both* sides to the target, so a
   720×960 frame went in at 238×252 instead of being cropped like upstream. It now takes the width
@@ -188,16 +200,6 @@ version scheme (canonical version in the `VERSION` file, read by
   projections. The real scoring is `masked_nvs_benchmark.py`.
 
 ### Findings
-- **Pose refinement is not deterministic, and when it diverges nothing notices.** Two runs of
-  `spin_native_full.yaml` got identical VGGT-Long geometry (rotations equal to 0.004°) and
-  pixel-identical tracker images, yet one bundle adjustment converged (final reprojection
-  0.88 px) and the other diverged (6·10¹⁴⁹ px, one camera turned 160°). The pipeline passed the
-  diverged poses on: that run scores 12.67 against 14.96 on the converged geometry. Not changed
-  here; the table's native numbers are all on the converged geometry.
-- **VGGT-Long's focal is 38% long in its own pixels; pose refinement is right to shrink it.** In
-  the 518-pixel crop, spin's true focal is 719.2 × 518 / 720 ≈ 517 px. VGGT-Long estimates 715
-  (the wrapper passes its intrinsics through unchanged); pose refinement brings it to 547 (6%
-  long). The drop from 715 to 547 looked suspicious; it is a move toward the truth.
 - **On spin, the dynamic scene barely beats a static one on held-out views.** On the same
   native geometry the dynamic scene scores 14.96 masked mPSNR against the static scene's 14.56 —
   and the static one has the better mLPIPS (0.43 against 0.46) — though the dynamic scene fits

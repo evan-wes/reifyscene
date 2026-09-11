@@ -395,11 +395,31 @@ def _pose_refine_ran(ctx: ResumeContext) -> str | None:
     info = _metadata(ctx.artifact).get("pose_refine") or {}
     if not info.get("enabled"):
         return None
-    if not info.get("refined_streams"):
+    rejected = info.get("rejected_streams") or {}
+    if not info.get("refined_streams") and not rejected:
         return "pose refinement was enabled but refined nothing (it passed the geometry through)"
     stats = info.get("stats") or {}
     if any("reanchor_scale" not in (st or {}) for st in stats.values()):
         return "made before pose_refine re-anchored its poses to the input frame (2026-07-06)"
+    return None
+
+
+def _bundle_adjustment_converged(ctx: ResumeContext) -> str | None:
+    """A stream kept as refined whose bundle adjustment diverged is not a refinement."""
+    from reifyscene.geometry.pose_refine import bundle_adjustment_diverged
+
+    info = _metadata(ctx.artifact).get("pose_refine") or {}
+    max_reproj = float(get_path(ctx.cfg, "pose_refine.max_final_reproj_px", 8.0))
+    max_turn = float(get_path(ctx.cfg, "pose_refine.max_rot_delta_deg", 90.0))
+    for stream_id in info.get("refined_streams") or []:
+        st = (info.get("stats") or {}).get(stream_id) or {}
+        why = bundle_adjustment_diverged(
+            float(st.get("mean_reproj_px", float("nan"))),
+            [float(st.get("seed_to_refined_rot_delta_deg_max", 0.0))],
+            max_reproj_px=max_reproj, max_rot_delta_deg=max_turn,
+        )
+        if why is not None:
+            return f"stream {stream_id}'s bundle adjustment diverged ({why}) but its poses were kept"
     return None
 
 
@@ -522,7 +542,11 @@ REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {
     "ingest": (Requirement("its input frames exist", _ingest_frames_resolve, _ingest_reroot),),
     "dyn_mask": (Requirement("the configured backend ran", _dyn_mask_backend),),
     "geometry": _GEOMETRY,
-    "pose_refine": (*_GEOMETRY, Requirement("the refinement actually ran", _pose_refine_ran)),
+    "pose_refine": (
+        *_GEOMETRY,
+        Requirement("the refinement actually ran", _pose_refine_ran),
+        Requirement("its bundle adjustment converged", _bundle_adjustment_converged),
+    ),
     "segment": (Requirement("every instance has a frame-sized mask", _segment_masks),),
     "reid": (Requirement("it embeds exactly segment's tracks", _reid_covers_tracks),),
     "semantics": (Requirement("every canonical track is named", _semantics_cover_tracks),),

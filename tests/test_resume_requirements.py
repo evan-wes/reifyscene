@@ -272,3 +272,30 @@ def test_old_no_upscale_geometry_of_portrait_frames_is_refused(tmp_path) -> None
                         vggt_long_input_loader={"loader": "bounded", "target_size": 252, "version": 2})
     assert req.check(today) is None
     assert req.check(_loader_ctx(tmp_path, (720, 960), vggt_long_resize_max_dim=None)) is None
+
+
+def test_a_diverged_bundle_adjustment_is_refused() -> None:
+    from reifyscene.geometry.pose_refine import bundle_adjustment_diverged
+
+    limits = dict(max_reproj_px=8.0, max_rot_delta_deg=90.0)
+    assert bundle_adjustment_diverged(0.883, [3.4, 34.9], **limits) is None  # the converged spin run
+    assert "reprojection" in bundle_adjustment_diverged(6.2e149, [4.0, 160.2], **limits)
+    assert "reprojection" in bundle_adjustment_diverged(float("nan"), [1.0], **limits)
+    assert "turned 160.2" in bundle_adjustment_diverged(0.9, [4.0, 160.2], **limits)
+
+
+def test_a_kept_diverged_refinement_is_rejected_and_a_refused_one_loads(tmp_path) -> None:
+    diverged = _geometry({}, pose_refine={
+        "enabled": True, "refined_streams": ["0"],
+        "stats": {"0": {"reanchor_scale": 1.0, "mean_reproj_px": 6.2e149,
+                        "seed_to_refined_rot_delta_deg_max": 160.2}},
+    })
+    req = _requirement("pose_refine", "its bundle adjustment converged")
+    assert "diverged" in req.check(_ctx("pose_refine", diverged, tmp_path))
+    refused = _geometry({}, pose_refine={
+        "enabled": True, "refined_streams": [], "stats": {},
+        "rejected_streams": {"0": "final mean reprojection error 6.2e+149 px exceeds 8 px"},
+    })
+    ctx = _ctx("pose_refine", refused, tmp_path)
+    assert all(r.check(ctx) is None for r in REQUIREMENTS["pose_refine"] if r.name in (
+        "the refinement actually ran", "its bundle adjustment converged"))
