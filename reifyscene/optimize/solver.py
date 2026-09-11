@@ -501,7 +501,7 @@ class JointSpatiotemporalSolver:
 
         return OptimizationArtifact(
             run_id=geometry_artifact.run_id,
-            stage_name="optimize",
+            stage_name="optimization",  # the stage registry's name (was "optimize")
             save_dir=Path("."),
             refined_cameras=state.get("camera_states", {}),
             refined_offsets=state.get("time_offsets", {}),

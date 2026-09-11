@@ -106,6 +106,8 @@ version scheme (canonical version in the `VERSION` file, read by
 - **Pose refinement wrote its COLMAP seed model into the geometry stage's folder**
   (`geometry/colmap_seed/`), so a geometry artifact collected another stage's files. It now
   writes into its own `pose_refine/` folder.
+- **The optimization artifact called its stage `optimize`**; it now uses the stage registry's
+  name, `optimization`, like every other stage.
 - **Self-reconstructed scenes could not be scored: every native run's held-out renders were
   black.** The dynamic scorer placed the dataset's held-out cameras in the scene through the
   bundle's scene-norm, which is only right when the scene was built on the dataset's own
