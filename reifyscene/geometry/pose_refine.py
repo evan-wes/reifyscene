@@ -74,7 +74,9 @@ class PoseRefineConfig:
     refine_pp: bool = False
     min_reg_frames: int = 2
     min_points: int = 2
-    # The tracker shuffles its query points (torch.randperm): seeded, a run repeats.
+    # The tracker shuffles its query points (torch.randperm); seeding pins that much. It does
+    # not make a run repeat: GPU kernels and the multithreaded bundle adjustment do not either,
+    # and two seeded runs of spin ended with their worst camera 14 and 30 degrees from its seed.
     seed: int = 0
     # A bundle adjustment that ends above this mean reprojection error, or turns any camera
     # further than this from its seed pose, diverged: its poses are refused (a converged

@@ -138,8 +138,8 @@ Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views):
 
 | geometry | scene | frames | masked mPSNR | mLPIPS |
 |---|---|---|---|---|
-| VGGT-Long + pose_refine (native) | dynamic | 426 (all) | 14.96 ¹ | 0.46 |
-| VGGT-Long + pose_refine (native) | static | 426 (all) | 14.56 ¹ | 0.43 |
+| VGGT-Long + pose_refine (native) | dynamic | 426 (all) | 13.97 ¹ | 0.53 |
+| VGGT-Long + pose_refine (native) | static | 426 (all) | 13.34 ¹ | 0.62 |
 | GT-oracle (upper bound) | dynamic | 426 (all) | 19.65 | 0.34 |
 | GT-oracle | static | 426 (all) | 16.22 ¹ | 0.32 |
 | Shape-of-Motion reference | dynamic | all | 17.42 | — |
@@ -152,9 +152,11 @@ one global offset; per-camera drift still counts (median rotation left after the
 the native rows), and so do parts of the room a held-out camera sees that VGGT-Long's centre crop
 never did.
 
-The native rows share one geometry, whose bundle adjustment converged (0.88 px). Pose
-refinement is not deterministic and can diverge without the pipeline noticing: one fresh run of
-the same config ended at an absurd reprojection error with a camera turned 160°, and scored 12.67.
+Both native rows come from one fresh run of `configs/experiment/spin_native_full.yaml`. Pose
+refinement does not repeat exactly from run to run (GPU kernels and a multithreaded bundle
+adjustment), and the geometry it lands on moves the score: another converged run of the same
+config scored 14.96 dynamic / 14.56 static. A run whose bundle adjustment *diverges* is now
+refused — it keeps the unrefined poses and says so — rather than quietly scoring 12.67.
 
 Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
 drift), not the dynamic modeling; the remaining gap to the oracle is the cost of
