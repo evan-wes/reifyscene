@@ -599,9 +599,13 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
         version += 1
         upgraded = True
     if version != contract.version and not stale:
+        since = [
+            f"v{v}: {contract.changes[v]}"
+            for v in sorted(contract.changes) if int(record.get("version", 0)) < v
+        ]
         stale.append(
             f"made by contract version {record.get('version')} of {stage}; this code is "
-            f"version {contract.version}"
+            f"version {contract.version}" + (" (" + "; ".join(since) + ")" if since else "")
         )
     diffs = _settings_diff(record.get("settings") or {}, effective_settings(stage, cfg))
     if diffs:

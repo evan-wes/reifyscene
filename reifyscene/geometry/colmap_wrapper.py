@@ -35,6 +35,7 @@ from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 from reifyscene.geometry.reconstruction_health import assess_pose_health
 from reifyscene.ingest.decoder import VideoDecoder
 
@@ -230,6 +231,15 @@ class ColmapPoseInitializer(GeometryInitializer):
             artifact.metadata["colmap_model_dir"] = str(self._last_model_dir)
         artifact.metadata["dyn_mask_applied"] = bool(apply_mask)
         artifact.metadata["dyn_mask_fraction"] = float(dyn_frac)
+        # SfM ran on the decoded frames themselves: its intrinsics are in their pixels.
+        artifact.metadata["image_transforms"] = {
+            stream_id: transform_record(
+                ImageTransform.identity((int(stream.width), int(stream.height))),
+                recorded_by=self.backend_name,
+            )
+            for stream_id, stream in stream_lookup.items()
+            if stream_id in camera_states_by_stream
+        }
         # FP6b step 3: stamp a GT-free per-stream trajectory health-check so a degenerate
         # (silent) SfM draw is observable downstream (design: observable degradation).
         health = assess_pose_health(camera_states_by_stream)

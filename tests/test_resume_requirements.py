@@ -187,3 +187,66 @@ def test_a_dataset_root_is_fingerprinted_by_content_not_location(tmp_path) -> No
     cfg = {"geometry": {"backend_name": "dataset", "dataset_root": str(moved)}}
     settings = effective_settings("geometry", cfg)
     assert settings["geometry"]["dataset_root"] == path_identity(moved)
+
+
+# ------------------------------------------------------------------ crop boxes (B)
+
+def _geometry_with_depth(backend, depth_hw, *, stream="0", **metadata):
+    return SimpleNamespace(
+        metadata={"capability": {"backend_used": backend}, **metadata},
+        selected_frames=[SimpleNamespace(stream_id=stream)],
+        depthmaps_by_frame={f"{stream}:0": {"depth": np.zeros(depth_hw, np.float32)}},
+        notes=["Used VGGT-Long globally-aligned camera_poses.txt for camera poses."],
+    )
+
+
+def _ingest(w, h, stream="0"):
+    return SimpleNamespace(streams=[SimpleNamespace(stream_id=stream, width=w, height=h)])
+
+
+def _derive_crop(stage, geometry, tmp_path, *, ingest, settings=None, artifacts=None):
+    req = _requirement(stage, "its crop box is recorded")
+    ctx = ResumeContext(
+        stage, geometry, {"ingest": ingest, **(artifacts or {})},
+        {stage: {"settings": {"geometry": settings or {}}}}, {}, tmp_path / stage, [],
+    )
+    assert "made before crop boxes were recorded" in req.check(ctx)
+    done = req.derive(ctx)
+    assert req.check(ctx) is None
+    return done
+
+
+def test_an_old_vggt_long_geometry_gets_the_crop_its_loader_applied(tmp_path) -> None:
+    from reifyscene.geometry.image_transform import ImageTransform
+
+    geo = _geometry_with_depth("vggt-long", (518, 518), vggt_long_resize_max_dim=None)
+    done = _derive_crop("geometry", geo, tmp_path, ingest=_ingest(720, 960))
+    record = geo.metadata["image_transforms"]["0"]
+    assert record["source"] == "derived at resume"
+    t = ImageTransform.from_dict(record)
+    assert t.output_size == (518, 518) and not t.is_pure_resize  # 518x686, then rows 84..602
+    assert [op.to_dict() for op in t.ops][1] == {"op": "crop", "box": [0, 84, 518, 602]}
+    assert "upstream loader" in done.note and not done.resave
+
+
+def test_an_old_dataset_geometry_is_a_plain_resize(tmp_path) -> None:
+    from reifyscene.geometry.image_transform import ImageTransform
+
+    geo = _geometry_with_depth("dataset", (480, 360))
+    _derive_crop("geometry", geo, tmp_path, ingest=_ingest(720, 960))
+    t = ImageTransform.from_dict(geo.metadata["image_transforms"]["0"])
+    assert t.is_pure_resize and t.output_size == (360, 480)
+
+
+def test_a_crop_that_does_not_land_on_the_depth_maps_is_refused(tmp_path) -> None:
+    geo = _geometry_with_depth("vggt-long", (392, 392), vggt_long_resize_max_dim=None)
+    with pytest.raises(NotDerivable, match="lands on"):
+        _derive_crop("geometry", geo, tmp_path, ingest=_ingest(720, 960))
+
+
+def test_pose_refine_shares_its_geometrys_crop_box(tmp_path) -> None:
+    geo = _geometry_with_depth("vggt-long", (518, 518), vggt_long_resize_max_dim=None)
+    _derive_crop("geometry", geo, tmp_path, ingest=_ingest(720, 960))
+    refined = _geometry_with_depth("vggt-long", (518, 518))
+    _derive_crop("pose_refine", refined, tmp_path, ingest=_ingest(720, 960), artifacts={"geometry": geo})
+    assert refined.metadata["image_transforms"] == geo.metadata["image_transforms"]

@@ -12,7 +12,9 @@ every stage declares a :class:`StageContract`:
   (:data:`ALWAYS_EXCLUDED`, plus per-stage ``exclude`` / ``exclude_when``).
 - ``version``: bump it whenever the stage's output changes for the same settings and
   input -- a new algorithm, OR A CHANGED CODE DEFAULT for a setting it reads (the
-  fingerprint records the value the config gives, not what the code falls back to).
+  fingerprint records the value the config gives, not what the code falls back to) --
+  and say what changed in ``changes``; a resume quotes it when it rejects an older
+  artifact.
 - ``pinned``: settings the run script picks from the machine (free GPU memory) when
   they are not given explicitly. A resume takes them from the prior run instead of
   re-picking them, so a busy GPU does not change what "the same run" means.
@@ -72,6 +74,7 @@ class StageContract:
     upstream: tuple[str, ...] = ()
     paths: tuple[str, ...] = ()
     rebuildable: bool | Callable[[Mapping[str, Any]], bool] = False
+    changes: Mapping[int, str] = field(default_factory=dict)
 
     def excluded(self, cfg: Mapping[str, Any]) -> tuple[str, ...]:
         extra = tuple(self.exclude_when(cfg)) if self.exclude_when is not None else ()
@@ -412,6 +415,12 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "tracking",
+            version=2,
+            changes={
+                2: "tracks are lifted from the geometry's depth and cameras through its recorded "
+                "crop box (they were read off VGGT's point maps with the frame squashed onto the "
+                "crop, and positions outside it clamped to its edge)",
+            },
             settings={"tracking": {}, "lifting": {}},
             pinned=(
                 "tracking.frame_stride",
@@ -429,12 +438,20 @@ CONTRACTS: dict[str, StageContract] = {
             # The solver reads the ``optimizer`` section; ``optimization`` holds only
             # debug-viewer switches.
             "optimization",
+            version=2,
+            changes={2: "the re-lift goes through the tracking stage's crop box and lift function"},
             settings={"optimizer": {}},
             upstream=("sync", "pose_refine", "tracking", "humans", "objects", "graph"),
             rebuildable=True,
         ),
         StageContract(
             "scene",
+            version=2,
+            changes={
+                2: "training photos, seed colours and the dynamic init's frames and masks are "
+                "put into the geometry's pixels (they were squashed onto its crop, so the photos "
+                "did not match the cameras)",
+            },
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
             # timeline_source is only a metadata label; the human_* keys are legacy and
             # ignored by the assembler.

@@ -35,6 +35,18 @@ def _sanitize_key(key: str) -> str:
     return str(key).replace(":", "__").replace("/", "_")
 
 
+TRAIN_VIEWS_DIR = "train_views"
+
+
+def train_view_filename(index: int, frame_key: str, suffix: str = ".png") -> str:
+    """File name of training view ``index`` under the scene's ``train_views/``.
+
+    Shared by the assembler, which writes each geometry-space photo straight to
+    its final place, and :meth:`SceneArtifact.save`, which then finds it there.
+    """
+    return f"{int(index):04d}_{_sanitize_key(frame_key)}{suffix or '.png'}"
+
+
 @dataclass
 class SceneArtifact(BaseArtifact):
     """A self-contained renderable static/dynamic 4D scene."""
@@ -82,6 +94,14 @@ class SceneArtifact(BaseArtifact):
         return {"num_gaussians": int(means.shape[0]), "npz_file": "render_seed/seed_cloud.npz"}
 
     def _save_train_views(self, views_dir: Path) -> list[dict[str, Any]]:
+        """Persist every training view with its photo INSIDE this scene's ``train_views/``.
+
+        ``image_file`` is always written relative to the scene directory, and a photo
+        that lives anywhere else (a fresh ``image_path``, or an ``image_file`` still
+        pointing into the run this scene was loaded from) is copied in first -- so a
+        scene re-saved into a new run never points back at the old run's files. A
+        view whose photo is missing raises: a scene must not lose a view silently.
+        """
         saved: list[dict[str, Any]] = []
         for idx, view in enumerate(self.train_views):
             entry = {
@@ -92,16 +112,19 @@ class SceneArtifact(BaseArtifact):
                 "width": int(view["width"]),
                 "height": int(view["height"]),
             }
-            image_file = view.get("image_file")
-            image_path = view.get("image_path")
-            if image_path is not None and Path(image_path).exists():
-                stem = f"{idx:04d}_{_sanitize_key(entry['frame_key'])}"
-                dst = views_dir / f"{stem}{Path(image_path).suffix or '.png'}"
-                if Path(image_path).resolve() != dst.resolve():
-                    shutil.copy2(image_path, dst)
-                entry["image_file"] = str((Path("train_views") / dst.name).as_posix())
-            elif image_file is not None:
-                entry["image_file"] = str(image_file)
+            source = view.get("image_path") or view.get("image_file")
+            if source is not None:
+                src = Path(source)
+                if not src.is_absolute():
+                    src = Path(self.save_dir) / src
+                if not src.exists():
+                    raise FileNotFoundError(
+                        f"training view {idx} ({entry['frame_key']}): its photo {src} does not exist"
+                    )
+                dst = views_dir / train_view_filename(idx, entry["frame_key"], src.suffix)
+                if src.resolve() != dst.resolve():
+                    shutil.copy2(src, dst)
+                entry["image_file"] = str((Path(TRAIN_VIEWS_DIR) / dst.name).as_posix())
             saved.append(entry)
         return saved
 
@@ -131,7 +154,7 @@ class SceneArtifact(BaseArtifact):
     def save(self) -> None:
         ensure_dir(self.save_dir)
         seed_meta = self._save_seed(ensure_dir(self.save_dir / "render_seed"))
-        train_views = self._save_train_views(ensure_dir(self.save_dir / "train_views"))
+        train_views = self._save_train_views(ensure_dir(self.save_dir / TRAIN_VIEWS_DIR))
         serializable = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,

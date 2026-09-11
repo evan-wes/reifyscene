@@ -246,14 +246,12 @@ class _AutoTuneVGGTLong(VGGTLongInitializer):
         self._is_loaded = True
 
     def _create_runner(self, image_dir: Path, output_dir: Path):
-        resize_max_dim = None
-        name = image_dir.name
-        if name.startswith("maxdim_"):
-            resize_max_dim = int(name.split("_", 1)[1])
+        # Auto-tune sets resize_max_dim for the attempt before creating its runner; the
+        # images live in that setting's content-keyed cache directory.
         runner = type("_Runner", (), {})()
         runner.image_dir = image_dir
         runner.output_dir = output_dir
-        runner.resize_max_dim = resize_max_dim
+        runner.resize_max_dim = self.resize_max_dim
         return runner
 
     def _run_runner(self, runner) -> None:

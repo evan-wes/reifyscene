@@ -31,9 +31,19 @@ def _backproject_view(
     scale_min: float,
     scale_max: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Unproject one depth map to (world_xyz, colors_rgb, scales) point arrays."""
+    """Unproject one depth map to (world_xyz, colors_rgb, scales) point arrays.
+
+    ``rgb`` must already be in the depth map's pixels (the geometry's image
+    transform applied): a pixel's colour is read at the same (u, v) as its depth.
+    """
     depth = np.squeeze(np.asarray(depth, dtype=np.float32))
     height, width = depth.shape[:2]
+    rgb = np.asarray(rgb)
+    if rgb.shape[:2] != (height, width):
+        raise ValueError(
+            f"seed photo is {rgb.shape[1]}x{rgb.shape[0]} but the depth map is {width}x{height}; "
+            "put the photo into the geometry's pixels first (its recorded image transform)"
+        )
     fx, fy, cx, cy = (
         float(intrinsics.fx),
         float(intrinsics.fy),
@@ -88,7 +98,10 @@ def seed_arrays_from_geometry(
 
     Pure numpy (no torch/gsplat) so the scene assembler can build a persistable
     seed without a GPU. ``rgb_by_frame`` maps ``"{stream_id}:{frame_idx}"`` ->
-    HxWx3 uint8 image, aligned with ``geometry_artifact.depthmaps_by_frame`` keys.
+    HxWx3 uint8 image in the depth map's pixels, aligned with
+    ``geometry_artifact.depthmaps_by_frame`` keys. A frame with depth but no photo
+    contributes no seed points only when ``rgb_by_frame`` is empty (the geometry has
+    no photos at all); otherwise it raises -- a photo is never dropped silently.
     """
     state_by_key: dict[tuple[str, float], Any] = {}
     for stream_id, states in geometry_artifact.camera_states_by_stream.items():
@@ -104,8 +117,10 @@ def seed_arrays_from_geometry(
         depth_payload = geometry_artifact.depthmaps_by_frame.get(key)
         rgb = rgb_by_frame.get(key)
         state = state_by_key.get((str(frame.stream_id), round(float(frame.timestamp_sec), 6)))
-        if depth_payload is None or rgb is None or state is None:
+        if depth_payload is None or state is None or not rgb_by_frame:
             continue
+        if rgb is None:
+            raise KeyError(f"geometry frame {key} has depth but no photo to colour its seed points")
         xyz, colors, scales = _backproject_view(
             depth_payload["depth"],
             rgb,

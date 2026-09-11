@@ -88,6 +88,9 @@ def _make_track_artifact(tmp_path: Path) -> TrackArtifact:
         'timestamps_sec': np.asarray([0.0, 0.1, 0.2], dtype=np.float32),
         'track_ids': track_ids,
         'points_xy': np.zeros((3, 4, 2), dtype=np.float32),
+        # the frame the track positions are measured in (the tracker always records it);
+        # here the geometry's own 64x48 pixels
+        'original_size_wh': [64, 48],
         'visibility': np.ones((3, 4), dtype=bool),
         'confidence': np.ones((3, 4), dtype=np.float32),
         'backend_used': 'test',

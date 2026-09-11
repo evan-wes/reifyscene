@@ -151,6 +151,8 @@ class ArtifactGeometryProvider(GeometryProvider):
         if split != "train":
             raise NotImplementedError("ArtifactGeometryProvider only provides the 'train' frame stack.")
 
+        from reifyscene.geometry.image_transform import image_transform_for
+
         debug = (self.geometry_artifact.metadata or {}).get("debug_image_paths", {}) or {}
         depthmaps = self.geometry_artifact.depthmaps_by_frame or {}
         names: list[str] = []
@@ -160,34 +162,42 @@ class ArtifactGeometryProvider(GeometryProvider):
         rgbs: list[torch.Tensor] = []
         fgs: list[torch.Tensor] = []
         valids: list[torch.Tensor] = []
+        expected = 0
 
         for fr in self.train_frames:
             key = self._frame_key(fr)
-            state = self._state_for(fr)
             payload = depthmaps.get(key)
+            if payload is None:
+                continue  # the geometry has no depth for this frame: it is not part of the scene
+            expected += 1
+            state = self._state_for(fr)
+            if state is None:
+                raise ValueError(f"geometry frame {key} has depth but no camera state")
             path = debug.get(key)
-            if state is None or payload is None or path is None:
-                continue
+            if not path or not Path(path).exists():
+                raise FileNotFoundError(
+                    f"geometry frame {key} has no photo on disk (debug_image_paths entry: {path!r}); "
+                    "a frame the geometry lists must have its photo -- nothing is dropped silently"
+                )
             depth = np.squeeze(np.asarray(payload["depth"], dtype=np.float32))
             if depth.ndim != 2:
-                continue
+                raise ValueError(f"geometry frame {key}: depth map has shape {depth.shape}, expected HxW")
             h, w = depth.shape
-            try:
-                rgb = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
-            except Exception:
-                continue
-            if rgb.shape[:2] != (h, w):
-                rgb = np.array(Image.fromarray(rgb).resize((w, h)), dtype=np.uint8)
+            # Photos and masks into the geometry's pixels through its recorded transform
+            # (VGGT: resize + centre crop), never squashed to the depth size.
+            with Image.open(path) as img:
+                photo = img.convert("RGB")
+            transform = image_transform_for(self.geometry_artifact, str(fr.stream_id), source_size=photo.size)
+            if transform.output_size != (w, h):
+                raise ValueError(
+                    f"geometry frame {key}: its image transform lands on {transform.output_size}, depth is {(w, h)}"
+                )
+            rgb = transform.apply_to_image(photo)
             fg = self.fg_mask_by_frame.get(key)
             if fg is None:
                 fg_arr = np.zeros((h, w), dtype=np.float32)
             else:
-                fg_arr = np.asarray(fg, dtype=np.float32)
-                if fg_arr.shape[:2] != (h, w):
-                    fg_arr = np.array(
-                        Image.fromarray((np.clip(fg_arr, 0.0, 1.0) * 255).astype(np.uint8)).resize((w, h)),
-                        dtype=np.float32,
-                    ) / 255.0
+                fg_arr = transform.apply_to_image(np.clip(np.asarray(fg, dtype=np.float32), 0.0, 1.0), kind="mask")
             twc = torch.as_tensor(np.asarray(state.pose.T_world_cam, dtype=np.float32), device=device)
             names.append(key)
             w2cs.append(torch.linalg.inv(twc))
@@ -200,6 +210,9 @@ class ArtifactGeometryProvider(GeometryProvider):
             valids.append(torch.as_tensor(valid_depth_mask(depth).astype(np.float32), device=device))
 
         n = len(names)
+        # Time ids number the stack; every frame with depth is in it, so no frame the
+        # geometry lists was dropped and renumbered the ones after it.
+        assert n == expected, f"frame stack has {n} frames but the geometry lists {expected} with depth"
         cameras = CameraRecords(
             frame_names=names,
             time_ids=torch.arange(n, dtype=torch.long, device=device),

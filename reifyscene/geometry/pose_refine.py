@@ -287,58 +287,45 @@ class PoseRefiner:
         frames = [f for f in frames if f"{stream_id}:{int(f.frame_idx)}" in geometry.pointmaps_by_frame]
         return sorted(frames, key=lambda fr: int(fr.frame_idx))
 
-    def _resolve_frame_paths(self, geometry, stream_id, frames, *, decoder, ingest_artifact, work_dir) -> list[str]:
-        """Return ordered on-disk image paths for ``frames`` in the same pixel
-        space the geometry backend consumed.
+    def _geometry_space_images(
+        self, geometry, stream_id, frames, *, decoder, ingest_artifact
+    ) -> np.ndarray:
+        """``frames`` as (N, H, W, 3) uint8 in the geometry's own pixel space.
 
-        Prefers the backend's materialized inputs (``metadata.debug_image_paths``,
-        the exact files the backend ran on); re-materializes via the decoder when
-        those have been cleaned up (e.g. resuming from ``--start-stage``).
+        The geometry's recorded image transform says how its backend turned a frame
+        into the pixels its K and point maps describe (VGGT: resize + centre crop);
+        applying it reproduces those pixels exactly, so BA's tracks share the
+        artifact's coordinates. Prefers the backend's materialized inputs
+        (``metadata.debug_image_paths``, the files it ran on); decodes the ingest
+        frame when those are gone (e.g. resuming from ``--start-stage``).
         """
-        debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
-        resolved: list[str] = []
-        missing: list[FrameRef] = []
-        for fr in frames:
-            key = f"{stream_id}:{int(fr.frame_idx)}"
-            src = debug_paths.get(key)
-            if src and Path(src).exists():
-                resolved.append(str(src))
-            else:
-                resolved.append("")
-                missing.append(fr)
-        if not missing:
-            return resolved
-        # re-materialize the missing frames, mirroring the backend's writer:
-        # decode -> optional resize_max_dim (BILINEAR) -> PNG.
         from PIL import Image
 
-        resize_max_dim = (geometry.metadata or {}).get("vggt_long_resize_max_dim")
-        resize_max_dim = None if resize_max_dim in (None, 0) else int(resize_max_dim)
-        stream_lookup = {s.stream_id: s for s in ingest_artifact.streams}
-        frame_dir = work_dir / "frames"
-        frame_dir.mkdir(parents=True, exist_ok=True)
-        for i, fr in enumerate(frames):
-            if resolved[i]:
-                continue
-            stream = stream_lookup[fr.stream_id]
-            image = decoder.get_frame(stream, fr.frame_idx)
-            pil = Image.fromarray(image)
-            if resize_max_dim is not None:
-                w, h = pil.size
-                max_dim = max(w, h)
-                if max_dim > resize_max_dim:
-                    scale = float(resize_max_dim) / float(max_dim)
-                    pil = pil.resize((max(1, round(w * scale)), max(1, round(h * scale))), resample=Image.BILINEAR)
-            out_path = frame_dir / f"{self._sanitize_name(stream_id)}_{int(fr.frame_idx):06d}.png"
-            pil.save(out_path)
-            resolved[i] = str(out_path)
-        return resolved
+        from reifyscene.geometry.image_transform import image_transform_for
+
+        stream = {s.stream_id: s for s in ingest_artifact.streams}.get(stream_id)
+        source_size = (int(stream.width), int(stream.height)) if stream is not None else None
+        transform = image_transform_for(geometry, stream_id, source_size=source_size)
+        debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
+        images = []
+        for fr in frames:
+            src = debug_paths.get(f"{stream_id}:{int(fr.frame_idx)}")
+            if src and Path(src).exists():
+                with Image.open(src) as img:
+                    images.append(transform.apply_to_image(img.convert("RGB")))
+            else:
+                if stream is None:
+                    raise ValueError(
+                        f"stream {stream_id!r} frame {fr.frame_idx}: no materialized input and "
+                        "no ingest stream to decode"
+                    )
+                images.append(transform.apply_to_image(decoder.get_frame(stream, fr.frame_idx)))
+        return np.stack(images)
 
     def _refine_stream(self, geometry, stream_id, *, decoder, ingest_artifact) -> StreamRefinement | None:
         import torch
 
         from vggt.dependency.track_predict import predict_tracks
-        from vggt.utils.load_fn import load_and_preprocess_images
 
         frames = self._stream_frames(geometry, stream_id)
         if len(frames) < self.cfg.min_reg_frames:
@@ -388,18 +375,19 @@ class PoseRefiner:
         conf = np.stack(conf)
 
         work_dir = Path(geometry.save_dir)
-        image_paths = self._resolve_frame_paths(
-            geometry, stream_id, frames, decoder=decoder, ingest_artifact=ingest_artifact, work_dir=work_dir
+        rgb = self._geometry_space_images(
+            geometry, stream_id, frames, decoder=decoder, ingest_artifact=ingest_artifact
         )
-
-        images = load_and_preprocess_images(image_paths, mode="crop").to(self.cfg.device)
+        # Same float conversion as VGGT's loader (``ToTensor``: uint8 / 255).
+        images = torch.from_numpy(rgb).permute(0, 3, 1, 2).float().div(255.0).to(self.cfg.device)
         if tuple(images.shape[-2:]) != (H, W):
             # The tracks must live in the SAME pixel space as the artifact's K /
             # world points, or the seed reprojection is meaningless. A mismatch
-            # means the crop diverged from the backend's preprocessing.
+            # means the recorded transform disagrees with the point maps.
             raise PoseRefineUnavailable(
-                f"stream {stream_id}: tracker image space {tuple(images.shape[-2:])} != geometry pointmap space {(H, W)}; "
-                "crop divergence — refusing to seed BA with mismatched coordinates."
+                f"stream {stream_id}: tracker image space {tuple(images.shape[-2:])} != geometry "
+                f"pointmap space {(H, W)}; the recorded image transform disagrees with the point "
+                "maps — refusing to seed BA with mismatched coordinates."
             )
 
         self._log(f"stream {stream_id}: {len(frames)} keyframes at {W}x{H}; predicting VGGSfM tracks.")

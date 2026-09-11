@@ -69,19 +69,34 @@ class GaussianRenderBackend(RenderBackend):
         return view.get("image_file") or view.get("image_path")
 
     def _load_gt(self, path: str, width: int, height: int) -> torch.Tensor:
-        img = Image.open(path).convert("RGB")
+        """A training photo, which must already be its camera's size.
+
+        The scene stage writes each photo in the geometry's pixels, matching its
+        camera. A photo of any other size would be resized (squashed) into a
+        different image than the camera sees -- the bug this refuses.
+        """
+        with Image.open(path) as img:
+            img = img.convert("RGB")
         w, h = int(width), int(height)
         if img.size != (w, h):
-            img = img.resize((w, h), Image.Resampling.BILINEAR)
+            raise ValueError(
+                f"training photo {path} is {img.size[0]}x{img.size[1]} but its camera is {w}x{h}; "
+                "the scene stage must write it in the geometry's pixels (a scene made before image transforms "
+                "were recorded has to be rebuilt)"
+            )
         arr = np.array(img, dtype=np.uint8)  # copy -> writable (no torch warning)
         return torch.as_tensor(arr, dtype=torch.float32, device=self.device) / 255.0
+
+    def _require_image_path(self, view: dict[str, Any]) -> str:
+        path = self._view_image_path(view)
+        if not path:
+            raise FileNotFoundError(f"training view {view.get('frame_key')!r} has no photo (image_file / image_path)")
+        return path
 
     def _train_views(self, scene_artifact) -> list[tuple[RenderCamera, torch.Tensor]]:
         out: list[tuple[RenderCamera, torch.Tensor]] = []
         for view in scene_artifact.train_views:
-            path = self._view_image_path(view)
-            if not path:
-                continue
+            path = self._require_image_path(view)
             out.append((self._camera(view), self._load_gt(path, view["width"], view["height"])))
         return out
 
@@ -187,9 +202,7 @@ class GaussianRenderBackend(RenderBackend):
         """Train views for the dynamic trainer: (camera, gt[H,W,3], time_id)."""
         out: list[tuple[RenderCamera, torch.Tensor, int]] = []
         for view in scene_artifact.train_views:
-            path = self._view_image_path(view)
-            if not path:
-                continue
+            path = self._require_image_path(view)
             out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view.get("time_id", 0))))
         return out
 

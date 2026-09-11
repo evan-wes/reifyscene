@@ -220,6 +220,147 @@ def _photos_reroot(ctx: ResumeContext) -> Derivation:
     return Derivation(f"photo paths re-rooted ({where})", metadata={"debug_image_paths": paths})
 
 
+def _depth_sizes(geometry: Any) -> dict[str, tuple[int, int]]:
+    import numpy as np
+
+    sizes: dict[str, tuple[int, int]] = {}
+    for key, payload in (getattr(geometry, "depthmaps_by_frame", {}) or {}).items():
+        depth = None if payload is None else payload.get("depth")
+        if depth is None:
+            continue
+        arr = np.asarray(depth)
+        arr = arr[..., 0] if arr.ndim == 3 and arr.shape[-1] == 1 else arr
+        sizes.setdefault(str(key).rpartition(":")[0], (int(arr.shape[1]), int(arr.shape[0])))
+    return sizes
+
+
+def _geometry_streams(geometry: Any) -> list[str]:
+    return sorted(
+        {str(f.stream_id) for f in getattr(geometry, "selected_frames", []) or []}
+        | set(_depth_sizes(geometry))
+    )
+
+
+def _ingest_sizes(ctx: ResumeContext) -> dict[str, tuple[int, int]]:
+    ingest = ctx.artifacts.get("ingest")
+    return {
+        str(s.stream_id): (int(s.width), int(s.height))
+        for s in getattr(ingest, "streams", []) or []
+        if int(s.width) > 0
+    }
+
+
+def _transforms_recorded(ctx: ResumeContext) -> str | None:
+    from reifyscene.geometry.image_transform import ImageTransform
+
+    records = _metadata(ctx.artifact).get("image_transforms") or {}
+    missing = [s for s in _geometry_streams(ctx.artifact) if s not in records]
+    if missing:
+        return (
+            f"it does not record how stream(s) {missing} map into its pixels (made before crop "
+            "boxes were recorded)"
+        )
+    depth, ingest = _depth_sizes(ctx.artifact), _ingest_sizes(ctx)
+    for stream_id, raw in records.items():
+        transform = ImageTransform.from_dict(raw)
+        if stream_id in depth and transform.output_size != depth[stream_id]:
+            return (
+                f"stream {stream_id}'s crop box lands on {transform.output_size}, "
+                f"its depth is {depth[stream_id]}"
+            )
+        if stream_id in ingest and transform.source_size != ingest[stream_id]:
+            return (
+                f"stream {stream_id}'s crop box starts from {transform.source_size}, "
+                f"its frames are {ingest[stream_id]}"
+            )
+    return None
+
+
+def _vggt_long_loader(
+    geometry_settings: dict[str, Any], resize_max_dim: int | None
+) -> tuple[str, int]:
+    """The loader VGGT-Long ran for this resize setting (mirrors ``_input_loader``)."""
+    from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+
+    target = VGGTLongInitializer._effective_vggt_input_target_size(resize_max_dim)
+    if bool(geometry_settings.get("prevent_input_upscale", True)) and target < 518:
+        return "bounded", int(target)
+    return "upstream", 518
+
+
+def _derive_transforms(ctx: ResumeContext) -> Derivation:
+    """The crop box a pre-record geometry artifact's backend applied, from what it recorded.
+
+    Accepted only when its recorded settings leave one possible loader and the result
+    lands exactly on its depth maps; ``pose_refine`` shares its geometry's pixels.
+    """
+    from reifyscene.geometry.image_transform import (
+        ImageTransform,
+        Resize,
+        pad_to_batch,
+        transform_record,
+        vggt_input_transform,
+    )
+
+    md = _metadata(ctx.artifact)
+    backend = _backend_used(ctx.artifact) or ""
+    if ctx.stage == "pose_refine":
+        records = (_metadata(ctx.artifacts.get("geometry")).get("image_transforms")) or {}
+        if not records:
+            raise NotDerivable("its geometry has no crop box to share")
+        ctx.artifact.metadata["image_transforms"] = dict(records)
+        return Derivation(
+            "crop boxes taken from its geometry", metadata={"image_transforms": dict(records)}
+        )
+
+    ingest, depth = _ingest_sizes(ctx), _depth_sizes(ctx.artifact)
+    streams = _geometry_streams(ctx.artifact)
+    missing = [s for s in streams if s not in ingest]
+    if missing:
+        raise NotDerivable(f"the ingest artifact has no frame size for stream(s) {missing}")
+    settings = (ctx.records.get(ctx.stage) or {}).get("settings", {}).get("geometry") or {}
+    transforms: dict[str, ImageTransform] = {}
+    how = backend
+    if backend == "vggt-long":
+        resize = md.get("vggt_long_resize_max_dim")
+        loader, target = _vggt_long_loader(settings, resize)
+        how = f"vggt-long, {loader} loader at {target}, resize_max_dim={resize}"
+        transforms = {
+            s: vggt_input_transform(
+                ingest[s], loader=loader, target_size=target, resize_max_dim=resize
+            )
+            for s in streams
+        }
+    elif backend == "vggt":
+        resize = settings.get("resize_max_dim")
+        how = f"vggt, upstream loader, resize_max_dim={resize}"
+        transforms = pad_to_batch({
+            s: vggt_input_transform(ingest[s], loader="upstream", resize_max_dim=resize)
+            for s in streams
+        })
+    elif backend == "dataset":
+        how = "dataset, its pre-scaled frames"
+        for s in streams:
+            out = depth.get(s, ingest[s])
+            ops = () if out == ingest[s] else (Resize(out, "unknown"),)
+            transforms[s] = ImageTransform(ingest[s], ops)
+    else:
+        how = f"{backend}, frame-sized depth"
+        transforms = {s: ImageTransform.identity(ingest[s]) for s in streams}
+    for s, transform in transforms.items():
+        if s in depth and transform.output_size != depth[s]:
+            raise NotDerivable(
+                f"the crop box its settings imply ({how}) lands on {transform.output_size}, but "
+                f"its depth maps are {depth[s]}"
+            )
+    records = {
+        s: {**transform_record(t, recorded_by=backend or "unknown"), "source": "derived at resume"}
+        for s, t in transforms.items()
+    }
+    ctx.artifact.metadata["image_transforms"] = records
+    return Derivation(f"crop boxes derived ({how})", metadata={"image_transforms": records})
+
+
 def _pose_refine_ran(ctx: ResumeContext) -> str | None:
     info = _metadata(ctx.artifact).get("pose_refine") or {}
     if not info.get("enabled"):
@@ -343,6 +484,7 @@ _GEOMETRY = (
     Requirement("the ground-plane transform is recorded", _ground_plane_recorded),
     Requirement("VGGT-Long's poses are globally aligned", _global_poses),
     Requirement("its photos exist", _photos_resolve, _photos_reroot),
+    Requirement("its crop box is recorded", _transforms_recorded, _derive_transforms),
 )
 
 REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {
@@ -358,6 +500,44 @@ REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {
     "scene": (Requirement("it is a complete scene", _scene_consistent),),
 }
 
+def _upgrade_tracking_lift(ctx: ResumeContext) -> Derivation:
+    """Tracking 1 -> 2: re-lift the loaded 2D tracks and re-split static/dynamic.
+
+    The 2D tracks (the expensive, model-made part) are kept; the lift and the split
+    are recomputed exactly as the tracking stage now does them, on the loaded
+    pose-refined geometry.
+    """
+    from reifyscene.geometry.image_transform import MissingImageTransform
+    from reifyscene.lifting.backproject import TrackLifter3D
+    from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
+
+    geometry, ingest = ctx.artifacts.get("pose_refine"), ctx.artifacts.get("ingest")
+    if geometry is None or ingest is None:
+        raise NotDerivable("re-lifting needs the loaded pose_refine and ingest artifacts")
+    lifting = ctx.cfg.get("lifting") or {}
+    try:
+        TrackLifter3D(point_conf_threshold=float(lifting.get("point_conf_threshold", 0.0))).lift(
+            ctx.artifact, geometry, ingest
+        )
+    except MissingImageTransform as exc:
+        raise NotDerivable(str(exc)) from exc
+    StaticDynamicPartitioner(
+        static_threshold_world=float(lifting.get("static_threshold_world", 0.05)),
+        min_lifted_frames=int(lifting.get("min_lifted_frames", 2)),
+    ).partition(ctx.artifact, geometry)
+    md = ctx.artifact.metadata
+    md["debug_image_paths"] = dict(_metadata(geometry).get("debug_image_paths") or {})
+    # The resumed copy does not rebuild the prior run's (large) track debug viewer.
+    md["save_debug_assets"] = md["save_debug_html"] = False
+    return Derivation(
+        "tracks re-lifted from the geometry's depth and cameras through its crop box, and "
+        "re-split static/dynamic (contract v1 -> v2)",
+        resave=True,
+    )
+
+
 # stage -> {version made by: upgrade to the next version}. An upgrade recomputes the
 # artifact's content from what is loaded (no model run) and returns what it did.
-UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {}
+UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {
+    "tracking": {1: _upgrade_tracking_lift},
+}

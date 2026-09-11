@@ -465,6 +465,62 @@ class ReifyScenePipeline:
             manifest.notes.append(result.reconcile.note())
         return result.artifact, manifest
 
+    @staticmethod
+    def _finalize_image_transforms(artifact, ingest_artifact: IngestArtifact) -> None:
+        """Every geometry stream carries an ingest-frame -> geometry-pixels transform.
+
+        Backends record their own (VGGT's crop, the dataset's factor resize). A
+        stream left without one (a composed or pose-only artifact) gets the identity
+        at its ingest frame size. Either way the transform must land exactly on the
+        stream's depth-map size and start from its ingest frame size -- a mismatch
+        means consumers would pair photos and pixels with the wrong geometry pixels,
+        so it fails here instead.
+        """
+        from reifyscene.geometry.image_transform import ImageTransform, transform_record
+
+        streams = {s.stream_id: s for s in ingest_artifact.streams}
+        depth_sizes: dict[str, tuple[int, int]] = {}
+        for key, payload in (artifact.depthmaps_by_frame or {}).items():
+            depth = np.asarray((payload or {}).get('depth')) if payload is not None else None
+            if depth is None or depth.ndim < 2:
+                continue
+            depth = depth[..., 0] if depth.ndim == 3 and depth.shape[-1] == 1 else depth
+            stream_id = str(key).rpartition(':')[0]
+            size = (int(depth.shape[1]), int(depth.shape[0]))
+            if depth_sizes.setdefault(stream_id, size) != size:
+                raise ValueError(f"geometry stream {stream_id!r} has depth maps of different sizes")
+        stream_ids = {str(f.stream_id) for f in artifact.selected_frames} | set(depth_sizes) | {
+            str(s) for s in (artifact.camera_states_by_stream or {})
+        }
+        records = dict((artifact.metadata or {}).get('image_transforms') or {})
+        for stream_id in sorted(stream_ids):
+            stream = streams.get(stream_id)
+            ingest_size = None
+            if stream is not None and stream.width > 0:
+                ingest_size = (int(stream.width), int(stream.height))
+            if stream_id not in records:
+                size = ingest_size or depth_sizes.get(stream_id)
+                if size is None:
+                    raise ValueError(
+                        f"geometry stream {stream_id!r}: no ingest frame size to record its image transform"
+                    )
+                records[stream_id] = transform_record(
+                    ImageTransform.identity(size),
+                    recorded_by=f'pipeline:identity ({artifact.backend_name})',
+                )
+            transform = ImageTransform.from_dict(records[stream_id])
+            if stream_id in depth_sizes and transform.output_size != depth_sizes[stream_id]:
+                raise ValueError(
+                    f"geometry stream {stream_id!r}: image transform lands on {transform.output_size} "
+                    f"but its depth maps are {depth_sizes[stream_id]}"
+                )
+            if ingest_size is not None and transform.source_size != ingest_size:
+                raise ValueError(
+                    f"geometry stream {stream_id!r}: image transform starts from "
+                    f"{transform.source_size} but the ingest frames are {ingest_size}"
+                )
+        artifact.metadata['image_transforms'] = records
+
     def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
         """Run coarse geometry initialization and persist its heavy outputs.
 
@@ -485,6 +541,7 @@ class ReifyScenePipeline:
                 'geometry', self.geometry_init, self.geometry_backend_name,
                 selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
         artifact.attach_manifest(manifest)
+        self._finalize_image_transforms(artifact, ingest_artifact)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
         if estimate is not None:

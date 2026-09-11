@@ -514,3 +514,26 @@ def test_a_legacy_dataset_root_that_no_longer_exists_is_matched_by_name(prior, t
     other['geometry']['dataset_root'] = str(tmp_path / 'elsewhere' / 'windmill')
     (tmp_path / 'elsewhere' / 'windmill').mkdir(parents=True)
     assert not _check(legacy, tmp_path / 'new', 'scene', other, [video]).ok
+
+
+def test_an_old_run_is_relifted_and_its_cheap_stages_rebuilt(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
+    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
+    assert plan.ok, plan.report()
+    tracking = plan.verdicts['tracking']
+    assert tracking.action == 'load' and tracking.resave
+    assert any('re-lifted' in d for d in tracking.derived)
+    assert plan.records['tracking']['version'] == contract_for('tracking').version
+    for stage in ('graph', 'optimization'):
+        assert plan.verdicts[stage].action == 'rebuild', stage
+
+
+def test_an_old_scene_is_rejected_with_what_changed(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
+    plan = _check(legacy, tmp_path / 'new', 'render', copy.deepcopy(cfg), [video])
+    assert not plan.ok
+    problem = plan.verdicts['scene'].problems[0]
+    assert 'contract version 1 of scene' in problem and 'did not match the cameras' in problem
+    assert plan.latest_start() == 'scene'

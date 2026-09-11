@@ -19,7 +19,8 @@ from reifyscene.common.memory import format_memory_snapshot, process_memory_snap
 from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile
 from reifyscene.common.types import FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.image_transform import vggt_input_transform
+from reifyscene.geometry.vggt_wrapper import DEFAULT_INPUT_CACHE_ROOT, VGGTInitializer
 
 
 
@@ -938,6 +939,7 @@ class VGGTLongInitializer(VGGTInitializer):
         plans, recommendation = self._attempt_plan_sequence(selected_frames, ingest_artifact)
         attempt_history: list[dict[str, Any]] = []
         image_cache: dict[int | None, tuple[list[Path], list[str]]] = {}
+        input_caches: dict[int | None, dict[str, Any] | None] = {}
         last_error_summary: str | None = None
 
         self._log_auto_tune(
@@ -958,14 +960,14 @@ class VGGTLongInitializer(VGGTInitializer):
             )
             self.resize_max_dim = None if resize_max_dim is None else int(resize_max_dim)
             if resize_max_dim not in image_cache:
-                resize_tag = "orig" if resize_max_dim is None else f"maxdim_{int(resize_max_dim)}"
-                image_dir = cache_root / resize_tag
+                # Each resize setting materializes into its own content-keyed directory.
                 image_cache[resize_max_dim] = self._materialize_images(
                     selected_frames,
                     ingest_artifact,
-                    image_dir,
+                    cache_root,
                     resize_max_dim=resize_max_dim,
                 )
+                input_caches[resize_max_dim] = self._last_input_cache
                 self._log_auto_tune(
                     f"attempt {attempt_idx}/{len(plans)}: prepared {len(image_cache[resize_max_dim][0])} image(s) at resize_max_dim={resize_label}."
                 )
@@ -995,6 +997,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 chunks = self._load_chunk_predictions(runner)
                 global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
                 predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                self._last_input_cache = input_caches.get(resize_max_dim)
                 attempt_history.append({
                     **plan,
                     "attempt_index": attempt_idx,
@@ -1080,12 +1083,22 @@ class VGGTLongInitializer(VGGTInitializer):
             artifact.notes.append("VGGT-Long backend unavailable; emitted heuristic fallback geometry.")
             return artifact
 
+        # Content-keyed input cache shared with VGGT (never an ingest-folder-named
+        # directory another run would empty and rewrite).
         cache_root = (
-            Path(self.frame_cache_dir)
-            if self.frame_cache_dir
-            else Path(".reifyscene_cache") / "vggt_long_inputs" / ingest_artifact.run_id
+            Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
         )
         cache_root.mkdir(parents=True, exist_ok=True)
+        # VGGT-Long pads each chunk's mixed-size images up to that chunk's largest, so a
+        # frame's pixel mapping would depend on which chunk it fell in: refuse up front.
+        source_sizes = self._stream_source_sizes(selected_frames, ingest_artifact)
+        if len(set(source_sizes.values())) > 1:
+            sizes = {sid: f"{w}x{h}" for sid, (w, h) in source_sizes.items()}
+            raise ValueError(
+                f"VGGT-Long got streams of different frame sizes ({sizes}); its per-chunk padding "
+                "makes the frame-to-geometry pixel mapping chunk-dependent, which is not recorded "
+                "-- run the streams separately"
+            )
 
         backend_output_root = (
             Path(self.output_cache_dir)
@@ -1115,7 +1128,8 @@ class VGGTLongInitializer(VGGTInitializer):
                 cache_root,
                 resize_max_dim=self.resize_max_dim,
             )
-            runner = self._create_runner(cache_root, backend_output_root)
+            image_dir = Path(image_paths[0]).parent if image_paths else cache_root
+            runner = self._create_runner(image_dir, backend_output_root)
             runner.img_list = [str(path) for path in image_paths]
             self._run_runner(runner)
             chunks = self._load_chunk_predictions(runner)
@@ -1150,4 +1164,23 @@ class VGGTLongInitializer(VGGTInitializer):
         if auto_tune_recommendation is not None:
             artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
         artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
+        loader, target = self._input_loader()
+        artifact.metadata["vggt_long_input_loader"] = {"loader": loader, "target_size": target}
+        self._record_transforms(artifact, {
+            stream_id: vggt_input_transform(
+                size, loader=loader, target_size=target, resize_max_dim=self.resize_max_dim
+            )
+            for stream_id, size in source_sizes.items()
+        })
         return artifact
+
+    def _input_loader(self) -> tuple[str, int]:
+        """The loader ``_patched_vggt_long_preprocess`` runs for the current resize setting.
+
+        The no-upscale ``bounded`` loader replaces the upstream one only when
+        ``prevent_input_upscale`` is on and the effective target is below 518.
+        """
+        target = self._effective_vggt_input_target_size(self.resize_max_dim)
+        if self.prevent_input_upscale and target < 518:
+            return "bounded", int(target)
+        return "upstream", 518
