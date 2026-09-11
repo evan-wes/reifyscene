@@ -103,6 +103,16 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **The GT-oracle backend timed its cameras by frame number.** The dataset backend set each
+  camera's time to the frame index (`fps` defaulted to 1.0), while every other stage times frames
+  on the ingest clock (frame / 30 for spin). So the cameras densified for the tracking frames
+  were interpolated between the wrong dataset frames — tracking frame 95 (3.2 s) got a camera
+  from near dataset frame 3 — and the oracle's lifted tracks and graph were built on them (its
+  scene was not: it uses the dataset's own frames). The backend now uses the ingest stream's fps.
+  Resume: an old oracle geometry's cameras are re-timed and its tracking-frame cameras
+  re-interpolated — a *revision* recorded in its fingerprint — and the stages built from it
+  follow instead of being rejected: pose_refine repeats the re-timing (contracts may now declare
+  `relinks`), tracking keeps its 2D tracks and re-lifts them, graph and optimization rebuild.
 - **A backend asked for as `real` could still fall back silently.** The wrappers raise when a
   `real` backend is unavailable, but each stage's backend ladder caught that and ran the next
   rung — for geometry the empty floor, so `--geometry-backend-mode real` (the run script's

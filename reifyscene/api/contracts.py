@@ -25,6 +25,8 @@ every stage declares a :class:`StageContract`:
 - ``rebuildable``: the stage is cheap, runs no model, and is a pure function of its
   upstream artifacts and settings, so a resume that finds it stale re-runs it
   instead of rejecting.
+- ``relinks``: upstream stages whose change this stage can absorb without re-running
+  (tracking keeps its 2D tracks and re-lifts them onto a changed pose_refine).
 
 Every artifact records ``metadata["contract"]``: its stage, version, effective
 settings, the identity of the input frames, the digests of the upstream artifacts it
@@ -75,6 +77,7 @@ class StageContract:
     paths: tuple[str, ...] = ()
     rebuildable: bool | Callable[[Mapping[str, Any]], bool] = False
     changes: Mapping[int, str] = field(default_factory=dict)
+    relinks: tuple[str, ...] = ()
 
     def excluded(self, cfg: Mapping[str, Any]) -> tuple[str, ...]:
         extra = tuple(self.exclude_when(cfg)) if self.exclude_when is not None else ()
@@ -261,8 +264,14 @@ def fingerprint(
     input_id: Mapping[str, Any],
     upstream: Mapping[str, str | None],
     version: int | None = None,
+    revisions: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """The record an artifact carries in ``metadata["contract"]``."""
+    """The record an artifact carries in ``metadata["contract"]``.
+
+    ``revisions`` name changes a resume made to the artifact's content (re-timed
+    cameras, re-lifted tracks); they are part of the digest, so what was built from the
+    unrevised artifact no longer matches it.
+    """
     record = {
         "stage": stage,
         "version": contract_for(stage).version if version is None else int(version),
@@ -270,6 +279,9 @@ def fingerprint(
         "input": stable(dict(input_id)),
         "upstream": {k: upstream[k] for k in sorted(upstream)},
     }
+    revisions = list(revisions)
+    if revisions:
+        record["revisions"] = revisions
     record["digest"] = _digest(record)
     return record
 
@@ -391,6 +403,7 @@ CONTRACTS: dict[str, StageContract] = {
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),
+            relinks=("geometry",),
         ),
         StageContract(
             # Segment is configured by the objects section (detector, SAM 2, frame stride);
@@ -443,6 +456,7 @@ CONTRACTS: dict[str, StageContract] = {
                 "crop, and positions outside it clamped to its edge)",
             },
             settings={"tracking": {}, "lifting": {}},
+            relinks=("pose_refine",),
             pinned=(
                 "tracking.frame_stride",
                 "tracking.max_frames",

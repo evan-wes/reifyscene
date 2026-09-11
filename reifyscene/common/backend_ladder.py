@@ -175,7 +175,9 @@ class BackendLadder:
                         f"{self.stage}: the {rung.name} backend, asked for as real, failed "
                         f"({type(exc).__name__}: {exc}); not falling back"
                     ) from exc
-                manifest.rungs.append(RungStatus(rung.name, rung.fidelity, 'failed', f'run-error: {exc}'))
+                manifest.rungs.append(
+                    RungStatus(rung.name, rung.fidelity, 'failed', f'run-error: {exc}')
+                )
                 continue
             manifest.rungs.append(RungStatus(rung.name, rung.fidelity, 'ran'))
             manifest.backend_used = rung.name
@@ -223,7 +225,9 @@ def fallbacks_of(stage: str, artifact: Any) -> list[dict[str, Any]]:
             'stage': stage,
             'wanted': missed[0].get('name'),
             'used': cap.get('backend_used') or 'nothing',
-            'why': '; '.join(f"{r.get('name')} {r.get('status')}: {r.get('reason')}" for r in missed),
+            'why': '; '.join(
+                f"{r.get('name')} {r.get('status')}: {r.get('reason')}" for r in missed
+            ),
         })
     for stream_id, payload in (getattr(artifact, 'track_payloads_by_stream', {}) or {}).items():
         used = str((payload or {}).get('backend_used') or '')

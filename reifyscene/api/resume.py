@@ -39,7 +39,13 @@ from reifyscene.api.contracts import (
     set_path,
     stable,
 )
-from reifyscene.api.requirements import REQUIREMENTS, UPGRADES, NotDerivable, ResumeContext
+from reifyscene.api.requirements import (
+    RELINKS,
+    REQUIREMENTS,
+    UPGRADES,
+    NotDerivable,
+    ResumeContext,
+)
 from reifyscene.api.stages import STAGE_ORDER, StageSpec
 from reifyscene.common.io import read_json, write_json
 
@@ -574,13 +580,21 @@ def check_resume(
 
 def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_input, stage_dir,
                   video_paths) -> None:
-    """Load, upgrade and derive -- or mark for rebuild, or reject -- one loadable stage."""
+    """Load, upgrade, relink and derive -- or mark for rebuild, or reject -- one stage."""
     contract = contract_for(stage)
     record = records[stage]
     ctx = ResumeContext(stage, artifacts[stage], artifacts, records, cfg, stage_dir, video_paths)
     if record.get("input") != current_input:
         verdict.reject("it was made from a different input (the frames it read have changed)")
         return
+    revisions: list[str] = list(record.get("revisions") or [])
+
+    def take(done) -> None:
+        verdict.derived.append(done.note)
+        verdict.resave = verdict.resave or done.resave
+        verdict.metadata_updates.update(done.metadata)
+        if done.revision:
+            revisions.append(done.revision)
 
     stale: list[str] = []
     version = int(record.get("version", 0))
@@ -590,13 +604,10 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
         if upgrade is None:
             break
         try:
-            done = upgrade(ctx)
+            take(upgrade(ctx))
         except NotDerivable as exc:
             stale.append(f"it cannot be upgraded from contract version {version}: {exc}")
             break
-        verdict.derived.append(done.note)
-        verdict.resave = verdict.resave or done.resave
-        verdict.metadata_updates.update(done.metadata)
         version += 1
         upgraded = True
     if version != contract.version and not stale:
@@ -612,10 +623,26 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
     diffs = _settings_diff(recorded, effective_settings(stage, cfg))
     if diffs:
         stale.append("settings differ: " + "; ".join(diffs))
-    for up in contract.upstream:
-        have = digests.get(up)
-        if up in digests and have is not None and record.get("upstream", {}).get(up) != have:
-            stale.append(f"it was built from a different {up} artifact than the one being loaded")
+    changed = [
+        up for up in contract.upstream
+        if up in digests and digests[up] is not None
+        and record.get("upstream", {}).get(up) != digests[up]
+    ]
+    relinked = False
+    if changed and not stale and set(changed) <= set(contract.relinks):
+        # An upstream it can follow changed: bring it along instead of re-running it (an
+        # upgrade that already recomputed from the loaded upstream has done so).
+        if not upgraded:
+            try:
+                take(RELINKS[stage](ctx))
+            except NotDerivable as exc:
+                stale.append(f"its {', '.join(changed)} changed and it cannot follow: {exc}")
+        relinked = not stale
+    elif changed:
+        stale.extend(
+            f"it was built from a different {up} artifact than the one being loaded"
+            for up in changed
+        )
 
     if stale:
         if contract.is_rebuildable(cfg):
@@ -637,17 +664,17 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
             verdict.reject(problem)
             continue
         try:
-            done = requirement.derive(ctx)
+            take(requirement.derive(ctx))
         except NotDerivable as exc:
             verdict.reject(f"{problem}; {exc}")
             continue
-        verdict.derived.append(done.note)
-        verdict.resave = verdict.resave or done.resave
-        verdict.metadata_updates.update(done.metadata)
 
-    if upgraded:
+    if upgraded or relinked or revisions != list(record.get("revisions") or []):
+        upstream = dict(record.get("upstream") or {})
+        if relinked or upgraded:
+            upstream.update({up: digests[up] for up in contract.upstream if digests.get(up)})
         records[stage] = fingerprint(
-            stage, record["settings"], record["input"], record.get("upstream") or {}, version
+            stage, record["settings"], record["input"], upstream, version, revisions
         )
 
 

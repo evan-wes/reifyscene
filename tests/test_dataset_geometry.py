@@ -104,3 +104,41 @@ def test_backproject_view_translated_pose() -> None:
         scale_mult=1.0, scale_min=1e-5, scale_max=1.0,
     )
     assert np.allclose(xyz[0], [-1.5 + 10.0, -1.5, 2.0], atol=1e-5)
+
+
+def _write_frames(root, n: int, size: int = 10) -> None:
+    """A DyCheck-format sequence of ``n`` frames of camera 0, all at the identity pose."""
+    for sub in ("camera", "depth/1x", "rgb/1x", "splits"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    cam = {
+        "focal_length": 100.0, "pixel_aspect_ratio": 1.0, "principal_point": [size / 2.0, size / 2.0],
+        "image_size": [size, size], "orientation": np.eye(3).tolist(), "position": [0.0, 0.0, 1.0],
+        "radial_distortion": [0.0, 0.0, 0.0], "tangential_distortion": [0.0, 0.0], "skew": 0.0,
+    }
+    names = [f"0_{i:05d}" for i in range(n)]
+    for name in names:
+        (root / "camera" / f"{name}.json").write_text(json.dumps(cam))
+        np.save(root / "depth" / "1x" / f"{name}.npy", np.full((size, size), 2.0, dtype=np.float32))
+        Image.fromarray(np.zeros((size, size, 3), dtype=np.uint8)).save(root / "rgb" / "1x" / f"{name}.png")
+    (root / "splits" / "train.json").write_text(
+        json.dumps({"camera_ids": ["0"] * n, "frame_names": names, "time_ids": list(range(n))})
+    )
+
+
+def test_cameras_are_on_the_ingest_clock(tmp_path) -> None:
+    """Frame 2 of a 30 fps stream is at 2/30 s, as every other stage has it (not at 2 s)."""
+    from types import SimpleNamespace
+
+    from reifyscene.common.types import FrameRef
+
+    _write_frames(tmp_path, 3)
+    ingest = SimpleNamespace(
+        run_id="r", keyframes=[],
+        streams=[SimpleNamespace(stream_id="0", fps=30.0, width=10, height=10, num_frames=3)],
+    )
+    frames = [FrameRef("0", i, i / 30.0) for i in range(3)]
+    art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 1}).initialize(
+        frames, ingest_artifact=ingest
+    )
+    assert [round(st.time_sec, 6) for st in art.camera_states_by_stream["0"]] == [0.0, 0.033333, 0.066667]
+    assert [round(fr.timestamp_sec, 6) for fr in art.selected_frames] == [0.0, 0.033333, 0.066667]

@@ -581,3 +581,33 @@ def test_a_run_tracked_under_a_frame_cap_resumes_with_that_cap(prior, tmp_path) 
     plan = _check(run_dir, tmp_path / 'new', 'scene', uncapped, [video])
     assert plan.ok, plan.report()
     assert plan.pins == {'tracking.max_frames': 4}
+
+
+def test_a_revised_geometry_is_followed_downstream_not_rejected(prior, tmp_path, monkeypatch) -> None:
+    from reifyscene.api import requirements as req
+
+    root, run_dir, cfg, video = prior
+    # A content-changing derivation on geometry (as the camera re-timing of an old oracle is).
+    retimed = req.Requirement(
+        "stand-in for the camera clock", check=lambda ctx: "cameras off the ingest clock",
+        derive=lambda ctx: req.Derivation("re-timed", resave=True, revision="camera-clock"),
+    )
+    monkeypatch.setitem(req.REQUIREMENTS, "geometry", (*req.REQUIREMENTS["geometry"], retimed))
+    plan = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
+    assert plan.ok, plan.report()
+    assert plan.records['geometry']['revisions'] == ['camera-clock']
+    assert any('follows its geometry' in d for d in plan.verdicts['pose_refine'].derived)
+    assert any('re-lifted' in d for d in plan.verdicts['tracking'].derived)
+    for stage in ('graph', 'optimization'):
+        assert plan.verdicts[stage].action == 'rebuild', stage
+    # Every relinked record names the upstream it now matches.
+    assert plan.records['pose_refine']['upstream']['geometry'] == plan.records['geometry']['digest']
+    assert plan.records['tracking']['upstream']['pose_refine'] == plan.records['pose_refine']['digest']
+    # A revision it cannot follow is refused.
+    other = req.Requirement(
+        "an unfollowable revision", check=lambda ctx: "x",
+        derive=lambda ctx: req.Derivation("changed", resave=True, revision="something-else"),
+    )
+    monkeypatch.setitem(req.REQUIREMENTS, "geometry", (*req.REQUIREMENTS["geometry"][:-1], other))
+    refused = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
+    assert 'cannot follow' in refused.verdicts['pose_refine'].problems[0]

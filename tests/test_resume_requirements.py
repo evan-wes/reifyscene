@@ -299,3 +299,33 @@ def test_a_kept_diverged_refinement_is_rejected_and_a_refused_one_loads(tmp_path
     ctx = _ctx("pose_refine", refused, tmp_path)
     assert all(r.check(ctx) is None for r in REQUIREMENTS["pose_refine"] if r.name in (
         "the refinement actually ran", "its bundle adjustment converged"))
+
+
+def test_an_old_oracle_geometry_is_retimed_onto_the_ingest_clock(tmp_path) -> None:
+    from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+
+    intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=5.0, cy=5.0)
+
+    def state(t, x):
+        pose = np.eye(4)
+        pose[0, 3] = x
+        return TimedCameraState(stream_id="0", time_sec=t, intrinsics=intr, pose=CameraPose(T_world_cam=pose))
+
+    # The old dataset backend: cameras at time = frame number (0, 1, 2), plus a camera it
+    # densified for tracking frame 1 at 1/30 s -- interpolated between dataset frames 0 and 1.
+    geo = SimpleNamespace(
+        metadata={"capability": {"backend_used": "dataset"}},
+        selected_frames=[FrameRef("0", i, float(i)) for i in range(3)],
+        camera_states_by_stream={"0": [state(0.0, 0.0), state(1 / 30, 1 / 30), state(1.0, 1.0), state(2.0, 2.0)]},
+    )
+    ingest = SimpleNamespace(streams=[SimpleNamespace(stream_id="0", fps=30.0, width=10, height=10, num_frames=3)])
+    ctx = ResumeContext("geometry", geo, {"ingest": ingest}, {}, {"tracking": {}}, tmp_path / "geometry", [])
+    req = _requirement("geometry", "its cameras are on the ingest clock")
+    assert "not on the ingest clock" in req.check(ctx)
+    done = req.derive(ctx)
+    assert done.revision == "camera-clock" and done.resave
+    states = geo.camera_states_by_stream["0"]
+    assert [round(st.time_sec, 6) for st in states] == [0.0, 0.033333, 0.066667]
+    # Each camera is its own dataset frame's pose, not an interpolation between the wrong ones.
+    assert [st.pose.T_world_cam[0, 3] for st in states] == [0.0, 1.0, 2.0]
+    assert req.check(ctx) is None

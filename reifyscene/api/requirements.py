@@ -35,11 +35,15 @@ class Derivation:
 
     ``metadata`` updates are patched into the copied artifact's JSON; ``resave`` means
     the derivation changed more than metadata, so the artifact is saved in full.
+    ``revision`` names a change to what the artifact *says* (not just where its files
+    are): it enters the artifact's fingerprint, so the stages built from the unrevised
+    artifact must relink, rebuild or be rejected.
     """
 
     note: str
     metadata: dict[str, Any] = field(default_factory=dict)
     resave: bool = False
+    revision: str | None = None
 
 
 @dataclass
@@ -306,8 +310,9 @@ def _loader_current(ctx: ResumeContext) -> str | None:
     if loader != "bounded_v1":
         return None
     for stream_id, size in _ingest_sizes(ctx).items():
-        then = vggt_input_transform(size, loader="bounded_v1", target_size=target, resize_max_dim=resize)
-        now = vggt_input_transform(size, loader="bounded", target_size=target, resize_max_dim=resize)
+        kw = dict(target_size=target, resize_max_dim=resize)
+        then = vggt_input_transform(size, loader="bounded_v1", **kw)
+        now = vggt_input_transform(size, loader="bounded", **kw)
         if then.to_dict() != now.to_dict():
             return (
                 f"made by the no-upscale VGGT-Long loader before it cropped tall frames: stream "
@@ -391,6 +396,95 @@ def _derive_transforms(ctx: ResumeContext) -> Derivation:
     return Derivation(f"crop boxes derived ({how})", metadata={"image_transforms": records})
 
 
+def _stream_fps(ctx: ResumeContext) -> dict[str, float]:
+    ingest = ctx.artifacts.get("ingest")
+    return {
+        str(s.stream_id): float(s.fps)
+        for s in getattr(ingest, "streams", []) or []
+        if float(getattr(s, "fps", 0) or 0) > 0
+    }
+
+
+def _off_clock(ctx: ResumeContext) -> list[Any]:
+    """Selected frames whose camera is not at the ingest clock's time (dataset geometry)."""
+    if _backend_used(ctx.artifact) != "dataset":
+        return []
+    fps = _stream_fps(ctx)
+    states = getattr(ctx.artifact, "camera_states_by_stream", {}) or {}
+    out = []
+    for fr in getattr(ctx.artifact, "selected_frames", []) or []:
+        rate = fps.get(str(fr.stream_id))
+        if rate is None:
+            continue
+        want = float(fr.frame_idx) / rate
+        times = [float(st.time_sec) for st in states.get(str(fr.stream_id), [])]
+        has_camera = any(abs(t - want) <= 1e-6 for t in times)
+        if abs(float(fr.timestamp_sec) - want) > 1e-6 or not has_camera:
+            out.append(fr)
+    return out
+
+
+def _camera_clock(ctx: ResumeContext) -> str | None:
+    off = _off_clock(ctx)
+    if not off:
+        return None
+    fr = off[0]
+    return (
+        f"{len(off)} of its cameras are not on the ingest clock (frame {fr.frame_idx} at "
+        f"{float(fr.timestamp_sec):g} s): the dataset backend timed cameras by frame number"
+    )
+
+
+def _retime_cameras(ctx: ResumeContext) -> Derivation:
+    """Re-time a dataset geometry's cameras onto the ingest clock and re-densify them.
+
+    Its cameras sat at time = frame number, and the extra cameras densified for the
+    tracking frames (which are on the ingest clock) were interpolated between the wrong
+    dataset frames. Keep the dataset's own cameras, move them to frame / fps, drop the
+    densified ones and densify again onto the tracking plan.
+    """
+    from reifyscene.common.types import FrameRef, TimedCameraState
+    from reifyscene.geometry.camera_interpolation import densify_camera_states_for_frames
+    from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
+
+    art, fps = ctx.artifact, _stream_fps(ctx)
+    old_time = {(str(f.stream_id), float(f.timestamp_sec)): f for f in art.selected_frames}
+    states: dict[str, list[Any]] = {}
+    for stream_id, lst in (art.camera_states_by_stream or {}).items():
+        rate = fps.get(str(stream_id))
+        if rate is None:
+            raise NotDerivable(f"the ingest artifact has no fps for stream {stream_id}")
+        kept = []
+        for st in lst:
+            fr = old_time.get((str(stream_id), float(st.time_sec)))
+            if fr is None:
+                continue  # a densified camera: re-made below
+            kept.append(TimedCameraState(
+                stream_id=st.stream_id, time_sec=float(fr.frame_idx) / rate,
+                intrinsics=st.intrinsics, pose=st.pose,
+            ))
+        states[str(stream_id)] = sorted(kept, key=lambda st: st.time_sec)
+    art.selected_frames = [
+        FrameRef(f.stream_id, f.frame_idx, float(f.frame_idx) / fps.get(str(f.stream_id), 1.0))
+        for f in art.selected_frames
+    ]
+    art.camera_states_by_stream = states
+    tracker = CoTrackerWrapper(dict(ctx.cfg.get("tracking") or {}))
+    targets = [fr for s in getattr(ctx.artifacts.get("ingest"), "streams", []) or []
+               for fr in tracker.plan_frame_refs(s)]
+    summary = (
+        densify_camera_states_for_frames(art.camera_states_by_stream, targets) if targets else {}
+    )
+    md = art.metadata
+    md["dense_camera_summary"] = summary
+    md["save_debug_assets"] = md["save_debug_html"] = False  # do not rebuild the old viewer
+    return Derivation(
+        f"cameras re-timed onto the ingest clock and {int(summary.get('added_camera_states', 0))} "
+        "tracking-frame cameras re-interpolated",
+        resave=True, revision="camera-clock",
+    )
+
+
 def _pose_refine_ran(ctx: ResumeContext) -> str | None:
     info = _metadata(ctx.artifact).get("pose_refine") or {}
     if not info.get("enabled"):
@@ -419,7 +513,9 @@ def _bundle_adjustment_converged(ctx: ResumeContext) -> str | None:
             max_reproj_px=max_reproj, max_rot_delta_deg=max_turn,
         )
         if why is not None:
-            return f"stream {stream_id}'s bundle adjustment diverged ({why}) but its poses were kept"
+            return (
+                f"stream {stream_id}'s bundle adjustment diverged ({why}) but its poses were kept"
+            )
     return None
 
 
@@ -536,6 +632,7 @@ _GEOMETRY = (
     Requirement("its photos exist", _photos_resolve, _photos_reroot),
     Requirement("its crop box is recorded", _transforms_recorded, _derive_transforms),
     Requirement("its frames went in as today's loader takes them", _loader_current),
+    Requirement("its cameras are on the ingest clock", _camera_clock, _retime_cameras),
 )
 
 REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {
@@ -555,12 +652,12 @@ REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {
     "scene": (Requirement("it is a complete scene", _scene_consistent),),
 }
 
-def _upgrade_tracking_lift(ctx: ResumeContext) -> Derivation:
-    """Tracking 1 -> 2: re-lift the loaded 2D tracks and re-split static/dynamic.
+def _relift_tracks(ctx: ResumeContext) -> Derivation:
+    """Re-lift the loaded 2D tracks onto the loaded pose_refine and re-split them.
 
-    The 2D tracks (the expensive, model-made part) are kept; the lift and the split
-    are recomputed exactly as the tracking stage now does them, on the loaded
-    pose-refined geometry.
+    The 2D tracks (the expensive, model-made part) are kept; the lift and the static /
+    dynamic split are recomputed exactly as the tracking stage does them. Used to bring
+    a version-1 tracking artifact up to date and to relink one whose pose_refine changed.
     """
     from reifyscene.geometry.image_transform import MissingImageTransform
     from reifyscene.lifting.backproject import TrackLifter3D
@@ -586,13 +683,31 @@ def _upgrade_tracking_lift(ctx: ResumeContext) -> Derivation:
     md["save_debug_assets"] = md["save_debug_html"] = False
     return Derivation(
         "tracks re-lifted from the geometry's depth and cameras through its crop box, and "
-        "re-split static/dynamic (contract v1 -> v2)",
+        "re-split static/dynamic",
+        # No revision: as an upgrade (new version) or a relink (new upstream digests) the
+        # fingerprint changes anyway, and it then equals a fresh run's.
         resave=True,
     )
+
+
+def _relink_pose_refine(ctx: ResumeContext) -> Derivation:
+    """pose_refine absorbs a geometry revision it repeats itself (re-timed cameras)."""
+    revised = set((ctx.records.get("geometry") or {}).get("revisions") or [])
+    if not revised <= {"camera-clock"}:
+        raise NotDerivable(
+            f"its geometry was revised ({sorted(revised)}) in a way it cannot follow"
+        )
+    return Derivation("follows its geometry's camera re-timing (applied below)")
 
 
 # stage -> {version made by: upgrade to the next version}. An upgrade recomputes the
 # artifact's content from what is loaded (no model run) and returns what it did.
 UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {
-    "tracking": {1: _upgrade_tracking_lift},
+    "tracking": {1: _relift_tracks},
+}
+
+# stage -> how it absorbs a change of the upstream stages its contract ``relinks``.
+RELINKS: dict[str, Callable[[ResumeContext], Derivation]] = {
+    "pose_refine": _relink_pose_refine,
+    "tracking": _relift_tracks,
 }
