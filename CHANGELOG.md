@@ -103,6 +103,12 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **Tracking stopped at frame 95.** The machine profile (`--resource-profile auto`) capped the
+  tracked frames at 24 / 48 / 96 by free GPU memory, so spin's 426-frame clip was tracked, lifted
+  and put into the graph only up to frame 95 (3.2 s of 14.2). Every profile tracks in windows,
+  which is what bounds memory, so none caps the frame count now; `--tracking-max-frames` still
+  does. A value the user did not give counts as machine-picked for a resume even when the profile
+  picks nothing, so a run tracked under the old cap still resumes with it.
 - **Pose refinement was not repeatable, and a diverged bundle adjustment was used anyway.** Two
   runs of `spin_native_full.yaml` got identical VGGT-Long geometry and pixel-identical tracker
   images, yet one bundle adjustment converged (final reprojection 0.88 px) and the other diverged

@@ -571,3 +571,13 @@ def test_vggt_long_scratch_outputs_are_per_run_and_removed(tmp_path, monkeypatch
     with given._backend_outputs(ingest) as (d, kept_d):
         pass
     assert kept_d and d == tmp_path / 'mine' and d.exists()
+
+
+def test_a_run_tracked_under_a_frame_cap_resumes_with_that_cap(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior  # tracked with max_frames 4
+    uncapped = copy.deepcopy(cfg)
+    uncapped['tracking']['max_frames'] = None  # today's profiles cap nothing
+    uncapped['_profile_picked'] = ['tracking.max_frames']
+    plan = _check(run_dir, tmp_path / 'new', 'scene', uncapped, [video])
+    assert plan.ok, plan.report()
+    assert plan.pins == {'tracking.max_frames': 4}

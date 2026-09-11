@@ -36,9 +36,11 @@ def _picked(cfg: dict, path: str, explicit, profile_value) -> None:
     """Note that ``path``'s value came from the machine profile, not the user.
 
     A resume pins such settings to the prior run's values instead of re-picking them
-    from whatever GPU memory happens to be free now (``cfg['_profile_picked']``).
+    from whatever GPU memory happens to be free now (``cfg['_profile_picked']``). Any
+    value the user did not give counts -- including a profile that picks nothing (no
+    frame cap), so a run made under an older profile still resumes as it was made.
     """
-    if explicit is None and profile_value is not None:
+    if explicit is None:
         cfg.setdefault('_profile_picked', []).append(path)
 
 
@@ -116,9 +118,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
             # Use the auto recommender and then override only the profile tag so the preset values stay in one place.
             rec = recommend_tracking_profile(system_report or collect_system_report(), device=tracking_device)
             manual_presets = {
-                'lowmem': {'resize_max_dim': 256, 'frame_stride': 2, 'max_frames': 24, 'window_size': 12, 'window_overlap': 4, 'cpu_threads': 4},
-                'balanced': {'resize_max_dim': 384, 'frame_stride': 2, 'max_frames': 48, 'window_size': 24, 'window_overlap': 8, 'cpu_threads': 6},
-                'full': {'resize_max_dim': 512, 'frame_stride': 1, 'max_frames': 96, 'window_size': 48, 'window_overlap': 12, 'cpu_threads': 8},
+                'lowmem': {'resize_max_dim': 256, 'frame_stride': 2, 'max_frames': None, 'window_size': 12, 'window_overlap': 4, 'cpu_threads': 4},
+                'balanced': {'resize_max_dim': 384, 'frame_stride': 2, 'max_frames': None, 'window_size': 24, 'window_overlap': 8, 'cpu_threads': 6},
+                'full': {'resize_max_dim': 512, 'frame_stride': 1, 'max_frames': None, 'window_size': 48, 'window_overlap': 12, 'cpu_threads': 8},
             }
             rec.update(manual_presets[args.resource_profile])
             rec['profile'] = args.resource_profile
