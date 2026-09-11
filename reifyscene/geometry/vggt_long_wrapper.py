@@ -1100,79 +1100,105 @@ class VGGTLongInitializer(VGGTInitializer):
                 "-- run the streams separately"
             )
 
-        backend_output_root = (
-            Path(self.output_cache_dir)
-            if self.output_cache_dir
-            else Path(".reifyscene_cache") / "vggt_long_run" / ingest_artifact.run_id
-        )
-        backend_output_root.mkdir(parents=True, exist_ok=True)
-
-        attempt_history: list[dict[str, Any]] = []
-        auto_tune_recommendation: dict[str, Any] | None = None
-        if self.auto_tune:
-            predictions, image_paths, notes, attempt_history, auto_tune_recommendation = self._run_auto_tuned(
-                selected_frames,
-                ingest_artifact=ingest_artifact,
-                cache_root=cache_root,
-                backend_output_root=backend_output_root,
-            )
-        else:
-            if len(selected_frames) > self.chunk_size and self.overlap <= 0:
-                raise ValueError(
-                    "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
-                    f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+        with self._backend_outputs(ingest_artifact) as (backend_output_root, keep_outputs):
+            attempt_history: list[dict[str, Any]] = []
+            auto_tune_recommendation: dict[str, Any] | None = None
+            if self.auto_tune:
+                predictions, image_paths, notes, attempt_history, auto_tune_recommendation = self._run_auto_tuned(
+                    selected_frames,
+                    ingest_artifact=ingest_artifact,
+                    cache_root=cache_root,
+                    backend_output_root=backend_output_root,
                 )
-            image_paths, notes = self._materialize_images(
-                selected_frames,
-                ingest_artifact,
-                cache_root,
-                resize_max_dim=self.resize_max_dim,
-            )
-            image_dir = Path(image_paths[0]).parent if image_paths else cache_root
-            runner = self._create_runner(image_dir, backend_output_root)
-            runner.img_list = [str(path) for path in image_paths]
-            self._run_runner(runner)
-            chunks = self._load_chunk_predictions(runner)
-            global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
-            predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
-            notes = list(notes)
-            notes.append(
-                "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
-                if global_c2w is not None
-                else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
-            )
-            notes.append(
-                f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
-            )
-            notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
+            else:
+                if len(selected_frames) > self.chunk_size and self.overlap <= 0:
+                    raise ValueError(
+                        "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
+                        f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+                    )
+                image_paths, notes = self._materialize_images(
+                    selected_frames,
+                    ingest_artifact,
+                    cache_root,
+                    resize_max_dim=self.resize_max_dim,
+                )
+                image_dir = Path(image_paths[0]).parent if image_paths else cache_root
+                runner = self._create_runner(image_dir, backend_output_root)
+                runner.img_list = [str(path) for path in image_paths]
+                self._run_runner(runner)
+                chunks = self._load_chunk_predictions(runner)
+                global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
+                predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                notes = list(notes)
+                notes.append(
+                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
+                    if global_c2w is not None
+                    else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
+                )
+                notes.append(
+                    f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
+                )
+                notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
 
-        artifact = self._initialize_from_predictions(
-            selected_frames,
-            predictions,
-            ingest_artifact,
-            notes=notes,
-            image_paths=image_paths,
-        )
-        artifact.backend_name = self.backend_name
-        artifact.notes.append("Chunk overlaps were merged by first occurrence; downstream artifact contract preserved.")
-        artifact.metadata["geometry_backend_name"] = self.backend_name
-        artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
-        artifact.metadata["vggt_long_overlap"] = self.overlap
-        artifact.metadata["vggt_long_loop_enable"] = self.loop_enable
-        artifact.metadata["vggt_long_auto_tune"] = bool(self.auto_tune)
-        artifact.metadata["vggt_long_auto_tune_attempts"] = attempt_history
-        if auto_tune_recommendation is not None:
-            artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
-        artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
-        loader, target = self._input_loader()
-        artifact.metadata["vggt_long_input_loader"] = {"loader": loader, "target_size": target}
-        self._record_transforms(artifact, {
-            stream_id: vggt_input_transform(
-                size, loader=loader, target_size=target, resize_max_dim=self.resize_max_dim
+            artifact = self._initialize_from_predictions(
+                selected_frames,
+                predictions,
+                ingest_artifact,
+                notes=notes,
+                image_paths=image_paths,
             )
-            for stream_id, size in source_sizes.items()
-        })
-        return artifact
+            artifact.backend_name = self.backend_name
+            artifact.notes.append("Chunk overlaps were merged by first occurrence; downstream artifact contract preserved.")
+            artifact.metadata["geometry_backend_name"] = self.backend_name
+            artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
+            artifact.metadata["vggt_long_overlap"] = self.overlap
+            artifact.metadata["vggt_long_loop_enable"] = self.loop_enable
+            artifact.metadata["vggt_long_auto_tune"] = bool(self.auto_tune)
+            artifact.metadata["vggt_long_auto_tune_attempts"] = attempt_history
+            if auto_tune_recommendation is not None:
+                artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
+            artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
+            loader, target = self._input_loader()
+            artifact.metadata["vggt_long_input_loader"] = {"loader": loader, "target_size": target}
+            self._record_transforms(artifact, {
+                stream_id: vggt_input_transform(
+                    size, loader=loader, target_size=target, resize_max_dim=self.resize_max_dim
+                )
+                for stream_id, size in source_sizes.items()
+            })
+            artifact.metadata["vggt_long_outputs"] = {
+                "dir": str(backend_output_root), "kept": keep_outputs,
+            }
+            return artifact
+
+    @contextmanager
+    def _backend_outputs(self, ingest_artifact):
+        """VGGT-Long's own output folder for one invocation: ``(path, kept)``.
+
+        Its chunk predictions and ``camera_poses.txt`` are read back once, while the
+        geometry is built, and are not needed after. A folder shared by every run of
+        the same input (``vggt_long_run/<input folder>``) could be written by two runs
+        at once, so each invocation gets its own, and it is removed afterwards (about
+        11 GB for 426 frames) unless ``keep_backend_outputs`` is set. An explicit
+        ``output_cache_dir`` is the caller's and is always kept.
+        """
+        import shutil
+        import tempfile
+
+        if self.output_cache_dir:
+            root = Path(self.output_cache_dir)
+            root.mkdir(parents=True, exist_ok=True)
+            yield root, True
+            return
+        keep = bool(self.cfg.get("keep_backend_outputs", False))
+        parent = DEFAULT_INPUT_CACHE_ROOT.parent / "vggt_long_run"
+        parent.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=f"{ingest_artifact.run_id}-", dir=parent))
+        try:
+            yield root, keep
+        finally:
+            if not keep:
+                shutil.rmtree(root, ignore_errors=True)
 
     def _input_loader(self) -> tuple[str, int]:
         """The loader ``_patched_vggt_long_preprocess`` runs for the current resize setting.

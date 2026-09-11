@@ -550,3 +550,24 @@ def test_a_setting_taken_out_of_a_fingerprint_does_not_reject_older_records(prio
     path.write_text(json.dumps(raw))
     assert _check(older, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video]).ok
 
+
+def test_vggt_long_scratch_outputs_are_per_run_and_removed(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import reifyscene.geometry.vggt_long_wrapper as wrapper
+
+    monkeypatch.setattr(wrapper, 'DEFAULT_INPUT_CACHE_ROOT', tmp_path / 'cache' / 'vggt_inputs')
+    init = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic'})
+    ingest = SimpleNamespace(run_id='1x')
+    with init._backend_outputs(ingest) as (a, kept_a), init._backend_outputs(ingest) as (b, _):
+        assert a != b and a.parent == b.parent == tmp_path / 'cache' / 'vggt_long_run'
+        assert not kept_a
+    assert not a.exists() and not b.exists()
+    keep = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic', 'keep_backend_outputs': True})
+    with keep._backend_outputs(ingest) as (c, kept_c):
+        pass
+    assert kept_c and c.exists()
+    given = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic', 'output_cache_dir': str(tmp_path / 'mine')})
+    with given._backend_outputs(ingest) as (d, kept_d):
+        pass
+    assert kept_d and d == tmp_path / 'mine' and d.exists()

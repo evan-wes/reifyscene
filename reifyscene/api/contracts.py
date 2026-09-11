@@ -306,7 +306,6 @@ _VGGT_LONG_ONLY = (
     "geometry.loop_enable",
     "geometry.use_dbow",
     "geometry.long_config",
-    "geometry.delete_temp_files",
 )
 
 
@@ -376,7 +375,12 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "geometry",
             settings={"geometry": {}, **_TRACK_PLAN, "env:MOGE_MODEL_ID": None},
-            exclude=("geometry.save_depth_pngs",),
+            # Where VGGT-Long keeps its scratch files, and whether, change nothing it outputs.
+            exclude=(
+                "geometry.save_depth_pngs",
+                "geometry.delete_temp_files",
+                "geometry.keep_backend_outputs",
+            ),
             exclude_when=_geometry_excluded,
             pinned=_TRACK_PLAN_PINNED,
             upstream=("ingest", "sync", "dyn_mask"),

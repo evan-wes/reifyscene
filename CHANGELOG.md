@@ -103,6 +103,13 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **VGGT-Long's scratch outputs were shared by every run of a sequence and never removed.** Its
+  chunk predictions and `camera_poses.txt` went to `.reifyscene_cache/vggt_long_run/<input
+  folder name>` (about 11 GB for spin's 426 frames), where two runs of one input would write
+  the same files. Each geometry invocation now gets its own folder, removed once the geometry is
+  built — nothing reads it after; `geometry.keep_backend_outputs: true` keeps it, and an
+  explicit `output_cache_dir` is always kept. The geometry artifact records where it was
+  (`metadata.vggt_long_outputs`). Neither setting is part of the geometry fingerprint.
 - **Pose refinement wrote its COLMAP seed model into the geometry stage's folder**
   (`geometry/colmap_seed/`), so a geometry artifact collected another stage's files. It now
   writes into its own `pose_refine/` folder.
