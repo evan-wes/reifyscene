@@ -7,6 +7,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.1.0] - 2026-09-10
+
+### Added
+- **`scripts/export_checkpoint_views.py`: see a trained scene, not just its score.** The
+  masked-NVS benchmark rendered every held-out view and kept only the average, and the
+  pipeline's one saved render, the orbit flythrough, swings far off the captured path and
+  smears. The exporter renders straight from a run's `render/trained_dynamic.npz` (nothing is
+  retrained, so old runs work too) and writes:
+  - **held-out views**, evenly spaced over the benchmark's held-out split: the render, the real
+    photo, the covisibility mask, and that view's masked PSNR (`heldout/index.json`);
+  - **a replay video**: the scene re-rendered from every training camera at its own time, i.e.
+    the captured path. It shows reconstruction fidelity, not novel views.
+
+  On the spin oracle run: 8 held-out views at 17.3–21.1 dB (its full-split average is 19.64)
+  and a 426-frame replay, in 6 s on the GPU. The logic is in
+  `reifyscene/render/eval/checkpoint_views.py`.
+- **`configs/experiment/spin_native_full.yaml`**, the config for the README's headline run
+  (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views). The
+  12.56 could not be reproduced from the repo before: its eval block lived only in one run's
+  recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file is
+  `base.yaml` plus `evaluation.masked_nvs`.
+
+### Changed
+- **Held-out camera placement is shared, not duplicated.** `heldout_placements` (with
+  `load_heldout_view` and `eval_dataset`) in `masked_nvs_benchmark.py` now does the placement
+  that `score_render_artifact_masked_nvs_dynamic` did inline, and the exporter calls the same
+  function, so an exported view is exactly a scored view. That placement has had a real bug
+  before (0.1.31.2's missing ground-plane rotation); a second copy would be a second place for
+  one to hide. **No change in results:** scoring the spin oracle checkpoint on all 722 views
+  with the old and new scorer in one process gives identical mPSNR / mSSIM / mLPIPS
+  (19.638906…). The dataset path now reads every held-out camera's JSON up front instead of
+  one per view.
+
+### Tests
+- `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
+  factor ratio; truncation) and from the dataset through the scene-norm; unplaceable bundles
+  (the scorer returns `{}`, the exporter refuses); even view picking; the replay's image size
+  from the principal point; the held-out export's files, index and per-view masked PSNR
+  (checked against a closed form); replay order and size. CPU-only stand-ins for the
+  rasterizer, scene and dataset reader. Full suite: **382 passed, 1 skipped**.
+
 ## [0.2.0.2] - 2026-09-10
 
 ### Fixed

@@ -1,0 +1,115 @@
+# The README's headline run: VGGT-Long + pose refinement on every frame of DyCheck
+# "spin", scored on the full held-out split (masked mPSNR 12.56 at v0.2.0.0).
+#
+# base.yaml plus an `evaluation.masked_nvs` block (--config replaces base.yaml, it
+# does not merge onto it). Run from the repo root:
+#
+#   python scripts/run_single_video_reifyscene.py \
+#     --frames-dir ../data/shape_of_motion/iphone/spin/rgb/1x \
+#     --geometry-backend-name vggt-long --geometry-device cuda \
+#     --keyframes-all --pose-refine-enable \
+#     --config configs/experiment/spin_native_full.yaml \
+#     --run-dir ../runs/spin_native_full
+#
+# dataset_root is relative to the repo root; point it at your DyCheck "spin" copy.
+
+run:
+  name: reifyscene_dev
+  output_dir: artifacts/runs/reifyscene_dev
+
+dataset:
+  input_dir: data/raw
+  cache_dir: artifacts/cache
+  keyframe_stride: 15
+
+models:
+  geometry_backend: vggt
+  tracker_backend: cotracker
+  use_densepose: true
+  use_smpl: true
+  detect_objects: true
+
+
+geometry:
+  ground_plane:
+    enabled: true
+    max_frames: 24
+    max_points_per_frame: 3000
+    ransac_iterations: 160
+    distance_threshold: 0.035
+    min_inlier_ratio: 0.06
+    min_alignment_cos: 0.45
+    alignment_weight: 0.18
+    camera_up_axis: -y
+    random_seed: 7
+    manual_up_vector: null
+    lock_gravity_vector: false
+    floor_height_quantile: 0.06
+    max_saved_candidates: 12
+
+
+calibration:
+  sampling:
+    sample_spacing_sec: 0.75
+    max_frames_per_stream: 48
+    image_max_dim: 960
+    prefer_static_frames: true
+    static_diff_threshold: 16.0
+    min_sharpness: 8.0
+  hloc_colmap:
+    retrieval_conf: netvlad
+    feature_conf: superpoint_aachen
+    matcher_conf: superglue
+    retrieval_top_k: 20
+    camera_mode: PER_FOLDER
+    camera_model: SIMPLE_RADIAL
+    fix_intrinsics: false
+    verbose: false
+
+optimization:
+  schedule: stage1_sync_pose
+  max_iterations: 100
+
+scene:
+  timeline_source: geometry
+  human_smpl_root_anchor: true
+  human_anchor_temporal_alpha: 0.6
+  human_ground_contact_strength: 1.0
+  human_anchor_search_radius_px: 10.0
+  human_foot_search_radius_px: 14.0
+  min_human_anchor_points: 6
+  min_human_foot_points: 4
+
+render:
+  backend_name: gaussian4d
+  device: cuda
+  width: 800
+  height: 450
+  point_limit: 10000
+  max_dynamic_entities_per_kind: 3
+  frame_stride: 1
+  max_frames_per_path: 32
+  debug_triptych: true
+  render_scale: 1
+  enabled_paths:
+    orbit: true
+    overhead: false
+    replay: false
+    follow_human: false
+    follow_object: false
+
+evaluation:
+  reprojection_error_p90_px_max: 24.0
+  mean_human_fragments_max: 1.5
+  height_abs_p90_max: 0.40
+  heldout_psnr_mean_min: 11.0
+  geometry: {}
+  tracking: {}
+  rendering:
+    max_views: 4
+  masked_nvs:
+    dataset_root: ../data/shape_of_motion/iphone/spin
+    factor: 2              # score at the 2x (360x480) resolution, as Shape of Motion does
+    split: train
+    eval_split: val
+    max_eval_frames: null  # null = every held-out view
