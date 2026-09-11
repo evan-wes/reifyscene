@@ -243,17 +243,23 @@ class PoseRefiner:
         self.notes: list[str] = []
 
     # -- public API -------------------------------------------------------- #
-    def refine(self, geometry: GeometryArtifact, *, decoder, ingest_artifact) -> dict[str, StreamRefinement]:
+    def refine(
+        self, geometry: GeometryArtifact, *, decoder, ingest_artifact, work_dir: str | Path | None = None
+    ) -> dict[str, StreamRefinement]:
         """Return a per-stream refinement for every stream that refines cleanly.
 
         Streams that are too sparse to bundle-adjust are omitted (the caller
         keeps their original poses). Raises :class:`PoseRefineUnavailable` if the
-        heavy dependencies / runtime are missing.
+        heavy dependencies / runtime are missing. ``work_dir`` receives the COLMAP
+        seed model; the pipeline passes the pose_refine stage's own folder (it used
+        to land in the geometry stage's).
         """
         self._import_or_unavailable()
         results: dict[str, StreamRefinement] = {}
         for stream_id in geometry.stream_ids():
-            refinement = self._refine_stream(geometry, stream_id, decoder=decoder, ingest_artifact=ingest_artifact)
+            refinement = self._refine_stream(
+                geometry, stream_id, decoder=decoder, ingest_artifact=ingest_artifact, work_dir=work_dir
+            )
             if refinement is not None:
                 results[stream_id] = refinement
         return results
@@ -322,7 +328,9 @@ class PoseRefiner:
                 images.append(transform.apply_to_image(decoder.get_frame(stream, fr.frame_idx)))
         return np.stack(images)
 
-    def _refine_stream(self, geometry, stream_id, *, decoder, ingest_artifact) -> StreamRefinement | None:
+    def _refine_stream(
+        self, geometry, stream_id, *, decoder, ingest_artifact, work_dir=None
+    ) -> StreamRefinement | None:
         import torch
 
         from vggt.dependency.track_predict import predict_tracks
@@ -374,7 +382,7 @@ class PoseRefiner:
         points = np.stack(points)
         conf = np.stack(conf)
 
-        work_dir = Path(geometry.save_dir)
+        work_dir = Path(work_dir) if work_dir is not None else Path(geometry.save_dir)
         rgb = self._geometry_space_images(
             geometry, stream_id, frames, decoder=decoder, ingest_artifact=ingest_artifact
         )

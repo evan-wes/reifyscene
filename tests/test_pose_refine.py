@@ -204,15 +204,21 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
         stats={"num_keyframes": 3},
     )
 
-    monkeypatch.setattr(
-        PoseRefiner, "refine", lambda self, geometry, *, decoder, ingest_artifact: {STREAM_ID: fake}
-    )
+    work_dirs = []
+
+    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+        work_dirs.append(work_dir)
+        return {STREAM_ID: fake}
+
+    monkeypatch.setattr(PoseRefiner, "refine", fake_refine)
     # isolate the keyframe-rebuild logic from the tracker-backed densification
     monkeypatch.setattr(ReifyScenePipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
 
     refined = pipeline.refine_poses(ingest, geom)
 
     assert refined.metadata["pose_refine"]["refined_streams"] == [STREAM_ID]
+    # BA's scratch goes in pose_refine's own folder, not the geometry stage's.
+    assert Path(work_dirs[0]) == pipeline._stage_dir("pose_refine")
     new = refined.camera_states_by_stream[STREAM_ID]
     assert len(new) == 3
     for fr, st in zip(geom.selected_frames, new):

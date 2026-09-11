@@ -103,6 +103,9 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **Pose refinement wrote its COLMAP seed model into the geometry stage's folder**
+  (`geometry/colmap_seed/`), so a geometry artifact collected another stage's files. It now
+  writes into its own `pose_refine/` folder.
 - **Self-reconstructed scenes could not be scored: every native run's held-out renders were
   black.** The dynamic scorer placed the dataset's held-out cameras in the scene through the
   bundle's scene-norm, which is only right when the scene was built on the dataset's own

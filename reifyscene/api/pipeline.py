@@ -578,7 +578,9 @@ class ReifyScenePipeline:
         if enabled:
             refiner = PoseRefiner(pose_cfg)
             try:
-                refinements = refiner.refine(geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact)
+                refinements = refiner.refine(
+                    geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact, work_dir=save_dir
+                )
             except PoseRefineUnavailable as exc:
                 extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
             extra_notes.extend(refiner.notes)
