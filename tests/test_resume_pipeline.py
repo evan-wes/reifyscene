@@ -537,3 +537,16 @@ def test_an_old_scene_is_rejected_with_what_changed(prior, tmp_path) -> None:
     problem = plan.verdicts['scene'].problems[0]
     assert 'contract version 1 of scene' in problem and 'did not match the cameras' in problem
     assert plan.latest_start() == 'scene'
+
+
+def test_a_setting_taken_out_of_a_fingerprint_does_not_reject_older_records(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    older = tmp_path / 'older'
+    shutil.copytree(run_dir, older)
+    path = older / 'geometry' / 'artifact.json'
+    raw = json.loads(path.read_text())
+    # An older record that still fingerprinted a key the contract now excludes.
+    raw['metadata']['contract']['settings']['geometry']['save_depth_pngs'] = True
+    path.write_text(json.dumps(raw))
+    assert _check(older, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video]).ok
+

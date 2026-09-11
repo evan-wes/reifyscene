@@ -31,6 +31,7 @@ from typing import Any
 from reifyscene.api.contracts import (
     MISSING,
     contract_for,
+    current_view,
     effective_settings,
     fingerprint,
     get_path,
@@ -607,7 +608,8 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
             f"made by contract version {record.get('version')} of {stage}; this code is "
             f"version {contract.version}" + (" (" + "; ".join(since) + ")" if since else "")
         )
-    diffs = _settings_diff(record.get("settings") or {}, effective_settings(stage, cfg))
+    recorded = current_view(stage, record.get("settings") or {}, cfg)
+    diffs = _settings_diff(recorded, effective_settings(stage, cfg))
     if diffs:
         stale.append("settings differ: " + "; ".join(diffs))
     for up in contract.upstream:

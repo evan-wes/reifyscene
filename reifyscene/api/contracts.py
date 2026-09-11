@@ -185,6 +185,23 @@ def effective_settings(stage: str, cfg: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def current_view(stage: str, settings: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Recorded settings as today's contract fingerprints them.
+
+    A key the contract has since excluded (it was found not to affect the output), or
+    an entry it no longer declares, is dropped, so taking a setting out of a
+    fingerprint does not make every older record look different.
+    """
+    contract = contract_for(stage)
+    patterns = contract.excluded(cfg)
+    out: dict[str, Any] = {}
+    for path, value in settings.items():
+        if path not in contract.settings or any(fnmatch.fnmatchcase(path, p) for p in patterns):
+            continue
+        out[path] = _prune(value, path, patterns)
+    return out
+
+
 def recorded_setting(record: Mapping[str, Any], path: str) -> Any:
     """The value a fingerprint record holds for ``path`` (inside a subtree entry too)."""
     settings = record.get("settings") or {}
