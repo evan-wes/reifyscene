@@ -250,3 +250,25 @@ def test_pose_refine_shares_its_geometrys_crop_box(tmp_path) -> None:
     refined = _geometry_with_depth("vggt-long", (518, 518))
     _derive_crop("pose_refine", refined, tmp_path, ingest=_ingest(720, 960), artifacts={"geometry": geo})
     assert refined.metadata["image_transforms"] == geo.metadata["image_transforms"]
+
+
+def _loader_ctx(tmp_path, size, **metadata):
+    geo = _geometry_with_depth("vggt-long", (252, 252), **metadata)
+    return ResumeContext(
+        "geometry", geo, {"ingest": _ingest(*size)}, {"geometry": {"settings": {"geometry": {}}}},
+        {}, tmp_path / "geometry", [],
+    )
+
+
+def test_old_no_upscale_geometry_of_portrait_frames_is_refused(tmp_path) -> None:
+    req = _requirement("geometry", "its frames went in as today's loader takes them")
+    old_portrait = _loader_ctx(tmp_path, (720, 960), vggt_long_resize_max_dim=252)
+    assert "went in squashed" in req.check(old_portrait)
+    assert req.derive is None
+    # Landscape frames go in the same way under both loaders: nothing to refuse.
+    assert req.check(_loader_ctx(tmp_path, (960, 720), vggt_long_resize_max_dim=252)) is None
+    # Today's loader (recorded as version 2), and the full-size upstream loader, are current.
+    today = _loader_ctx(tmp_path, (720, 960), vggt_long_resize_max_dim=252,
+                        vggt_long_input_loader={"loader": "bounded", "target_size": 252, "version": 2})
+    assert req.check(today) is None
+    assert req.check(_loader_ctx(tmp_path, (720, 960), vggt_long_resize_max_dim=None)) is None

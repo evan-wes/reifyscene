@@ -277,15 +277,44 @@ def _transforms_recorded(ctx: ResumeContext) -> str | None:
 
 
 def _vggt_long_loader(
-    geometry_settings: dict[str, Any], resize_max_dim: int | None
+    geometry_settings: dict[str, Any], resize_max_dim: int | None, *, version: int = 2
 ) -> tuple[str, int]:
-    """The loader VGGT-Long ran for this resize setting (mirrors ``_input_loader``)."""
+    """The loader VGGT-Long ran for this resize setting (mirrors ``_input_loader``).
+
+    ``version`` 1 is the no-upscale loader before it cropped tall frames.
+    """
     from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
 
     target = VGGTLongInitializer._effective_vggt_input_target_size(resize_max_dim)
     if bool(geometry_settings.get("prevent_input_upscale", True)) and target < 518:
-        return "bounded", int(target)
+        return ("bounded" if version >= 2 else "bounded_v1"), int(target)
     return "upstream", 518
+
+
+def _loader_current(ctx: ResumeContext) -> str | None:
+    """Geometry the old no-upscale loader made from squashed frames is not today's."""
+    from reifyscene.geometry.image_transform import vggt_input_transform
+
+    if _backend_used(ctx.artifact) != "vggt-long":
+        return None
+    md = _metadata(ctx.artifact)
+    if int((md.get("vggt_long_input_loader") or {}).get("version", 1)) >= 2:
+        return None
+    settings = (ctx.records.get(ctx.stage) or {}).get("settings", {}).get("geometry") or {}
+    resize = md.get("vggt_long_resize_max_dim")
+    loader, target = _vggt_long_loader(settings, resize, version=1)
+    if loader != "bounded_v1":
+        return None
+    for stream_id, size in _ingest_sizes(ctx).items():
+        then = vggt_input_transform(size, loader="bounded_v1", target_size=target, resize_max_dim=resize)
+        now = vggt_input_transform(size, loader="bounded", target_size=target, resize_max_dim=resize)
+        if then.to_dict() != now.to_dict():
+            return (
+                f"made by the no-upscale VGGT-Long loader before it cropped tall frames: stream "
+                f"{stream_id}'s {size[0]}x{size[1]} frames went in squashed to {then.output_size}, "
+                f"where today's loader crops them to {now.output_size}"
+            )
+    return None
 
 
 def _derive_transforms(ctx: ResumeContext) -> Derivation:
@@ -323,7 +352,8 @@ def _derive_transforms(ctx: ResumeContext) -> Derivation:
     how = backend
     if backend == "vggt-long":
         resize = md.get("vggt_long_resize_max_dim")
-        loader, target = _vggt_long_loader(settings, resize)
+        # No record: made before records existed, so by the version 1 no-upscale loader.
+        loader, target = _vggt_long_loader(settings, resize, version=1)
         how = f"vggt-long, {loader} loader at {target}, resize_max_dim={resize}"
         transforms = {
             s: vggt_input_transform(
@@ -485,6 +515,7 @@ _GEOMETRY = (
     Requirement("VGGT-Long's poses are globally aligned", _global_poses),
     Requirement("its photos exist", _photos_resolve, _photos_reroot),
     Requirement("its crop box is recorded", _transforms_recorded, _derive_transforms),
+    Requirement("its frames went in as today's loader takes them", _loader_current),
 )
 
 REQUIREMENTS: dict[str, tuple[Requirement, ...]] = {

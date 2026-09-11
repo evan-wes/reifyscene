@@ -108,12 +108,17 @@ def test_bounded_loader_parity_is_pixel_identical(tmp_path: Path, size, target) 
     assert np.array_equal(ours, theirs)
 
 
-def test_bounded_loader_squashes_a_portrait_frame_and_says_so() -> None:
-    # The no-upscale loader clamps both sides to the target: a portrait frame is squashed,
-    # not cropped. The record states exactly that, so consumers reproduce it.
+def test_bounded_loader_crops_a_portrait_frame_like_upstream() -> None:
+    # Width to the target in whole patches, height in proportion, rows centred on the target.
     transform = vggt_input_transform((720, 960), loader="bounded", target_size=252)
-    # 720 * (252 / 720) floors to 238 in floating point (the loader's own arithmetic,
-    # matched pixel-for-pixel above); the height clamps to 252: a 0.94 aspect, not 0.75.
+    assert transform.ops == (Resize((252, 336), "bicubic"), Crop((0, 42, 252, 294)))
+    assert transform.output_size == (252, 252)
+
+
+def test_bounded_v1_describes_the_old_squashing_loader() -> None:
+    # Before the fix: 720 * (252 / 720) floored to 238 in floating point and the height was
+    # clamped to the target, so the portrait frame went in squashed (0.94 aspect, not 0.75).
+    transform = vggt_input_transform((720, 960), loader="bounded_v1", target_size=252)
     assert transform.ops == (Resize((238, 252), "bicubic"),)
     assert transform.is_pure_resize
 
@@ -332,7 +337,7 @@ def test_vggt_long_records_the_loader_it_ran(tmp_path: Path) -> None:
         }
     )
     art = init.initialize(frames, ingest_artifact=ingest, sync_artifact=None)
-    assert art.metadata["vggt_long_input_loader"] == {"loader": "bounded", "target_size": 126}
+    assert art.metadata["vggt_long_input_loader"] == {"loader": "bounded", "target_size": 126, "version": 2}
     transform = ImageTransform.from_dict(art.metadata["image_transforms"]["cam_00"])
     assert transform == vggt_input_transform(
         (320, 240), loader="bounded", target_size=126, resize_max_dim=128

@@ -599,13 +599,16 @@ class VGGTLongInitializer(VGGTInitializer):
             img = img.convert("RGB")
 
             width, height = img.size
-            base_dim = max(width, height) if mode == "pad" else max(width, 1)
-            scale = min(1.0, float(target_size) / float(base_dim))
-
-            new_width = max(14, int(np.floor((width * scale) / 14.0)) * 14)
-            new_height = max(14, int(np.floor((height * scale) / 14.0)) * 14)
-            new_width = min(target_size, new_width)
-            new_height = min(target_size, new_height)
+            if mode == "crop":
+                # Width to the target (never up), in whole 14-pixel patches, height kept in
+                # proportion and cropped below. It used to scale by a float ratio (720 at 252
+                # floored to 238) and clamp the height to the target, squashing portrait frames.
+                new_width = max(14, (min(target_size, width) // 14) * 14)
+                new_height = max(14, int(np.floor(height * new_width / width / 14.0)) * 14)
+            else:
+                scale = min(1.0, float(target_size) / float(max(width, height)))
+                new_width = min(target_size, max(14, int(np.floor((width * scale) / 14.0)) * 14))
+                new_height = min(target_size, max(14, int(np.floor((height * scale) / 14.0)) * 14))
 
             img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
             tensor = torch.from_numpy(np.asarray(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
@@ -1159,7 +1162,10 @@ class VGGTLongInitializer(VGGTInitializer):
                 artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
             artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
             loader, target = self._input_loader()
-            artifact.metadata["vggt_long_input_loader"] = {"loader": loader, "target_size": target}
+            # version 2: the no-upscale loader crops tall frames (version 1 squashed them).
+            artifact.metadata["vggt_long_input_loader"] = {
+                "loader": loader, "target_size": target, "version": 2,
+            }
             self._record_transforms(artifact, {
                 stream_id: vggt_input_transform(
                     size, loader=loader, target_size=target, resize_max_dim=self.resize_max_dim

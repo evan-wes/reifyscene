@@ -309,10 +309,11 @@ def vggt_loader_ops(
     ``upstream`` mirrors ``vggt.utils.load_fn.load_and_preprocess_images``: width to
     518, height to ``round(h * 518 / w / 14) * 14``, bicubic, then the rows centred
     on 518 when taller. ``bounded`` mirrors VGGT-Long's no-upscale loader
-    (``VGGTLongInitializer._load_and_preprocess_images_without_upscale``): scale
-    ``min(1, target / w)``, both sides floored to multiples of 14 and clamped to the
-    target -- so a portrait frame is squashed to the target, not cropped, and the
-    recorded ops say so. ``pad`` mode letterboxes, which no backend uses: it is not
+    (``VGGTLongInitializer._load_and_preprocess_images_without_upscale``): width to
+    ``min(target, w)`` in whole 14-pixel patches, height in proportion (floored to 14),
+    then the rows centred on the target when taller -- like upstream, never upscaling.
+    ``bounded_v1`` is that loader before it cropped (it squashed tall frames), kept to
+    describe geometry it made. ``pad`` mode letterboxes, which no backend uses: it is not
     implemented rather than guessed.
     """
     if mode != "crop":
@@ -330,15 +331,25 @@ def vggt_loader_ops(
             ops.append(Crop((0, start_y, new_width, start_y + VGGT_TARGET_SIZE)))
     elif loader == "bounded":
         target = max(14, int(target_size))
+        new_width = max(14, (min(target, width) // 14) * 14)
+        new_height = max(14, int(np.floor(height * new_width / width / 14.0)) * 14)
+        ops.append(Resize((new_width, new_height), "bicubic"))
+        if new_height > target:
+            start_y = (new_height - target) // 2
+            ops.append(Crop((0, start_y, new_width, start_y + target)))
+    elif loader == "bounded_v1":
+        # The no-upscale loader before 2026-09-11: a float scale (720 at 252 floors to 238)
+        # and both sides clamped to the target, so a portrait frame was squashed. Kept to
+        # describe geometry it made.
+        target = max(14, int(target_size))
         scale = min(1.0, float(target) / float(max(width, 1)))
         new_width = min(target, max(14, int(np.floor((width * scale) / 14.0)) * 14))
         new_height = min(target, max(14, int(np.floor((height * scale) / 14.0)) * 14))
         ops.append(Resize((new_width, new_height), "bicubic"))
-        if new_height > target:  # unreachable after the clamp; mirrors the loader
-            start_y = (new_height - target) // 2
-            ops.append(Crop((0, start_y, new_width, start_y + target)))
     else:
-        raise ValueError(f"unknown VGGT loader {loader!r}: expected 'upstream' or 'bounded'")
+        raise ValueError(
+            f"unknown VGGT loader {loader!r}: expected 'upstream', 'bounded' or 'bounded_v1'"
+        )
     return ops
 
 

@@ -103,6 +103,13 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **Our no-upscale VGGT-Long loader squashed portrait frames.** Below a 518 target it scaled by
+  a floating-point ratio (720 at 252 floored to 238) and clamped *both* sides to the target, so a
+  720×960 frame went in at 238×252 instead of being cropped like upstream. It now takes the width
+  to the target in whole 14-pixel patches, keeps the height in proportion and crops the rows
+  (252×336 → rows 42–294). Geometry records the loader as version 2. A resume refuses geometry
+  the old loader made from frames it squashed (restart at geometry); for frames it did not
+  squash, the old and new loaders agree and the geometry loads. None of the runs above use it.
 - **VGGT-Long's scratch outputs were shared by every run of a sequence and never removed.** Its
   chunk predictions and `camera_poses.txt` went to `.reifyscene_cache/vggt_long_run/<input
   folder name>` (about 11 GB for spin's 426 frames), where two runs of one input would write
@@ -196,11 +203,6 @@ version scheme (canonical version in the `VERSION` file, read by
   and the static one has the better mLPIPS (0.43 against 0.46) — though the dynamic scene fits
   its training views 4.3 dB better (21.3 against 17.0). Its motion modelling generalizes little
   of what it fits: a lead for the renderer, not changed here.
-- **Our VGGT-Long no-upscale loader squashes portrait frames.** When the target is below 518 it
-  floors both sides to multiples of 14 and clamps both to the target, so 720×960 at 252 becomes
-  252×252. The crop box records it faithfully; the loader itself is unchanged here. None of the
-  runs above use it (they run at 518).
-
 ### Tests
 - `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
   factor ratio; truncation) and from the dataset through the scene-norm; unplaceable bundles
