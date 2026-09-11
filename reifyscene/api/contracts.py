@@ -467,7 +467,15 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "pose_refine"),
         ),
         StageContract(
-            "graph", upstream=("pose_refine", "tracking", "humans", "objects"), rebuildable=True
+            "graph",
+            version=2,
+            changes={
+                2: "entities carry the point tracks that are evidence for them (the graph held "
+                "a node per track); the tracks inside no entity are the background's"
+            },
+            settings={"graph": {}},
+            upstream=("pose_refine", "tracking", "humans", "objects"),
+            rebuildable=True,
         ),
         StageContract(
             # The solver reads the ``optimizer`` section; ``optimization`` holds only

@@ -142,7 +142,7 @@ class ReifyScenePipeline:
         self.object_detector = ObjectDetector(objects_cfg)
         self.object_segmenter = ObjectSegmenter(objects_cfg)
         self.object_embedder = InstanceEmbedder(objects_cfg)
-        self.graph_builder = DynamicSceneGraphBuilder()
+        self.graph_builder = DynamicSceneGraphBuilder(self.cfg.get('graph', {}))
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))

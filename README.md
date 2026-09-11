@@ -58,8 +58,10 @@ geometry at full frame count.
   rendering.
 
 **Partial / scaffold:**
-- The scene **graph** stage builds camera + per-stream track nodes, but relation and
-  uncertainty inference and cross-view entity association are still placeholders.
+- The scene **graph** stage holds the cameras, the people and objects the perception
+  stages found, and the background, each carrying the point tracks that are evidence for
+  it and a position over time; relation and uncertainty inference and cross-view entity
+  association are still placeholders.
 - The joint **optimization** stage is a staged scaffold — `pose_refine` does the real
   bundle adjustment today.
 

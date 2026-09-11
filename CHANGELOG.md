@@ -61,6 +61,27 @@ version scheme (canonical version in the `VERSION` file, read by
   run's geometry, 12.37 before it). No config for it was in the repo before; its eval block lived only in one
   run's recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file
   is `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
+- **The graph holds real things; point tracks are the evidence for them**
+  (`reifyscene/graph/builders.py`, `graph/track_support.py`). The stage made a node per point
+  track — 1593 of them on spin against 11 real entities — and every person and object carried an
+  empty list of tracks, because nothing ever associated a track with an instance: the pipeline
+  hardcoded `'track_ids': []` on both. Now the nodes are the cameras, the people and objects the
+  perception stages found, and the background. A track is evidence for the entity whose mask it
+  sits inside on at least `graph.track_membership_min_frames` frames (2) and on at least
+  `graph.track_membership_min_ratio` (0.5) of the frames the two share, and for at most one — the
+  one it is inside most often, since a point on the world belongs to one thing. Each entity node
+  carries its supporting tracks' ids and how many frames each was inside, the mean ratio, how the
+  tracking stage labelled them (static / moving / uncertain), and **where it was per frame**: the
+  median of its supporting tracks' lifted 3D points, which is what makes "where did the person
+  go?" answerable from the graph. Tracks inside nothing are the background's evidence; tracks
+  inside something but never enough are named on it as ambiguous rather than swept into the room.
+  The masks are the humans' and objects' own copies of the segment masks, so the stage gains no
+  new upstream, and both they and the tracks are in ingest-frame pixels, so the test is a direct
+  lookup at the nearest pixel. The per-stream note records what the join had to work with — an
+  empty overlap between the tracked frames and the masked ones would otherwise be silent.
+  On spin: **13 nodes instead of 1593**, the person supported by 294 tracks (mean ratio 0.99) with
+  a position on 421 of 426 frames, 411 tracks on the background, 72 ambiguous. Graph contract
+  version 2, so an older run's graph is rebuilt on resume, and its optimization with it.
 
 ### Fixed
 - **VGGT's photos did not match its cameras.** VGGT and VGGT-Long see a resized,
@@ -238,6 +259,19 @@ version scheme (canonical version in the `VERSION` file, read by
   (there the static scene had the better mLPIPS, 0.43 against 0.46). The dynamic scene fits its
   training views 3 to 4 dB better either way (21.5 against 18.6; 21.3 against 17.0): its motion
   modelling generalizes little of what it fits. A lead for the renderer, not changed here.
+- **The object labels on spin are wrong, and one node per entity makes it obvious.** The run's
+  eleven object entities read: four separate `tie`s, plus `vase`, `spoon`, `couch`, `bench`,
+  `chair` and `suitcase`. The largest of them carries 397 supporting tracks, 337 of them static —
+  a large static region, whatever it is, not a tie. The labels come from the semantics stage
+  (top-k over the SAM-2 masks) and are unchanged here; when 1593 track nodes buried eleven
+  entities this was not visible at a glance. The graph's own evidence is sound (mean inside-ratio
+  0.98–1.00); it is the names that are not.
+- **The static/dynamic partition disagrees with itself about the moving person.** Of the tracks
+  supporting the person, the native run calls 168 static and 123 moving; the oracle run, on the
+  same clip, 29 static and 38 moving. One of the two is substantially wrong about a person who
+  moves throughout. The threshold is `lifting.static_threshold_world` (0.05 m) applied to lifted
+  world positions, so it inherits whatever the depth and the cameras got wrong. Not chased here;
+  it matters for the renderer's motion model and for any query about who moved.
 
 ### Tests
 - `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
@@ -262,7 +296,14 @@ version scheme (canonical version in the `VERSION` file, read by
   dataset folder, rejected for a leftover stage; every requirement's derivation and rejection;
   the run script end to end (load, rebuild, reject before writing anything, `--check-resume`).
 - `tests/test_stage_settings_coverage.py`: every config key a stage reads is in its fingerprint.
-  Full suite: **483 passed, 1 skipped**.
+- `tests/test_track_support.py`, `tests/test_graph.py`: synthetic masks and tracks — a track
+  inside one mask, inside nothing, inside too rarely to count, and inside two entities (it goes to
+  the one it is inside most); the ratio taken over the frames the two share; invisible and
+  off-frame points as no evidence either way; the nearest-pixel test; the median position and the
+  columns it reads; and on the builder — entities and a background instead of track nodes, the
+  evidence and motion summary each node carries, the thresholds read from the config, and the note
+  an empty join produces.
+  Full suite: **522 passed, 1 skipped**.
 
 ## [0.2.0.2] - 2026-09-10
 
