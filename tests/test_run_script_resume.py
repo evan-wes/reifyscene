@@ -38,7 +38,9 @@ def test_the_run_script_resumes_rebuilds_rejects_and_reports(tmp_path, monkeypat
     shutil.rmtree(a / 'graph')  # a cheap stage gone: rebuilt, not rejected
     _main(monkeypatch, [*common, '--run-dir', str(b), '--prior-run-dir', str(a),
                         '--start-stage', 'scene'])
-    stages = json.loads((b / 'run_manifest.json').read_text())['resume']['stages']
+    manifest_b = json.loads((b / 'run_manifest.json').read_text())
+    assert isinstance(manifest_b['fallbacks'], list)  # every fallback, recorded (maybe none)
+    stages = manifest_b['resume']['stages']
     assert stages['graph']['action'] == 'rebuild'
     assert stages['tracking']['action'] == 'load'
     assert _meta(b, 'tracking')['resume']['loaded_from'] == str(a / 'tracking')

@@ -653,3 +653,24 @@ def test_vggt_promotes_camera_predictions_before_pose_decoding() -> None:
     assert promoted["extrinsic"].dtype == torch.float32
     assert promoted["intrinsic"].dtype == torch.float32
     assert promoted["depth"].dtype == torch.bfloat16
+
+
+def test_geometry_asked_for_as_real_fails_instead_of_going_empty(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from reifyscene.api.pipeline import ReifyScenePipeline
+    from reifyscene.common.backend_ladder import BackendRequired
+
+    class Crashing:
+        backend_name = "vggt-long"
+
+        def initialize(self, frames, **kwargs):
+            raise RuntimeError("VGGT-Long produced no readable chunk predictions.")
+
+    ingest = SimpleNamespace(run_id="r", streams=[])
+    real = ReifyScenePipeline({"run_dir": str(tmp_path / "a"), "geometry": {"backend_mode": "real"}})
+    with pytest.raises(BackendRequired, match="no readable chunk predictions"):
+        real._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    auto = ReifyScenePipeline({"run_dir": str(tmp_path / "b"), "geometry": {"backend_mode": "auto"}})
+    artifact, manifest = auto._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    assert manifest.backend_used == "empty" and manifest.rungs[0].status == "failed"

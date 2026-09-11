@@ -103,6 +103,16 @@ version scheme (canonical version in the `VERSION` file, read by
   folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
   photo paths could point at another run's images. It is now keyed by what decides its pixels
   (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **A backend asked for as `real` could still fall back silently.** The wrappers raise when a
+  `real` backend is unavailable, but each stage's backend ladder caught that and ran the next
+  rung — for geometry the empty floor, so `--geometry-backend-mode real` (the run script's
+  default) could hand every later stage an empty geometry, stamped and saved. Ladder rungs can
+  now be strict: the geometry rung when `geometry.backend_mode` is `real` (also when its package
+  is missing), segment's rungs when the object detector is, reid's ResNet floor when the embedder
+  is, humans' Keypoint-RCNN rung when the pose model is. A strict rung that fails stops the run
+  (`BackendRequired`) instead of falling back. Under `auto`, falling back is still allowed, but
+  never quietly: every run ends with a table of each stage that ran (or was loaded) on a weaker
+  backend than its best, and records them in the run manifest (`fallbacks`).
 - **Tracking stopped at frame 95.** The machine profile (`--resource-profile auto`) capped the
   tracked frames at 24 / 48 / 96 by free GPU memory, so spin's 426-frame clip was tracked, lifted
   and put into the graph only up to frame 95 (3.2 s of 14.2). Every profile tracks in windows,

@@ -395,6 +395,9 @@ class ReifyScenePipeline:
             kwargs['dyn_mask_artifact'] = inp.get('dyn_mask')
         return init.initialize(inp['frames'], **kwargs)
 
+    def _geometry_mode_is_real(self) -> bool:
+        return str(self.cfg.get('geometry', {}).get('backend_mode', 'auto')).lower() == 'real'
+
     def _geometry_ladder(self, stage_label, init, backend_name, selected_frames,
                          ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None,
                          dyn_mask_artifact=None):
@@ -419,6 +422,8 @@ class ReifyScenePipeline:
                 _GEOMETRY_FIDELITY.get(rung_name, rung_name),
                 runner=lambda inp: self._geometry_init_call(init, inp),
                 probe=probe_by_backend.get(rung_name),
+                # backend_mode: real asks for this backend: empty geometry is not a fallback.
+                strict='always' if self._geometry_mode_is_real() else '',
             ),
             BackendRung(
                 'empty', 'empty',
@@ -737,6 +742,8 @@ class ReifyScenePipeline:
         objects_cfg = self.cfg.get('objects', {})
         selected_frames = self._select_perception_frames(ingest_artifact, None, objects_cfg, default_source='keyframes')
         floor = FloorInstanceSegmenter(self.decoder, self.object_detector, self.object_segmenter, objects_cfg)
+        # Both rungs run the object detector: asked for as real, its failure is not a fallback.
+        detector_strict = 'fail' if str(self.object_detector.backend_mode).lower() == 'real' else ''
         ladder = BackendLadder('segment', [
             # SAM 3 (gated) is the eventual top rung (design §4A); SAM 2 is the
             # ungated stand-in: prompt-free class-agnostic discovery + video
@@ -748,8 +755,10 @@ class ReifyScenePipeline:
                 'sam2', 'class_agnostic_propagation',
                 runner=lambda inp: SAM2InstanceSegmenter(self.decoder, self.object_detector, objects_cfg).run(inp['ingest'], inp['frames']),
                 probe=importable('sam2'),
+                strict=detector_strict,
             ),
-            BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames'])),
+            BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames']),
+                        strict=detector_strict),
             BackendRung('empty', 'empty', runner=lambda inp: ([], {})),
         ])
         result, manifest = ladder.run({'ingest': ingest_artifact, 'frames': selected_frames})
@@ -795,7 +804,8 @@ class ReifyScenePipeline:
                 runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
                 probe=importable('transformers'),
             ),
-            BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
+            BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances']),
+                        strict='fail' if str(self.object_embedder.backend_mode).lower() == 'real' else ''),
             BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
         ])
         empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
@@ -886,7 +896,8 @@ class ReifyScenePipeline:
                         runner=lambda inp: SapiensDenseRung(self.decoder, sapiens_cfg).run(inp['ingest'], inp['instances']),
                         probe=_sapiens_probe),
             BackendRung('keypoint_rcnn', 'pose_only',
-                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances'])),
+                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances']),
+                        strict='fail' if str(self.human_pose.backend_mode).lower() == 'real' else ''),
             BackendRung('bbox_only', 'bbox_only',
                         runner=lambda inp: BboxOnlyRung(self.decoder).run(inp['ingest'], inp['instances'])),
         ])

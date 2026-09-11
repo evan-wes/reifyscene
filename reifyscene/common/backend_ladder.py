@@ -20,6 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+class BackendRequired(RuntimeError):
+    """A rung whose backend was asked for as ``real`` could not run: no silent fallback."""
+
+
 # A probe returns ``None`` when the rung is available, else a short string
 # explaining why it is not (e.g. ``'not-installed'``, ``'no-access'``).
 Probe = Callable[[], Optional[str]]
@@ -87,13 +91,22 @@ class BackendRung:
     probe:    optional ``() -> str | None``; ``None`` return means available,
               a string is the skip reason. Omit for an always-available rung
               (e.g. the graceful-empty floor).
+    strict:   ``''`` (default) falls through to the next rung on a skip or a
+              failure; ``'fail'`` raises :class:`BackendRequired` when the rung
+              fails (a backend it relies on was asked for as ``real``);
+              ``'always'`` also raises when it is skipped (the rung *is* the
+              backend asked for).
     """
 
-    def __init__(self, name: str, fidelity: str, runner: Runner, probe: Optional[Probe] = None) -> None:
+    def __init__(self, name: str, fidelity: str, runner: Runner, probe: Optional[Probe] = None,
+                 strict: str = '') -> None:
+        if strict not in ('', 'fail', 'always'):
+            raise ValueError(f"strict must be '', 'fail' or 'always', got {strict!r}")
         self.name = name
         self.fidelity = fidelity
         self._runner = runner
         self._probe = probe
+        self.strict = strict
 
     def availability(self) -> Optional[str]:
         """Return ``None`` if available, else a short skip reason."""
@@ -147,11 +160,21 @@ class BackendLadder:
         for rung in self.rungs:
             reason = rung.availability()
             if reason is not None:
+                if rung.strict == 'always':
+                    raise BackendRequired(
+                        f"{self.stage}: the {rung.name} backend was asked for as real but is "
+                        f"unavailable ({reason}); not falling back"
+                    )
                 manifest.rungs.append(RungStatus(rung.name, rung.fidelity, 'skipped', reason))
                 continue
             try:
                 result = rung.run(inputs)
             except Exception as exc:
+                if rung.strict:
+                    raise BackendRequired(
+                        f"{self.stage}: the {rung.name} backend, asked for as real, failed "
+                        f"({type(exc).__name__}: {exc}); not falling back"
+                    ) from exc
                 manifest.rungs.append(RungStatus(rung.name, rung.fidelity, 'failed', f'run-error: {exc}'))
                 continue
             manifest.rungs.append(RungStatus(rung.name, rung.fidelity, 'ran'))
@@ -182,3 +205,29 @@ def importable(*modules: str) -> Probe:
         return None
 
     return _probe
+
+
+def fallbacks_of(stage: str, artifact: Any) -> list[dict[str, Any]]:
+    """What ``artifact``'s stage fell back from: the rungs above the one that ran.
+
+    Read from the capability manifest every laddered stage records; the tracker has no
+    ladder and records its own ``backend_used`` per stream. Empty when the best
+    backend ran.
+    """
+    out: list[dict[str, Any]] = []
+    cap = (getattr(artifact, 'metadata', {}) or {}).get('capability') or {}
+    rungs = list(cap.get('rungs') or [])
+    missed = [r for r in rungs if r.get('status') in ('skipped', 'failed')]
+    if missed:
+        out.append({
+            'stage': stage,
+            'wanted': missed[0].get('name'),
+            'used': cap.get('backend_used') or 'nothing',
+            'why': '; '.join(f"{r.get('name')} {r.get('status')}: {r.get('reason')}" for r in missed),
+        })
+    for stream_id, payload in (getattr(artifact, 'track_payloads_by_stream', {}) or {}).items():
+        used = str((payload or {}).get('backend_used') or '')
+        if used and not used.startswith('cotracker'):
+            out.append({'stage': stage, 'wanted': 'cotracker', 'used': used,
+                        'why': f'stream {stream_id} was tracked by the {used} fallback'})
+    return out

@@ -20,6 +20,7 @@ from reifyscene.api.resume import ResumeRejected, check_resume, materialize_stag
 from reifyscene.api.stages import STAGE_ORDER, build_stage_registry, write_run_manifest
 from reifyscene.common.io import read_yaml
 from reifyscene.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from reifyscene.common.backend_ladder import fallbacks_of
 from reifyscene.common.memory import release_memory
 from reifyscene.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile, save_system_report
 
@@ -592,9 +593,7 @@ def main() -> None:
             raise ResumeRejected(plan.report())
     _save_preflight_report()
 
-    write_run_manifest(
-        args.run_dir,
-        {
+    manifest = {
             'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
             'run_dir': str(Path(args.run_dir).expanduser().resolve()),
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
@@ -605,8 +604,8 @@ def main() -> None:
                 'pinned': plan.pins,
                 'stages': {s: {'action': v.action, 'derived': v.derived} for s, v in plan.verdicts.items()},
             },
-        },
-    )
+    }
+    write_run_manifest(args.run_dir, manifest)
 
     pipeline = ReifyScenePipeline(cfg)
     registry = pipeline.stage_registry()
@@ -686,6 +685,21 @@ def main() -> None:
         _debug_stage_done(console, args.debug, 'Deferred debug export', export_started, save_dir=args.run_dir)
 
     _print_frame_summary(console, outputs, cfg)
+
+    # Every stage that ran (or was loaded) on a weaker backend than its best, said loudly
+    # and recorded in the manifest: an `auto` fallback is allowed, never silent.
+    fallbacks = [f for name in STAGE_ORDER if name in outputs for f in fallbacks_of(name, outputs[name])]
+    manifest['fallbacks'] = fallbacks
+    write_run_manifest(args.run_dir, manifest)
+    if fallbacks:
+        table = Table(title='[bold red]Backends that fell back: this run used weaker ones[/bold red]')
+        for column in ('stage', 'wanted', 'used', 'why'):
+            table.add_column(column)
+        for f in fallbacks:
+            table.add_row(f['stage'], str(f['wanted']), str(f['used']), str(f['why']))
+        console.print(table)
+    else:
+        console.print('every stage ran its best backend')
 
     for name in STAGE_ORDER:
         artifact = outputs.get(name)
