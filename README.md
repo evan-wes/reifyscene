@@ -119,6 +119,15 @@ from a prior run's cached stages — e.g. re-run only `scene` / `render` without
 geometry. The final render writes the trained scene + a novel-view flythrough, and the run
 records a covisibility-masked novel-view score.
 
+A resume loads a prior stage only when it is what this run would make: every artifact records
+the settings its stage used (from whichever config sections it reads), the input frames it read,
+its contract version and the artifacts it was built from, and each stage lists what a loaded
+artifact must carry. The whole resume is checked before anything is written. What can be derived
+from what is loaded is (a moved input or dataset folder, missing photos, a crop box, re-lifted
+tracks), cheap stages that run no model are re-run, and anything else is refused with the stage
+to restart from. Add `--check-resume` to see that report — every prior stage's verdict and the
+latest `--start-stage` the prior run supports — without running or writing anything.
+
 `configs/base.yaml` builds a **static** scene (`render/trained_gaussians.npz`). The dynamic
 4D scene (`render/trained_dynamic.npz`) needs `scene: {kind: dynamic}` in the config, as in
 `configs/experiment/spin_native_full.yaml`.
@@ -127,18 +136,25 @@ records a covisibility-masked novel-view score.
 
 Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views):
 
-| geometry | frames | masked mPSNR |
-|---|---|---|
-| VGGT-Long + pose_refine (native) | 426 (all) | 12.37 ¹ |
-| GT-oracle (upper bound) | 426 (all) | 19.64 |
-| Shape-of-Motion reference | all | 17.42 |
+| geometry | scene | frames | masked mPSNR | mLPIPS |
+|---|---|---|---|---|
+| VGGT-Long + pose_refine (native) | dynamic | 426 (all) | 14.96 ¹ | 0.46 |
+| VGGT-Long + pose_refine (native) | static | 426 (all) | 14.56 ¹ | 0.43 |
+| GT-oracle (upper bound) | dynamic | 426 (all) | 19.65 | 0.34 |
+| GT-oracle | static | 426 (all) | 16.22 ¹ | 0.32 |
+| Shape-of-Motion reference | dynamic | all | 17.42 | — |
 
-¹ A self-reconstructed scene lives in its own coordinate frame, so its held-out cameras are
-placed through a similarity (rotation, translation, scale) fitted on the training cameras,
-whose poses are known in both frames — the usual way to score a method that estimates its own
-cameras. The fit absorbs one global offset; per-camera drift still counts (median rotation left
-after the fit: 0.60°), and so do parts of the room a held-out camera sees that VGGT-Long's
-centre crop never did.
+¹ Held-out cameras are placed through a similarity (rotation, translation, scale) fitted on the
+training cameras, whose poses are known in both frames — the usual way to score a method that
+estimates its own cameras. A self-reconstructed scene lives in its own frame, and a static scene
+in its geometry's ground-plane-rotated one (for the GT oracle the fit is exact). The fit absorbs
+one global offset; per-camera drift still counts (median rotation left after the fit: 0.60° for
+the native rows), and so do parts of the room a held-out camera sees that VGGT-Long's centre crop
+never did.
+
+The native rows share one geometry, whose bundle adjustment converged (0.88 px). Pose
+refinement is not deterministic and can diverge without the pipeline noticing: one fresh run of
+the same config ended at an absurd reprojection error with a camera turned 160°, and scored 12.67.
 
 Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
 drift), not the dynamic modeling; the remaining gap to the oracle is the cost of

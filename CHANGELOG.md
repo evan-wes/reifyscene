@@ -7,9 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
-## [0.2.1.0] - 2026-09-10
+## [0.2.1.0] - 2026-09-11
 
 ### Added
+- **A resume loads only what this run would make, and says why** (`reifyscene/api/contracts.py`,
+  `resume.py`, `requirements.py`). `--start-stage X --prior-run-dir P` used to compare each
+  loaded stage's own config section and the input's absolute path, after copying it into the
+  new run. An audit of all 15 stages found it wrong both ways: segment's settings live in
+  `objects`, the solver reads `optimizer` while `optimization` was compared, tracking's lift
+  reads `lifting` — so changed settings resumed silently — while the absolute path made every
+  run from before the project rename unresumable and the tracking profile, picked from free GPU
+  memory at launch, rejected a resume started while the GPU was busy. Now:
+  - **Every stage declares what its output depends on**: the settings it reads, from any
+    section, with defaults filled and debug / device keys left out; folders it names by what is
+    in them, not where they are; a contract version (bumped, with a note, when its output
+    changes meaning); and the stages it consumes. Each artifact records that fingerprint, the
+    identity of the frames the decoder read (name, size, mtime — not the folder's path) and the
+    digests of the upstream artifacts it was built from. `tests/test_stage_settings_coverage.py`
+    runs the pipeline on a config that logs every key read and fails on one a stage does not
+    fingerprint.
+  - **The resume is checked read-only before anything is copied or run.** One report lists every
+    problem and the latest stage the prior run supports; `--check-resume` prints it and exits.
+    Resuming into the prior's own folder is refused. Settings picked from the machine are pinned
+    to the prior run's values.
+  - **Each stage lists what a loaded artifact must carry**, and what can be derived from what is
+    loaded is: a moved input or dataset folder, photos from the run's own copies or the dataset,
+    a crop box, re-lifted tracks. Cheap stages that run no model (sync, objects, graph,
+    optimization) are rebuilt; anything else rejects the resume and names the stage to restart
+    from. Loading copies a stage exactly and patches only its `artifact.json`.
+
+  Runs from before these records get them derived from their run manifests. All three spin runs
+  kept on disk — `spin_native_full`, and `spin_oracle_allframes` / `spin_vggtlong_capstone` from
+  the pre-rename `project` paths — resume at `scene`; the static oracle below is one.
 - **`scripts/export_checkpoint_views.py`: see a trained scene, not just its score.** The
   masked-NVS benchmark rendered every held-out view and kept only the average, and the
   pipeline's one saved render, the orbit flythrough, swings far off the captured path and
@@ -28,11 +57,52 @@ version scheme (canonical version in the `VERSION` file, read by
   `reifyscene/render/eval/checkpoint_views.py`.
 - **`configs/experiment/spin_native_full.yaml`**, the config for the headline native run
   (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views: masked
-  mPSNR **12.37**). No config for it was in the repo before; its eval block lived only in one
+  mPSNR **14.96** with this release's photo fix on geometry whose bundle adjustment converged;
+  12.37 before the fix — but see Findings: pose refinement can diverge). No config for it was
+  in the repo before; its eval block lived only in one
   run's recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file
   is `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
 
 ### Fixed
+- **VGGT's photos did not match its cameras.** VGGT and VGGT-Long see a resized,
+  centre-cropped square of each frame (720×960 → 518×686 → rows 84–602), so their cameras, K
+  and depth maps describe that square, but six places paired them with the whole frame: static
+  training photos at full size with the square's K; seed colours read from the photo's top-left
+  corner; dynamic training photos, and the dynamic init's frames and foreground masks, squashed
+  to 518×518; and track positions squashed into the square's depth, those outside it clamped to
+  its edge. `reifyscene/geometry/image_transform.py` records the exact ops per stream
+  (`metadata.image_transforms`, written by every geometry backend; pixel-identical to both VGGT
+  loaders), and every one of those places goes through it; nothing is squashed any more, and a
+  photo that does not fit raises. Tracks outside the crop get no 3D point. Tracking and the
+  optimizer's re-lift share one lift (`lifting/lift.py`: the geometry's depth and pose-refined
+  camera, through the crop), so a track no longer has two positions — tracking used to read
+  VGGT's point maps, which pose refinement does not refine. Spin, 722 held-out views, same
+  geometry before and after: native dynamic **12.37 → 14.96** (mLPIPS 0.46), the gap to the GT
+  oracle down from 7.3 dB to 4.7. The oracle itself barely moves (19.64 → 19.65 retrained: its
+  frames already match its depth; only its foreground masks are now resized nearest, not bicubic).
+- **Static scenes were scored with misplaced cameras.** The static scorer placed the dataset's
+  held-out cameras with no transform, but a static scene lives in its geometry's
+  ground-plane-canonicalized frame on every backend, the GT oracle's included, and its checkpoint
+  has no scene-norm to undo that — the native static run's 11.46 was a render of the wrong
+  place. Static scoring now uses the dynamic path's similarity fit (`align: sim3`, fitted on the
+  scene's training views, same refusal rules), the default for every static scene. On the static
+  oracle the fit is exact — scale 0.99999998, median rotation residual 0.0°, centre residual
+  5·10⁻⁸ — and it scores **16.22**; the native static scene scores **14.56**.
+  `export_checkpoint_views.py` exports and scores static runs too (no replay).
+- **Resume bugs the audit found**:
+  - `--run-dir` equal to `--prior-run-dir` deleted each prior stage before copying it;
+  - the check ran after the copy, so a rejected resume had already copied earlier stages and
+    deleted whatever was at the destination;
+  - every resume dropped the object embeddings (filed under the track id, reloaded by the
+    detection id);
+  - artifact loaders skipped a listed mask or embedding file that was missing, and took their
+    folder from the saved JSON rather than the folder they were loaded from;
+  - ingest recorded its input by the path as typed, so a relative path resolved only from the
+    working directory it was run in.
+- **The VGGT input cache was shared by every run of a sequence.** It was keyed by the input
+  folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
+  photo paths could point at another run's images. It is now keyed by what decides its pixels
+  (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
 - **Self-reconstructed scenes could not be scored: every native run's held-out renders were
   black.** The dynamic scorer placed the dataset's held-out cameras in the scene through the
   bundle's scene-norm, which is only right when the scene was built on the dataset's own
@@ -59,7 +129,8 @@ version scheme (canonical version in the `VERSION` file, read by
   errors (0.88° / 0.615° / 2.3° / 0.71°) are exactly the median rotation residuals of the
   training-camera fit, and the aligned scorer now reproduces its scores within 0.03–0.36 dB
   (10.06 / 11.92 / 9.19 / 12.20). The headline native number is replaced by the reproducible
-  **12.37** from a fresh full run of `spin_native_full.yaml` (0.60° residual).
+  **12.37** from a fresh full run of `spin_native_full.yaml` (0.60° residual), and with the
+  photo fix above by **14.96** on that same run's geometry.
 
 ### Docs
 - **`base.yaml` builds a static scene, and the README now says so.** The README's run command
@@ -80,6 +151,32 @@ version scheme (canonical version in the `VERSION` file, read by
 - **The Sim(3) helpers moved to `reifyscene/geometry/similarity.py`** (`fit_similarity`,
   `apply_similarity_to_c2w`, `camera_center`, plus `similarity_residuals`), shared by
   `pose_refine`'s gauge re-anchor and the scorer's alignment; `pose_refine` keeps its old names.
+- **`scene/train_views/*.png` are the photos in the geometry's pixels** (518×518 for VGGT), not
+  copies of the input frames, so a scene's photos match its cameras by construction; the render
+  stage's `_load_gt` refuses a photo that is not its camera's size instead of resizing it.
+  `pose_refine` builds its tracker images from the recorded crop instead of re-running VGGT's
+  loader. A frame the geometry lists without a photo on disk raises instead of being dropped.
+
+### Findings
+- **Pose refinement is not deterministic, and when it diverges nothing notices.** Two runs of
+  `spin_native_full.yaml` got identical VGGT-Long geometry (rotations equal to 0.004°) and
+  pixel-identical tracker images, yet one bundle adjustment converged (final reprojection
+  0.88 px) and the other diverged (6·10¹⁴⁹ px, one camera turned 160°). The pipeline passed the
+  diverged poses on: that run scores 12.67 against 14.96 on the converged geometry. Not changed
+  here; the table's native numbers are all on the converged geometry.
+- **VGGT-Long's focal is 38% long in its own pixels; pose refinement is right to shrink it.** In
+  the 518-pixel crop, spin's true focal is 719.2 × 518 / 720 ≈ 517 px. VGGT-Long estimates 715
+  (the wrapper passes its intrinsics through unchanged); pose refinement brings it to 547 (6%
+  long). The drop from 715 to 547 looked suspicious; it is a move toward the truth.
+- **On spin, the dynamic scene barely beats a static one on held-out views.** On the same
+  native geometry the dynamic scene scores 14.96 masked mPSNR against the static scene's 14.56 —
+  and the static one has the better mLPIPS (0.43 against 0.46) — though the dynamic scene fits
+  its training views 4.3 dB better (21.3 against 17.0). Its motion modelling generalizes little
+  of what it fits: a lead for the renderer, not changed here.
+- **Our VGGT-Long no-upscale loader squashes portrait frames.** When the target is below 518 it
+  floors both sides to multiples of 14 and clamps both to the target, so 720×960 at 252 becomes
+  252×252. The crop box records it faithfully; the loader itself is unchanged here. None of the
+  runs above use it (they run at 518).
 
 ### Tests
 - `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
@@ -90,7 +187,21 @@ version scheme (canonical version in the `VERSION` file, read by
   with no score; even view picking; the replay's image size from the principal point; the
   held-out export's files, index and per-view masked PSNR (checked against a closed form);
   replay order and size. CPU-only stand-ins for the rasterizer, scene and dataset reader.
-  Full suite: **386 passed, 1 skipped**.
+- Static scoring: a known similarity recovered through the scene's training views, `align: none`,
+  refusal, the render stage's static branch, the static export and the CLI's run-kind detection.
+- `tests/test_image_transform.py`, `tests/test_crop_box_sites.py`: both VGGT loaders
+  reproduced pixel for pixel; point mapping in and out of the crop (a crop-free transform maps
+  exactly as before); size dispatch; each backend's record; the six sites on synthetic photos
+  with distinct top and bottom bands; the shared lift recovering known points.
+- `tests/test_resume_pipeline.py`, `tests/test_resume_requirements.py`,
+  `tests/test_run_script_resume.py`: a real prior run from the CPU pipeline resumed, rejected for
+  a changed setting in another section, pinned for a machine-picked one, re-rooted for a moved
+  input, rebuilt or rejected for a changed upstream; runs converted to the pre-fingerprint format
+  resumed through derived records (the digests equal a fresh run's), re-rooted by name for a gone
+  dataset folder, rejected for a leftover stage; every requirement's derivation and rejection;
+  the run script end to end (load, rebuild, reject before writing anything, `--check-resume`).
+- `tests/test_stage_settings_coverage.py`: every config key a stage reads is in its fingerprint.
+  Full suite: **483 passed, 1 skipped**.
 
 ## [0.2.0.2] - 2026-09-10
 
