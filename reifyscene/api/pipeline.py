@@ -1076,8 +1076,16 @@ class ReifyScenePipeline:
                 eval_cfg.setdefault('align', default_alignment(self.geometry_backend_name))
                 metrics = score_render_artifact_masked_nvs_dynamic(artifact, eval_cfg, device=device)
             else:
-                from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
-                metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+                from reifyscene.render.eval.masked_nvs_benchmark import (
+                    default_alignment,
+                    score_render_artifact_masked_nvs,
+                )
+                # A static scene lives in the ground-plane-canonicalized frame on every
+                # backend: align held-out cameras through the scene's training views.
+                eval_cfg.setdefault('align', default_alignment(self.geometry_backend_name, kind='static'))
+                metrics = score_render_artifact_masked_nvs(
+                    artifact, eval_cfg, train_views=scene_artifact.train_views, device=device
+                )
             if metrics:
                 artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir

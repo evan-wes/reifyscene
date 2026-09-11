@@ -13,7 +13,10 @@ in-pipeline number is directly comparable to ``run_render_proof.py``.
 A dynamic scene built on self-reconstructed geometry (VGGT / VGGT-Long) lives in
 its own frame, not the dataset's, so its held-out cameras are placed through a
 similarity fitted on the training cameras (``align: sim3``); every score records
-how its cameras were placed. See :func:`place_heldout_views`.
+how its cameras were placed. See :func:`place_heldout_views`. A static scene is
+always placed that way: it lives in its geometry's ground-plane-canonicalized
+frame, the dataset's own geometry included, and its checkpoint carries no
+scene-norm to undo that. See :func:`place_static_heldout_views`.
 """
 
 from __future__ import annotations
@@ -36,7 +39,8 @@ from reifyscene.render.eval.novel_view import score_masked_dynamic_views, score_
 from reifyscene.render.gaussian4d.rasterizer import GaussianCloud, RenderCamera, build_rasterizer
 
 
-def _load_trained_cloud(npz_path: Path, device: str) -> GaussianCloud:
+def load_trained_cloud(npz_path: Path, device: str) -> GaussianCloud:
+    """A static render checkpoint (``trained_gaussians.npz``) as a GaussianCloud."""
     data = np.load(npz_path)
 
     def _t(key: str) -> torch.Tensor:
@@ -55,15 +59,17 @@ def score_render_artifact_masked_nvs(
     render_artifact,
     eval_cfg: dict[str, Any],
     *,
+    train_views: list[dict[str, Any]] | None = None,
     device: str = "cuda",
 ) -> dict[str, Any]:
-    """Score a trained RenderArtifact's masked NVS against a dataset's val split.
+    """Score a trained static RenderArtifact's masked NVS against a dataset's val split.
 
     ``eval_cfg`` keys: ``dataset_root`` (required to run), ``factor``, ``split``
     (the train split the renderer was fit on), ``eval_split`` (held-out, default
-    ``val``), ``max_eval_frames``, ``lpips_net``. Returns the masked
-    mPSNR/mSSIM/mLPIPS + ``num_views`` (or ``{}`` when no dataset source / no
-    checkpoint is available).
+    ``val``), ``max_eval_frames``, ``lpips_net``, ``align``. ``train_views`` are the
+    scene artifact's training views, through which the held-out cameras are placed
+    (:func:`place_static_heldout_views`). Returns :func:`score_static_cloud`'s
+    result, or ``{}`` when no dataset source / no checkpoint is available.
     """
     dataset_root = eval_cfg.get("dataset_root")
     if not dataset_root:
@@ -75,35 +81,13 @@ def score_render_artifact_masked_nvs(
     if not npz_path.exists():
         return {}
 
-    eval_split = str(eval_cfg.get("eval_split", "val"))
-    backend = DatasetGeometryInitializer({
-        "dataset_root": str(dataset_root),
-        "factor": int(eval_cfg.get("factor", 2)),
-        "split": str(eval_cfg.get("split", "train")),
-    })
-    cloud = _load_trained_cloud(npz_path, device)
-    rasterizer = build_rasterizer({"device": device})
-
-    val_specs = backend.split_frames(eval_split)
-    max_eval = eval_cfg.get("max_eval_frames")
-    if max_eval:
-        val_specs = val_specs[: int(max_eval)]
-
-    def _views():
-        for cam, t in val_specs:
-            name = backend.frame_name(cam, int(t))
-            intrinsics, t_world_cam, (width, height) = backend.load_camera(name)
-            camera = RenderCamera.from_world_cam(t_world_cam, intrinsics, width, height)
-            gt = torch.as_tensor(backend.load_rgb(name), dtype=torch.float32, device=device) / 255.0
-            mask = torch.as_tensor(backend.load_covisible(name, eval_split), device=device)
-            yield camera, gt, mask
-
-    metrics = score_masked_novel_views(
-        rasterizer, cloud, _views(), device=device, lpips_net=str(eval_cfg.get("lpips_net", "alex"))
+    return score_static_cloud(
+        load_trained_cloud(npz_path, device),
+        train_views or [],
+        eval_cfg,
+        backend=eval_dataset(eval_cfg),
+        device=device,
     )
-    metrics["eval_split"] = eval_split
-    metrics["dataset"] = Path(str(dataset_root)).name
-    return metrics
 
 
 def _normalize_w2c(w2c: np.ndarray, transfm: np.ndarray, scale: float) -> np.ndarray:
@@ -122,14 +106,16 @@ def eval_dataset(eval_cfg: dict[str, Any]) -> DatasetGeometryInitializer:
     })
 
 
-# How held-out cameras reach a dynamic scene's frame; recorded as ``alignment["method"]``
-# with every score:
+# How held-out cameras reach a scene's frame; recorded as ``alignment["method"]`` with
+# every score:
 #   bundle_val  the bundle carries its own held-out cameras (DyCheck-sourced builds)
-#   none        dataset cameras through the bundle's scene-norm: right only when the scene
-#               was built on the dataset's own geometry (the GT oracle)
-#   sim3        a similarity fitted from the dataset's training cameras onto the bundle's,
+#   none        dataset cameras through the bundle's scene-norm (dynamic) or untransformed
+#               (static): right only when the scene was built on the dataset's own geometry
+#               (the GT oracle) -- and for a static scene only if no ground plane ran
+#   sim3        a similarity fitted from the dataset's training cameras onto the scene's,
 #               for self-reconstructed geometry, whose frame differs from the dataset's by an
-#               unknown rotation, translation and scale (without it the renders miss the scene)
+#               unknown rotation, translation and scale (without it the renders miss the
+#               scene); also every static scene's, since it lives in the canonicalized frame
 ALIGN_MAX_ROTATION_DEG = 5.0
 ALIGN_MAX_CENTRE_FRACTION = 0.2
 
@@ -142,8 +128,15 @@ class AlignmentFailed(ValueError):
         self.record = record or {}
 
 
-def default_alignment(geometry_backend: str | None) -> str:
-    """``none`` for a scene built on the benchmark's own geometry, ``sim3`` otherwise."""
+def default_alignment(geometry_backend: str | None, kind: str = "dynamic") -> str:
+    """How the pipeline places a scene's held-out cameras.
+
+    ``none`` for a dynamic scene built on the benchmark's own geometry, ``sim3``
+    otherwise -- and ``sim3`` for every static scene, whose frame is the
+    ground-plane-canonicalized geometry's even on the dataset backend.
+    """
+    if str(kind).lower() == "static":
+        return "sim3"
     return "none" if str(geometry_backend or "").lower() == "dataset" else "sim3"
 
 
@@ -170,6 +163,31 @@ class HeldoutViews:
 
     placements: list[HeldoutPlacement]
     alignment: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrainCamera:
+    """A static scene's training camera, shaped like a bundle camera for the alignment fit."""
+
+    frame_name: str
+    time_id: int
+    w2c: np.ndarray  # (4, 4) world->cam in the scene's frame
+
+
+def static_train_cameras(train_views: list[dict[str, Any]]) -> list[TrainCamera]:
+    """A scene artifact's training views as cameras in the static scene's frame.
+
+    Their ``frame_key`` is ``<stream>:<frame>`` and ``time_id`` the video frame, so
+    they pair with the dataset's cameras the way a bundle's training cameras do.
+    """
+    return [
+        TrainCamera(
+            str(view["frame_key"]),
+            int(view["time_id"]),
+            np.linalg.inv(np.asarray(view["t_world_cam"], np.float64)),
+        )
+        for view in train_views
+    ]
 
 
 def _keyframe_frames(train_cams) -> dict[int, tuple[str, int]]:
@@ -275,11 +293,7 @@ def place_heldout_views(data, cams, eval_cfg: dict[str, Any], backend) -> Heldou
     align = str(eval_cfg.get("align", "none")).lower()
     if align == "sim3":
         s, R, t, record = _fit_training_alignment(keyframes, train_cams, backend, eval_cfg)
-
-        def to_scene_w2c(t_world_cam: np.ndarray) -> np.ndarray:
-            c2w = apply_similarity_to_c2w(np.asarray(t_world_cam, np.float64), s, R, t)
-            return np.linalg.inv(c2w).astype(np.float32)
-
+        to_scene_w2c = _through_similarity(s, R, t)
     elif align == "none":
         if "scene_norm_transfm" not in getattr(data, "files", data):
             return None
@@ -294,8 +308,62 @@ def place_heldout_views(data, cams, eval_cfg: dict[str, Any], backend) -> Heldou
     else:
         raise ValueError(f"unknown alignment {align!r}: expected 'none' or 'sim3'")
     record["scene_time"] = "nearest training keyframe"
+    return _place_dataset_views(backend, eval_cfg, to_scene_w2c, record, keyframes)
 
-    specs = backend.split_frames(eval_split)
+
+def place_static_heldout_views(
+    train_views: list[dict[str, Any]], eval_cfg: dict[str, Any], backend
+) -> HeldoutViews:
+    """Place the dataset's held-out cameras in a static scene's frame.
+
+    A static scene lives in its geometry's ground-plane-canonicalized frame -- the
+    dataset's own geometry included -- and its checkpoint carries no scene-norm, so
+    by default (``align: sim3``) the cameras go through a similarity fitted on the
+    scene artifact's ``train_views``, with the same refusal rules as a dynamic
+    scene's. ``align: none`` places them untransformed. Raises
+    :class:`AlignmentFailed` when the training views do not support a trustworthy fit.
+    """
+    align = str(eval_cfg.get("align", "sim3")).lower()
+    if align == "sim3":
+        train_cams = static_train_cameras(train_views)
+        s, R, t, record = _fit_training_alignment(
+            _keyframe_frames(train_cams), train_cams, backend, eval_cfg
+        )
+        to_scene_w2c = _through_similarity(s, R, t)
+    elif align == "none":
+        record = {"method": "none"}
+
+        def to_scene_w2c(t_world_cam: np.ndarray) -> np.ndarray:
+            return np.linalg.inv(np.asarray(t_world_cam, np.float32)).astype(np.float32)
+
+    else:
+        raise ValueError(f"unknown alignment {align!r}: expected 'none' or 'sim3'")
+    # A static scene has no time axis: each view renders at its own frame (no keyframes).
+    return _place_dataset_views(backend, eval_cfg, to_scene_w2c, record, {})
+
+
+def _through_similarity(
+    s: float, R: np.ndarray, t: np.ndarray
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Dataset camera->world to scene world->camera, through a fitted similarity."""
+
+    def to_scene_w2c(t_world_cam: np.ndarray) -> np.ndarray:
+        c2w = apply_similarity_to_c2w(np.asarray(t_world_cam, np.float64), s, R, t)
+        return np.linalg.inv(c2w).astype(np.float32)
+
+    return to_scene_w2c
+
+
+def _place_dataset_views(
+    backend,
+    eval_cfg: dict[str, Any],
+    to_scene_w2c: Callable[[np.ndarray], np.ndarray],
+    record: dict[str, Any],
+    keyframes: dict[int, tuple[str, int]],
+) -> HeldoutViews:
+    """The dataset's held-out views, each camera placed in the scene by ``to_scene_w2c``."""
+    specs = backend.split_frames(str(eval_cfg.get("eval_split", "val")))
+    max_eval = eval_cfg.get("max_eval_frames")
     if max_eval:
         specs = specs[: int(max_eval)]
     placements = []
@@ -366,6 +434,39 @@ def score_dynamic_bundle(
     )
     metrics = score_masked_dynamic_views(
         rasterizer, scene, stream, device=device, lpips_net=str(eval_cfg.get("lpips_net", "alex"))
+    )
+    return {**metrics, **context, "alignment": views.alignment}
+
+
+def score_static_cloud(
+    cloud: GaussianCloud,
+    train_views: list[dict[str, Any]],
+    eval_cfg: dict[str, Any],
+    *,
+    backend,
+    device: str = "cuda",
+    rasterizer=None,
+) -> dict[str, Any]:
+    """Masked NVS of a trained static cloud against the benchmark's held-out views.
+
+    Held-out cameras are placed through the scene's ``train_views``
+    (:func:`place_static_heldout_views`). When the alignment is refused the result
+    carries the refused ``alignment`` record and no score, as for a dynamic scene.
+    """
+    eval_split = str(eval_cfg.get("eval_split", "val"))
+    context = {
+        "eval_split": eval_split,
+        "dataset": Path(str(eval_cfg["dataset_root"])).name,
+        "kind": "static",
+    }
+    try:
+        views = place_static_heldout_views(train_views, eval_cfg, backend)
+    except AlignmentFailed as exc:
+        return {**context, "alignment": {**exc.record, "status": "refused", "reason": str(exc)}}
+    rasterizer = rasterizer or build_rasterizer({"device": device})
+    stream = (load_heldout_view(p, backend, eval_split, device) for p in views.placements)
+    metrics = score_masked_novel_views(
+        rasterizer, cloud, stream, device=device, lpips_net=str(eval_cfg.get("lpips_net", "alex"))
     )
     return {**metrics, **context, "alignment": views.alignment}
 

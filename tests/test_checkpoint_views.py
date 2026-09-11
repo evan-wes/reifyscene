@@ -16,10 +16,12 @@ import numpy as np
 import pytest
 import torch
 
+import reifyscene.render.eval.masked_nvs_benchmark as nvs
 from reifyscene.geometry.similarity import apply_similarity_to_c2w
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
     export_replay,
+    export_static_heldout_views,
     pick_evenly,
     replay_size,
 )
@@ -27,10 +29,13 @@ from reifyscene.render.eval.masked_nvs_benchmark import (
     AlignmentFailed,
     default_alignment,
     place_heldout_views,
+    place_static_heldout_views,
     score_dynamic_bundle,
     score_render_artifact_masked_nvs_dynamic,
+    score_static_cloud,
 )
 from reifyscene.render.gaussian4d.motion_init import BorrowedCamera
+from scripts import export_checkpoint_views as cli
 
 W, H = 80, 60
 
@@ -135,6 +140,12 @@ def test_default_alignment_by_geometry_backend():
     assert default_alignment(None) == "sim3"
 
 
+def test_default_alignment_is_sim3_for_every_static_scene():
+    # a static scene lives in the ground-plane-canonicalized frame, the oracle's included
+    assert default_alignment("dataset", kind="static") == "sim3"
+    assert default_alignment("vggt-long", kind="static") == "sim3"
+
+
 # -- alignment for self-reconstructed scenes ------------------------------------
 
 
@@ -210,22 +221,142 @@ def test_sparse_keyframes_render_at_the_nearest_keyframe():
     assert [p.scene_time for p in views.placements] == [0, 1, 1, 2, 2]
 
 
-def test_untrustworthy_alignment_is_refused_and_scores_nothing():
+def _unrelated_c2ws(n: int) -> list[np.ndarray]:
+    """Scene cameras with no relation to the dataset's."""
     rng = np.random.default_rng(0)
-    K = np.eye(3, dtype=np.float32)
-    unrelated = []
-    for i in range(12):  # scene cameras with no relation to the dataset's
+    out = []
+    for _ in range(n):
         q = np.linalg.qr(rng.normal(size=(3, 3)))[0]
         c2w = np.eye(4)
         c2w[:3, :3] = q * np.sign(np.linalg.det(q))
         c2w[:3, 3] = rng.normal(size=3) * 5
-        unrelated.append(BorrowedCamera(f"0:{5 * i}", i, np.linalg.inv(c2w), K))
+        out.append(c2w)
+    return out
+
+
+def test_untrustworthy_alignment_is_refused_and_scores_nothing():
+    K = np.eye(3, dtype=np.float32)
+    unrelated = [
+        BorrowedCamera(f"0:{5 * i}", i, np.linalg.inv(c2w), K)
+        for i, c2w in enumerate(_unrelated_c2ws(12))
+    ]
     cams, cfg = {"train": unrelated, "val": []}, {"align": "sim3", "dataset_root": "spin"}
     with pytest.raises(AlignmentFailed):
         place_heldout_views({}, cams, cfg, _PosedDataset([7]))
     result = score_dynamic_bundle({}, None, cams, cfg, backend=_PosedDataset([7]), device="cpu")
     assert "masked_mpsnr" not in result
     assert result["alignment"]["status"] == "refused" and result["alignment"]["reason"]
+
+
+# -- static scenes ----------------------------------------------------------------
+
+
+def _static_train_views(frames) -> list[dict]:
+    """A static scene artifact's training views in the self-reconstruction's frame,
+    as persisted (float32 poses as lists)."""
+    return [
+        {
+            "frame_key": f"0:{f}",
+            "time_id": f,  # a static scene's time is the video frame
+            "t_world_cam": apply_similarity_to_c2w(_orbit_c2w(f), S_TRUE, R_TRUE, T_TRUE)
+            .astype(np.float32)
+            .tolist(),
+        }
+        for f in frames
+    ]
+
+
+def _cloud():
+    z = torch.zeros(1, 3)
+    return SimpleNamespace(means=z, quats=z, scales=z, opacities=z[:, 0], colors=z)
+
+
+def test_static_scene_places_heldout_cameras_through_its_training_views():
+    views = place_static_heldout_views(
+        _static_train_views(range(0, 60, 5)), {}, _PosedDataset([7, 33])
+    )
+    assert views.alignment["method"] == "sim3"  # the default for a static scene
+    assert views.alignment["scale"] == pytest.approx(S_TRUE, rel=1e-5)
+    assert views.alignment["rotation_residual_deg_median"] < 0.05
+    for p in views.placements:
+        _, t_world_cam, _ = _PosedDataset([]).load_camera(p.frame_name)
+        expected = np.linalg.inv(
+            apply_similarity_to_c2w(t_world_cam.astype(np.float64), S_TRUE, R_TRUE, T_TRUE)
+        )
+        assert np.allclose(p.camera(W, H).viewmat, expected, atol=1e-4)
+        assert p.scene_time == p.time_id  # no time axis to snap to
+    assert "scene_time" not in views.alignment
+
+
+def test_static_align_none_places_dataset_cameras_untransformed():
+    views = place_static_heldout_views([], {"align": "none"}, _Dataset(n=2))
+    assert views.alignment == {"method": "none"}
+    camera = views.placements[0].camera(1, 1)
+    assert (camera.width, camera.height) == (W, H)
+    assert camera.viewmat[2, 3] == pytest.approx(4.0)  # world->cam of a camera at z=-4
+
+
+def test_static_unknown_alignment_is_an_error():
+    with pytest.raises(ValueError, match="unknown alignment"):
+        place_static_heldout_views([], {"align": "bogus"}, _Dataset())
+
+
+@pytest.mark.parametrize("n_views", [12, 2])  # unrelated cameras; too few to fit
+def test_static_untrustworthy_alignment_is_refused_and_scores_nothing(n_views):
+    views = [
+        {"frame_key": f"0:{5 * i}", "time_id": 5 * i, "t_world_cam": c2w.tolist()}
+        for i, c2w in enumerate(_unrelated_c2ws(n_views))
+    ]
+    cfg = {"dataset_root": "spin"}
+    with pytest.raises(AlignmentFailed):
+        place_static_heldout_views(views, cfg, _PosedDataset([7]))
+    result = score_static_cloud(_cloud(), views, cfg, backend=_PosedDataset([7]), device="cpu")
+    assert "masked_mpsnr" not in result
+    assert result["kind"] == "static"
+    assert result["alignment"]["status"] == "refused" and result["alignment"]["reason"]
+
+
+def test_static_score_renders_the_placed_views_and_records_the_alignment(monkeypatch):
+    seen = []
+
+    def fake_score(rasterizer, cloud, views, **_):
+        seen.extend(views)
+        return {"masked_mpsnr": 1.0, "num_views": len(seen)}
+
+    monkeypatch.setattr(nvs, "score_masked_novel_views", fake_score)
+    result = score_static_cloud(
+        _cloud(),
+        _static_train_views(range(0, 60, 5)),
+        {"dataset_root": "/data/spin"},
+        backend=_PosedDataset([7, 33]),
+        device="cpu",
+        rasterizer=_Rasterizer(),
+    )
+    assert result["num_views"] == 2 and len(seen) == 2
+    assert (result["kind"], result["dataset"], result["eval_split"]) == ("static", "spin", "val")
+    assert result["alignment"]["method"] == "sim3"
+
+
+def test_export_static_heldout_views_writes_images_and_scores(tmp_path: Path):
+    rasterizer = _Rasterizer()
+    records = export_static_heldout_views(
+        _cloud(),
+        _static_train_views(range(0, 60, 5)),
+        {},
+        tmp_path,
+        backend=_PosedDataset([0, 10, 20, 30]),
+        rasterizer=rasterizer,
+        count=2,
+        device="cpu",
+    )
+    assert [r["time_id"] for r in records] == [0, 30]
+    assert len(rasterizer.cameras) == 2
+    assert all(r["masked_psnr"] == pytest.approx(6.0206, abs=1e-3) for r in records)
+    for r in records:
+        for name in r["files"].values():
+            assert (tmp_path / name).exists()
+    index = json.loads((tmp_path / "index.json").read_text())
+    assert index["num_heldout_views"] == 4 and index["alignment"]["method"] == "sim3"
 
 
 def test_dynamic_scorer_returns_empty_when_views_cannot_be_placed(tmp_path: Path):
@@ -313,3 +444,65 @@ def test_export_replay_renders_each_training_camera_in_time_order(tmp_path: Path
     assert all((c.width, c.height) == (40, 30) for c in rasterizer.cameras)
     assert (tmp_path / "replay.mp4").stat().st_size > 0
     assert json.loads((tmp_path / "replay.json").read_text())["fps"] == 10
+
+
+# -- export CLI ---------------------------------------------------------------
+
+
+def _save_static_checkpoint(path: Path) -> None:
+    ones = np.ones((1, 3), np.float32)
+    np.savez(
+        path,
+        means=ones,
+        quats=np.ones((1, 4), np.float32),
+        scales=ones,
+        opacities=np.ones(1, np.float32),
+        colors=ones,
+    )
+
+
+def _static_run(tmp_path: Path) -> Path:
+    (tmp_path / "render").mkdir(parents=True)
+    (tmp_path / "scene").mkdir()
+    _save_static_checkpoint(tmp_path / "render" / "trained_gaussians.npz")
+    scene = {"kind": "static", "train_views": _static_train_views(range(0, 60, 5))}
+    for view in scene["train_views"]:
+        view.update(width=W, height=H, intrinsics={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0})
+    (tmp_path / "scene" / "artifact.json").write_text(json.dumps(scene))
+    return tmp_path
+
+
+def test_cli_finds_a_static_run_and_aligns_it_without_a_manifest(tmp_path: Path):
+    run = _static_run(tmp_path)
+    path, kind = cli.find_checkpoint(run, None)
+    assert (path.name, kind) == ("trained_gaussians.npz", "static")
+    assert cli.resolve_alignment(run, "auto", kind) == "sim3"  # no run_manifest.json needed
+    assert cli.resolve_alignment(run, "none", kind) == "none"
+    views = cli.read_train_views(run)
+    assert len(views) == 12 and set(views[0]) == {"frame_key", "time_id", "t_world_cam"}
+
+
+def test_cli_checkpoint_kind_comes_from_the_contents(tmp_path: Path):
+    _save_static_checkpoint(tmp_path / "custom.npz")
+    np.savez(tmp_path / "bundle.npz", fg_means=np.ones((1, 3), np.float32))
+    assert cli.find_checkpoint(tmp_path, tmp_path / "custom.npz")[1] == "static"
+    assert cli.find_checkpoint(tmp_path, tmp_path / "bundle.npz")[1] == "dynamic"
+
+
+def test_cli_dynamic_auto_alignment_reads_the_geometry_backend(tmp_path: Path):
+    manifest = {"config": {"geometry": {"backend_name": "dataset"}}}
+    (tmp_path / "run_manifest.json").write_text(json.dumps(manifest))
+    assert cli.resolve_alignment(tmp_path, "auto", "dynamic") == "none"
+
+
+def test_cli_exports_a_static_runs_heldout_views(tmp_path: Path, monkeypatch, capsys):
+    run = _static_run(tmp_path / "run")
+    monkeypatch.setattr(cli, "build_rasterizer", lambda cfg: _Rasterizer())
+    monkeypatch.setattr(cli, "eval_dataset", lambda cfg: _PosedDataset([0, 10, 20]))
+    argv = ["export", str(run), "--dataset-root", "spin", "--views", "2", "--no-score"]
+    monkeypatch.setattr("sys.argv", [*argv, "--device", "cpu"])
+    cli.main()
+    index = json.loads((run / "render" / "exports" / "heldout" / "index.json").read_text())
+    assert index["alignment"]["method"] == "sim3" and len(index["views"]) == 2
+    assert not (run / "render" / "exports" / "replay.mp4").exists()
+    assert "replay: skipped" in capsys.readouterr().out

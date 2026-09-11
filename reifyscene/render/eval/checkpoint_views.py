@@ -1,21 +1,24 @@
-"""Export what a trained dynamic scene looks like: held-out views and a replay.
+"""Export what a trained scene looks like: held-out views and a replay.
 
 The masked-NVS score says how good held-out renders are; this writes some of them
 out so a person can see it. Nothing is retrained -- it renders straight from a
-run's ``render/trained_dynamic.npz``.
+run's ``render/trained_dynamic.npz`` (or, for held-out views of a static scene,
+``render/trained_gaussians.npz``).
 
 - **Held-out views.** For evenly spaced views of the benchmark's held-out split:
   the render, the real photo, the covisibility mask, and that view's masked PSNR.
-  Cameras are placed by the scorer's own :func:`place_heldout_views`, so an
-  exported view is exactly a view that was scored.
-- **Replay.** The scene re-rendered from every training camera at its own time:
-  the path the camera actually took. It shows reconstruction fidelity, not novel
-  views, and should be labelled that way.
+  Cameras are placed by the scorer's own :func:`place_heldout_views` (or
+  :func:`place_static_heldout_views`), so an exported view is exactly a view that
+  was scored.
+- **Replay.** A dynamic scene re-rendered from every training camera at its own
+  time: the path the camera actually took. It shows reconstruction fidelity, not
+  novel views, and should be labelled that way.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +27,12 @@ import torch
 from PIL import Image
 
 from reifyscene.eval.metrics.image import MaskedPSNR
-from reifyscene.render.eval.masked_nvs_benchmark import load_heldout_view, place_heldout_views
+from reifyscene.render.eval.masked_nvs_benchmark import (
+    HeldoutViews,
+    load_heldout_view,
+    place_heldout_views,
+    place_static_heldout_views,
+)
 from reifyscene.render.export import write_video
 
 
@@ -54,12 +62,15 @@ def _to_u8(img: torch.Tensor) -> np.ndarray:
     return (img.clamp(0.0, 1.0).detach().cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
 
 
-def _render(rasterizer, scene, camera, time_id: int) -> torch.Tensor:
-    cloud = scene.cloud_at(int(time_id))
+def _render_cloud(rasterizer, cloud, camera) -> torch.Tensor:
     out = rasterizer.rasterize(
         cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera
     )
     return out.rgb.clamp(0.0, 1.0)
+
+
+def _render(rasterizer, scene, camera, time_id: int) -> torch.Tensor:
+    return _render_cloud(rasterizer, scene.cloud_at(int(time_id)), camera)
 
 
 @torch.no_grad()
@@ -87,6 +98,57 @@ def export_heldout_views(
         raise ValueError(
             "cannot place held-out cameras: the bundle has no val cameras and no scene-norm"
         )
+    return _write_heldout_views(
+        views,
+        lambda camera, time_id: _render(rasterizer, scene, camera, time_id),
+        eval_cfg,
+        out_dir,
+        backend=backend,
+        count=count,
+        device=device,
+    )
+
+
+@torch.no_grad()
+def export_static_heldout_views(
+    cloud,
+    train_views: list[dict[str, Any]],
+    eval_cfg: dict[str, Any],
+    out_dir: str | Path,
+    *,
+    backend,
+    rasterizer,
+    count: int = 8,
+    device: str = "cuda",
+) -> list[dict[str, Any]]:
+    """:func:`export_heldout_views` for a trained static cloud.
+
+    Cameras are placed through the scene's ``train_views``, as the static scorer
+    places them; every view renders the one cloud.
+    """
+    views = place_static_heldout_views(train_views, eval_cfg, backend)
+    return _write_heldout_views(
+        views,
+        lambda camera, _time_id: _render_cloud(rasterizer, cloud, camera),
+        eval_cfg,
+        out_dir,
+        backend=backend,
+        count=count,
+        device=device,
+    )
+
+
+def _write_heldout_views(
+    views: HeldoutViews,
+    render_at: Callable[[Any, int], torch.Tensor],
+    eval_cfg: dict[str, Any],
+    out_dir: str | Path,
+    *,
+    backend,
+    count: int,
+    device: str,
+) -> list[dict[str, Any]]:
+    """Render, compare and write ``count`` evenly spaced placed views, plus ``index.json``."""
     placements = views.placements
     eval_split = str(eval_cfg.get("eval_split", "val"))
     out_dir = Path(out_dir)
@@ -96,7 +158,7 @@ def export_heldout_views(
     for index in pick_evenly(len(placements), count):
         placement = placements[index]
         camera, gt, mask = load_heldout_view(placement, backend, eval_split, device)
-        pred = _render(rasterizer, scene, camera, placement.scene_time)
+        pred = render_at(camera, placement.scene_time)
         psnr = MaskedPSNR().to(device)
         psnr.update(pred[None], gt.to(device)[None], mask.to(device).float()[None])
 
