@@ -524,16 +524,20 @@ def main() -> None:
     if args.geometry_backend_name == 'vggt-long':
         geometry_recommended = recommend_vggt_long_profile(system_report, device=args.geometry_device)
     report_path = Path(args.run_dir) / 'preflight_system_report.json'
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    save_system_report(report_path, {
-        'report': system_report,
-        'recommended_tracking_profile': recommended,
-        'recommended_vggt_long_profile': geometry_recommended,
-    })
 
+    def _save_preflight_report() -> None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        save_system_report(report_path, {
+            'report': system_report,
+            'recommended_tracking_profile': recommended,
+            'recommended_vggt_long_profile': geometry_recommended,
+        })
+
+    if args.preflight_only:
+        _save_preflight_report()
     if args.debug or args.preflight_only:
         _print_system_report(console, system_report, recommended, geometry_recommendation=geometry_recommended)
-        console.print(f'saved preflight report: {report_path}')
+        console.print(f'preflight report: {report_path}')
     if args.preflight_only:
         return
 
@@ -584,6 +588,7 @@ def main() -> None:
         console.print(plan.report())
         if not plan.ok:
             raise ResumeRejected(plan.report())
+    _save_preflight_report()
 
     write_run_manifest(
         args.run_dir,
@@ -646,8 +651,12 @@ def main() -> None:
         label = stage_labels[stage_name]
         if idx < start_idx:
             started = _debug_stage(console, args.debug, f"{label} [load]")
-            artifact = materialize_stage(plan, spec)
-            pipeline.register_loaded_stage(stage_name, artifact)
+            if plan.verdicts[stage_name].action == 'rebuild':
+                # Stale but cheap (no model, a pure function of what is loaded): re-run it.
+                artifact = spec.run_fn(pipeline, outputs, [args.video])
+            else:
+                artifact = materialize_stage(plan, spec)
+                pipeline.register_loaded_stage(stage_name, artifact)
             outputs[stage_name] = artifact
             if stage_name == 'tracking':
                 outputs['tracks'] = artifact

@@ -304,7 +304,7 @@ def test_machine_picked_settings_are_pinned_to_the_prior_run(prior, tmp_path) ->
     assert not _check(run_dir, tmp_path / 'new', 'scene', explicit, [video]).ok
 
 
-def test_a_stage_built_from_a_different_upstream_is_stale(prior, tmp_path) -> None:
+def test_a_cheap_stage_built_from_a_different_upstream_is_rebuilt(prior, tmp_path) -> None:
     root, run_dir, cfg, video = prior
     other, other_cfg = _run(tmp_path, 'other', [video], **{'lifting.point_conf_threshold': 0.5})
     mixed = tmp_path / 'mixed'
@@ -312,11 +312,38 @@ def test_a_stage_built_from_a_different_upstream_is_stale(prior, tmp_path) -> No
     shutil.rmtree(mixed / 'tracking')
     shutil.copytree(other / 'tracking', mixed / 'tracking')
     plan = _check(mixed, tmp_path / 'new', 'scene', copy.deepcopy(other_cfg), [video])
+    assert plan.ok, plan.report()
     assert plan.verdicts['tracking'].action == 'load'
-    for stage in ('graph', 'optimization'):
-        assert plan.verdicts[stage].action == 'reject'
-        assert 'built from a different tracking artifact' in ' '.join(plan.verdicts[stage].problems)
-    assert plan.latest_start() == 'graph'
+    for stage in ('graph', 'optimization'):  # no model, pure functions of what is loaded
+        assert plan.verdicts[stage].action == 'rebuild'
+        assert 'built from a different tracking artifact' in plan.verdicts[stage].derived[-1]
+    # The rebuilt graph's fingerprint names the loaded tracking, so optimization follows it.
+    assert plan.records['graph']['upstream']['tracking'] == plan.records['tracking']['digest']
+
+
+def test_a_model_stage_built_from_a_different_upstream_is_rejected(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    other, other_cfg = _run(tmp_path, 'other', [video], **{'objects.frame_stride': 2})
+    mixed = tmp_path / 'mixed'
+    shutil.copytree(run_dir, mixed)
+    shutil.rmtree(mixed / 'segment')
+    shutil.copytree(other / 'segment', mixed / 'segment')
+    plan = _check(mixed, tmp_path / 'new', 'tracking', copy.deepcopy(other_cfg), [video])
+    assert plan.verdicts['segment'].action == 'load'
+    assert plan.verdicts['reid'].action == 'reject'  # runs a model: not rebuilt behind your back
+    assert 'built from a different segment artifact' in plan.verdicts['reid'].problems[0]
+    assert plan.latest_start() == 'reid'
+
+
+def test_a_missing_cheap_stage_is_rebuilt(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    holed = tmp_path / 'holed'
+    shutil.copytree(run_dir, holed)
+    shutil.rmtree(holed / 'graph')
+    plan = _check(holed, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
+    assert plan.ok, plan.report()
+    assert plan.verdicts['graph'].action == 'rebuild'
+    assert plan.verdicts['optimization'].action == 'load'  # same inputs: same digest
 
 
 def test_checking_every_stage_reports_the_latest_start(prior, tmp_path) -> None:
@@ -468,3 +495,22 @@ def test_object_embeddings_survive_a_reload(tmp_path: Path) -> None:
     loaded = ObjectArtifact.load(tmp_path / 'objects')
     assert loaded.objects[0].embedding is not None
     np.testing.assert_array_equal(loaded.objects[0].embedding, vec)
+
+
+def test_a_legacy_dataset_root_that_no_longer_exists_is_matched_by_name(prior, tmp_path) -> None:
+    root, run_dir, cfg, video = prior
+    spin = tmp_path / 'new_project' / 'spin'
+    spin.mkdir(parents=True)
+    (spin / 'dataset.json').write_text('{}')
+    then = copy.deepcopy(cfg)
+    then['geometry']['dataset_root'] = str(tmp_path / 'old_project' / 'spin')  # gone
+    legacy = _make_legacy(run_dir, tmp_path / 'legacy', then, video)
+    now = copy.deepcopy(cfg)
+    now['geometry']['dataset_root'] = str(spin)
+    plan = _check(legacy, tmp_path / 'new', 'scene', now, [video])
+    assert plan.ok, plan.report()
+    assert any('re-rooted by name only' in d for d in plan.verdicts['geometry'].derived)
+    other = copy.deepcopy(now)
+    other['geometry']['dataset_root'] = str(tmp_path / 'elsewhere' / 'windmill')
+    (tmp_path / 'elsewhere' / 'windmill').mkdir(parents=True)
+    assert not _check(legacy, tmp_path / 'new', 'scene', other, [video]).ok

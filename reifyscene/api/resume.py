@@ -38,6 +38,7 @@ from reifyscene.api.contracts import (
     set_path,
     stable,
 )
+from reifyscene.api.requirements import REQUIREMENTS, UPGRADES, NotDerivable, ResumeContext
 from reifyscene.api.stages import STAGE_ORDER, StageSpec
 from reifyscene.common.io import read_json, write_json
 
@@ -85,10 +86,12 @@ class StageVerdict:
     """What a resume does with one prior stage, and why."""
 
     stage: str
-    action: str = "load"  # "load" | "reject"
+    action: str = "load"  # "load" | "rebuild" (re-run, it is cheap) | "reject"
     derived: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     restart_from: str | None = None
+    resave: bool = False  # a derivation changed more than metadata: save the copy in full
+    metadata_updates: dict[str, Any] = field(default_factory=dict)
 
     def reject(self, problem: str, restart_from: str | None = None) -> None:
         self.action = "reject"
@@ -146,7 +149,7 @@ class ResumePlan:
             verdict = self.verdicts.get(stage)
             if verdict is None:
                 continue
-            mark = {"load": "ok", "reject": "REJECTED"}[verdict.action]
+            mark = {"load": "ok", "rebuild": "rebuilt", "reject": "REJECTED"}[verdict.action]
             if verdict.action == "load" and verdict.derived:
                 mark = "ok (derived)"
             lines.append(f"  {stage:13s} {mark}")
@@ -262,7 +265,8 @@ def _legacy_input_matches(
 
 
 def _legacy_record(stage: str, artifact: Any, prior: Path, video_paths: list[str],
-                   current_input: dict[str, Any], verdict: StageVerdict) -> dict[str, Any] | None:
+                   current_input: dict[str, Any], verdict: StageVerdict,
+                   current_cfg: dict[str, Any]) -> dict[str, Any] | None:
     """A fingerprint for a pre-fingerprint artifact, derived from what the prior run recorded.
 
     Returns the record without upstream digests or its own digest (filled in once the
@@ -293,13 +297,56 @@ def _legacy_record(stage: str, artifact: Any, prior: Path, video_paths: list[str
         f"fingerprint derived from {run_dir / 'run_manifest.json'} "
         "(made before fingerprint records)"
     )
+    settings = effective_settings(stage, cfg)
+    _reroot_paths_by_name(stage, settings, cfg, current_cfg, verdict)
     return {
         "stage": stage,
         "version": 1,  # the pre-fingerprint baseline of every stage
-        "settings": effective_settings(stage, cfg),
+        "settings": settings,
         "input": current_input,
-        "_legacy": True,
     }
+
+
+def _reroot_paths_by_name(stage: str, settings: dict[str, Any], cfg: dict[str, Any],
+                          current_cfg: dict[str, Any], verdict: StageVerdict) -> None:
+    """A folder a legacy run named by a path that is gone: the current one of that name.
+
+    A legacy record holds only the path, so when that path no longer exists (the
+    project was renamed) the folder can be matched by name alone -- said so in the
+    report. A path that still exists is compared by content as usual.
+    """
+    current = effective_settings(stage, current_cfg)
+    for path in contract_for(stage).paths:
+        was = _setting_at(settings, path)
+        now = _setting_at(current, path)
+        if not (isinstance(was, dict) and isinstance(now, dict)):
+            continue
+        if "content" in was or "content" not in now or was.get("name") != now.get("name"):
+            continue
+        _set_setting_at(settings, path, dict(now))
+        verdict.derived.append(
+            f"{path} re-rooted by name only: the run named {get_path(cfg, path)}, which no longer "
+            f"exists; this run's {get_path(current_cfg, path)} is taken as the same {now['name']}"
+        )
+
+
+def _setting_at(settings: dict[str, Any], path: str) -> Any:
+    if path in settings:
+        return settings[path]
+    for entry, value in settings.items():
+        if path.startswith(entry + ".") and isinstance(value, dict):
+            return get_path(value, path[len(entry) + 1:], MISSING)
+    return MISSING
+
+
+def _set_setting_at(settings: dict[str, Any], path: str, value: Any) -> None:
+    if path in settings:
+        settings[path] = value
+        return
+    for entry, node in settings.items():
+        if path.startswith(entry + ".") and isinstance(node, dict):
+            set_path(node, path[len(entry) + 1:], value)
+            return
 
 
 # ------------------------------------------------------------------ the check
@@ -428,12 +475,17 @@ def check_resume(
     *,
     stages: list[str] | None = None,
 ) -> ResumePlan:
-    """Decide, read-only, whether each prior stage can be loaded for this invocation.
+    """Decide, read-only, what a resume does with each prior stage.
 
     Checks every stage before ``start_stage`` (or ``stages``, e.g. every stage the
-    prior run has, for a report). Mutates ``cfg`` to pin machine-picked settings to
-    the prior run's values. Raises :class:`ResumeRejected` only for a request that
-    cannot be checked at all (the prior run and the new run are the same folder).
+    prior run has, for a report), in order. A stage is loaded when its fingerprint
+    matches, its upstream is the one it was built from and it meets its
+    requirements (:mod:`reifyscene.api.requirements`) -- after deriving whatever can
+    be derived from what is loaded. A stale rebuildable stage is re-run instead; a
+    rebuilt or upgraded stage makes the stages built from it stale in turn. Anything
+    else rejects. Mutates ``cfg`` to pin machine-picked settings to the prior run's
+    values. Raises :class:`ResumeRejected` only for a request that cannot be checked
+    at all (the prior run and the new run are the same folder).
     """
     prior = Path(prior_run_dir).expanduser().resolve()
     run = Path(run_dir).expanduser().resolve()
@@ -447,6 +499,7 @@ def check_resume(
     if stages is None:
         stages = list(STAGE_ORDER[: STAGE_ORDER.index(start_stage)])
     stages = [s for s in STAGE_ORDER if s in set(stages)]
+    video_paths = [str(p) for p in video_paths]
     current_input = input_identity(video_paths)
 
     verdicts: dict[str, StageVerdict] = {}
@@ -455,18 +508,30 @@ def check_resume(
     for stage in stages:
         verdict = verdicts[stage] = StageVerdict(stage)
         stage_dir = prior / registry[stage].dir_name
+        rebuildable = contract_for(stage).is_rebuildable(cfg)
         if not stage_dir.exists():
-            verdict.reject(f"the prior run has no {stage} stage ({stage_dir})")
+            if rebuildable:
+                verdict.action = "rebuild"
+                verdict.derived.append("rebuilt: the prior run does not have it")
+            else:
+                verdict.reject(f"the prior run has no {stage} stage ({stage_dir})")
             continue
         try:
             artifact = registry[stage].load_fn(stage_dir)
-        except Exception as exc:  # an incomplete or unreadable artifact cannot be resumed
-            verdict.reject(f"cannot be loaded: {type(exc).__name__}: {exc}")
+        except Exception as exc:  # an incomplete or unreadable artifact cannot be loaded
+            if rebuildable:
+                verdict.action = "rebuild"
+                why = f"{type(exc).__name__}: {exc}"
+                verdict.derived.append(f"rebuilt: it cannot be loaded ({why})")
+            else:
+                verdict.reject(f"cannot be loaded: {type(exc).__name__}: {exc}")
             continue
         artifacts[stage] = artifact
         record = (getattr(artifact, "metadata", {}) or {}).get("contract")
         if record is None:
-            record = _legacy_record(stage, artifact, prior, video_paths, current_input, verdict)
+            record = _legacy_record(
+                stage, artifact, prior, video_paths, current_input, verdict, cfg
+            )
             if record is None:
                 continue
             # Lineage cannot be checked for a legacy artifact; the manifest chain above is
@@ -486,30 +551,98 @@ def check_resume(
 
     pins = _pin(records, verdicts, cfg)
 
+    # What each stage's digest will be once the plan is carried out (lineage for the next).
+    digests: dict[str, str | None] = {}
     for stage in stages:
         verdict = verdicts[stage]
-        record = records.get(stage)
-        if record is None or verdict.action == "reject":
-            continue
         contract = contract_for(stage)
-        if int(record.get("version", 0)) != contract.version:
-            verdict.reject(
-                f"made by contract version {record.get('version')} of {stage}; this code is "
-                f"version {contract.version}"
-            )
-        diffs = _settings_diff(record.get("settings") or {}, effective_settings(stage, cfg))
-        if diffs:
-            verdict.reject("settings differ: " + "; ".join(diffs))
-        if record.get("input") != current_input:
-            verdict.reject("it was made from a different input (the frames it read have changed)")
-        for up in contract.upstream:
-            have = (records.get(up) or {}).get("digest")
-            if up in verdicts and have is not None and record.get("upstream", {}).get(up) != have:
-                verdict.reject(
-                    f"it was built from a different {up} artifact than the one being loaded"
-                )
+        if verdict.action == "reject":
+            digests[stage] = None
+            continue
+        if verdict.action == "load":
+            _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_input,
+                          prior / registry[stage].dir_name, video_paths)
+        if verdict.action == "rebuild":
+            upstream = {u: digests.get(u) for u in contract.upstream}
+            settings = effective_settings(stage, cfg)
+            records[stage] = fingerprint(stage, settings, current_input, upstream)
+        digests[stage] = records[stage]["digest"] if verdict.action != "reject" else None
 
     return ResumePlan(prior, run, start_stage, verdicts, records, artifacts, pins)
+
+
+def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_input, stage_dir,
+                  video_paths) -> None:
+    """Load, upgrade and derive -- or mark for rebuild, or reject -- one loadable stage."""
+    contract = contract_for(stage)
+    record = records[stage]
+    ctx = ResumeContext(stage, artifacts[stage], artifacts, records, cfg, stage_dir, video_paths)
+    if record.get("input") != current_input:
+        verdict.reject("it was made from a different input (the frames it read have changed)")
+        return
+
+    stale: list[str] = []
+    version = int(record.get("version", 0))
+    upgraded = False
+    while version < contract.version:
+        upgrade = UPGRADES.get(stage, {}).get(version)
+        if upgrade is None:
+            break
+        try:
+            done = upgrade(ctx)
+        except NotDerivable as exc:
+            stale.append(f"it cannot be upgraded from contract version {version}: {exc}")
+            break
+        verdict.derived.append(done.note)
+        verdict.resave = verdict.resave or done.resave
+        verdict.metadata_updates.update(done.metadata)
+        version += 1
+        upgraded = True
+    if version != contract.version and not stale:
+        stale.append(
+            f"made by contract version {record.get('version')} of {stage}; this code is "
+            f"version {contract.version}"
+        )
+    diffs = _settings_diff(record.get("settings") or {}, effective_settings(stage, cfg))
+    if diffs:
+        stale.append("settings differ: " + "; ".join(diffs))
+    for up in contract.upstream:
+        have = digests.get(up)
+        if up in digests and have is not None and record.get("upstream", {}).get(up) != have:
+            stale.append(f"it was built from a different {up} artifact than the one being loaded")
+
+    if stale:
+        if contract.is_rebuildable(cfg):
+            verdict.action = "rebuild"
+            verdict.derived = [d for d in verdict.derived if not d.startswith("lineage derived")]
+            verdict.derived.append("rebuilt: " + "; ".join(stale))
+            verdict.resave = False
+            verdict.metadata_updates.clear()
+        else:
+            for problem in stale:
+                verdict.reject(problem)
+        return
+
+    for requirement in REQUIREMENTS.get(stage, ()):
+        problem = requirement.check(ctx)
+        if problem is None:
+            continue
+        if requirement.derive is None:
+            verdict.reject(problem)
+            continue
+        try:
+            done = requirement.derive(ctx)
+        except NotDerivable as exc:
+            verdict.reject(f"{problem}; {exc}")
+            continue
+        verdict.derived.append(done.note)
+        verdict.resave = verdict.resave or done.resave
+        verdict.metadata_updates.update(done.metadata)
+
+    if upgraded:
+        records[stage] = fingerprint(
+            stage, record["settings"], record["input"], record.get("upstream") or {}, version
+        )
 
 
 # ------------------------------------------------------------------ loading
@@ -530,23 +663,29 @@ def _patch_artifact_json(stage_dir: Path, metadata: dict[str, Any]) -> None:
 def materialize_stage(plan: ResumePlan, spec: StageSpec) -> Any:
     """Copy one checked prior stage into the run folder and return its artifact.
 
-    The copy is exact -- the artifact is not re-saved, so nothing a save/load round
-    trip could lose is lost; only ``artifact.json`` is patched with the new folder,
-    the fingerprint record and ``metadata["resume"]`` (where it was loaded from and
-    what was derived).
+    The copy is exact and only ``artifact.json`` is patched -- the new folder, the
+    fingerprint record, ``metadata["resume"]`` (where it was loaded from, what was
+    derived) and any metadata a derivation produced -- so nothing a save/load round
+    trip could lose is lost. Only a derivation that changed more than metadata (an
+    upgrade, a re-rooted input) saves the artifact in full.
     """
     verdict = plan.verdicts[spec.name]
-    if verdict.action == "reject":
-        raise ResumeRejected(plan.report())
+    if verdict.action != "load":
+        raise ResumeRejected(
+            f"{spec.name} is not loaded by this resume ({verdict.action})\n" + plan.report()
+        )
     src = plan.prior_run_dir / spec.dir_name
     dst = plan.run_dir / spec.dir_name
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
     provenance = {"loaded_from": str(src), "derived": list(verdict.derived)}
-    patch = {"contract": plan.records[spec.name], "resume": provenance}
-    _patch_artifact_json(dst, patch)
+    patch = {**verdict.metadata_updates, "contract": plan.records[spec.name], "resume": provenance}
     artifact = plan.artifacts[spec.name]
     artifact.save_dir = dst
     artifact.metadata = {**(getattr(artifact, "metadata", {}) or {}), **patch}
+    if verdict.resave:
+        artifact.save()
+    else:
+        _patch_artifact_json(dst, patch)
     return artifact

@@ -17,6 +17,12 @@ every stage declares a :class:`StageContract`:
   they are not given explicitly. A resume takes them from the prior run instead of
   re-picking them, so a busy GPU does not change what "the same run" means.
 - ``upstream``: the stages whose artifacts it actually consumes (lineage).
+- ``paths``: settings that name a folder or file (a dataset root). They are
+  fingerprinted by what is there -- the name and the files' names, sizes and
+  modification times -- not by where it is, so moving the project keeps them.
+- ``rebuildable``: the stage is cheap, runs no model, and is a pure function of its
+  upstream artifacts and settings, so a resume that finds it stale re-runs it
+  instead of rejecting.
 
 Every artifact records ``metadata["contract"]``: its stage, version, effective
 settings, the identity of the input frames, the digests of the upstream artifacts it
@@ -64,10 +70,15 @@ class StageContract:
     exclude_when: Callable[[Mapping[str, Any]], Iterable[str]] | None = None
     pinned: tuple[str, ...] = ()
     upstream: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+    rebuildable: bool | Callable[[Mapping[str, Any]], bool] = False
 
     def excluded(self, cfg: Mapping[str, Any]) -> tuple[str, ...]:
         extra = tuple(self.exclude_when(cfg)) if self.exclude_when is not None else ()
         return ALWAYS_EXCLUDED + self.exclude + extra
+
+    def is_rebuildable(self, cfg: Mapping[str, Any]) -> bool:
+        return bool(self.rebuildable(cfg) if callable(self.rebuildable) else self.rebuildable)
 
 
 # -------------------------------------------------------------- config paths
@@ -120,6 +131,39 @@ def _prune(value: Any, prefix: str, patterns: tuple[str, ...]) -> Any:
     return out
 
 
+def path_identity(value: Any) -> Any:
+    """A folder or file named in the settings, as what it is rather than where it is.
+
+    ``{"name", "content"}``: the base name and a digest of the (top-level) files'
+    names, sizes and modification times -- which moving or renaming a parent folder
+    keeps. Only ``{"name"}`` when nothing is there.
+    """
+    if value in (None, ""):
+        return value
+    path = Path(str(value)).expanduser()
+    identity: dict[str, Any] = {"name": path.name}
+    if path.exists():
+        entries = [path] if path.is_file() else sorted(p for p in path.iterdir() if p.is_file())
+        identity["content"] = hashlib.sha256(
+            json.dumps([_file_signature(e) for e in entries], separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+    return identity
+
+
+def _identify_paths(entry: str, value: Any, paths: tuple[str, ...]) -> Any:
+    for p in paths:
+        if p == entry:
+            value = path_identity(value)
+        elif p.startswith(entry + ".") and isinstance(value, dict):
+            *parents, leaf = p[len(entry) + 1:].split(".")
+            node = value
+            for part in parents:
+                node = node.get(part) if isinstance(node, dict) else None
+            if isinstance(node, dict) and leaf in node:
+                node[leaf] = path_identity(node[leaf])
+    return value
+
+
 def effective_settings(stage: str, cfg: Mapping[str, Any]) -> dict[str, Any]:
     """The settings ``stage``'s output depends on, as this config gives them."""
     contract = contract_for(stage)
@@ -134,7 +178,7 @@ def effective_settings(stage: str, cfg: Mapping[str, Any]) -> dict[str, Any]:
             value = get_path(cfg, path, MISSING)
             if value is MISSING:
                 value = copy.deepcopy(default)
-        out[path] = stable(_prune(value, path, patterns))
+        out[path] = _identify_paths(path, stable(_prune(value, path, patterns)), contract.paths)
     return out
 
 
@@ -256,6 +300,10 @@ def _dyn_mask_excluded(cfg):
     return tuple(_TRACK_PLAN) if source != "tracking" else ()
 
 
+def _dyn_mask_is_all_static(cfg):
+    return str(get_path(cfg, "dyn_mask.backend_name", "all-static")).lower() == "all-static"
+
+
 def _geometry_excluded(cfg):
     backends = {
         str(get_path(cfg, key, "") or "").lower()
@@ -289,7 +337,7 @@ CONTRACTS: dict[str, StageContract] = {
             },
             exclude_when=_ingest_excluded,
         ),
-        StageContract("sync", upstream=("ingest",)),
+        StageContract("sync", upstream=("ingest",), rebuildable=True),
         StageContract(
             "dyn_mask",
             settings={
@@ -302,6 +350,8 @@ CONTRACTS: dict[str, StageContract] = {
             exclude_when=_dyn_mask_excluded,
             pinned=_TRACK_PLAN_PINNED,
             upstream=("ingest", "sync"),
+            # The default all-static backend is a no-op; the detector runs a model.
+            rebuildable=_dyn_mask_is_all_static,
         ),
         StageContract(
             "geometry",
@@ -310,6 +360,7 @@ CONTRACTS: dict[str, StageContract] = {
             exclude_when=_geometry_excluded,
             pinned=_TRACK_PLAN_PINNED,
             upstream=("ingest", "sync", "dyn_mask"),
+            paths=("geometry.dataset_root",),
         ),
         StageContract(
             "pose_refine",
@@ -340,7 +391,9 @@ CONTRACTS: dict[str, StageContract] = {
             "semantics", settings={"semantics": {}}, upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
-        StageContract("objects", upstream=("ingest", "segment", "reid", "semantics")),
+        StageContract(
+            "objects", upstream=("ingest", "segment", "reid", "semantics"), rebuildable=True
+        ),
         StageContract(
             # The dense ladder runs on segment's instances, so the humans section's own
             # detector / frame-selection / DensePose / SMPL keys do not reach its output.
@@ -369,13 +422,16 @@ CONTRACTS: dict[str, StageContract] = {
             ),
             upstream=("ingest", "pose_refine"),
         ),
-        StageContract("graph", upstream=("pose_refine", "tracking", "humans", "objects")),
+        StageContract(
+            "graph", upstream=("pose_refine", "tracking", "humans", "objects"), rebuildable=True
+        ),
         StageContract(
             # The solver reads the ``optimizer`` section; ``optimization`` holds only
             # debug-viewer switches.
             "optimization",
             settings={"optimizer": {}},
             upstream=("sync", "pose_refine", "tracking", "humans", "objects", "graph"),
+            rebuildable=True,
         ),
         StageContract(
             "scene",
@@ -400,6 +456,7 @@ CONTRACTS: dict[str, StageContract] = {
                 "render.render_scale",
             ),
             upstream=("scene",),
+            paths=("evaluation.masked_nvs.dataset_root",),
         ),
     )
 }
