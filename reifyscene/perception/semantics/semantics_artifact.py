@@ -22,7 +22,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reifyscene.common.backend_ladder import CapabilityManifest
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact
 
@@ -108,15 +108,14 @@ class SemanticsArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         embeddings: dict[str, np.ndarray] = {}
         for track_id, filename in raw.get('embedding_index', {}).items():
-            path = save_dir / 'embeddings' / filename
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    embeddings[track_id] = np.asarray(npz['embedding'], dtype=np.float32)
+            path = require_file(save_dir / 'embeddings' / filename, "semantics embedding")
+            with np.load(path, allow_pickle=True) as npz:
+                embeddings[track_id] = np.asarray(npz['embedding'], dtype=np.float32)
         records = {tid: SemanticRecord.from_dict(r) for tid, r in raw.get('records', {}).items()}
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             records=records,
             embeddings=embeddings,

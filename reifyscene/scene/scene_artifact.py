@@ -215,7 +215,7 @@ class SceneArtifact(BaseArtifact):
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
-            save_dir=Path(raw["save_dir"]),
+            save_dir=Path(save_dir),
             metadata=raw.get("metadata", {}),
             kind=str(raw.get("kind", "static")),
             render_seed=render_seed,

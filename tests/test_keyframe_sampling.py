@@ -40,16 +40,16 @@ def test_zero_frame_stream_still_emits_frame0() -> None:
     assert [f.frame_idx for f in ds.sample_keyframes(all_frames=True)] == [0]
 
 
-def test_keyframes_all_resume_signature_is_backward_compatible() -> None:
-    """Default (strided) signature stays identical to pre-flag artifacts; only an
-    actual all-frames run gets a distinct signature that invalidates them."""
-    from reifyscene.api.resume import _stage_cfg_signature
+def test_keyframes_all_changes_the_ingest_fingerprint_only_when_on() -> None:
+    """keyframes_all off fingerprints like the strided default; on, the stride and cap
+    select nothing, so only the flag is fingerprinted."""
+    from reifyscene.api.contracts import effective_settings
 
     base = {"max_keyframes_per_stream": 4, "keyframe_stride_sec": 1.0}
-    default_sig = _stage_cfg_signature(base, "ingest")
-    assert "keyframes_all" not in default_sig  # byte-identical to pre-flag signature
-    assert _stage_cfg_signature({**base, "keyframes_all": False}, "ingest") == default_sig
+    default = effective_settings("ingest", base)
+    assert effective_settings("ingest", {**base, "keyframes_all": False}) == default
 
-    all_sig = _stage_cfg_signature({**base, "keyframes_all": True}, "ingest")
-    assert all_sig.get("keyframes_all") is True
-    assert all_sig != default_sig
+    all_frames = effective_settings("ingest", {**base, "keyframes_all": True})
+    assert all_frames["keyframes_all"] is True
+    assert "max_keyframes_per_stream" not in all_frames and "keyframe_stride_sec" not in all_frames
+    assert all_frames != default

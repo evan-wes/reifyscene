@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.backend_ladder import CapabilityManifest
 from reifyscene.common.types import BaseArtifact, FrameRef, HumanState
@@ -454,36 +454,32 @@ class HumanArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
         for det_id in raw.get('mask_ids', []):
-            path = save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
+            path = require_file(save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         densepose_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('densepose_ids', []):
-            path = save_dir / 'densepose' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    densepose_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
+            path = require_file(save_dir / 'densepose' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                densepose_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         smpl_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('smpl_ids', []):
-            path = save_dir / 'smpl' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    payload = {}
-                    for k in npz.files:
-                        arr = np.asarray(npz[k])
-                        payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
-                    smpl_payloads[det_id] = payload
+            path = require_file(save_dir / 'smpl' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                payload = {}
+                for k in npz.files:
+                    arr = np.asarray(npz[k])
+                    payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
+                smpl_payloads[det_id] = payload
         dense_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('dense_ids', []):
-            path = save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
+            path = require_file(save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         artifact = cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             humans=[],
             raw_humans=[],

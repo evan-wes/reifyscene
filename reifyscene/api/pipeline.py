@@ -53,7 +53,7 @@ from reifyscene.perception.semantics.semantics_artifact import SemanticsArtifact
 from reifyscene.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
 from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from reifyscene.query.parser import PromptParser
-from reifyscene.api.resume import apply_stage_compatibility_metadata
+from reifyscene.api.contracts import input_identity, stage_fingerprint
 from reifyscene.api.stages import build_stage_registry
 from reifyscene.render.registry import build_renderer
 from reifyscene.scene.assembler import SingleVideoSceneAssembler
@@ -93,6 +93,10 @@ class ReifyScenePipeline:
             Passed directly to :class:`JointSpatiotemporalSolver`.
         """
         self.cfg = cfg or {}
+        # Fingerprint digests of the stages run or loaded so far (lineage for the next ones).
+        self._stage_digests: dict[str, str | None] = {}
+        self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
+        self._run_video_paths: list[str] = []
         self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
         self.quality = ClipQualityAssessor()
@@ -189,10 +193,34 @@ class ReifyScenePipeline:
     def _video_paths_for_stage(self, ingest_artifact: IngestArtifact | None = None) -> list[str]:
         if ingest_artifact is not None:
             return self._video_paths_from_ingest(ingest_artifact)
-        return [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+        resume_paths = [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+        # Every stage fingerprints the same input: without the run script's explicit
+        # list, use the one ingest read (run or loaded) rather than none.
+        return resume_paths or list(self._run_video_paths)
 
     def _stamp_stage_metadata(self, artifact, stage_name: str, *, video_paths: list[str]) -> None:
-        apply_stage_compatibility_metadata(artifact, self.cfg, stage_name, video_paths)
+        """Record the stage's fingerprint (``metadata['contract']``) before it is saved.
+
+        The fingerprint names the settings the stage used, the input frames, and the
+        digests of the upstream artifacts it was built from -- this run's own, or the
+        ones a resume loaded (:meth:`register_loaded_stage`).
+        """
+        if stage_name == 'ingest':
+            self._run_video_paths = [str(p) for p in video_paths]
+        key = tuple(str(p) for p in video_paths)
+        if key not in self._input_identities:
+            self._input_identities[key] = input_identity(video_paths)
+        record = stage_fingerprint(stage_name, self.cfg, self._input_identities[key], self._stage_digests)
+        artifact.metadata = dict(getattr(artifact, 'metadata', {}) or {})
+        artifact.metadata['contract'] = record
+        self._stage_digests[stage_name] = record['digest']
+
+    def register_loaded_stage(self, stage_name: str, artifact) -> None:
+        """Make a stage a resume loaded (not ran) the upstream of the stages that run next."""
+        record = (getattr(artifact, 'metadata', {}) or {}).get('contract') or {}
+        self._stage_digests[stage_name] = record.get('digest')
+        if stage_name == 'ingest':
+            self._run_video_paths = self._video_paths_from_ingest(artifact)
 
 
     def calibrate(self, video_paths: list[str]) -> Any:

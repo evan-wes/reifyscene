@@ -83,3 +83,24 @@ def test_build_config_supports_geometry_and_tracking_time_spacing(tmp_path: Path
     assert cfg['render']['backend_name'] == 'gaussian4d'
     assert cfg['render']['render_scale'] == 1
     assert 'offline_high_quality' not in cfg['render']
+
+
+def test_build_config_records_which_settings_the_machine_picked(tmp_path: Path, monkeypatch) -> None:
+    """A resume pins these to the prior run's values instead of re-picking them."""
+    import scripts.run_single_video_reifyscene as runner
+
+    monkeypatch.setattr(
+        runner, 'recommend_tracking_profile',
+        lambda report, device: {'profile': 'full', 'frame_stride': 1, 'max_frames': 96,
+                                'resize_max_dim': 512, 'window_size': 48, 'window_overlap': 12},
+    )
+    args = _make_args(tmp_path)
+    args.resource_profile = 'auto'
+    args.tracking_frame_stride = 2  # given explicitly: intent, not a machine pick
+    cfg, _ = build_config(args, system_report={'ram_gb': 16.0})
+    picked = set(cfg['_profile_picked'])
+    assert {'tracking.max_frames', 'tracking.resize_max_dim', 'tracking.window_size',
+            'tracking.window_overlap'} <= picked
+    assert 'tracking.frame_stride' not in picked
+    assert cfg['tracking']['max_frames'] == 96
+    assert {'humans.max_inference_side', 'objects.embedder_max_inference_side'} <= picked

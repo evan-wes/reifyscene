@@ -119,4 +119,4 @@ def test_pipeline_calibrate_uses_runner_and_stamps_metadata(tmp_path: Path) -> N
     pipeline.calibration_runner.run = lambda run_id, save_dir, video_paths: artifact
     out = pipeline.calibrate([__file__])
     assert out is artifact
-    assert out.metadata["compatibility"]["stage_name"] == "calibration"
+    assert out.metadata["contract"]["stage"] == "calibration"

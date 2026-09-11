@@ -142,7 +142,7 @@ class OptimizationArtifact(BaseArtifact):
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             refined_cameras={
                 stream_id: [GeometryArtifact._camera_state_from_dict(state) for state in states]

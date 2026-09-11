@@ -107,7 +107,9 @@ class VideoDecoder:
             Optional explicit stream identifier (a frame directory prefers the camera id
             parsed from filenames; this is the fallback when filenames carry no camera).
         """
-        path = Path(video_path)
+        # Absolute, so the stream (and every frame path in it) still resolves when a later
+        # stage or a resume runs from another working directory.
+        path = Path(video_path).expanduser().resolve()
         if path.is_dir():
             return self._decode_frame_dir(path, stream_id)
         meta = self._probe_capture(path)
