@@ -57,7 +57,6 @@ from reifyscene.api.contracts import input_identity, stage_fingerprint
 from reifyscene.api.stages import build_stage_registry
 from reifyscene.render.registry import build_renderer
 from reifyscene.scene.assembler import SingleVideoSceneAssembler
-from reifyscene.eval.benchmark_runner import BenchmarkRunner
 from reifyscene.sync.global_time_solver import GlobalTimeAlignmentSolver
 from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
 
@@ -149,7 +148,6 @@ class ReifyScenePipeline:
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
         self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
-        self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
         self.calibration_runner = CalibrationRunner(self.cfg.get("calibration", {}), decoder=self.decoder)
 
     @staticmethod
@@ -687,59 +685,6 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-
-    def _project_world_to_image(self, xyz_world: np.ndarray, frame_ref: FrameRef, geometry_artifact) -> np.ndarray | None:
-        if geometry_artifact is None:
-            return None
-        states = (getattr(geometry_artifact, 'camera_states_by_stream', {}) or {}).get(frame_ref.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for st in states:
-            dt = abs(float(st.time_sec) - float(frame_ref.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = st
-                best_dt = dt
-        if best is None:
-            return None
-        Twc = np.asarray(best.pose.T_world_cam, dtype=np.float32)
-        try:
-            Tcw = np.linalg.inv(Twc)
-        except np.linalg.LinAlgError:
-            return None
-        xyz_h = np.asarray(list(np.asarray(xyz_world, dtype=np.float32)) + [1.0], dtype=np.float32)
-        cam = Tcw @ xyz_h
-        if not np.all(np.isfinite(cam)) or abs(float(cam[2])) < 1e-6:
-            return None
-        intr = best.intrinsics
-        x = float(intr.cx) + float(intr.fx) * (float(cam[0]) / float(cam[2]))
-        y = float(intr.cy) + float(intr.fy) * (float(cam[1]) / float(cam[2]))
-        return np.asarray([x, y], dtype=np.float32)
-
-    def _attach_human_debug_projections(self, artifact, track_artifact, geometry_artifact) -> None:
-        if geometry_artifact is None or artifact is None:
-            return
-        projected_by_frame: dict[str, list[dict[str, Any]]] = {}
-        for human in list(getattr(artifact, 'humans', []) or []):
-            try:
-                world = self.scene_assembler._state_world_position(human, 'humans', track_artifact, geometry_artifact, source_artifact=artifact)
-            except Exception:
-                world = None
-            if world is None:
-                continue
-            xy = self._project_world_to_image(np.asarray(world, dtype=np.float32), human.frame_ref, geometry_artifact)
-            if xy is None or not np.all(np.isfinite(xy)):
-                continue
-            frame_key = f"{human.frame_ref.stream_id}:{int(human.frame_ref.frame_idx)}"
-            projected_by_frame.setdefault(frame_key, []).append({
-                'human_id': str(human.human_id),
-                'xy': np.asarray(xy, dtype=np.float32).tolist(),
-                'world_xyz': np.asarray(world, dtype=np.float32).tolist(),
-                'confidence': float(getattr(human, 'confidence', 0.0)),
-                'anchor_source': str((getattr(human, 'attributes', {}) or {}).get('human_world_anchor_source', 'unknown')),
-            })
-        artifact.metadata['projected_centers_by_frame'] = projected_by_frame
 
     def _effective_sample_stride(self, stage_cfg: dict[str, Any]) -> int:
         """Return the effective original-frame stride for a perception stage."""

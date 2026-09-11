@@ -162,6 +162,17 @@ version scheme (canonical version in the `VERSION` file, read by
   `pose_refine` builds its tracker images from the recorded crop instead of re-running VGGT's
   loader. A frame the geometry lists without a photo on disk raises instead of being dropped.
 
+### Removed
+- **Evaluation code nothing ran, which would have carried the crop bug.** `BenchmarkRunner`
+  (`reifyscene/eval/benchmark_runner.py`) was built by the pipeline but never run, and it alone
+  used `RenderingMetrics` (train-view metrics that squashed ground truth onto the prediction and
+  called a renderer method that does not exist), `TrackingMetrics` (projected with the crop's K
+  onto full-frame track positions; its quality score read summaries nothing writes, so it was
+  always 0.0) and `GeometryMetrics`. Also removed: the pipeline's human-centre projection
+  (`_attach_human_debug_projections`, `_project_world_to_image`, called by nothing, and relying on
+  an assembler method that no longer exists) and the human debug view's branch that drew those
+  projections. The real scoring is `masked_nvs_benchmark.py`.
+
 ### Findings
 - **Pose refinement is not deterministic, and when it diverges nothing notices.** Two runs of
   `spin_native_full.yaml` got identical VGGT-Long geometry (rotations equal to 0.004°) and
