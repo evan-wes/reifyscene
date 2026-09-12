@@ -133,32 +133,60 @@ steps 1 and 3 are the loop.
 
 ---
 
-## 6. Footage — and why each clip is used for what
+## 6. Footage — and the constraint that decides it
 
-**Loop: NVIDIA `Jumping`** (`../data/shape_of_motion/nvidia/Jumping`).
+**The pipeline reconstructs from camera TRANSLATION.** Rotation gives no parallax, so a
+panning or tripod-mounted camera is useless to it however rich the scene is. That single
+constraint, not entity count, decides which clips can host the loop — and it disqualifies the
+obvious candidates. Measured 2026-09-12, ground truth where the dataset ships cameras,
+VGGT-Long's estimate otherwise:
 
-| | spin (today's runs) | **Jumping** | lindy-hop |
+| clip | entities | frames | camera translation | verdict |
+|---|---|---|---|---|
+| NVIDIA `Jumping` | 4 people + backpack | 96 | **0.000 (GT)** | fixed rig: unusable |
+| NVIDIA `Balloon1` | person + balloon | 192 | **0.000 (GT)** | fixed rig: unusable |
+| DyCheck `spin` | 1 person | 426 | 2.87 (GT), baseline/depth **0.579** | reconstructs well; one real node |
+| DyCheck `paper-windmill` | windmill + pot | 277 | 1.09 (GT) | reconstructs; two nodes |
+
+Both NVIDIA sequences are one camera of a rig held still while the people move, so the
+"camera motion" a reconstruction reports on them is hallucinated drift — on `Jumping` it
+produced a degenerate re-anchor (Sim(3) scale **-0.0038**, a reflection). They were the v3
+plan's first choice on entity count alone; the cameras were never checked. They are out.
+
+**Screening DAVIS settled it.** All 33 sequences with 3+ annotated objects were reconstructed
+(geometry only, ~40 s each) and ranked by **baseline / median scene depth** — the widest
+separation between two camera centres against how far away the scene is, which is what decides
+whether there is anything to triangulate. Path length is not the measure: a jittery handheld
+camera accumulates path without going anywhere.
+
+| clip | objects | frames | baseline/depth |
 |---|---|---|---|
-| real entities | 1 person | **4 people + a backpack** | 8 dancers in pairs |
-| relations available | none | near / left-of / approaching | holding, pairs, occlusion |
-| input frames | 426 | **96** (camera 0) | 73 |
-| held-out views | 722 | **288** (cameras 1–3) | none |
-| format | SoM preprocessed | **SoM preprocessed — runs today** | needs a DAVIS→ingest loader |
+| `longboard` | 5 | 52 | 1.707 |
+| **`lab-coat`** | **5** | **47** | **0.565** |
+| `gold-fish` | 5 | 78 | 0.516 |
+| `dogs-scale` | 4 | 83 | 0.472 |
+| `miami-surf` | 6 | 70 | 0.470 |
+| *spin, for scale* | *1* | *426* | *0.579* |
+| `lindy-hop` | 8 | 73 | 0.155 |
+| `schoolgirls` | 7 | 80 | 0.089 |
 
-spin is one person centre-frame for the whole clip: a graph with one real node, which cannot
-exercise relations, identity, or a meaningful edit. `Jumping` is nontrivial and costs no new
-plumbing — `masks`, `covisible` and `dataset.json` in the layout spin already uses, so held-out
-masked-NVS scoring works unchanged. At 96 input frames it is a quarter of spin's cost to
-regenerate. Its categories (`person`, `backpack`) are ones the semantics stage should get right,
-unlike spin's four "tie" entities. Removing one of four people leaves three people, a backpack and
-the steps that must survive — an edit whose correctness is visible.
+The richest clips are the worst shot — `lindy-hop`'s eight dancers sit behind a near-static
+camera — but the 4-6 object band holds several clips at or above spin's proven parallax.
 
-**Audit: DAVIS**, GT masks, `lindy-hop` (8 entities, pairs, constant mutual occlusion) as the
-deliberate stress case, plus moderates (`dog-gooses` 5, `sheep` 5, `schoolgirls` 7). GT masks
-separate "the definition is wrong" from "SAM2 is wrong"; a definition that holds on GT masks and
-degrades on SAM2 is a perception finding, not a definition failure.
+**Loop: DAVIS `lab-coat`.** Three similar-looking people (long hair, white coats: a real
+identity test the graph must not collapse), relations that matter (near, left-of/right-of, one
+holding a phone), slow motion over open ground with a fence and trees to anchor the static
+structure, and a baseline/depth of 0.565 against spin's 0.579. Removing one of three people is
+an edit whose correctness anyone can judge. Its 47 frames are few, which is the trade.
 
-**Fallback:** `Balloon1` (1 person + balloon, same format) if `Jumping`'s geometry disappoints.
+**Audit: DAVIS** with GT masks — `dogs-scale` (puppies on a scale on a table: the cleanest
+`on-top-of` in the set, 83 frames), `longboard` (skater on board, backpack on skater, cyclist on
+bicycle — richest relations, but a fast chase with motion blur), and `lindy-hop` as the
+deliberate stress case. GT masks separate "the definition is wrong" from "SAM2 is wrong".
+
+**No held-out scoring on DAVIS.** It ships no other viewpoints, so a masked-NVS number is not
+available for the loop clip; spin remains the clip for reconstruction quality. The loop does not
+need a score — §8 already limits what its diff may claim.
 
 ---
 
