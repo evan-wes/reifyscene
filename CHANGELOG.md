@@ -156,18 +156,58 @@ version scheme (canonical version in the `VERSION` file, read by
   converged (final reprojection 0.88 px) and the other diverged (6·10¹⁴⁹ px, one camera turned
   160°) — and its poses went downstream: that run scored 12.67, against 14.96 on the converged
   geometry. The tracker shuffles its query points with an unseeded `torch.randperm`, which pose
-  refinement now seeds (`pose_refine.seed`, default 0) — **that alone does not make a run
-  repeat**: two seeded runs on one geometry ended at the same reprojection error (0.87976 /
-  0.87980 px) and nearly the same focal (539.02 / 539.05), but their worst camera turned 14.3° in
-  one and 29.9° in the other, and their scenes score about a dB apart. GPU kernels and the
-  multithreaded bundle adjustment stay non-deterministic; what protects a run is the guard, not
-  the seed. A
+  refinement now seeds (`pose_refine.seed`, default 0) — that alone did not make a run repeat,
+  and the cause was found afterwards: see **Pose refinement repeats now** below. A
   bundle adjustment that ends above `pose_refine.max_final_reproj_px` (8) or turns a camera more
   than `max_rot_delta_deg` (90°) from its seed pose is refused: the stream keeps its seed poses
   and `metadata.pose_refine.rejected_streams` says why. A resume rejects a pose_refine artifact
   that kept a diverged stream (restart at pose_refine) and loads one that refused it. Seeding
   does not bump pose_refine's contract version: an unseeded refinement that converged is as good
   as a seeded one.
+- **Pose refinement repeats now: the bundle adjustment was refining cameras with no evidence**
+  (`pose_refine.min_obs_per_camera`, default 3; `pose_refine.ba_threads`, default 1). A 6-DOF pose
+  needs three observed points to be determined at all. On spin's 426 keyframes, **9 cameras had
+  none** and 14 had fewer than three, against a median of 204 — and COLMAP registers them anyway,
+  so they entered the solve as free parameters. The normal matrix is then rank-deficient, which
+  CHOLMOD reports 128–154 times per solve as "matrix not positive definite", and those cameras'
+  poses come back from nothing but the solver's damping. Replaying one run's saved seed model
+  eight times showed what that costs: the worst camera landed anywhere from 9.5° to **143°** from
+  its seed, one replay ended at 1.25·10¹⁵⁰ px, and another collapsed the scene's scale 60× (the
+  re-anchor Sim(3) came out at 0.0166 instead of ~1.06) **while its mean reprojection error stayed
+  a healthy 0.88 px** — a failure no reprojection check can see. Fixed in three parts:
+  - **Only cameras with `min_obs_per_camera` observations are refined**, recomputed every BA
+    iteration because dropping points can leave a camera unconstrained part-way through. The rest
+    keep their seed pose, and the stats name them (`cameras_refined`, `cameras_kept_seed`).
+    On spin that is 411 of 426 — the 15 are frames 24-30, 228-234 and 387 — and solver failures
+    fall from 128-154 to 37.
+  - **The re-anchor covers only the cameras the solve moved.** The Sim(3) undoes BA's gauge
+    drift; a camera BA skipped never drifted, so fitting and applying the correction over every
+    camera pushed the skipped ones off their own seed pose by exactly the drift they never had
+    (it put the worst *anchored* camera on a zero-observation frame, several of them displaced by
+    an identical 9.4867°). Both the fit and the correction are now restricted to the moved
+    cameras, so a skipped camera comes out bit-identical to its seed.
+  - **The solve runs single-threaded** (`ba_threads`). Ceres' multithreaded accumulation order
+    varies run to run; at one thread two runs of the same seed model are bit-identical (same pose
+    digest, same 16 digits of reprojection error and focal). It costs ~90 s on a 426-frame run
+    (109 → 198 s) in a pipeline that takes hours. `-1` restores every core, and repeatability is
+    then not offered.
+  - **The divergence guard measures what ships.** The reprojection error is checked before the
+    gauge is re-anchored (a solve at 10¹⁵⁰ px would poison the Sim(3) fitted from its poses) and
+    the rotations after, where the poses actually land. The old order checked rotations
+    pre-anchor, which carries BA's global gauge drift and overstates them — 15.4° against 9.5° on
+    the same solve. The recorded `seed_to_refined_rot_delta_deg_*` are now post-anchor, with the
+    old measure kept beside them as `..._max_before_reanchor`.
+
+  Validated on the GPU: two full runs of the stage from the same geometry are **bit-identical** —
+  one digest over all 426 refined poses, the same focal to nine decimals and the same mean
+  reprojection error (0.8808554045571958) to sixteen, which is also what replaying the saved seed
+  model on the CPU gives. Its post-anchor worst camera is 9.35°, against 15.36° by the old
+  pre-anchor measure.
+
+  pose_refine is contract version 2. A resume upgrades an artifact that refined nothing (disabled,
+  or every stream refused) for free, since version 2 would pass the geometry through identically;
+  one that did refine cannot be brought forward — its poses came out of the old solve — so the
+  resume is rejected and names pose_refine as the stage to restart from.
 - **Our no-upscale VGGT-Long loader squashed portrait frames.** Below a 518 target it scaled by
   a floating-point ratio (720 at 252 floored to 238) and clamped *both* sides to the target, so a
   720×960 frame went in at 238×252 instead of being cropped like upstream. It now takes the width
@@ -207,6 +247,15 @@ version scheme (canonical version in the `VERSION` file, read by
   renders at the nearest training keyframe's time. Full-frame scenes are unaffected.
 
 ### Correction
+- **The GPU was never why pose refinement did not repeat.** This release first claimed the
+  seeded tracker still could not make a run repeat because "GPU kernels and the multithreaded
+  bundle adjustment" were both non-deterministic. The GPU half is wrong. Three runs of the
+  VGGSfM tracker — two launched for this measurement, plus the one inside `spin_native_c` days
+  earlier — wrote **byte-identical** COLMAP seed models (`images.txt` 10,244,822 B,
+  `points3D.txt` 3,650,780 B, matching digests). Seeding does make the tracker repeat. Only the
+  bundle adjustment did not, for the reason fixed above; with one thread it is bit-identical too,
+  so a run repeats end to end. The claim was written from two runs that differed, without
+  isolating which half differed.
 - **The native numbers in 0.1.31.3 (10.29 / 11.95) and 0.2.0.0 (12.56) were never scored by
   the repo.** Re-scoring the surviving checkpoints with the scorer of the day (0.1.31.3) and of
   today both gives ~4.6. They came from an aligned scoring step run outside the repo: its pose
@@ -296,6 +345,11 @@ version scheme (canonical version in the `VERSION` file, read by
   dataset folder, rejected for a leftover stage; every requirement's derivation and rejection;
   the run script end to end (load, rebuild, reject before writing anything, `--check-resume`).
 - `tests/test_stage_settings_coverage.py`: every config key a stage reads is in its fingerprint.
+- `tests/test_pose_refine.py`: the camera filter (which cameras enter the solve, which keep their
+  seed pose, and the skip when fewer than two are left), the pinned thread count, each divergence
+  check on its own, the rotation-delta helper, and the re-anchor leaving a camera the solve never
+  moved bit-identical to its seed. `tests/test_resume_requirements.py`: a pass-through pose_refine
+  upgrades to version 2, a refined one is refused with the stage to restart from.
 - `tests/test_track_support.py`, `tests/test_graph.py`: synthetic masks and tracks — a track
   inside one mask, inside nothing, inside too rarely to count, and inside two entities (it goes to
   the one it is inside most); the ratio taken over the frames the two share; invisible and
@@ -303,7 +357,7 @@ version scheme (canonical version in the `VERSION` file, read by
   columns it reads; and on the builder — entities and a background instead of track nodes, the
   evidence and motion summary each node carries, the thresholds read from the config, and the note
   an empty join produces.
-  Full suite: **522 passed, 1 skipped**.
+  Full suite: **530 passed, 1 skipped**.
 
 ## [0.2.0.2] - 2026-09-10
 

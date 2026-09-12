@@ -400,6 +400,13 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "pose_refine",
+            version=2,
+            changes={
+                2: "the bundle adjustment refines only cameras with enough observations to "
+                "determine a pose and runs single-threaded, so it repeats; a camera with "
+                "none used to come back from the solver's damping (one run turned one 143 "
+                "degrees and collapsed the scene's scale 60x)"
+            },
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),

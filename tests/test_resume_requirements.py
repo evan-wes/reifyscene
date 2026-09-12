@@ -301,6 +301,27 @@ def test_a_kept_diverged_refinement_is_rejected_and_a_refused_one_loads(tmp_path
         "the refinement actually ran", "its bundle adjustment converged"))
 
 
+def test_a_pass_through_pose_refine_upgrades_but_a_refined_one_cannot(tmp_path) -> None:
+    from reifyscene.api.requirements import UPGRADES, NotDerivable
+
+    upgrade = UPGRADES["pose_refine"][1]
+    # Nothing was refined, so version 2's bundle adjustment would change nothing.
+    disabled = _geometry({}, pose_refine={"enabled": False, "refined_streams": []})
+    assert "passed the geometry through" in upgrade(_ctx("pose_refine", disabled, tmp_path)).note
+    refused = _geometry({}, pose_refine={
+        "enabled": True, "refined_streams": [],
+        "rejected_streams": {"0": "final mean reprojection error 6.2e+149 px exceeds 8 px"},
+    })
+    assert "refined nothing" in upgrade(_ctx("pose_refine", refused, tmp_path)).note
+    # A run that did refine has poses from the old solve; only re-running gets the new ones.
+    refined = _geometry({}, pose_refine={
+        "enabled": True, "refined_streams": ["0"],
+        "stats": {"0": {"reanchor_scale": 1.0, "mean_reproj_px": 0.88}},
+    })
+    with pytest.raises(NotDerivable, match="re-run pose_refine"):
+        upgrade(_ctx("pose_refine", refined, tmp_path))
+
+
 def test_an_old_oracle_geometry_is_retimed_onto_the_ingest_clock(tmp_path) -> None:
     from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 

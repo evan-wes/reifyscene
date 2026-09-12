@@ -154,11 +154,13 @@ one global offset; per-camera drift still counts (median rotation left after the
 the native rows), and so do parts of the room a held-out camera sees that VGGT-Long's centre crop
 never did.
 
-Both native rows come from one fresh run of `configs/experiment/spin_native_full.yaml`. Pose
-refinement does not repeat exactly from run to run (GPU kernels and a multithreaded bundle
-adjustment), and the geometry it lands on moves the score: another converged run of the same
-config scored 14.96 dynamic / 14.56 static. A run whose bundle adjustment *diverges* is now
-refused — it keeps the unrefined poses and says so — rather than quietly scoring 12.67.
+Both native rows come from one fresh run of `configs/experiment/spin_native_full.yaml`, scored
+before pose refinement was made repeatable; the geometry a refinement lands on moves the score,
+and another converged run of the same config scored 14.96 dynamic / 14.56 static. Pose refinement
+now repeats: its tracker always did (three runs, byte-identical seed models), and the bundle
+adjustment does too once it stops refining cameras the observations cannot constrain and runs
+single-threaded. A run whose bundle adjustment *diverges* is refused — it keeps the unrefined
+poses and says so — rather than quietly scoring 12.67.
 
 Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
 drift), not the dynamic modeling; the remaining gap to the oracle is the cost of

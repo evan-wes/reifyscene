@@ -702,8 +702,35 @@ def _relink_pose_refine(ctx: ResumeContext) -> Derivation:
 
 # stage -> {version made by: upgrade to the next version}. An upgrade recomputes the
 # artifact's content from what is loaded (no model run) and returns what it did.
+def _pose_refine_v2(ctx: ResumeContext) -> Derivation:
+    """Bring a version-1 pose_refine artifact up to date, when there is nothing to bring.
+
+    Version 2 changed the bundle adjustment: it refines only cameras with enough
+    observations to determine a pose, and runs single-threaded so it repeats. A run that
+    passed the geometry through -- refinement disabled, or every stream refused -- ran no
+    bundle adjustment, so v2 would produce exactly what is on disk. A run that did refine
+    cannot be brought forward: its poses came out of the old solve, and the only way to
+    the new ones is to run it again.
+    """
+    info = _metadata(ctx.artifact).get("pose_refine") or {}
+    if not info.get("enabled"):
+        return Derivation(
+            note="pose refinement was disabled: the stage passed the geometry through"
+        )
+    if not info.get("refined_streams"):
+        return Derivation(
+            note="pose refinement refined nothing: the stage passed the geometry through"
+        )
+    raise NotDerivable(
+        "its poses came out of the old bundle adjustment, which refined cameras with too few "
+        "observations to determine a pose and did not repeat run to run; the new ones cannot "
+        "be computed from the artifact -- re-run pose_refine"
+    )
+
+
 UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {
     "tracking": {1: _relift_tracks},
+    "pose_refine": {1: _pose_refine_v2},
 }
 
 # stage -> how it absorbs a change of the upstream stages its contract ``relinks``.
