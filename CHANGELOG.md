@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
-## [0.2.1.0] - 2026-09-11
+## [0.3.0.0] - 2026-09-11
 
 ### Added
 - **A resume loads only what this run would make, and says why** (`reifyscene/api/contracts.py`,

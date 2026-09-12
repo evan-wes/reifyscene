@@ -1,5 +1,5 @@
 # The README's headline native run: VGGT-Long + pose refinement on every frame of DyCheck
-# "spin", scored on all 722 held-out views (masked mPSNR 12.37 at v0.2.1.0, held-out
+# "spin", scored on all 722 held-out views (masked mPSNR 12.37 at v0.3.0.0, held-out
 # cameras aligned through the training cameras; median rotation residual 0.60 deg).
 #
 # base.yaml plus `scene.kind: dynamic` (base.yaml builds a STATIC scene; the headline is
