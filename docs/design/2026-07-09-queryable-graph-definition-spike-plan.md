@@ -1,245 +1,303 @@
-# Spike plan (v2) — grounding the definition of a queryable scene graph for room4d
+# Spike plan (v3) — closing the interpret / query / edit / re-render loop
 
-**Status:** PROPOSED v2 (supersedes v1; v1 reasoning preserved in §10)
-**Inception:** 2026-07-09 · **Revised:** 2026-07-13
-**Branch:** `spike/queryable-graph-definition`
-**Refines:** §5a (graph), §5b (query), §5e (round-trip eval), P3–P4 of
+**Status:** PROPOSED v3 (supersedes v2; v2 reasoning in Appendix A, v1 in Appendix B)
+**Inception:** 2026-07-09 · **Revised:** 2026-09-12
+**Branch:** `spike/queryable-graph-definition` (rebased onto develop at v0.3.0.0)
+**Refines:** §5a–§5e, P3–P7 of
 `docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md`.
 
 ---
 
-## 0. What this spike is (and the reframe from v1)
+## 0. What changed since v2, and the decision
 
-Block-2 (the back-half P3–P7) is **paused**. Two adversarial review panels reshaped this spike:
+Three things.
 
-- **Panel 1 (on the P3 graph design):** the current graph keys node identity on
-  `track:{stream}:{track_id}` — a *grid-seed index* that cannot survive a re-render, so the
-  eval's diff join key is noise; point-tracks are not entities; presence-from-visibility
-  conflates "removed" with "occluded."
-- **Panel 2 (on v1 of this plan):** v1's instrument (a null-edit re-render correspondence
-  residual) was **confounded** (SAM2 re-partitions the render, real↔render embedding domain gap,
-  own-renderer near-tautology, no ground truth, no chance baseline) **and overreached** — a
-  node-only appearance measurement claiming to define a whole queryable graph (edges, relations,
-  presence, queries all unmeasured).
+**1. Half of v2's Part 1 shipped.** v2 listed a "per-entity trajectory aggregator" as throwaway
+spike code. It is now the `graph` stage on develop (v0.3.0.0, `a89de66`), built properly: point
+tracks are assigned to entities by mask membership, each entity node carries its supporting track
+ids, how many frames each was inside, the tracking stage's static/moving split, and a **per-frame
+world position** (the median of its supporting tracks' lifted points). Tracks inside no entity
+are the background's evidence; tracks inside one but not often enough are named as ambiguous
+rather than swept in. Contract version 2, resume-covered, tested. On spin that is 13 nodes where
+there were 1593.
 
-**Decision (the two-part split).** Separate the two jobs the v1 plan tangled together:
+**2. The gap was scoped too narrowly.** v2 aimed only at *defining* the graph, deferring
+everything else to a Part 2 that also never covered editing. But the README promises a scene you
+can "**interpret, query, and semantically edit**", and the showcase page promises the whole loop —
+query in plain language, render the answer, check it by perceiving it again. Measured against
+that, the missing capability is the entire back half (§2), and the load-bearing hole is not the
+node model at all: **nothing links a graph entity to the Gaussians that render it** (§4).
 
-- **Part 1 — THIS DOC — Definition + human audit.** Build a queryable scene graph on a *single
-  video stream* whose **nodes are real physical entities** (not tracked pixels) and whose **edges
-  are real physical relationships**, with per-entity **position and motion over time**. Validate it
-  by **human audit across many DAVIS sequences** — visualize the graph and its temporal evolution,
-  and answer basic conceptual questions. Terminal deliverable: a **grounded, human-validated
-  definition**.
-- **Part 2 — DEFERRED (separate plan, later).** Novel-view evaluation and **two-graph comparison**
-  (the round-trip correspondence floor / discriminability measurement). *All* re-render,
-  cross-input, and Level-2 machinery — and every Panel-2 confound — lives here.
-
-**The load-bearing insight.** A graph that is **human-understandable** (real entities + real
-relations) is the *precondition* for being **discriminative** in the back-half: a meaningful scene
-change changes such a graph in a way a person would recognize. So the human audit is not a soft
-check — it is the **acceptance test for discriminability**. Get "means something" right first;
-measure "diffs cleanly across a generated answer" in Part 2.
+**3. Therefore: loop first, but define the graph properly.** Not a thin slice that leaves the
+model wrong — the model is specified as a contract *before* the loop consumes it, and audited at
+breadth afterwards. The loop ordering exists because the grounding bridge is the assumption most
+likely to invalidate the design, and it is cheapest to test first.
 
 ---
 
-## 1. The question and the terminal deliverable
+## 1. The question and the terminal deliverables
 
-**Question.** *What is a queryable scene graph for a single video stream, such that (a) it means
-something to a person — nodes are real entities, edges are real physical relations, each node
-carries its position and motion over time — and (b) it is therefore discriminative when diffed in
-the back-half?*
+**Question.** *Can a scene the pipeline reconstructed be interpreted as a graph of real entities
+and relations, queried in language, edited through that graph, and re-rendered — and does the
+graph mean what a person would say it means?*
 
-**Terminal deliverable.** `docs/design/2026-07-09-queryable-scene-graph-definition.md` — the
-grounded contract: the **node model**, the **attribute schema**, the **edge/relation vocabulary**,
-the **query surface**, and — per Panel 2 — a **per-axis grounded / partially-grounded / ungrounded
-verdict** with the evidence that earns it, plus the honest boundary of what a single monocular
-stream can support.
+**Two deliverables, both required:**
+
+1. **`docs/design/2026-09-12-queryable-scene-graph-definition.md`** — the grounded contract: node
+   model, attribute schema, relation vocabulary, presence semantics, the **renderable handle**,
+   and the query surface; with a per-axis *grounded / partially grounded / ungrounded* verdict and
+   the evidence that earns it, plus the honest boundary of a single monocular stream.
+2. **A working thin loop on one clip** — a query resolves an entity, an edit is applied, the
+   edited scene renders, the render is re-perceived, and the two graphs are diffed. Thin at every
+   stage, but end to end and on the real model.
 
 ---
 
-## 2. The corrected graph model (what we build and audit)
+## 2. The gap, per capability (verified 2026-09-12)
 
-**Node = one persistent physical entity.** Identity = the reid-canonical tracklet spanning every
-frame the entity appears. **One node per entity** — never per-frame, never a point-track.
+| Capability | State | Evidence |
+|---|---|---|
+| **Interpret** | partial | Entity nodes with per-frame position and motion exist (`reifyscene/graph/builders.py`). **No typed relations**, no presence-vs-occlusion semantics, no caption/embedding handle, no cross-view association. Audited on one clip, never at breadth. |
+| **Query** | absent | `reifyscene/query/` is four stubs returning `{}` (`parser.py`, `node_retrieval.py`, `event_retrieval.py`, `trajectory_planner.py`); not wired into `run()`. |
+| **Edit** | absent | §5b's `remove` / `move` / `recolor` and the §5c render-plan IR do not exist as code. |
+| **Re-render** | trains, cannot edit | The render stage wires the real trainers (`StaticGaussianTrainer` / `DynamicGaussianTrainer` — §5d's "delete the toy" is done) and renders a trajectory, but has no way to render a scene with an entity removed or moved. |
+| **Verify by re-perceiving** | absent | §5e's round-trip graph diff. |
+| **The bridge between them** | **absent** | §5a requires nodes to link back to `scene.dynamic_entities` / `render_contract`. `SceneArtifact` has neither field and nothing writes them; `render/camera_paths.py:120` already reads `scene_artifact.dynamic_entities` and would raise `AttributeError` if `follow_subject` were called. |
+
+---
+
+## 3. The graph model (what is built, what this spike adds)
+
+**Node = one persistent physical entity.** Identity = the reid-canonical tracklet. One node per
+entity — never per-frame, never a point-track. *(Shipped.)*
 
 ```
 EntityNode( id = canonical entity )
-  identity   : category, category_topk, caption, semantic embedding      # static
-  presence   : [t_start, t_end] + observed frame set                     # temporal extent
-  position(t): world-space trajectory — one 3D point per observed frame  # temporal attribute
-  motion     : velocity(t), speed, path length, is_moving                # derived from position(t)
-  support    : the member point-track ids + per-frame uncertainty        # provenance
+  identity   : category, category_topk, caption, semantic embedding     # PARTIAL: category only
+  presence   : [t_start, t_end] + observed frames + occlusion gaps      # ADD: gaps are not flagged
+  position(t): world-space trajectory, one 3D point per observed frame  # SHIPPED
+  motion     : velocity(t), speed, path length, is_moving               # PARTIAL: static/moving
+  support    : member point-track ids + per-frame uncertainty           # SHIPPED
+  renderable : the Gaussians this entity owns                           # ADD — §4, the crux
 ```
 
-**How `position(t)` is built (the key correction over v1).** A segmentation mask is a *single-frame
-observation*, not the entity's position. Instead:
+**Edges = physical relations between entity nodes, each with a validity interval**, recomputed per
+frame from trajectories + masks so edges appear and disappear over time. Rung-1 vocabulary:
+`near`, `above`/`below`, `left-of`/`right-of`, `in-front-of`/`behind`, `on-top-of`,
+`supported-by`, `contains`, `overlaps`. *(None built. The pre-flight in
+`../spike_graph_definition/` produced two `near` edges on one clip and was never audited.)*
 
-1. Assign point-tracks to entities by **mask membership** (a point-track belongs to the entity whose
-   mask its 2D location falls inside, per frame).
-2. The entity's position at frame *t* = a **robust aggregate (median) of its member points' 3D
-   positions at t**, carried across the whole presence interval → a trajectory.
-3. Robustness + uncertainty come for free from the aggregation (many points vs one); low-support
-   entities are flagged and may fall back to a **mask-centroid lift** as a secondary source.
-
-This **redeems the point-tracks**: the "meaningless pixel tracks" become the *support* that gives a
-real entity its motion, rather than being nodes themselves.
-
-**World frame is required for motion.** Per-entity motion over time must live in a **common world
-frame** — otherwise DAVIS's moving cameras contaminate it. So we run room4d's **geometry stage
-(VGGT: pose + depth)** per sequence and lift member points to world space. (Relations *between two
-co-present entities* are camera-invariant, so those don't strictly need pose — but the single-entity
-trajectory does.)
-
-**Edges = physical relations between entity nodes, each with a validity time-interval.**
-Recomputed per frame from the trajectories + masks, so edges appear and disappear over time =
-**the graph's evolution.** Relation vocabulary (rung-1 set):
-- **spatial:** `near`, `above` / `below`, `left-of` / `right-of`, `in-front-of` / `behind` (depth)
-- **support / contact:** `on-top-of`, `supported-by`
-- **containment / overlap:** `contains`, `overlaps`
-
-**Presence = existence, handled honestly.** Presence spans first-to-last observation; interior gaps
-are flagged as **occlusion candidates**, *not* logged as the entity ceasing to exist (Panel 1's
-visibility≠existence fix). Full object-permanence across long occlusions is out of scope here
-(design §6, future).
+**Presence = existence, handled honestly.** Presence spans first-to-last observation; interior
+gaps are flagged **occlusion candidates**, not the entity ceasing to exist. Object permanence
+across long occlusions stays out of scope.
 
 ---
 
-## 3. Building blocks — exists vs. build
+## 4. The grounding bridge — step 1, and the crux
 
-| Element | Status | Source |
-|---|---|---|
-| Frame ingest (`--frames-dir`) | exists | `ingest` |
-| Pose + depth (world frame) | exists | `geometry` (VGGT) |
-| Instance masks + persistent ids | exists | `segment` (SAM2) **or** DAVIS GT masks |
-| Canonical entity identity | exists | `reid` (DINOv2) |
-| Human-readable label + caption + embedding | exists | `semantics` (SigLIP2 / COCO floor) |
-| Point-tracks + per-frame lifted 3D | exists | `tracking` (`lifted_xyz`) |
-| **Per-entity trajectory aggregator** | **BUILD** | mask-membership → median world trajectory + uncertainty (fills the `object_lifter.lift_to_3d` stub) |
-| **Relation computer** | **BUILD** | spatial / support / containment, with time-intervals |
-| **Entity-graph assembler** | **BUILD** | one node/entity + attributes + edges |
-| **Audit viewer** | **BUILD** | self-contained HTML: playback + graph overlay + time scrub + query panel |
-| **Conceptual-query executor** | **BUILD** | count / select / relate / motion queries over the graph |
+Editing needs to know **which Gaussians are this chair**. Nothing computes that today, and the
+architecture doc flags it as a first-class risk (the grounding problem; the literature's mAP ~6.08).
 
-All BUILD items are **throwaway spike code** in `../spike_graph_definition/` — they import room4d
-and invoke stage outputs, but add **no** pipeline wiring.
+**The rule already exists.** The `graph` stage assigns a point track to an entity by projecting it
+into each frame and testing it against that entity's mask, assigning by majority over the frames
+the two share. **The same rule generalizes from point tracks to Gaussians**: project the scene's
+Gaussians into each training view, test against the entity masks, assign by majority. Same
+membership test, same thresholds, a different population — and it is already implemented and
+tested (`reifyscene/graph/track_support.py`, `tests/test_track_support.py`).
 
----
+**What step 1 builds:** a real `dynamic_entities` / `render_contract` on `SceneArtifact` — graph
+entity id → Gaussian index set — and a demonstration that dropping that set leaves a hole where
+the entity was. It also repairs `camera_paths.py:follow_subject`, which reads a field that has
+never existed.
 
-## 4. Validation — the human audit (the acceptance test)
-
-**The viewer** (self-contained HTML, one per sequence): plays the frames with entity labels + edges
-overlaid on masks; a **time scrubber** to watch the graph evolve; a **conceptual-question panel**
-answered *from the graph*.
-
-**Conceptual questions = executed queries** (this is what earns the word "queryable" — Panel 2
-demanded at least one real query per family):
-- **count / select:** "how many entities?", "what categories are present?"
-- **relate:** "what is the person near / on / holding?", "what is on top of the table?"
-- **motion:** "which entities are moving?", "who approached whom?"
-
-Fixed templated panel first; a freeform **NL→query** box (small LLM parser, VisProg-style per §5b)
-is a stretch rung.
-
-**Acceptance criteria (per axis, honest — each gets grounded / partial / ungrounded + evidence):**
-- **Nodes are real entities:** a human agrees nodes ↔ the real objects/people, **one node per
-  entity**, stable identity through the clip.
-- **Edges are real relations:** asserted relations are physically true; false-positive / missing
-  rate is acceptable by a fixed rubric.
-- **Queryable:** the conceptual questions return human-correct answers.
-
-**Controls (Panel fixes that still apply to Part 1):**
-- **GT DAVIS masks first, then SAM2** — isolates the *graph definition* from *segmentation error*.
-  A good definition on GT masks that degrades on SAM2 is a *perception* finding, not a definition
-  failure.
-- **Report per-entity trajectory uncertainty**; flag low-support entities rather than trusting them.
-- **Multiple sequences with contrasting motion/content** (DAVIS breadth) — **no conclusion from one
-  clip** (Panel 2's N=1 objection).
-- **A short written audit rubric** so "a human agrees" is a checklist, not a vibe.
+**Why first:** everything downstream assumes it. If entity→Gaussian assignment is too noisy to
+support an edit, the loop is not merely thin, it is impossible, and the plan changes before
+anything is built on top. **Go/no-go gate.**
 
 ---
 
-## 5. Protocol — staged, start tiny
+## 5. The four steps
 
-- **Rung 0 (thin vertical):** ONE DAVIS sequence, **GT masks**, geometry, per-entity trajectories,
-  spatial edges, a minimal viewer. Goal: **see a real scene graph and decide if it means
-  something.** Go/no-go on the model before generalizing.
-- **Rung 1:** add semantic labels + reid identity + the full relation set + the conceptual-query
-  panel; audit on **~3–5 diverse sequences** (GT masks).
-- **Rung 2:** swap GT masks → **SAM2**; measure how perception noise degrades the graph; widen
-  sequences.
-- **Rung 3 (scale):** batch over many DAVIS sequences; a gallery for audit-at-scale; freeform NL
-  queries as a stretch.
+- **Step 1 — the bridge.** Entity → Gaussians by mask membership; `remove` drops the set; render
+  and look. One clip. Gate: is the removed region the entity, and is what remains intact?
+- **Step 2 — the definition, as a contract.** Write the node/relation/presence/renderable contract
+  *before* the loop consumes it (deliverable 1, first draft). Build the relation computer against
+  it.
+- **Step 3 — the thin loop.** `select` an entity by category → apply `remove`, then `move` → render
+  → re-perceive the render → diff the two graphs. One query family, two edit ops, everything thin.
+- **Step 4 — the audit, at breadth.** DAVIS with GT masks, a written rubric, several sequences.
+  Findings revise the step-2 contract; the revised contract is the terminal deliverable.
 
-Each rung is human-audited; findings feed the definition doc.
-
----
-
-## 6. Scope boundary — explicitly NOT in Part 1
-
-Deferred to **Part 2** (the eval-floor spike, planned after the definition lands): re-render,
-novel-view synthesis, re-perception, **two-graph diff / correspondence floor**, Level-2 world-model
-proxies, discriminability *measurement*. Part 1 **defines and human-validates** the graph as a
-meaningful, queryable object; Part 2 **measures** whether it diffs discriminatively across a
-generated answer.
+Each step is human-inspected before the next. Steps 2 and 4 are the "define it properly" half;
+steps 1 and 3 are the loop.
 
 ---
 
-## 7. Deliverables and homes
+## 6. Footage — and why each clip is used for what
 
-- **Spike code + heavy outputs** (per-sequence graphs, geometry, viewers): `../spike_graph_definition/`
-  — throwaway sibling, **not** git-tracked, **not** wired into the pipeline.
-- **Committed (this branch):** this plan; the definition doc on completion; and a few exported
-  example graphs / viewer screenshots to illustrate the definition.
+**Loop: NVIDIA `Jumping`** (`../data/shape_of_motion/nvidia/Jumping`).
+
+| | spin (today's runs) | **Jumping** | lindy-hop |
+|---|---|---|---|
+| real entities | 1 person | **4 people + a backpack** | 8 dancers in pairs |
+| relations available | none | near / left-of / approaching | holding, pairs, occlusion |
+| input frames | 426 | **96** (camera 0) | 73 |
+| held-out views | 722 | **288** (cameras 1–3) | none |
+| format | SoM preprocessed | **SoM preprocessed — runs today** | needs a DAVIS→ingest loader |
+
+spin is one person centre-frame for the whole clip: a graph with one real node, which cannot
+exercise relations, identity, or a meaningful edit. `Jumping` is nontrivial and costs no new
+plumbing — `masks`, `covisible` and `dataset.json` in the layout spin already uses, so held-out
+masked-NVS scoring works unchanged. At 96 input frames it is a quarter of spin's cost to
+regenerate. Its categories (`person`, `backpack`) are ones the semantics stage should get right,
+unlike spin's four "tie" entities. Removing one of four people leaves three people, a backpack and
+the steps that must survive — an edit whose correctness is visible.
+
+**Audit: DAVIS**, GT masks, `lindy-hop` (8 entities, pairs, constant mutual occlusion) as the
+deliberate stress case, plus moderates (`dog-gooses` 5, `sheep` 5, `schoolgirls` 7). GT masks
+separate "the definition is wrong" from "SAM2 is wrong"; a definition that holds on GT masks and
+degrades on SAM2 is a perception finding, not a definition failure.
+
+**Fallback:** `Balloon1` (1 person + balloon, same format) if `Jumping`'s geometry disappoints.
 
 ---
 
-## 8. Cost, logistics, risks
+## 7. The edit ops — `remove` and `move`
 
-- **GPU:** `geometry` (VGGT) per sequence is the main cost; segment/reid/semantics are moderate.
-  Start with a handful of sequences. Prompt the power-limit / temp-watchdog check before GPU rungs
-  (standing rule).
-- **DAVIS:** `../data/Davis2017/DAVIS-2017-trainval-480p` (JPEG frames + `Annotations` GT masks);
-  ingest via `--frames-dir`.
+Both against Lowering A (our own 3DGS renderer), which is **faithful by construction**: a `remove`
+leaves a real hole, with no plausible fill. That hole is not a bug to hide; it is exactly why
+Level 2 (a generative backbone) exists in the design, and it is out of scope here.
+
+- **`remove(entity)`** — drop the entity's Gaussians for the whole clip. Tests the bridge and
+  nothing else.
+- **`move(entity, delta)`** — transform the entity's Gaussians along a trajectory. Materially
+  harder than `remove`: it exposes the hole *and* must carry the entity's dynamic motion bases
+  with the transform, so a moved person must still walk. Expect this to be where the thin loop
+  strains; that is the point of including it.
+
+Per the architecture doc's instruction, the plan carries an **op-support matrix** (what each
+target honors / no-ops / errors) from the start, so the IR does not fracture silently later.
+
+---
+
+## 8. What this spike does NOT measure
+
+**The thin loop's graph diff is a smoke test, not a measurement.** Re-perceiving our own render
+carries every confound Panel 2 named against v1: SAM2 re-partitions the render, the real↔render
+embedding domain gap, the own-renderer near-tautology, no ground truth, no chance baseline — and
+with an edit applied there is now a real hole in the input as well. It tells us the loop runs end
+to end and that a removed entity disappears from the re-perceived graph. It does **not** tell us
+the graph diffs discriminatively.
+
+That measurement stays **Part 2** (novel-view, partition-controlled, GT-anchored, chance-
+baselined), planned separately, after the definition lands.
+
+---
+
+## 9. Where the code lives
+
+- **Lands in the pipeline, with contracts and tests:** the bridge (step 1), typed relations and
+  presence (step 2). These are deterministic, cheap, rebuildable functions of stages that already
+  exist — the same shape as the `graph` stage, which is exactly why it was landed properly rather
+  than spiked. A second throwaway node model is what this plan exists to avoid.
+- **Throwaway first, in `../spike_graph_definition/`:** the query parser and DSL, the render-plan
+  IR, the re-perception diff, the audit viewer. They land once their shapes settle.
+
+---
+
+## 10. Acceptance criteria
+
+**Step 1 (gate).** A person looking at the render agrees the removed region *is* the entity and
+the rest of the scene is intact. Reported with the fraction of Gaussians assigned, per entity, and
+the entities too small or too occluded to assign.
+
+**Step 3.** The loop runs end to end without hand-editing intermediate artifacts; `remove` makes
+the entity absent from the re-perceived graph; `move` puts it somewhere else and it still moves.
+
+**Step 4 (per axis, each graded grounded / partial / ungrounded, with evidence).**
+- **Nodes are real entities:** a person agrees nodes ↔ real objects/people, one node per entity,
+  stable identity through the clip.
+- **Edges are real relations:** asserted relations are physically true; false-positive and missing
+  rates acceptable against a fixed rubric.
+- **Queryable:** the conceptual questions return human-correct answers — count/select ("how many
+  people?", "what categories are here?"), relate ("what is the person near?"), motion ("which
+  entities moved?", "where did the person on the left go?").
+
+**Controls:** GT masks before SAM2; per-entity trajectory uncertainty reported and low-support
+entities flagged, never silently trusted; multiple sequences with contrasting content — **no
+conclusion from one clip**; a short written rubric so "a human agrees" is a checklist, not a vibe.
+
+---
+
+## 11. Cost, logistics, risks
+
+- **GPU:** a full `Jumping` run (geometry → scene → render) is the main cost, ~1/4 of spin's frame
+  count. The DAVIS audit needs geometry per sequence. Every GPU job goes through
+  `gpu_guard.sh --detach` with the 400 W cap verified first; heavy CPU
+  work runs under a `systemd-run --scope` memory cap.
 - **Risks:**
-  - VGGT may fail on fast-motion DAVIS clips → pick sequences it handles, flag the ones it doesn't.
-  - Low-support entities → noisy trajectory → report uncertainty, fall back to mask-centroid.
-  - Relation thresholds (near / on distances) may need per-scene tuning → report sensitivity, prefer
-    scale-relative thresholds.
-  - "Human audit" is subjective → fixed rubric + multiple sequences.
+  - **The bridge is noisy for small or heavily occluded entities** → report assigned fraction per
+    entity; fall back to a mask-centroid neighbourhood; flag entities that cannot be assigned.
+  - **`move` breaks the dynamic bases** → accept a static-transform first pass and say so.
+  - **VGGT may fail on fast-motion DAVIS clips** → pick sequences it handles, flag the ones it
+    does not; `lindy-hop` is expected to be hard and is included for that reason.
+  - **Relation thresholds need per-scene tuning** → prefer scale-relative thresholds, report
+    sensitivity.
+  - **Re-perceiving a render with a hole** confuses segmentation → precisely why §8 calls the diff
+    a smoke test.
 
 ---
 
-## 9. Open decisions (proposed defaults)
+## 12. Open decisions (proposed defaults)
 
-1. **Relation set (rung 1):** `{near, above/below, left/right-of, in-front/behind, on-top-of,
-   supported-by, overlaps, contains}`. *Proposed; open.*
-2. **Trajectory frame:** world-space via VGGT pose (for motion); camera-space per-frame for
-   co-present relations. *Proposed; open.*
-3. **Query panel:** fixed conceptual templates first, freeform NL→query stretch. *Proposed; open.*
+1. **Relation set (rung 1):** as §3. *Proposed; open.*
+2. **Query surface:** fixed conceptual templates first, freeform NL→program (VisProg-style, small
+   LLM parser) as a stretch. *Proposed; open.*
+3. **Where `move` gets its trajectory:** a user-supplied delta first; graph-derived paths later.
+   *Proposed; open.*
 4. **Viewer:** self-contained HTML per sequence + a gallery. *Proposed; open.*
-5. **Audit rubric:** a short per-sequence checklist for nodes / edges / queries — drafted with
-   rung 0. *Proposed; open.*
+5. **Audit rubric:** drafted with step 1, fixed before step 4. *Proposed; open.*
 
 ---
 
-## 10. Appendix — v1 → v2 (why it reshaped)
+## Appendix A — v2 → v3 (why it reshaped)
+
+v2 split the work into *define the graph and audit it* (Part 1) and *measure discriminability*
+(Part 2), and deliberately kept all spike code throwaway. Two things changed.
+
+**The definition half started landing for real.** The corrected node model — entities, not point
+tracks, with trajectories built from member-track aggregation — is on develop as the `graph`
+stage, with contracts, resume coverage and tests. v2's assumption that none of this should touch
+the pipeline no longer holds for the parts that are deterministic and settled.
+
+**The scope was wrong.** Part 1 + Part 2 together still never covered **editing**, which the
+README promises and the showcase advertises. Measuring the graph's discriminability before
+anything can be queried, edited or re-rendered orders the work by rigour rather than by risk, and
+leaves the loop open indefinitely. v3 keeps v2's insistence that the model be defined and
+human-audited — that is steps 2 and 4, unchanged in substance — but puts the **grounding bridge**
+first, because it is the assumption everything else rests on and the one that can invalidate the
+design outright.
+
+What v3 explicitly keeps from v2: entities-not-point-tracks; visibility ≠ existence; GT masks
+before SAM2; no conclusion from one clip; a written rubric; and the refusal to let a smoke test
+masquerade as a measurement.
+
+## Appendix B — v1 → v2 (preserved)
 
 v1 pre-registered a single instrument: the **null-edit round-trip residual** (perceive → render a
-near-identity answer → re-perceive → diff), intended both to measure the eval's correspondence floor
-*and* to ground the graph definition. The two panels showed one instrument could do neither cleanly:
+near-identity answer → re-perceive → diff), intended both to measure the eval's correspondence
+floor *and* to ground the graph definition. Two adversarial review panels showed one instrument
+could do neither cleanly:
 
-- **It couldn't cleanly measure the floor.** Same-trajectory rung-1 is rigged toward a trivial pass
-  and sits inside the own-renderer near-tautology (§5e); the headline "spurious diff" is dominated by
-  SAM2 re-partitioning the render and the real↔render embedding domain gap; there was no ground-truth
-  or chance baseline, and the "delta of 1" reference was asserted, never computed.
+- **It couldn't cleanly measure the floor.** Same-trajectory rung-1 is rigged toward a trivial
+  pass and sits inside the own-renderer near-tautology; the headline "spurious diff" is dominated
+  by SAM2 re-partitioning the render and the real↔render embedding domain gap; there was no
+  ground-truth or chance baseline, and the "delta of 1" reference was asserted, never computed.
 - **It couldn't ground the definition.** A node-appearance measurement says nothing about edges,
-  relations, presence semantics, or an actual executed query — yet the deliverable claimed to define
-  a *queryable* graph. Presence-from-visibility re-imported the exact conflation the spike existed to
-  kill.
+  relations, presence semantics, or an actual executed query — yet the deliverable claimed to
+  define a *queryable* graph. Presence-from-visibility re-imported the exact conflation the spike
+  existed to kill.
 
-**v2 resolves this by splitting the aims** (§0): Part 1 grounds the *definition* by **building the
-graph and auditing it against human judgment on real, varied footage** — a construction+audit task
-that needs no re-render and therefore inherits none of those confounds — while the *discriminability
-measurement* moves to a dedicated Part 2 done rigorously (novel-view, partition-controlled,
-GT-anchored, chance-baselined) where it belongs. The corrected **entity-with-trajectory node model**
-(§2) replaces v1's implicit point-track / single-mask-lift model.
+Panel 1 separately found that keying node identity on `track:{stream}:{track_id}` — a grid-seed
+index that cannot survive a re-render — made the eval's diff join key noise, and that point tracks
+are not entities. That finding is what the shipped `graph` stage now implements.
