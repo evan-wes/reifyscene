@@ -105,10 +105,21 @@ Gaussians into each training view, test against the entity masks, assign by majo
 membership test, same thresholds, a different population — and it is already implemented and
 tested (`reifyscene/graph/track_support.py`, `tests/test_track_support.py`).
 
-**What step 1 builds:** a real `dynamic_entities` / `render_contract` on `SceneArtifact` — graph
-entity id → Gaussian index set — and a demonstration that dropping that set leaves a hole where
-the entity was. It also repairs `camera_paths.py:follow_subject`, which reads a field that has
-never existed.
+**What step 1 builds:** graph entity id → Gaussian index set, and a demonstration that dropping
+that set leaves a hole where the entity was.
+
+**Correction found while building it (2026-09-12): the map belongs with the TRAINED Gaussians,
+not the seed.** §5a names `scene.dynamic_entities` / `render_contract`, but `SceneArtifact` holds
+the seed cloud, and training densifies and prunes it — a seed index means nothing at render time.
+The cloud that renders lives in the render stage's `trained_dynamic.npz` (on lab-coat: 46,687
+foreground + 269,195 background, where the seed was neither). So the map is computed over the
+trained cloud and belongs in the render stage's artifact. The render stage already depends on
+`pose_refine`, `tracking` and `humans`; it would need `objects` and `graph` added to build the map
+itself. The assignment core is landed and tested as `reifyscene/graph/entity_gaussians.py`; where
+the artifact stores it is settled when step 3 shows what the loop needs to read.
+
+It also leaves `camera_paths.py:follow_subject` reading `scene_artifact.dynamic_entities`, a field
+that has never existed — to be repaired with whatever schema step 3 settles on.
 
 **Why first:** everything downstream assumes it. If entity→Gaussian assignment is too noisy to
 support an edit, the loop is not merely thin, it is impossible, and the plan changes before
