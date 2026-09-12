@@ -36,6 +36,4 @@ third_party/
 
 # Internal cache
 .reifyscene_cache
-# Stale pre-rename cache; kept on disk until confirmed disposable, then delete.
-.room4d_cache
 .claude/

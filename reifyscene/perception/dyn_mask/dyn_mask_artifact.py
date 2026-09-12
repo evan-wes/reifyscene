@@ -21,7 +21,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reifyscene.common.backend_ladder import CapabilityManifest
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef
 
@@ -98,14 +98,13 @@ class DynMaskArtifact(BaseArtifact):
         raw = read_json(save_dir / "artifact.json")
         masks: dict[str, np.ndarray] = {}
         for frame_key, filename in raw.get("mask_index", {}).items():
-            path = save_dir / "masks" / filename
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    masks[frame_key] = np.asarray(npz["mask"], dtype=np.uint8)
+            path = require_file(save_dir / "masks" / filename, "dyn_mask mask")
+            with np.load(path, allow_pickle=True) as npz:
+                masks[frame_key] = np.asarray(npz["mask"], dtype=np.uint8)
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
-            save_dir=Path(raw["save_dir"]),
+            save_dir=Path(save_dir),
             metadata=raw.get("metadata", {}),
             backend_name=raw.get("backend_name", "all-static"),
             selected_frames=[

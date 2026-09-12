@@ -204,15 +204,21 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
         stats={"num_keyframes": 3},
     )
 
-    monkeypatch.setattr(
-        PoseRefiner, "refine", lambda self, geometry, *, decoder, ingest_artifact: {STREAM_ID: fake}
-    )
+    work_dirs = []
+
+    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+        work_dirs.append(work_dir)
+        return {STREAM_ID: fake}
+
+    monkeypatch.setattr(PoseRefiner, "refine", fake_refine)
     # isolate the keyframe-rebuild logic from the tracker-backed densification
     monkeypatch.setattr(ReifyScenePipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
 
     refined = pipeline.refine_poses(ingest, geom)
 
     assert refined.metadata["pose_refine"]["refined_streams"] == [STREAM_ID]
+    # BA's scratch goes in pose_refine's own folder, not the geometry stage's.
+    assert Path(work_dirs[0]) == pipeline._stage_dir("pose_refine")
     new = refined.camera_states_by_stream[STREAM_ID]
     assert len(new) == 3
     for fr, st in zip(geom.selected_frames, new):
@@ -222,3 +228,208 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
     assert refined.intrinsics_by_stream[STREAM_ID].fx == 310.0
     # the original geometry artifact must be left untouched (refined is a new artifact)
     assert geom.intrinsics_by_stream[STREAM_ID].fx == 300.0
+
+
+def test_a_refused_refinement_keeps_the_seed_poses_and_says_why(tmp_path: Path, monkeypatch) -> None:
+    pipeline = ReifyScenePipeline({"run_dir": tmp_path / "run", "pose_refine": {"enabled": True}})
+    geom = _geometry_artifact(tmp_path)
+    ingest = _ingest_artifact(tmp_path)
+
+    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+        self.rejected[STREAM_ID] = "final mean reprojection error 6.2e+149 px exceeds 8 px"
+        return {}
+
+    monkeypatch.setattr(PoseRefiner, "refine", fake_refine)
+    monkeypatch.setattr(ReifyScenePipeline, "_densify_geometry_cameras_for_tracking", lambda self, art, ing: None)
+    refined = pipeline.refine_poses(ingest, geom)
+    info = refined.metadata["pose_refine"]
+    assert info["refined_streams"] == [] and "6.2e+149" in info["rejected_streams"][STREAM_ID]
+    for before, after in zip(geom.camera_states_by_stream[STREAM_ID], refined.camera_states_by_stream[STREAM_ID]):
+        assert np.allclose(before.pose.T_world_cam, after.pose.T_world_cam)
+
+
+# --------------------------------------------------------------------------- #
+# The bundle adjustment: which cameras it refines, and whether it repeats.
+# --------------------------------------------------------------------------- #
+class _FakePoint2D:
+    def __init__(self, has: bool) -> None:
+        self._has = has
+
+    def has_point3D(self) -> bool:
+        return self._has
+
+
+class _FakeImage:
+    def __init__(self, name: str, num_obs: int) -> None:
+        self.name = name
+        self.points2D = [_FakePoint2D(True) for _ in range(num_obs)] + [_FakePoint2D(False)]
+
+
+class _FakeRec:
+    """The little of a pycolmap Reconstruction that the camera filter reads."""
+
+    def __init__(self, obs_per_image: dict[str, int]) -> None:
+        self._images = {
+            i + 1: _FakeImage(name, n) for i, (name, n) in enumerate(obs_per_image.items())
+        }
+
+    def reg_image_ids(self):
+        return list(self._images)
+
+    def image(self, image_id):
+        return self._images[image_id]
+
+    def num_reg_frames(self):
+        return len(self._images)
+
+
+class _FakeConfig:
+    def __init__(self) -> None:
+        self.added = []
+
+    def add_image(self, image_id):
+        self.added.append(image_id)
+
+
+def _patch_pycolmap(monkeypatch):
+    """Record what the adjuster is handed instead of solving anything."""
+    import pycolmap
+
+    calls = {"config": None, "solved": 0, "convenience": 0}
+
+    class _Adjuster:
+        def solve(self):
+            calls["solved"] += 1
+
+    def _create(opts, config, rec):
+        calls["config"] = config
+        return _Adjuster()
+
+    monkeypatch.setattr(pycolmap, "BundleAdjustmentConfig", _FakeConfig)
+    monkeypatch.setattr(pycolmap, "create_default_bundle_adjuster", _create)
+    def _convenience(rec, opts):
+        calls["convenience"] += 1
+
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", _convenience)
+    return calls
+
+
+def test_only_cameras_with_enough_observations_are_refined(monkeypatch) -> None:
+    from reifyscene.geometry.pose_refine import _adjust
+
+    calls = _patch_pycolmap(monkeypatch)
+    rec = _FakeRec({"a": 200, "b": 0, "c": 1, "d": 50, "e": 2})
+    refined, kept_seed = _adjust(rec, object(), min_obs=3, log=lambda m: None)
+
+    assert refined == 2  # only 'a' and 'd' have 3+ observations
+    assert kept_seed == [2, 3, 5]  # image ids of 'b', 'c', 'e'
+    assert [rec.image(i).name for i in kept_seed] == ["b", "c", "e"]
+    assert calls["config"].added == [1, 4]
+    assert calls["solved"] == 1 and calls["convenience"] == 0
+
+
+def test_min_obs_zero_refines_every_registered_camera(monkeypatch) -> None:
+    from reifyscene.geometry.pose_refine import _adjust
+
+    calls = _patch_pycolmap(monkeypatch)
+    rec = _FakeRec({"a": 200, "b": 0})
+    refined, kept_seed = _adjust(rec, object(), min_obs=0, log=lambda m: None)
+
+    # The behaviour from before under-constrained cameras were found to wreck the solve.
+    assert refined == 2 and kept_seed == []
+    assert calls["convenience"] == 1 and calls["solved"] == 0
+
+
+def test_a_solve_with_nothing_left_to_constrain_is_skipped(monkeypatch) -> None:
+    from reifyscene.geometry.pose_refine import _adjust
+
+    calls = _patch_pycolmap(monkeypatch)
+    notes: list[str] = []
+    rec = _FakeRec({"a": 200, "b": 0, "c": 1})
+    refined, kept_seed = _adjust(rec, object(), min_obs=3, log=notes.append)
+
+    assert refined == 1 and kept_seed == [2, 3]
+    assert calls["solved"] == 0 and calls["convenience"] == 0
+    assert any("BA skipped" in n for n in notes)
+
+
+def test_the_solver_thread_count_is_pinned() -> None:
+    from reifyscene.geometry.pose_refine import _ba_options
+
+    assert _ba_options(1.0, refine_focal=True, refine_pp=False).solver_options.num_threads == 1
+    eight = _ba_options(1.0, refine_focal=True, refine_pp=False, threads=8)
+    assert eight.solver_options.num_threads == 8
+
+
+def test_either_divergence_check_can_be_skipped() -> None:
+    from reifyscene.geometry.pose_refine import bundle_adjustment_diverged
+
+    limits = {"max_reproj_px": 8.0, "max_rot_delta_deg": 90.0}
+    # Before the re-anchor only the reprojection error is meaningful; after it, only the
+    # rotations are checked, and a huge reprojection error is not re-reported.
+    assert bundle_adjustment_diverged(0.9, None, **limits) is None
+    assert "reprojection" in bundle_adjustment_diverged(6.2e149, None, **limits)
+    assert bundle_adjustment_diverged(None, [4.0, 30.0], **limits) is None
+    assert "turned 143.0" in bundle_adjustment_diverged(None, [4.0, 143.0], **limits)
+    assert bundle_adjustment_diverged(None, None, **limits) is None
+
+
+def test_rotation_delta_is_the_angle_between_two_orientations() -> None:
+    from reifyscene.geometry.pose_refine import _rotation_delta_deg
+
+    def rz(deg):
+        t = np.radians(deg)
+        T = np.eye(4)
+        T[:3, :3] = [[np.cos(t), -np.sin(t), 0], [np.sin(t), np.cos(t), 0], [0, 0, 1]]
+        return T
+
+    assert _rotation_delta_deg(rz(0), rz(0)) == 0.0
+    assert abs(_rotation_delta_deg(rz(30), rz(0)) - 30.0) < 1e-9
+    assert abs(_rotation_delta_deg(rz(-45), rz(45)) - 90.0) < 1e-9
+
+
+def test_the_reanchor_leaves_an_unrefined_camera_exactly_where_it_was() -> None:
+    """A camera the bundle adjustment never moved must come out at its seed pose.
+
+    The Sim(3) undoes the gauge drift of the cameras BA *did* move. A camera it skipped
+    (too few observations to determine a pose) never drifted, so putting it through the
+    same correction would displace it by exactly that drift -- which is what happened
+    before the fit and the correction were restricted to the moved cameras.
+    """
+    from reifyscene.geometry.pose_refine import _reanchor_to_seed
+
+    seed_c2w, seed_w2c = {}, {}
+    for i in range(5):
+        ang = 0.3 * i
+        c2w = np.eye(4)
+        c2w[:3, :3] = [
+            [np.cos(ang), -np.sin(ang), 0.0], [np.sin(ang), np.cos(ang), 0.0], [0.0, 0.0, 1.0]
+        ]
+        c2w[:3, 3] = [np.cos(ang), np.sin(ang), 0.4 * i]
+        seed_c2w[str(i)], seed_w2c[str(i)] = c2w, np.linalg.inv(c2w)
+
+    # BA moved cameras 0-3 by a global similarity and never touched camera 4.
+    moved = ["0", "1", "2", "3"]
+    s_true, a = 40.0, 0.5
+    R_true = np.array([[np.cos(a), 0.0, np.sin(a)], [0.0, 1.0, 0.0], [-np.sin(a), 0.0, np.cos(a)]])
+    t_true = np.array([2.0, -1.0, 0.5])
+    refined, refined_w2c = {}, {}
+    for key, c2w in seed_c2w.items():
+        if key in moved:
+            drifted = np.eye(4)
+            drifted[:3, :3] = R_true @ c2w[:3, :3]
+            drifted[:3, 3] = s_true * (R_true @ c2w[:3, 3]) + t_true
+        else:
+            drifted = c2w.copy()
+        refined[key] = drifted
+        refined_w2c[key] = np.linalg.inv(drifted)
+
+    untouched_before = refined["4"].copy()
+    s, _, _ = _reanchor_to_seed(refined, refined_w2c, seed_w2c, moved)
+
+    assert np.isclose(s, 1.0 / s_true, rtol=1e-6)
+    for key in moved:
+        assert np.allclose(refined[key], seed_c2w[key], atol=1e-6)
+    # The skipped camera is untouched, to the bit.
+    assert np.array_equal(refined["4"], untouched_before)
+    assert np.array_equal(refined["4"], seed_c2w["4"])

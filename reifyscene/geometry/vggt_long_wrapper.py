@@ -19,7 +19,8 @@ from reifyscene.common.memory import format_memory_snapshot, process_memory_snap
 from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile
 from reifyscene.common.types import FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.image_transform import vggt_input_transform
+from reifyscene.geometry.vggt_wrapper import DEFAULT_INPUT_CACHE_ROOT, VGGTInitializer
 
 
 
@@ -598,13 +599,16 @@ class VGGTLongInitializer(VGGTInitializer):
             img = img.convert("RGB")
 
             width, height = img.size
-            base_dim = max(width, height) if mode == "pad" else max(width, 1)
-            scale = min(1.0, float(target_size) / float(base_dim))
-
-            new_width = max(14, int(np.floor((width * scale) / 14.0)) * 14)
-            new_height = max(14, int(np.floor((height * scale) / 14.0)) * 14)
-            new_width = min(target_size, new_width)
-            new_height = min(target_size, new_height)
+            if mode == "crop":
+                # Width to the target (never up), in whole 14-pixel patches, height kept in
+                # proportion and cropped below. It used to scale by a float ratio (720 at 252
+                # floored to 238) and clamp the height to the target, squashing portrait frames.
+                new_width = max(14, (min(target_size, width) // 14) * 14)
+                new_height = max(14, int(np.floor(height * new_width / width / 14.0)) * 14)
+            else:
+                scale = min(1.0, float(target_size) / float(max(width, height)))
+                new_width = min(target_size, max(14, int(np.floor((width * scale) / 14.0)) * 14))
+                new_height = min(target_size, max(14, int(np.floor((height * scale) / 14.0)) * 14))
 
             img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
             tensor = torch.from_numpy(np.asarray(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
@@ -938,6 +942,7 @@ class VGGTLongInitializer(VGGTInitializer):
         plans, recommendation = self._attempt_plan_sequence(selected_frames, ingest_artifact)
         attempt_history: list[dict[str, Any]] = []
         image_cache: dict[int | None, tuple[list[Path], list[str]]] = {}
+        input_caches: dict[int | None, dict[str, Any] | None] = {}
         last_error_summary: str | None = None
 
         self._log_auto_tune(
@@ -958,14 +963,14 @@ class VGGTLongInitializer(VGGTInitializer):
             )
             self.resize_max_dim = None if resize_max_dim is None else int(resize_max_dim)
             if resize_max_dim not in image_cache:
-                resize_tag = "orig" if resize_max_dim is None else f"maxdim_{int(resize_max_dim)}"
-                image_dir = cache_root / resize_tag
+                # Each resize setting materializes into its own content-keyed directory.
                 image_cache[resize_max_dim] = self._materialize_images(
                     selected_frames,
                     ingest_artifact,
-                    image_dir,
+                    cache_root,
                     resize_max_dim=resize_max_dim,
                 )
+                input_caches[resize_max_dim] = self._last_input_cache
                 self._log_auto_tune(
                     f"attempt {attempt_idx}/{len(plans)}: prepared {len(image_cache[resize_max_dim][0])} image(s) at resize_max_dim={resize_label}."
                 )
@@ -995,6 +1000,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 chunks = self._load_chunk_predictions(runner)
                 global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
                 predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                self._last_input_cache = input_caches.get(resize_max_dim)
                 attempt_history.append({
                     **plan,
                     "attempt_index": attempt_idx,
@@ -1080,74 +1086,133 @@ class VGGTLongInitializer(VGGTInitializer):
             artifact.notes.append("VGGT-Long backend unavailable; emitted heuristic fallback geometry.")
             return artifact
 
+        # Content-keyed input cache shared with VGGT (never an ingest-folder-named
+        # directory another run would empty and rewrite).
         cache_root = (
-            Path(self.frame_cache_dir)
-            if self.frame_cache_dir
-            else Path(".reifyscene_cache") / "vggt_long_inputs" / ingest_artifact.run_id
+            Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
         )
         cache_root.mkdir(parents=True, exist_ok=True)
-
-        backend_output_root = (
-            Path(self.output_cache_dir)
-            if self.output_cache_dir
-            else Path(".reifyscene_cache") / "vggt_long_run" / ingest_artifact.run_id
-        )
-        backend_output_root.mkdir(parents=True, exist_ok=True)
-
-        attempt_history: list[dict[str, Any]] = []
-        auto_tune_recommendation: dict[str, Any] | None = None
-        if self.auto_tune:
-            predictions, image_paths, notes, attempt_history, auto_tune_recommendation = self._run_auto_tuned(
-                selected_frames,
-                ingest_artifact=ingest_artifact,
-                cache_root=cache_root,
-                backend_output_root=backend_output_root,
+        # VGGT-Long pads each chunk's mixed-size images up to that chunk's largest, so a
+        # frame's pixel mapping would depend on which chunk it fell in: refuse up front.
+        source_sizes = self._stream_source_sizes(selected_frames, ingest_artifact)
+        if len(set(source_sizes.values())) > 1:
+            sizes = {sid: f"{w}x{h}" for sid, (w, h) in source_sizes.items()}
+            raise ValueError(
+                f"VGGT-Long got streams of different frame sizes ({sizes}); its per-chunk padding "
+                "makes the frame-to-geometry pixel mapping chunk-dependent, which is not recorded "
+                "-- run the streams separately"
             )
-        else:
-            if len(selected_frames) > self.chunk_size and self.overlap <= 0:
-                raise ValueError(
-                    "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
-                    f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+
+        with self._backend_outputs(ingest_artifact) as (backend_output_root, keep_outputs):
+            attempt_history: list[dict[str, Any]] = []
+            auto_tune_recommendation: dict[str, Any] | None = None
+            if self.auto_tune:
+                predictions, image_paths, notes, attempt_history, auto_tune_recommendation = self._run_auto_tuned(
+                    selected_frames,
+                    ingest_artifact=ingest_artifact,
+                    cache_root=cache_root,
+                    backend_output_root=backend_output_root,
                 )
-            image_paths, notes = self._materialize_images(
-                selected_frames,
-                ingest_artifact,
-                cache_root,
-                resize_max_dim=self.resize_max_dim,
-            )
-            runner = self._create_runner(cache_root, backend_output_root)
-            runner.img_list = [str(path) for path in image_paths]
-            self._run_runner(runner)
-            chunks = self._load_chunk_predictions(runner)
-            global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
-            predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
-            notes = list(notes)
-            notes.append(
-                "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
-                if global_c2w is not None
-                else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
-            )
-            notes.append(
-                f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
-            )
-            notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
+            else:
+                if len(selected_frames) > self.chunk_size and self.overlap <= 0:
+                    raise ValueError(
+                        "VGGT-Long requires overlap > 0 when more than one chunk is needed. "
+                        f"Got {len(selected_frames)} frames, chunk_size={self.chunk_size}, overlap={self.overlap}."
+                    )
+                image_paths, notes = self._materialize_images(
+                    selected_frames,
+                    ingest_artifact,
+                    cache_root,
+                    resize_max_dim=self.resize_max_dim,
+                )
+                image_dir = Path(image_paths[0]).parent if image_paths else cache_root
+                runner = self._create_runner(image_dir, backend_output_root)
+                runner.img_list = [str(path) for path in image_paths]
+                self._run_runner(runner)
+                chunks = self._load_chunk_predictions(runner)
+                global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
+                predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                notes = list(notes)
+                notes.append(
+                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
+                    if global_c2w is not None
+                    else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
+                )
+                notes.append(
+                    f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
+                )
+                notes.append(f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s).")
 
-        artifact = self._initialize_from_predictions(
-            selected_frames,
-            predictions,
-            ingest_artifact,
-            notes=notes,
-            image_paths=image_paths,
-        )
-        artifact.backend_name = self.backend_name
-        artifact.notes.append("Chunk overlaps were merged by first occurrence; downstream artifact contract preserved.")
-        artifact.metadata["geometry_backend_name"] = self.backend_name
-        artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
-        artifact.metadata["vggt_long_overlap"] = self.overlap
-        artifact.metadata["vggt_long_loop_enable"] = self.loop_enable
-        artifact.metadata["vggt_long_auto_tune"] = bool(self.auto_tune)
-        artifact.metadata["vggt_long_auto_tune_attempts"] = attempt_history
-        if auto_tune_recommendation is not None:
-            artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
-        artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
-        return artifact
+            artifact = self._initialize_from_predictions(
+                selected_frames,
+                predictions,
+                ingest_artifact,
+                notes=notes,
+                image_paths=image_paths,
+            )
+            artifact.backend_name = self.backend_name
+            artifact.notes.append("Chunk overlaps were merged by first occurrence; downstream artifact contract preserved.")
+            artifact.metadata["geometry_backend_name"] = self.backend_name
+            artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
+            artifact.metadata["vggt_long_overlap"] = self.overlap
+            artifact.metadata["vggt_long_loop_enable"] = self.loop_enable
+            artifact.metadata["vggt_long_auto_tune"] = bool(self.auto_tune)
+            artifact.metadata["vggt_long_auto_tune_attempts"] = attempt_history
+            if auto_tune_recommendation is not None:
+                artifact.metadata["vggt_long_auto_tune_recommendation"] = auto_tune_recommendation
+            artifact.metadata["vggt_long_resize_max_dim"] = self.resize_max_dim
+            loader, target = self._input_loader()
+            # version 2: the no-upscale loader crops tall frames (version 1 squashed them).
+            artifact.metadata["vggt_long_input_loader"] = {
+                "loader": loader, "target_size": target, "version": 2,
+            }
+            self._record_transforms(artifact, {
+                stream_id: vggt_input_transform(
+                    size, loader=loader, target_size=target, resize_max_dim=self.resize_max_dim
+                )
+                for stream_id, size in source_sizes.items()
+            })
+            artifact.metadata["vggt_long_outputs"] = {
+                "dir": str(backend_output_root), "kept": keep_outputs,
+            }
+            return artifact
+
+    @contextmanager
+    def _backend_outputs(self, ingest_artifact):
+        """VGGT-Long's own output folder for one invocation: ``(path, kept)``.
+
+        Its chunk predictions and ``camera_poses.txt`` are read back once, while the
+        geometry is built, and are not needed after. A folder shared by every run of
+        the same input (``vggt_long_run/<input folder>``) could be written by two runs
+        at once, so each invocation gets its own, and it is removed afterwards (about
+        11 GB for 426 frames) unless ``keep_backend_outputs`` is set. An explicit
+        ``output_cache_dir`` is the caller's and is always kept.
+        """
+        import shutil
+        import tempfile
+
+        if self.output_cache_dir:
+            root = Path(self.output_cache_dir)
+            root.mkdir(parents=True, exist_ok=True)
+            yield root, True
+            return
+        keep = bool(self.cfg.get("keep_backend_outputs", False))
+        parent = DEFAULT_INPUT_CACHE_ROOT.parent / "vggt_long_run"
+        parent.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=f"{ingest_artifact.run_id}-", dir=parent))
+        try:
+            yield root, keep
+        finally:
+            if not keep:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def _input_loader(self) -> tuple[str, int]:
+        """The loader ``_patched_vggt_long_preprocess`` runs for the current resize setting.
+
+        The no-upscale ``bounded`` loader replaces the upstream one only when
+        ``prevent_input_upscale`` is on and the effective target is below 518.
+        """
+        target = self._effective_vggt_input_target_size(self.resize_max_dim)
+        if self.prevent_input_upscale and target < 518:
+            return "bounded", int(target)
+        return "upstream", 518

@@ -9,7 +9,12 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from reifyscene.lifting.backproject import Backprojector
+from reifyscene.geometry.image_transform import (
+    ImageTransform,
+    MissingImageTransform,
+    image_transform_for,
+)
+from reifyscene.lifting.lift import lift_pixels, lift_record
 from reifyscene.optimize.factors.priors import PriorFactor
 from reifyscene.optimize.factors.reprojection import ReprojectionFactor
 from reifyscene.optimize.factors.time_alignment import TimeAlignmentFactor
@@ -41,7 +46,6 @@ class JointSpatiotemporalSolver:
             "relabel_static_threshold_world": float(self.cfg.get("relabel_static_threshold_world", 0.05)),
             "relabel_min_lifted_frames": max(int(self.cfg.get("relabel_min_lifted_frames", 2)), 2),
         }
-        self.backprojector = Backprojector(point_conf_threshold=0.0)
 
     @staticmethod
     def _copy_intrinsics(intr: CameraIntrinsics) -> CameraIntrinsics:
@@ -75,8 +79,21 @@ class JointSpatiotemporalSolver:
         """Build an initial solver state dictionary.
 
         The state is intentionally plain-Python so it can be inspected and later
-        migrated to torch or scipy parameter containers.
+        migrated to torch or scipy parameter containers. The geometry's image
+        transforms and the tracking lift's settings travel with it, so the re-lift
+        maps track pixels exactly as the tracking stage did.
         """
+        # Each stream's transform, or why it has none (raised only if a re-lift needs it).
+        image_transforms: dict[str, dict[str, Any] | str] = {}
+        for stream_id, payload in track_artifact.track_payloads_by_stream.items():
+            original_wh = tuple(int(v) for v in payload.get("original_size_wh", [0, 0]))
+            try:
+                image_transforms[str(stream_id)] = image_transform_for(
+                    geometry_artifact, str(stream_id), source_size=original_wh
+                ).to_dict()
+            except MissingImageTransform as exc:
+                image_transforms[str(stream_id)] = str(exc)
+        lift_settings = dict((getattr(track_artifact, "metadata", {}) or {}).get("lift") or {})
         return {
             "run_id": geometry_artifact.run_id,
             "stream_ids": geometry_artifact.stream_ids() or sync_artifact.stream_ids(),
@@ -102,6 +119,8 @@ class JointSpatiotemporalSolver:
                 }
                 for k, payload in track_artifact.track_payloads_by_stream.items()
             },
+            "image_transforms": image_transforms,
+            "lift_settings": lift_settings,
             "graph_nodes": list(graph_artifact.nodes) if graph_artifact is not None else [],
             "graph_edges": list(graph_artifact.edges) if graph_artifact is not None else [],
             "human_artifact_present": human_artifact is not None,
@@ -246,9 +265,17 @@ class JointSpatiotemporalSolver:
         }
 
     def _relift_tracks_with_refined_cameras(self, state: dict[str, Any]) -> None:
+        """Re-lift every track with the refined cameras, through the tracking stage's lift.
+
+        Same function (:func:`lift_pixels`), transform and confidence threshold the
+        tracking stage used; only the cameras differ. Records ``state['relift']``.
+        """
         selected_frames = list(state.get("selected_frames", []))
         depthmaps_by_frame = state.get("depthmaps_by_frame", {})
         camera_states = state.get("camera_states", {})
+        lift_settings = state.get("lift_settings", {}) or {}
+        conf_threshold = float(lift_settings.get("point_conf_threshold", 0.0))
+        used_transforms: dict[str, Any] = {}
         for stream_id, payload in state.get("track_payloads", {}).items():
             frame_indices = np.asarray(payload.get("frame_indices", []), dtype=int)
             points_xy = np.asarray(payload.get("points_xy", np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32)
@@ -259,9 +286,18 @@ class JointSpatiotemporalSolver:
             refined_valid = np.zeros((len(stream_frames), num_tracks), dtype=bool)
             lifted_frame_indices = np.asarray([f.frame_idx for f in stream_frames], dtype=np.int32)
             original_wh = tuple(int(v) for v in payload.get("original_size_wh", [0, 0]))
+            transform = None
+            if stream_frames and num_tracks:
+                raw = (state.get("image_transforms", {}) or {}).get(str(stream_id))
+                if not isinstance(raw, dict):
+                    raise MissingImageTransform(
+                        raw or f"stream {stream_id!r}: no image transform to re-lift its tracks with"
+                    )
+                transform = ImageTransform.from_dict(raw)
+                used_transforms[str(stream_id)] = raw
             for k, frame in enumerate(stream_frames):
                 matches = np.where(frame_indices == int(frame.frame_idx))[0]
-                if matches.size == 0:
+                if matches.size == 0 or transform is None:
                     continue
                 t = int(matches[0])
                 frame_key = f"{frame.stream_id}:{frame.frame_idx}"
@@ -269,18 +305,13 @@ class JointSpatiotemporalSolver:
                 state_for_frame = self._find_state_for_frame(camera_states.get(stream_id, []), frame)
                 if depth_payload is None or state_for_frame is None:
                     continue
-                xy = points_xy[t].copy()
                 vis = visibility[t].astype(bool) if visibility.size else np.ones((num_tracks,), dtype=bool)
-                depth_map = np.asarray(depth_payload.get("depth"), dtype=np.float32)
-                if depth_map.ndim == 3 and depth_map.shape[-1] == 1:
-                    depth_map = depth_map[..., 0]
-                h, w = depth_map.shape[:2]
-                scale_x = float(w) / max(float(original_wh[0]), 1e-6)
-                scale_y = float(h) / max(float(original_wh[1]), 1e-6)
-                xy[:, 0] *= scale_x
-                xy[:, 1] *= scale_y
-                xyz = self.backprojector.backproject(xy, state_for_frame, depth_map)
-                valid = np.isfinite(xyz).all(axis=1) & vis
+                xyz, valid = lift_pixels(
+                    points_xy[t], transform, depth_payload.get("depth"), state_for_frame.intrinsics,
+                    state_for_frame.pose.T_world_cam, confidence=depth_payload.get("confidence"),
+                    conf_threshold=conf_threshold, from_size=original_wh,
+                )
+                valid &= vis
                 xyz[~valid] = np.nan
                 refined_xyz[k] = xyz.astype(np.float32)
                 refined_valid[k] = valid
@@ -294,6 +325,7 @@ class JointSpatiotemporalSolver:
                 label_key="refined_static_labels",
                 score_key="refined_static_scores",
             )
+        state["relift"] = lift_record(confidence="depth", conf_threshold=conf_threshold, transforms=used_transforms)
 
     def _refine_static_track_geometry(self, state: dict[str, Any]) -> dict[str, Any]:
         if not self.static_track_cfg["enabled"]:
@@ -469,7 +501,7 @@ class JointSpatiotemporalSolver:
 
         return OptimizationArtifact(
             run_id=geometry_artifact.run_id,
-            stage_name="optimize",
+            stage_name="optimization",  # the stage registry's name (was "optimize")
             save_dir=Path("."),
             refined_cameras=state.get("camera_states", {}),
             refined_offsets=state.get("time_offsets", {}),
@@ -481,4 +513,5 @@ class JointSpatiotemporalSolver:
             stage_diagnostics=list(state.get("stage_history", [])),
             schedule_used=schedule_used,
             pending_todos=pending_todos + state.get("notes", []),
+            metadata={"relift": state["relift"]} if "relift" in state else {},
         )

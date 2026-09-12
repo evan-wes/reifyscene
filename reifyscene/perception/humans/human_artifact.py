@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.backend_ladder import CapabilityManifest
 from reifyscene.common.types import BaseArtifact, FrameRef, HumanState
@@ -212,28 +212,16 @@ class HumanArtifact(BaseArtifact):
             history = sorted(history, key=lambda item: item[2])
             if len(history) >= 2:
                 draw.line([(x, y) for x, y, _ in history], fill=(*rgb_color, 220), width=2)
-        for item in list((self.metadata.get('projected_centers_by_frame', {}) or {}).get(frame_key, []) or []):
-            xy = np.asarray(item.get('xy', []), dtype=np.float32)
-            if xy.shape != (2,) or not np.all(np.isfinite(xy)):
-                continue
-            hid = str(item.get('human_id', 'human'))
-            color = ImageColor.getrgb(self._track_color(hid))
-            x, y = float(xy[0]), float(xy[1])
-            draw.line([(x - 6, y), (x + 6, y)], fill=(*color, 255), width=2)
-            draw.line([(x, y - 6), (x, y + 6)], fill=(*color, 255), width=2)
-            draw.text((x + 6, y + 4), f"3D {hid}", fill=(*color, 255))
         composed = Image.alpha_composite(base, overlay).convert('RGB')
         return np.asarray(composed, dtype=np.uint8)
 
     def _build_summary_rows(self, frame_key: str, frame_humans: list[HumanState], raw_frame_humans: list[HumanState]) -> list[list[str]]:
-        projected = list((self.metadata.get('projected_centers_by_frame', {}) or {}).get(frame_key, []) or [])
         rows = [
             ['Frame', frame_key],
             ['Raw detections', str(len(raw_frame_humans))],
             ['Kept humans', str(len(frame_humans))],
             ['Suppressed', str(len([h for h in raw_frame_humans if h.attributes.get('suppressed')]))],
             ['Persistent IDs', str(len({h.human_id for h in self.humans}))],
-            ['Projected 3D centers', str(len(projected))],
         ]
         track_summaries = self.linked_ids.get('track_summaries', {})
         for h in frame_humans[:8]:
@@ -454,36 +442,32 @@ class HumanArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
         for det_id in raw.get('mask_ids', []):
-            path = save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
+            path = require_file(save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         densepose_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('densepose_ids', []):
-            path = save_dir / 'densepose' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    densepose_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
+            path = require_file(save_dir / 'densepose' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                densepose_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         smpl_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('smpl_ids', []):
-            path = save_dir / 'smpl' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    payload = {}
-                    for k in npz.files:
-                        arr = np.asarray(npz[k])
-                        payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
-                    smpl_payloads[det_id] = payload
+            path = require_file(save_dir / 'smpl' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                payload = {}
+                for k in npz.files:
+                    arr = np.asarray(npz[k])
+                    payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
+                smpl_payloads[det_id] = payload
         dense_payloads: dict[str, dict[str, Any]] = {}
         for det_id in raw.get('dense_ids', []):
-            path = save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz"
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
+            path = require_file(save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
+            with np.load(path, allow_pickle=True) as npz:
+                dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         artifact = cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             humans=[],
             raw_humans=[],

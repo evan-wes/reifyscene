@@ -27,6 +27,7 @@ import numpy as np
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 from reifyscene.ingest.decoder import VideoDecoder
 
 # Single source of truth for the model id. The setup precache
@@ -177,6 +178,15 @@ class MoGeInitializer(GeometryInitializer):
 
         # MoGe provides NO cross-frame poses → camera_states_by_stream stays empty.
         # Poses come from a pose source (VGGT / GT / the FP6b COLMAP rung), not here.
+        # It infers on the decoded frame itself, so its pixels are the frame's.
+        image_transforms = {
+            stream_id: transform_record(
+                ImageTransform.identity((int(stream.width), int(stream.height))),
+                recorded_by=self.backend_name,
+            )
+            for stream_id, stream in stream_lookup.items()
+            if any(str(f.stream_id) == str(stream_id) for f in selected_frames)
+        }
         return GeometryArtifact(
             run_id=self.run_id,
             stage_name="geometry",
@@ -186,6 +196,7 @@ class MoGeInitializer(GeometryInitializer):
             intrinsics_by_stream=intrinsics_by_stream,
             depthmaps_by_frame=depthmaps_by_frame,
             pointmaps_by_frame=pointmaps_by_frame,
+            metadata={"image_transforms": image_transforms},
             notes=[
                 f"MoGe-2 model={self.model_id}",
                 f"frames={len(selected_frames)}",

@@ -16,10 +16,11 @@ from time import perf_counter
 from rich.console import Console
 from rich.table import Table
 from reifyscene.api.pipeline import ReifyScenePipeline
-from reifyscene.api.resume import materialize_stage_from_prior, resolve_stage_window
-from reifyscene.api.stages import STAGE_ORDER, write_run_manifest
+from reifyscene.api.resume import ResumeRejected, check_resume, materialize_stage, resolve_stage_window
+from reifyscene.api.stages import STAGE_ORDER, build_stage_registry, write_run_manifest
 from reifyscene.common.io import read_yaml
 from reifyscene.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from reifyscene.common.backend_ladder import fallbacks_of
 from reifyscene.common.memory import release_memory
 from reifyscene.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile, save_system_report
 
@@ -30,6 +31,18 @@ def _coalesce(explicit, profile_value, fallback):
     if profile_value is not None:
         return profile_value
     return fallback
+
+
+def _picked(cfg: dict, path: str, explicit, profile_value) -> None:
+    """Note that ``path``'s value came from the machine profile, not the user.
+
+    A resume pins such settings to the prior run's values instead of re-picking them
+    from whatever GPU memory happens to be free now (``cfg['_profile_picked']``). Any
+    value the user did not give counts -- including a profile that picks nothing (no
+    frame cap), so a run made under an older profile still resumes as it was made.
+    """
+    if explicit is None:
+        cfg.setdefault('_profile_picked', []).append(path)
 
 
 def build_config(args: argparse.Namespace, *, system_report: dict | None = None) -> tuple[dict, dict[str, object]]:
@@ -106,9 +119,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
             # Use the auto recommender and then override only the profile tag so the preset values stay in one place.
             rec = recommend_tracking_profile(system_report or collect_system_report(), device=tracking_device)
             manual_presets = {
-                'lowmem': {'resize_max_dim': 256, 'frame_stride': 2, 'max_frames': 24, 'window_size': 12, 'window_overlap': 4, 'cpu_threads': 4},
-                'balanced': {'resize_max_dim': 384, 'frame_stride': 2, 'max_frames': 48, 'window_size': 24, 'window_overlap': 8, 'cpu_threads': 6},
-                'full': {'resize_max_dim': 512, 'frame_stride': 1, 'max_frames': 96, 'window_size': 48, 'window_overlap': 12, 'cpu_threads': 8},
+                'lowmem': {'resize_max_dim': 256, 'frame_stride': 2, 'max_frames': None, 'window_size': 12, 'window_overlap': 4, 'cpu_threads': 4},
+                'balanced': {'resize_max_dim': 384, 'frame_stride': 2, 'max_frames': None, 'window_size': 24, 'window_overlap': 8, 'cpu_threads': 6},
+                'full': {'resize_max_dim': 512, 'frame_stride': 1, 'max_frames': None, 'window_size': 48, 'window_overlap': 12, 'cpu_threads': 8},
             }
             rec.update(manual_presets[args.resource_profile])
             rec['profile'] = args.resource_profile
@@ -117,6 +130,11 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     tracking['device'] = tracking_device
     tracking['grid_size'] = int(_coalesce(args.tracking_grid_size, None, 12))
     tracking['frame_stride'] = int(_coalesce(args.tracking_frame_stride, rec.get('frame_stride'), 1))
+    _picked(cfg, 'tracking.frame_stride', args.tracking_frame_stride, rec.get('frame_stride'))
+    _picked(cfg, 'tracking.max_frames', args.tracking_max_frames, rec.get('max_frames'))
+    _picked(cfg, 'tracking.resize_max_dim', args.tracking_resize_max_dim, rec.get('resize_max_dim'))
+    _picked(cfg, 'tracking.window_size', args.tracking_window_size, rec.get('window_size'))
+    _picked(cfg, 'tracking.window_overlap', args.tracking_window_overlap, rec.get('window_overlap'))
     tracking_frame_spacing_sec = getattr(args, 'tracking_frame_spacing_sec', None)
     if tracking_frame_spacing_sec is not None:
         tracking['frame_spacing_sec'] = float(tracking_frame_spacing_sec)
@@ -151,8 +169,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     humans['densepose_frame_stride'] = int(args.humans_densepose_frame_stride)
     humans['smpl_backend_mode'] = args.humans_smpl_backend_mode
     humans['smpl_frame_stride'] = int(args.humans_smpl_frame_stride)
-    humans.setdefault('max_inference_side', side_preset['detector'])
-    humans.setdefault('pose_max_inference_side', side_preset['pose'])
+    for key, preset in (('max_inference_side', 'detector'), ('pose_max_inference_side', 'pose')):
+        _picked(cfg, f'humans.{key}', humans.get(key), side_preset[preset])
+        humans.setdefault(key, side_preset[preset])
     humans.setdefault('oom_retry_on_cpu', True)
 
     objects = cfg.setdefault('objects', {})
@@ -164,8 +183,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     objects['frame_source'] = args.objects_frame_source
     objects['frame_stride'] = int(args.objects_frame_stride)
     objects['embedder_backend_mode'] = args.objects_embedder_backend_mode
-    objects.setdefault('max_inference_side', side_preset['detector'])
-    objects.setdefault('embedder_max_inference_side', side_preset['embedder'])
+    for key, preset in (('max_inference_side', 'detector'), ('embedder_max_inference_side', 'embedder')):
+        _picked(cfg, f'objects.{key}', objects.get(key), side_preset[preset])
+        objects.setdefault(key, side_preset[preset])
     objects.setdefault('oom_retry_on_cpu', True)
 
     scene_cfg = cfg.setdefault('scene', {})
@@ -372,6 +392,29 @@ def _print_frame_summary(console: Console, outputs: dict, cfg: dict) -> None:
     console.print(table)
 
 
+def _check_resume_only(args: argparse.Namespace, system_report: dict, debug_cfg: dict) -> int:
+    """``--check-resume``: report what a resume from ``--prior-run-dir`` could load.
+
+    Checks every stage the pipeline could load (all but the last), read-only, so the
+    report also says the latest ``--start-stage`` the prior run supports. Writes nothing.
+    """
+    if not args.prior_run_dir:
+        print('--check-resume needs --prior-run-dir')
+        return 2
+    cfg, _ = build_config(args, system_report=system_report)
+    cfg = apply_debug_config_to_runtime_cfg(cfg, debug_cfg)
+    try:
+        plan = check_resume(
+            args.prior_run_dir, args.run_dir, args.start_stage, cfg, [args.video],
+            build_stage_registry(), stages=list(STAGE_ORDER[:-1]),
+        )
+    except ResumeRejected as exc:
+        print(exc)
+        return 1
+    print(plan.report())
+    return 0 if plan.ok else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
@@ -383,6 +426,7 @@ def main() -> None:
     parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
     parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
     parser.add_argument('--stop-stage', default=STAGE_ORDER[-1], choices=list(STAGE_ORDER), help='Last stage to run, inclusive. Stages after it are skipped. Default: the final stage (full pipeline).')
+    parser.add_argument('--check-resume', action='store_true', help='Check --prior-run-dir read-only: print, for every stage it has, whether a resume could load it (and why not), the latest --start-stage it supports, and whether --start-stage works. Writes nothing; exits 1 if --start-stage is not resumable.')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
@@ -472,6 +516,8 @@ def main() -> None:
     console = Console()
     system_report = collect_system_report()
     debug_cfg = load_debug_config(args.debug_config)
+    if args.check_resume:
+        raise SystemExit(_check_resume_only(args, system_report, debug_cfg))
     recommended = None
     geometry_recommended = None
     if args.resource_profile != 'none':
@@ -481,16 +527,20 @@ def main() -> None:
     if args.geometry_backend_name == 'vggt-long':
         geometry_recommended = recommend_vggt_long_profile(system_report, device=args.geometry_device)
     report_path = Path(args.run_dir) / 'preflight_system_report.json'
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    save_system_report(report_path, {
-        'report': system_report,
-        'recommended_tracking_profile': recommended,
-        'recommended_vggt_long_profile': geometry_recommended,
-    })
 
+    def _save_preflight_report() -> None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        save_system_report(report_path, {
+            'report': system_report,
+            'recommended_tracking_profile': recommended,
+            'recommended_vggt_long_profile': geometry_recommended,
+        })
+
+    if args.preflight_only:
+        _save_preflight_report()
     if args.debug or args.preflight_only:
         _print_system_report(console, system_report, recommended, geometry_recommendation=geometry_recommended)
-        console.print(f'saved preflight report: {report_path}')
+        console.print(f'preflight report: {report_path}')
     if args.preflight_only:
         return
 
@@ -530,17 +580,32 @@ def main() -> None:
         )
         console.print(f"scene timeline source: {cfg.get('scene', {}).get('timeline_source', 'geometry')}")
 
-    write_run_manifest(
-        args.run_dir,
-        {
+    # A resume is checked read-only BEFORE anything is written: a rejection leaves the run
+    # folder untouched and names the stage to restart from. Machine-picked settings are
+    # pinned to the prior run's values here, so the manifest records the pinned config.
+    plan = None
+    if start_idx > 0:
+        if not args.prior_run_dir:
+            raise ValueError('--prior-run-dir is required when --start-stage is later than ingest.')
+        plan = check_resume(args.prior_run_dir, args.run_dir, args.start_stage, cfg, [args.video], build_stage_registry())
+        console.print(plan.report())
+        if not plan.ok:
+            raise ResumeRejected(plan.report())
+    _save_preflight_report()
+
+    manifest = {
             'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
             'run_dir': str(Path(args.run_dir).expanduser().resolve()),
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
             'stop_stage': args.stop_stage,
             'config': cfg,
-        },
-    )
+            'resume': None if plan is None else {
+                'pinned': plan.pins,
+                'stages': {s: {'action': v.action, 'derived': v.derived} for s, v in plan.verdicts.items()},
+            },
+    }
+    write_run_manifest(args.run_dir, manifest)
 
     pipeline = ReifyScenePipeline(cfg)
     registry = pipeline.stage_registry()
@@ -580,9 +645,6 @@ def main() -> None:
         'render': 'render',
     }
 
-    if start_idx > 0 and not args.prior_run_dir:
-        raise ValueError('--prior-run-dir is required when --start-stage is later than ingest.')
-
     for idx, stage_name in enumerate(STAGE_ORDER):
         if idx > stop_idx:
             break
@@ -590,7 +652,12 @@ def main() -> None:
         label = stage_labels[stage_name]
         if idx < start_idx:
             started = _debug_stage(console, args.debug, f"{label} [load]")
-            artifact = materialize_stage_from_prior(args.prior_run_dir, args.run_dir, spec, cfg, [args.video])
+            if plan.verdicts[stage_name].action == 'rebuild':
+                # Stale but cheap (no model, a pure function of what is loaded): re-run it.
+                artifact = spec.run_fn(pipeline, outputs, [args.video])
+            else:
+                artifact = materialize_stage(plan, spec)
+                pipeline.register_loaded_stage(stage_name, artifact)
             outputs[stage_name] = artifact
             if stage_name == 'tracking':
                 outputs['tracks'] = artifact
@@ -618,6 +685,21 @@ def main() -> None:
         _debug_stage_done(console, args.debug, 'Deferred debug export', export_started, save_dir=args.run_dir)
 
     _print_frame_summary(console, outputs, cfg)
+
+    # Every stage that ran (or was loaded) on a weaker backend than its best, said loudly
+    # and recorded in the manifest: an `auto` fallback is allowed, never silent.
+    fallbacks = [f for name in STAGE_ORDER if name in outputs for f in fallbacks_of(name, outputs[name])]
+    manifest['fallbacks'] = fallbacks
+    write_run_manifest(args.run_dir, manifest)
+    if fallbacks:
+        table = Table(title='[bold red]Backends that fell back: this run used weaker ones[/bold red]')
+        for column in ('stage', 'wanted', 'used', 'why'):
+            table.add_column(column)
+        for f in fallbacks:
+            table.add_row(f['stage'], str(f['wanted']), str(f['used']), str(f['why']))
+        console.print(table)
+    else:
+        console.print('every stage ran its best backend')
 
     for name in STAGE_ORDER:
         artifact = outputs.get(name)

@@ -805,7 +805,7 @@ class TrackArtifact(BaseArtifact):
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             per_stream_observations=observations,
             seed_points_by_stream=raw.get('seed_points_by_stream', {}),

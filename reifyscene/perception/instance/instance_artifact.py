@@ -28,7 +28,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reifyscene.common.backend_ladder import CapabilityManifest
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef
 
@@ -153,14 +153,13 @@ class InstanceArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
         for instance_id, filename in raw.get('mask_index', {}).items():
-            path = save_dir / 'masks' / filename
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    mask_arrays[instance_id] = np.asarray(npz['mask'], dtype=bool)
+            path = require_file(save_dir / 'masks' / filename, "segment mask")
+            with np.load(path, allow_pickle=True) as npz:
+                mask_arrays[instance_id] = np.asarray(npz['mask'], dtype=bool)
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             observations=[cls._obs_from_dict(o) for o in raw.get('observations', [])],
             mask_arrays=mask_arrays,

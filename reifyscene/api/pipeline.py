@@ -53,11 +53,10 @@ from reifyscene.perception.semantics.semantics_artifact import SemanticsArtifact
 from reifyscene.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
 from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from reifyscene.query.parser import PromptParser
-from reifyscene.api.resume import apply_stage_compatibility_metadata
+from reifyscene.api.contracts import input_identity, stage_fingerprint
 from reifyscene.api.stages import build_stage_registry
 from reifyscene.render.registry import build_renderer
 from reifyscene.scene.assembler import SingleVideoSceneAssembler
-from reifyscene.eval.benchmark_runner import BenchmarkRunner
 from reifyscene.sync.global_time_solver import GlobalTimeAlignmentSolver
 from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
 
@@ -93,6 +92,10 @@ class ReifyScenePipeline:
             Passed directly to :class:`JointSpatiotemporalSolver`.
         """
         self.cfg = cfg or {}
+        # Fingerprint digests of the stages run or loaded so far (lineage for the next ones).
+        self._stage_digests: dict[str, str | None] = {}
+        self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
+        self._run_video_paths: list[str] = []
         self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
         self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
         self.quality = ClipQualityAssessor()
@@ -139,13 +142,12 @@ class ReifyScenePipeline:
         self.object_detector = ObjectDetector(objects_cfg)
         self.object_segmenter = ObjectSegmenter(objects_cfg)
         self.object_embedder = InstanceEmbedder(objects_cfg)
-        self.graph_builder = DynamicSceneGraphBuilder()
+        self.graph_builder = DynamicSceneGraphBuilder(self.cfg.get('graph', {}))
         self.solver = JointSpatiotemporalSolver(self.cfg.get('optimizer', {}))
         self.prompt_parser = PromptParser()
         self.scene_assembler = SingleVideoSceneAssembler(**self.cfg.get("scene", {}))
         self.ground_plane_canonicalizer = GroundPlaneCanonicalizer(geometry_cfg.get("ground_plane", {}))
         self.renderer = build_renderer(self.cfg.get("render", {}))
-        self.benchmark_runner = BenchmarkRunner(self.cfg.get("evaluation", {}))
         self.calibration_runner = CalibrationRunner(self.cfg.get("calibration", {}), decoder=self.decoder)
 
     @staticmethod
@@ -189,10 +191,34 @@ class ReifyScenePipeline:
     def _video_paths_for_stage(self, ingest_artifact: IngestArtifact | None = None) -> list[str]:
         if ingest_artifact is not None:
             return self._video_paths_from_ingest(ingest_artifact)
-        return [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+        resume_paths = [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+        # Every stage fingerprints the same input: without the run script's explicit
+        # list, use the one ingest read (run or loaded) rather than none.
+        return resume_paths or list(self._run_video_paths)
 
     def _stamp_stage_metadata(self, artifact, stage_name: str, *, video_paths: list[str]) -> None:
-        apply_stage_compatibility_metadata(artifact, self.cfg, stage_name, video_paths)
+        """Record the stage's fingerprint (``metadata['contract']``) before it is saved.
+
+        The fingerprint names the settings the stage used, the input frames, and the
+        digests of the upstream artifacts it was built from -- this run's own, or the
+        ones a resume loaded (:meth:`register_loaded_stage`).
+        """
+        if stage_name == 'ingest':
+            self._run_video_paths = [str(p) for p in video_paths]
+        key = tuple(str(p) for p in video_paths)
+        if key not in self._input_identities:
+            self._input_identities[key] = input_identity(video_paths)
+        record = stage_fingerprint(stage_name, self.cfg, self._input_identities[key], self._stage_digests)
+        artifact.metadata = dict(getattr(artifact, 'metadata', {}) or {})
+        artifact.metadata['contract'] = record
+        self._stage_digests[stage_name] = record['digest']
+
+    def register_loaded_stage(self, stage_name: str, artifact) -> None:
+        """Make a stage a resume loaded (not ran) the upstream of the stages that run next."""
+        record = (getattr(artifact, 'metadata', {}) or {}).get('contract') or {}
+        self._stage_digests[stage_name] = record.get('digest')
+        if stage_name == 'ingest':
+            self._run_video_paths = self._video_paths_from_ingest(artifact)
 
 
     def calibrate(self, video_paths: list[str]) -> Any:
@@ -369,6 +395,9 @@ class ReifyScenePipeline:
             kwargs['dyn_mask_artifact'] = inp.get('dyn_mask')
         return init.initialize(inp['frames'], **kwargs)
 
+    def _geometry_mode_is_real(self) -> bool:
+        return str(self.cfg.get('geometry', {}).get('backend_mode', 'auto')).lower() == 'real'
+
     def _geometry_ladder(self, stage_label, init, backend_name, selected_frames,
                          ingest_artifact: IngestArtifact, sync_artifact, *, channel: str | None = None,
                          dyn_mask_artifact=None):
@@ -393,6 +422,8 @@ class ReifyScenePipeline:
                 _GEOMETRY_FIDELITY.get(rung_name, rung_name),
                 runner=lambda inp: self._geometry_init_call(init, inp),
                 probe=probe_by_backend.get(rung_name),
+                # backend_mode: real asks for this backend: empty geometry is not a fallback.
+                strict='always' if self._geometry_mode_is_real() else '',
             ),
             BackendRung(
                 'empty', 'empty',
@@ -437,6 +468,62 @@ class ReifyScenePipeline:
             manifest.notes.append(result.reconcile.note())
         return result.artifact, manifest
 
+    @staticmethod
+    def _finalize_image_transforms(artifact, ingest_artifact: IngestArtifact) -> None:
+        """Every geometry stream carries an ingest-frame -> geometry-pixels transform.
+
+        Backends record their own (VGGT's crop, the dataset's factor resize). A
+        stream left without one (a composed or pose-only artifact) gets the identity
+        at its ingest frame size. Either way the transform must land exactly on the
+        stream's depth-map size and start from its ingest frame size -- a mismatch
+        means consumers would pair photos and pixels with the wrong geometry pixels,
+        so it fails here instead.
+        """
+        from reifyscene.geometry.image_transform import ImageTransform, transform_record
+
+        streams = {s.stream_id: s for s in ingest_artifact.streams}
+        depth_sizes: dict[str, tuple[int, int]] = {}
+        for key, payload in (artifact.depthmaps_by_frame or {}).items():
+            depth = np.asarray((payload or {}).get('depth')) if payload is not None else None
+            if depth is None or depth.ndim < 2:
+                continue
+            depth = depth[..., 0] if depth.ndim == 3 and depth.shape[-1] == 1 else depth
+            stream_id = str(key).rpartition(':')[0]
+            size = (int(depth.shape[1]), int(depth.shape[0]))
+            if depth_sizes.setdefault(stream_id, size) != size:
+                raise ValueError(f"geometry stream {stream_id!r} has depth maps of different sizes")
+        stream_ids = {str(f.stream_id) for f in artifact.selected_frames} | set(depth_sizes) | {
+            str(s) for s in (artifact.camera_states_by_stream or {})
+        }
+        records = dict((artifact.metadata or {}).get('image_transforms') or {})
+        for stream_id in sorted(stream_ids):
+            stream = streams.get(stream_id)
+            ingest_size = None
+            if stream is not None and stream.width > 0:
+                ingest_size = (int(stream.width), int(stream.height))
+            if stream_id not in records:
+                size = ingest_size or depth_sizes.get(stream_id)
+                if size is None:
+                    raise ValueError(
+                        f"geometry stream {stream_id!r}: no ingest frame size to record its image transform"
+                    )
+                records[stream_id] = transform_record(
+                    ImageTransform.identity(size),
+                    recorded_by=f'pipeline:identity ({artifact.backend_name})',
+                )
+            transform = ImageTransform.from_dict(records[stream_id])
+            if stream_id in depth_sizes and transform.output_size != depth_sizes[stream_id]:
+                raise ValueError(
+                    f"geometry stream {stream_id!r}: image transform lands on {transform.output_size} "
+                    f"but its depth maps are {depth_sizes[stream_id]}"
+                )
+            if ingest_size is not None and transform.source_size != ingest_size:
+                raise ValueError(
+                    f"geometry stream {stream_id!r}: image transform starts from "
+                    f"{transform.source_size} but the ingest frames are {ingest_size}"
+                )
+        artifact.metadata['image_transforms'] = records
+
     def initialize_geometry(self, ingest_artifact: IngestArtifact, sync_artifact, dyn_mask_artifact=None):
         """Run coarse geometry initialization and persist its heavy outputs.
 
@@ -457,6 +544,7 @@ class ReifyScenePipeline:
                 'geometry', self.geometry_init, self.geometry_backend_name,
                 selected_frames, ingest_artifact, sync_artifact, dyn_mask_artifact=dyn_mask_artifact)
         artifact.attach_manifest(manifest)
+        self._finalize_image_transforms(artifact, ingest_artifact)
         artifact.metadata['geometry_frame_source'] = str(self.cfg.get('geometry', {}).get('frame_source', 'keyframes')).lower()
         estimate = self.ground_plane_canonicalizer.estimate_and_apply(artifact)
         if estimate is not None:
@@ -493,7 +581,9 @@ class ReifyScenePipeline:
         if enabled:
             refiner = PoseRefiner(pose_cfg)
             try:
-                refinements = refiner.refine(geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact)
+                refinements = refiner.refine(
+                    geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact, work_dir=save_dir
+                )
             except PoseRefineUnavailable as exc:
                 extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
             extra_notes.extend(refiner.notes)
@@ -534,6 +624,8 @@ class ReifyScenePipeline:
             'enabled': enabled,
             'refined_streams': sorted(refinements.keys()),
             'stats': {sid: refinement.stats for sid, refinement in refinements.items()},
+            # Streams whose bundle adjustment diverged: they keep the seed poses.
+            'rejected_streams': dict(refiner.rejected) if enabled else {},
         }
         refined = GeometryArtifact(
             run_id=geometry_artifact.run_id,
@@ -601,59 +693,6 @@ class ReifyScenePipeline:
         return artifact
 
 
-    def _project_world_to_image(self, xyz_world: np.ndarray, frame_ref: FrameRef, geometry_artifact) -> np.ndarray | None:
-        if geometry_artifact is None:
-            return None
-        states = (getattr(geometry_artifact, 'camera_states_by_stream', {}) or {}).get(frame_ref.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for st in states:
-            dt = abs(float(st.time_sec) - float(frame_ref.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = st
-                best_dt = dt
-        if best is None:
-            return None
-        Twc = np.asarray(best.pose.T_world_cam, dtype=np.float32)
-        try:
-            Tcw = np.linalg.inv(Twc)
-        except np.linalg.LinAlgError:
-            return None
-        xyz_h = np.asarray(list(np.asarray(xyz_world, dtype=np.float32)) + [1.0], dtype=np.float32)
-        cam = Tcw @ xyz_h
-        if not np.all(np.isfinite(cam)) or abs(float(cam[2])) < 1e-6:
-            return None
-        intr = best.intrinsics
-        x = float(intr.cx) + float(intr.fx) * (float(cam[0]) / float(cam[2]))
-        y = float(intr.cy) + float(intr.fy) * (float(cam[1]) / float(cam[2]))
-        return np.asarray([x, y], dtype=np.float32)
-
-    def _attach_human_debug_projections(self, artifact, track_artifact, geometry_artifact) -> None:
-        if geometry_artifact is None or artifact is None:
-            return
-        projected_by_frame: dict[str, list[dict[str, Any]]] = {}
-        for human in list(getattr(artifact, 'humans', []) or []):
-            try:
-                world = self.scene_assembler._state_world_position(human, 'humans', track_artifact, geometry_artifact, source_artifact=artifact)
-            except Exception:
-                world = None
-            if world is None:
-                continue
-            xy = self._project_world_to_image(np.asarray(world, dtype=np.float32), human.frame_ref, geometry_artifact)
-            if xy is None or not np.all(np.isfinite(xy)):
-                continue
-            frame_key = f"{human.frame_ref.stream_id}:{int(human.frame_ref.frame_idx)}"
-            projected_by_frame.setdefault(frame_key, []).append({
-                'human_id': str(human.human_id),
-                'xy': np.asarray(xy, dtype=np.float32).tolist(),
-                'world_xyz': np.asarray(world, dtype=np.float32).tolist(),
-                'confidence': float(getattr(human, 'confidence', 0.0)),
-                'anchor_source': str((getattr(human, 'attributes', {}) or {}).get('human_world_anchor_source', 'unknown')),
-            })
-        artifact.metadata['projected_centers_by_frame'] = projected_by_frame
-
     def _effective_sample_stride(self, stage_cfg: dict[str, Any]) -> int:
         """Return the effective original-frame stride for a perception stage."""
         semantic_stride = max(1, int(stage_cfg.get('frame_stride', 1)))
@@ -703,6 +742,8 @@ class ReifyScenePipeline:
         objects_cfg = self.cfg.get('objects', {})
         selected_frames = self._select_perception_frames(ingest_artifact, None, objects_cfg, default_source='keyframes')
         floor = FloorInstanceSegmenter(self.decoder, self.object_detector, self.object_segmenter, objects_cfg)
+        # Both rungs run the object detector: asked for as real, its failure is not a fallback.
+        detector_strict = 'fail' if str(self.object_detector.backend_mode).lower() == 'real' else ''
         ladder = BackendLadder('segment', [
             # SAM 3 (gated) is the eventual top rung (design §4A); SAM 2 is the
             # ungated stand-in: prompt-free class-agnostic discovery + video
@@ -714,8 +755,10 @@ class ReifyScenePipeline:
                 'sam2', 'class_agnostic_propagation',
                 runner=lambda inp: SAM2InstanceSegmenter(self.decoder, self.object_detector, objects_cfg).run(inp['ingest'], inp['frames']),
                 probe=importable('sam2'),
+                strict=detector_strict,
             ),
-            BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames'])),
+            BackendRung('maskrcnn_iou', 'per_frame_assoc', runner=lambda inp: floor.run(inp['ingest'], inp['frames']),
+                        strict=detector_strict),
             BackendRung('empty', 'empty', runner=lambda inp: ([], {})),
         ])
         result, manifest = ladder.run({'ingest': ingest_artifact, 'frames': selected_frames})
@@ -761,7 +804,8 @@ class ReifyScenePipeline:
                 runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
                 probe=importable('transformers'),
             ),
-            BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances'])),
+            BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances']),
+                        strict='fail' if str(self.object_embedder.backend_mode).lower() == 'real' else ''),
             BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
         ])
         empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
@@ -852,7 +896,8 @@ class ReifyScenePipeline:
                         runner=lambda inp: SapiensDenseRung(self.decoder, sapiens_cfg).run(inp['ingest'], inp['instances']),
                         probe=_sapiens_probe),
             BackendRung('keypoint_rcnn', 'pose_only',
-                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances'])),
+                        runner=lambda inp: KeypointRcnnRung(self.decoder, self.human_pose).run(inp['ingest'], inp['instances']),
+                        strict='fail' if str(self.human_pose.backend_mode).lower() == 'real' else ''),
             BackendRung('bbox_only', 'bbox_only',
                         runner=lambda inp: BboxOnlyRung(self.decoder).run(inp['ingest'], inp['instances'])),
         ])
@@ -1067,11 +1112,25 @@ class ReifyScenePipeline:
         if eval_cfg.get('dataset_root'):
             device = str(self.cfg.get('render', {}).get('device', 'cuda'))
             if str(artifact.scene_state.get('kind', 'static')) == 'dynamic':
-                from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+                from reifyscene.render.eval.masked_nvs_benchmark import (
+                    default_alignment,
+                    score_render_artifact_masked_nvs_dynamic,
+                )
+                # Self-reconstructed geometry lives in its own frame: align held-out cameras
+                # through the training cameras unless the scene was built on the dataset's.
+                eval_cfg.setdefault('align', default_alignment(self.geometry_backend_name))
                 metrics = score_render_artifact_masked_nvs_dynamic(artifact, eval_cfg, device=device)
             else:
-                from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
-                metrics = score_render_artifact_masked_nvs(artifact, eval_cfg, device=device)
+                from reifyscene.render.eval.masked_nvs_benchmark import (
+                    default_alignment,
+                    score_render_artifact_masked_nvs,
+                )
+                # A static scene lives in the ground-plane-canonicalized frame on every
+                # backend: align held-out cameras through the scene's training views.
+                eval_cfg.setdefault('align', default_alignment(self.geometry_backend_name, kind='static'))
+                metrics = score_render_artifact_masked_nvs(
+                    artifact, eval_cfg, train_views=scene_artifact.train_views, device=device
+                )
             if metrics:
                 artifact.scene_state['evaluation'] = metrics
         artifact.save_dir = render_dir

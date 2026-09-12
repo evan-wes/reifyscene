@@ -7,6 +7,358 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.2.1.0] - 2026-09-11
+
+### Added
+- **A resume loads only what this run would make, and says why** (`reifyscene/api/contracts.py`,
+  `resume.py`, `requirements.py`). `--start-stage X --prior-run-dir P` used to compare each
+  loaded stage's own config section and the input's absolute path, after copying it into the
+  new run. An audit of all 15 stages found it wrong both ways: segment's settings live in
+  `objects`, the solver reads `optimizer` while `optimization` was compared, tracking's lift
+  reads `lifting` — so changed settings resumed silently — while the absolute path made every
+  run from before the project rename unresumable and the tracking profile, picked from free GPU
+  memory at launch, rejected a resume started while the GPU was busy. Now:
+  - **Every stage declares what its output depends on**: the settings it reads, from any
+    section, with defaults filled and debug / device keys left out; folders it names by what is
+    in them, not where they are; a contract version (bumped, with a note, when its output
+    changes meaning); and the stages it consumes. Each artifact records that fingerprint, the
+    identity of the frames the decoder read (name, size, mtime — not the folder's path) and the
+    digests of the upstream artifacts it was built from. `tests/test_stage_settings_coverage.py`
+    runs the pipeline on a config that logs every key read and fails on one a stage does not
+    fingerprint.
+  - **The resume is checked read-only before anything is copied or run.** One report lists every
+    problem and the latest stage the prior run supports; `--check-resume` prints it and exits.
+    Resuming into the prior's own folder is refused. Settings picked from the machine are pinned
+    to the prior run's values.
+  - **Each stage lists what a loaded artifact must carry**, and what can be derived from what is
+    loaded is: a moved input or dataset folder, photos from the run's own copies or the dataset,
+    a crop box, re-lifted tracks. Cheap stages that run no model (sync, objects, graph,
+    optimization) are rebuilt; anything else rejects the resume and names the stage to restart
+    from. Loading copies a stage exactly and patches only its `artifact.json`.
+
+  Runs from before these records get them derived from their run manifests. All three spin runs
+  kept on disk — `spin_native_full`, and `spin_oracle_allframes` / `spin_vggtlong_capstone` from
+  the pre-rename `project` paths — resume at `scene`; the static oracle below is one.
+- **`scripts/export_checkpoint_views.py`: see a trained scene, not just its score.** The
+  masked-NVS benchmark rendered every held-out view and kept only the average, and the
+  pipeline's one saved render, the orbit flythrough, swings far off the captured path and
+  smears. The exporter renders straight from a run's `render/trained_dynamic.npz` (nothing is
+  retrained, so old runs work too) and writes:
+  - **held-out views**, evenly spaced over the benchmark's held-out split: the render, the real
+    photo, the covisibility mask, and that view's masked PSNR (`heldout/index.json`);
+  - **a replay video**: the scene re-rendered from every training camera at its own time, i.e.
+    the captured path. It shows reconstruction fidelity, not novel views;
+  - **`score.json`**: the full held-out split's masked mPSNR / mSSIM / mLPIPS with how the
+    cameras were placed, so an old run can be re-scored without touching its records.
+
+  `--align auto` (default) reads the run's geometry backend from its manifest, as the pipeline
+  does. On the spin oracle run: 8 held-out views at 17.3–21.1 dB (its full-split average is
+  19.64) and a 426-frame replay, in 6 s on the GPU. The logic is in
+  `reifyscene/render/eval/checkpoint_views.py`.
+- **`configs/experiment/spin_native_full.yaml`**, the config for the headline native run
+  (VGGT-Long + pose refinement on every frame of spin, scored on all 722 held-out views: masked
+  mPSNR **13.97** from a fresh run with every fix in; 14.96 with the photo fix on the earlier
+  run's geometry, 12.37 before it). No config for it was in the repo before; its eval block lived only in one
+  run's recorded config. `--config` replaces `base.yaml` rather than merging onto it, so the file
+  is `base.yaml` plus `scene.kind: dynamic` and `evaluation.masked_nvs`.
+- **The graph holds real things; point tracks are the evidence for them**
+  (`reifyscene/graph/builders.py`, `graph/track_support.py`). The stage made a node per point
+  track — 1593 of them on spin against 11 real entities — and every person and object carried an
+  empty list of tracks, because nothing ever associated a track with an instance: the pipeline
+  hardcoded `'track_ids': []` on both. Now the nodes are the cameras, the people and objects the
+  perception stages found, and the background. A track is evidence for the entity whose mask it
+  sits inside on at least `graph.track_membership_min_frames` frames (2) and on at least
+  `graph.track_membership_min_ratio` (0.5) of the frames the two share, and for at most one — the
+  one it is inside most often, since a point on the world belongs to one thing. Each entity node
+  carries its supporting tracks' ids and how many frames each was inside, the mean ratio, how the
+  tracking stage labelled them (static / moving / uncertain), and **where it was per frame**: the
+  median of its supporting tracks' lifted 3D points, which is what makes "where did the person
+  go?" answerable from the graph. Tracks inside nothing are the background's evidence; tracks
+  inside something but never enough are named on it as ambiguous rather than swept into the room.
+  The masks are the humans' and objects' own copies of the segment masks, so the stage gains no
+  new upstream, and both they and the tracks are in ingest-frame pixels, so the test is a direct
+  lookup at the nearest pixel. The per-stream note records what the join had to work with — an
+  empty overlap between the tracked frames and the masked ones would otherwise be silent.
+  On spin: **13 nodes instead of 1593**, the person supported by 294 tracks (mean ratio 0.99) with
+  a position on 421 of 426 frames, 411 tracks on the background, 72 ambiguous. Graph contract
+  version 2, so an older run's graph is rebuilt on resume, and its optimization with it.
+
+### Fixed
+- **VGGT's photos did not match its cameras.** VGGT and VGGT-Long see a resized,
+  centre-cropped square of each frame (720×960 → 518×686 → rows 84–602), so their cameras, K
+  and depth maps describe that square, but six places paired them with the whole frame: static
+  training photos at full size with the square's K; seed colours read from the photo's top-left
+  corner; dynamic training photos, and the dynamic init's frames and foreground masks, squashed
+  to 518×518; and track positions squashed into the square's depth, those outside it clamped to
+  its edge. `reifyscene/geometry/image_transform.py` records the exact ops per stream
+  (`metadata.image_transforms`, written by every geometry backend; pixel-identical to both VGGT
+  loaders), and every one of those places goes through it; nothing is squashed any more, and a
+  photo that does not fit raises. Tracks outside the crop get no 3D point. Tracking and the
+  optimizer's re-lift share one lift (`lifting/lift.py`: the geometry's depth and pose-refined
+  camera, through the crop), so a track no longer has two positions — tracking used to read
+  VGGT's point maps, which pose refinement does not refine. Spin, 722 held-out views, same
+  geometry before and after: native dynamic **12.37 → 14.96** (mLPIPS 0.46), the gap to the GT
+  oracle down from 7.3 dB to 4.7. A fresh run of the config with every fix in scores **13.97**
+  (its pose refinement lands elsewhere — see the finding below). The oracle itself barely moves (19.64 → 19.65 retrained: its
+  frames already match its depth; only its foreground masks are now resized nearest, not bicubic).
+- **Static scenes were scored with misplaced cameras.** The static scorer placed the dataset's
+  held-out cameras with no transform, but a static scene lives in its geometry's
+  ground-plane-canonicalized frame on every backend, the GT oracle's included, and its checkpoint
+  has no scene-norm to undo that — the native static run's 11.46 was a render of the wrong
+  place. Static scoring now uses the dynamic path's similarity fit (`align: sim3`, fitted on the
+  scene's training views, same refusal rules), the default for every static scene. On the static
+  oracle the fit is exact — scale 0.99999998, median rotation residual 0.0°, centre residual
+  5·10⁻⁸ — and it scores **16.22**; the native static scene scores **13.34** (14.56 on the
+  earlier geometry).
+  `export_checkpoint_views.py` exports and scores static runs too (no replay).
+- **Resume bugs the audit found**:
+  - `--run-dir` equal to `--prior-run-dir` deleted each prior stage before copying it;
+  - the check ran after the copy, so a rejected resume had already copied earlier stages and
+    deleted whatever was at the destination;
+  - every resume dropped the object embeddings (filed under the track id, reloaded by the
+    detection id);
+  - artifact loaders skipped a listed mask or embedding file that was missing, and took their
+    folder from the saved JSON rather than the folder they were loaded from;
+  - ingest recorded its input by the path as typed, so a relative path resolved only from the
+    working directory it was run in.
+- **The VGGT input cache was shared by every run of a sequence.** It was keyed by the input
+  folder's name (`vggt_long_inputs/1x`) and emptied and rewritten by each run, so an older run's
+  photo paths could point at another run's images. It is now keyed by what decides its pixels
+  (the frames' name, size and mtime, and the downscale), never wiped, and its paths are absolute.
+- **The GT-oracle backend timed its cameras by frame number.** The dataset backend set each
+  camera's time to the frame index (`fps` defaulted to 1.0), while every other stage times frames
+  on the ingest clock (frame / 30 for spin). So the cameras densified for the tracking frames
+  were interpolated between the wrong dataset frames — tracking frame 95 (3.2 s) got a camera
+  from near dataset frame 3 — and the oracle's lifted tracks and graph were built on them (its
+  scene was not: it uses the dataset's own frames). The backend now uses the ingest stream's fps.
+  Resume: an old oracle geometry's cameras are re-timed and its tracking-frame cameras
+  re-interpolated — a *revision* recorded in its fingerprint — and the stages built from it
+  follow instead of being rejected: pose_refine repeats the re-timing (contracts may now declare
+  `relinks`), tracking keeps its 2D tracks and re-lifts them, graph and optimization rebuild.
+- **A backend asked for as `real` could still fall back silently.** The wrappers raise when a
+  `real` backend is unavailable, but each stage's backend ladder caught that and ran the next
+  rung — for geometry the empty floor, so `--geometry-backend-mode real` (the run script's
+  default) could hand every later stage an empty geometry, stamped and saved. Ladder rungs can
+  now be strict: the geometry rung when `geometry.backend_mode` is `real` (also when its package
+  is missing), segment's rungs when the object detector is, reid's ResNet floor when the embedder
+  is, humans' Keypoint-RCNN rung when the pose model is. A strict rung that fails stops the run
+  (`BackendRequired`) instead of falling back. Under `auto`, falling back is still allowed, but
+  never quietly: every run ends with a table of each stage that ran (or was loaded) on a weaker
+  backend than its best, and records them in the run manifest (`fallbacks`).
+- **Tracking stopped at frame 95.** The machine profile (`--resource-profile auto`) capped the
+  tracked frames at 24 / 48 / 96 by free GPU memory, so spin's 426-frame clip was tracked, lifted
+  and put into the graph only up to frame 95 (3.2 s of 14.2). Every profile tracks in windows,
+  which is what bounds memory, so none caps the frame count now; `--tracking-max-frames` still
+  does. A value the user did not give counts as machine-picked for a resume even when the profile
+  picks nothing, so a run tracked under the old cap still resumes with it.
+- **A diverged bundle adjustment was used anyway.** Two runs of `spin_native_full.yaml` got
+  identical VGGT-Long geometry and pixel-identical tracker images, yet one bundle adjustment
+  converged (final reprojection 0.88 px) and the other diverged (6·10¹⁴⁹ px, one camera turned
+  160°) — and its poses went downstream: that run scored 12.67, against 14.96 on the converged
+  geometry. The tracker shuffles its query points with an unseeded `torch.randperm`, which pose
+  refinement now seeds (`pose_refine.seed`, default 0) — that alone did not make a run repeat,
+  and the cause was found afterwards: see **Pose refinement repeats now** below. A
+  bundle adjustment that ends above `pose_refine.max_final_reproj_px` (8) or turns a camera more
+  than `max_rot_delta_deg` (90°) from its seed pose is refused: the stream keeps its seed poses
+  and `metadata.pose_refine.rejected_streams` says why. A resume rejects a pose_refine artifact
+  that kept a diverged stream (restart at pose_refine) and loads one that refused it. Seeding
+  does not bump pose_refine's contract version: an unseeded refinement that converged is as good
+  as a seeded one.
+- **Pose refinement repeats now: the bundle adjustment was refining cameras with no evidence**
+  (`pose_refine.min_obs_per_camera`, default 3; `pose_refine.ba_threads`, default 1). A 6-DOF pose
+  needs three observed points to be determined at all. On spin's 426 keyframes, **9 cameras had
+  none** and 14 had fewer than three, against a median of 204 — and COLMAP registers them anyway,
+  so they entered the solve as free parameters. The normal matrix is then rank-deficient, which
+  CHOLMOD reports 128–154 times per solve as "matrix not positive definite", and those cameras'
+  poses come back from nothing but the solver's damping. Replaying one run's saved seed model
+  eight times showed what that costs: the worst camera landed anywhere from 9.5° to **143°** from
+  its seed, one replay ended at 1.25·10¹⁵⁰ px, and another collapsed the scene's scale 60× (the
+  re-anchor Sim(3) came out at 0.0166 instead of ~1.06) **while its mean reprojection error stayed
+  a healthy 0.88 px** — a failure no reprojection check can see. Fixed in three parts:
+  - **Only cameras with `min_obs_per_camera` observations are refined**, recomputed every BA
+    iteration because dropping points can leave a camera unconstrained part-way through. The rest
+    keep their seed pose, and the stats name them (`cameras_refined`, `cameras_kept_seed`).
+    On spin that is 411 of 426 — the 15 are frames 24-30, 228-234 and 387 — and solver failures
+    fall from 128-154 to 37.
+  - **The re-anchor covers only the cameras the solve moved.** The Sim(3) undoes BA's gauge
+    drift; a camera BA skipped never drifted, so fitting and applying the correction over every
+    camera pushed the skipped ones off their own seed pose by exactly the drift they never had
+    (it put the worst *anchored* camera on a zero-observation frame, several of them displaced by
+    an identical 9.4867°). Both the fit and the correction are now restricted to the moved
+    cameras, so a skipped camera comes out bit-identical to its seed.
+  - **The solve runs single-threaded** (`ba_threads`). Ceres' multithreaded accumulation order
+    varies run to run; at one thread two runs of the same seed model are bit-identical (same pose
+    digest, same 16 digits of reprojection error and focal). It costs ~90 s on a 426-frame run
+    (109 → 198 s) in a pipeline that takes hours. `-1` restores every core, and repeatability is
+    then not offered.
+  - **The divergence guard measures what ships.** The reprojection error is checked before the
+    gauge is re-anchored (a solve at 10¹⁵⁰ px would poison the Sim(3) fitted from its poses) and
+    the rotations after, where the poses actually land. The old order checked rotations
+    pre-anchor, which carries BA's global gauge drift and overstates them — 15.4° against 9.5° on
+    the same solve. The recorded `seed_to_refined_rot_delta_deg_*` are now post-anchor, with the
+    old measure kept beside them as `..._max_before_reanchor`.
+
+  Validated on the GPU: two full runs of the stage from the same geometry are **bit-identical** —
+  one digest over all 426 refined poses, the same focal to nine decimals and the same mean
+  reprojection error (0.8808554045571958) to sixteen, which is also what replaying the saved seed
+  model on the CPU gives. Its post-anchor worst camera is 9.35°, against 15.36° by the old
+  pre-anchor measure.
+
+  pose_refine is contract version 2. A resume upgrades an artifact that refined nothing (disabled,
+  or every stream refused) for free, since version 2 would pass the geometry through identically;
+  one that did refine cannot be brought forward — its poses came out of the old solve — so the
+  resume is rejected and names pose_refine as the stage to restart from.
+- **Our no-upscale VGGT-Long loader squashed portrait frames.** Below a 518 target it scaled by
+  a floating-point ratio (720 at 252 floored to 238) and clamped *both* sides to the target, so a
+  720×960 frame went in at 238×252 instead of being cropped like upstream. It now takes the width
+  to the target in whole 14-pixel patches, keeps the height in proportion and crops the rows
+  (252×336 → rows 42–294). Geometry records the loader as version 2. A resume refuses geometry
+  the old loader made from frames it squashed (restart at geometry); for frames it did not
+  squash, the old and new loaders agree and the geometry loads. None of the runs above use it.
+- **VGGT-Long's scratch outputs were shared by every run of a sequence and never removed.** Its
+  chunk predictions and `camera_poses.txt` went to `.reifyscene_cache/vggt_long_run/<input
+  folder name>` (about 11 GB for spin's 426 frames), where two runs of one input would write
+  the same files. Each geometry invocation now gets its own folder, removed once the geometry is
+  built — nothing reads it after; `geometry.keep_backend_outputs: true` keeps it, and an
+  explicit `output_cache_dir` is always kept. The geometry artifact records where it was
+  (`metadata.vggt_long_outputs`). Neither setting is part of the geometry fingerprint.
+- **Pose refinement wrote its COLMAP seed model into the geometry stage's folder**
+  (`geometry/colmap_seed/`), so a geometry artifact collected another stage's files. It now
+  writes into its own `pose_refine/` folder.
+- **The optimization artifact called its stage `optimize`**; it now uses the stage registry's
+  name, `optimization`, like every other stage.
+- **Self-reconstructed scenes could not be scored: every native run's held-out renders were
+  black.** The dynamic scorer placed the dataset's held-out cameras in the scene through the
+  bundle's scene-norm, which is only right when the scene was built on the dataset's own
+  geometry (the oracle). A VGGT / VGGT-Long reconstruction lives in its own frame (for today's
+  run: scale 1.21 and 43° of rotation from the dataset's world), so the held-out cameras looked
+  at empty space and every native run on disk scored 4.5–4.6 whatever its quality. The scorer
+  now places them through a similarity fitted on the training cameras, whose poses are known in
+  both frames (`align: sim3`, the pipeline's default for any non-`dataset` geometry backend) —
+  the usual way to score a method that estimates its own cameras. The fit absorbs one global
+  offset; per-camera drift still counts. Fits whose scale is not positive, or whose median
+  rotation / centre residual exceeds 5° / 0.2 of the trajectory, are refused: the score
+  records why and gives no number. Every score now carries an `alignment` record (method,
+  scale, residuals). The oracle keeps its placement (`align: none`) and scores bit-identically
+  (19.638906478881836).
+- **Sparse-keyframe scenes rendered held-out views at the wrong time.** Scene time counts
+  keyframes, but views were rendered at the dataset frame number, which the scene clamps to its
+  last keyframe — every held-out view past it showed the scene's final state. Each view now
+  renders at the nearest training keyframe's time. Full-frame scenes are unaffected.
+
+### Correction
+- **The GPU was never why pose refinement did not repeat.** This release first claimed the
+  seeded tracker still could not make a run repeat because "GPU kernels and the multithreaded
+  bundle adjustment" were both non-deterministic. The GPU half is wrong. Three runs of the
+  VGGSfM tracker — two launched for this measurement, plus the one inside `spin_native_c` days
+  earlier — wrote **byte-identical** COLMAP seed models (`images.txt` 10,244,822 B,
+  `points3D.txt` 3,650,780 B, matching digests). Seeding does make the tracker repeat. Only the
+  bundle adjustment did not, for the reason fixed above; with one thread it is bit-identical too,
+  so a run repeats end to end. The claim was written from two runs that differed, without
+  isolating which half differed.
+- **The native numbers in 0.1.31.3 (10.29 / 11.95) and 0.2.0.0 (12.56) were never scored by
+  the repo.** Re-scoring the surviving checkpoints with the scorer of the day (0.1.31.3) and of
+  today both gives ~4.6. They came from an aligned scoring step run outside the repo: its pose
+  errors (0.88° / 0.615° / 2.3° / 0.71°) are exactly the median rotation residuals of the
+  training-camera fit, and the aligned scorer now reproduces its scores within 0.03–0.36 dB
+  (10.06 / 11.92 / 9.19 / 12.20). The headline native number is replaced by the reproducible
+  **12.37** from a fresh full run of `spin_native_full.yaml` (0.60° residual), and with the photo
+  fix above by **14.96** on that same run's geometry (**13.97** from a fresh run of the config
+  with every fix in this release).
+
+### Docs
+- **`base.yaml` builds a static scene, and the README now says so.** The README's run command
+  used `configs/base.yaml` and described the output as `render/trained_dynamic.npz`, but
+  `base.yaml` has no `scene.kind`, so the command builds a *static* scene
+  (`render/trained_gaussians.npz`); the dynamic 4D scene needs `scene: {kind: dynamic}`. Found
+  when the first run of the new experiment config (which lacked it too) built a static scene.
+
+### Changed
+- **Held-out camera placement is shared, not duplicated.** `place_heldout_views` (with
+  `load_heldout_view`, `eval_dataset` and `score_dynamic_bundle`) in `masked_nvs_benchmark.py`
+  now does the placement that `score_render_artifact_masked_nvs_dynamic` did inline, and the
+  exporter calls the same function, so an exported view is exactly a scored view. That placement
+  has had real bugs before (0.1.31.2's missing ground-plane rotation; the missing alignment
+  above); a second copy would be a second place for one to hide. The refactor alone changed no
+  result: scoring the oracle checkpoint on all 722 views with the old and new scorer in one
+  process gave identical mPSNR / mSSIM / mLPIPS.
+- **The Sim(3) helpers moved to `reifyscene/geometry/similarity.py`** (`fit_similarity`,
+  `apply_similarity_to_c2w`, `camera_center`, plus `similarity_residuals`), shared by
+  `pose_refine`'s gauge re-anchor and the scorer's alignment; `pose_refine` keeps its old names.
+- **`scene/train_views/*.png` are the photos in the geometry's pixels** (518×518 for VGGT), not
+  copies of the input frames, so a scene's photos match its cameras by construction; the render
+  stage's `_load_gt` refuses a photo that is not its camera's size instead of resizing it.
+  `pose_refine` builds its tracker images from the recorded crop instead of re-running VGGT's
+  loader. A frame the geometry lists without a photo on disk raises instead of being dropped.
+
+### Removed
+- **Evaluation code nothing ran, which would have carried the crop bug.** `BenchmarkRunner`
+  (`reifyscene/eval/benchmark_runner.py`) was built by the pipeline but never run, and it alone
+  used `RenderingMetrics` (train-view metrics that squashed ground truth onto the prediction and
+  called a renderer method that does not exist), `TrackingMetrics` (projected with the crop's K
+  onto full-frame track positions; its quality score read summaries nothing writes, so it was
+  always 0.0) and `GeometryMetrics`. Also removed: the pipeline's human-centre projection
+  (`_attach_human_debug_projections`, `_project_world_to_image`, called by nothing, and relying on
+  an assembler method that no longer exists) and the human debug view's branch that drew those
+  projections. The real scoring is `masked_nvs_benchmark.py`.
+
+### Findings
+- **On spin, the dynamic scene barely beats a static one on held-out views.** On one native
+  geometry 13.97 masked mPSNR against the static scene's 13.34; on another 14.96 against 14.56
+  (there the static scene had the better mLPIPS, 0.43 against 0.46). The dynamic scene fits its
+  training views 3 to 4 dB better either way (21.5 against 18.6; 21.3 against 17.0): its motion
+  modelling generalizes little of what it fits. A lead for the renderer, not changed here.
+- **The object labels on spin are wrong, and one node per entity makes it obvious.** The run's
+  eleven object entities read: four separate `tie`s, plus `vase`, `spoon`, `couch`, `bench`,
+  `chair` and `suitcase`. The largest of them carries 397 supporting tracks, 337 of them static —
+  a large static region, whatever it is, not a tie. The labels come from the semantics stage
+  (top-k over the SAM-2 masks) and are unchanged here; when 1593 track nodes buried eleven
+  entities this was not visible at a glance. The graph's own evidence is sound (mean inside-ratio
+  0.98–1.00); it is the names that are not.
+- **The static/dynamic partition disagrees with itself about the moving person.** Of the tracks
+  supporting the person, the native run calls 168 static and 123 moving; the oracle run, on the
+  same clip, 29 static and 38 moving. One of the two is substantially wrong about a person who
+  moves throughout. The threshold is `lifting.static_threshold_world` (0.05 m) applied to lifted
+  world positions, so it inherits whatever the depth and the cameras got wrong. Not chased here;
+  it matters for the renderer's motion model and for any query about who moved.
+
+### Tests
+- `tests/test_checkpoint_views.py`: placement from bundle-carried cameras (K scaled by the
+  factor ratio; truncation) and from the dataset through the scene-norm; unplaceable bundles
+  (the scorer returns `{}`, the exporter refuses); the default alignment per geometry backend;
+  a known similarity recovered from synthetic training cameras and the held-out cameras placed
+  through it; sparse keyframes rendered at the nearest keyframe; an unrelated camera set refused
+  with no score; even view picking; the replay's image size from the principal point; the
+  held-out export's files, index and per-view masked PSNR (checked against a closed form);
+  replay order and size. CPU-only stand-ins for the rasterizer, scene and dataset reader.
+- Static scoring: a known similarity recovered through the scene's training views, `align: none`,
+  refusal, the render stage's static branch, the static export and the CLI's run-kind detection.
+- `tests/test_image_transform.py`, `tests/test_crop_box_sites.py`: both VGGT loaders
+  reproduced pixel for pixel; point mapping in and out of the crop (a crop-free transform maps
+  exactly as before); size dispatch; each backend's record; the six sites on synthetic photos
+  with distinct top and bottom bands; the shared lift recovering known points.
+- `tests/test_resume_pipeline.py`, `tests/test_resume_requirements.py`,
+  `tests/test_run_script_resume.py`: a real prior run from the CPU pipeline resumed, rejected for
+  a changed setting in another section, pinned for a machine-picked one, re-rooted for a moved
+  input, rebuilt or rejected for a changed upstream; runs converted to the pre-fingerprint format
+  resumed through derived records (the digests equal a fresh run's), re-rooted by name for a gone
+  dataset folder, rejected for a leftover stage; every requirement's derivation and rejection;
+  the run script end to end (load, rebuild, reject before writing anything, `--check-resume`).
+- `tests/test_stage_settings_coverage.py`: every config key a stage reads is in its fingerprint.
+- `tests/test_pose_refine.py`: the camera filter (which cameras enter the solve, which keep their
+  seed pose, and the skip when fewer than two are left), the pinned thread count, each divergence
+  check on its own, the rotation-delta helper, and the re-anchor leaving a camera the solve never
+  moved bit-identical to its seed. `tests/test_resume_requirements.py`: a pass-through pose_refine
+  upgrades to version 2, a refined one is refused with the stage to restart from.
+- `tests/test_track_support.py`, `tests/test_graph.py`: synthetic masks and tracks — a track
+  inside one mask, inside nothing, inside too rarely to count, and inside two entities (it goes to
+  the one it is inside most); the ratio taken over the frames the two share; invisible and
+  off-frame points as no evidence either way; the nearest-pixel test; the median position and the
+  columns it reads; and on the builder — entities and a background instead of track nodes, the
+  evidence and motion summary each node carries, the thresholds read from the config, and the note
+  an empty join produces.
+  Full suite: **530 passed, 1 skipped**.
+
 ## [0.2.0.2] - 2026-09-10
 
 ### Fixed

@@ -58,7 +58,7 @@ class RenderArtifact(BaseArtifact):
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
-            save_dir=Path(raw["save_dir"]),
+            save_dir=Path(save_dir),
             metadata=raw.get("metadata", {}),
             scene_state=raw.get("scene_state", {}),
             coverage=raw.get("coverage", {}),

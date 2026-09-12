@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from reifyscene.common.system_report import collect_system_report, recommend_tracking_profile, recommend_vggt_long_profile
 
 
@@ -40,3 +42,10 @@ def test_vggt_long_recommendation_exposes_dense_resize_ladder_for_8gb_gpu() -> N
     assert rec['initial_resize_max_dim'] == 640
     assert rec['min_resize_max_dim'] == 224
     assert rec['resize_candidates'] == [640, 576, 512, 448, 384, 320, 288, 256, 224]
+
+
+@pytest.mark.parametrize("free_mb", [2048, 6144, 32768])
+def test_no_tracking_profile_caps_the_frame_count(free_mb) -> None:
+    """Every preset tracks in windows (that bounds memory); none stops a clip part-way."""
+    rec = recommend_tracking_profile({"gpus": [{"memory_free_mb": free_mb}]}, device="cuda")
+    assert rec["window_size"] and rec["max_frames"] is None

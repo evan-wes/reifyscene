@@ -246,14 +246,12 @@ class _AutoTuneVGGTLong(VGGTLongInitializer):
         self._is_loaded = True
 
     def _create_runner(self, image_dir: Path, output_dir: Path):
-        resize_max_dim = None
-        name = image_dir.name
-        if name.startswith("maxdim_"):
-            resize_max_dim = int(name.split("_", 1)[1])
+        # Auto-tune sets resize_max_dim for the attempt before creating its runner; the
+        # images live in that setting's content-keyed cache directory.
         runner = type("_Runner", (), {})()
         runner.image_dir = image_dir
         runner.output_dir = output_dir
-        runner.resize_max_dim = resize_max_dim
+        runner.resize_max_dim = self.resize_max_dim
         return runner
 
     def _run_runner(self, runner) -> None:
@@ -655,3 +653,24 @@ def test_vggt_promotes_camera_predictions_before_pose_decoding() -> None:
     assert promoted["extrinsic"].dtype == torch.float32
     assert promoted["intrinsic"].dtype == torch.float32
     assert promoted["depth"].dtype == torch.bfloat16
+
+
+def test_geometry_asked_for_as_real_fails_instead_of_going_empty(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from reifyscene.api.pipeline import ReifyScenePipeline
+    from reifyscene.common.backend_ladder import BackendRequired
+
+    class Crashing:
+        backend_name = "vggt-long"
+
+        def initialize(self, frames, **kwargs):
+            raise RuntimeError("VGGT-Long produced no readable chunk predictions.")
+
+    ingest = SimpleNamespace(run_id="r", streams=[])
+    real = ReifyScenePipeline({"run_dir": str(tmp_path / "a"), "geometry": {"backend_mode": "real"}})
+    with pytest.raises(BackendRequired, match="no readable chunk predictions"):
+        real._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    auto = ReifyScenePipeline({"run_dir": str(tmp_path / "b"), "geometry": {"backend_mode": "auto"}})
+    artifact, manifest = auto._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    assert manifest.backend_used == "empty" and manifest.rungs[0].status == "failed"

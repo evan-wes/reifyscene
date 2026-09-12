@@ -22,9 +22,10 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.common.types import FrameRef
+from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.render.gaussian4d.rasterizer import look_at_viewmat
 from reifyscene.render.gaussian4d.seed import seed_arrays_from_geometry
-from reifyscene.scene.scene_artifact import SceneArtifact
+from reifyscene.scene.scene_artifact import TRAIN_VIEWS_DIR, SceneArtifact, train_view_filename
 
 
 class SingleVideoSceneAssembler:
@@ -84,10 +85,47 @@ class SingleVideoSceneAssembler:
     def _frame_key(stream_id: str, frame_idx: int) -> str:
         return f"{stream_id}:{int(frame_idx)}"
 
+    @staticmethod
+    def _scene_metadata(metadata: dict[str, Any] | None, geometry_artifact) -> dict[str, Any]:
+        """The caller's metadata plus the image transforms the training photos went through."""
+        out = dict(metadata or {})
+        transforms = (getattr(geometry_artifact, "metadata", {}) or {}).get("image_transforms")
+        if transforms:
+            out["image_transforms"] = {str(k): dict(v) for k, v in transforms.items()}
+        return out
+
+    @staticmethod
+    def _photo_map(geometry_artifact) -> dict[str, str]:
+        return dict((getattr(geometry_artifact, "metadata", {}) or {}).get("debug_image_paths", {}) or {})
+
     def _gt_image_path(self, frame_key: str, geometry_artifact) -> str | None:
-        src_map = (getattr(geometry_artifact, "metadata", {}) or {}).get("debug_image_paths", {}) or {}
+        """The photo of a frame the geometry lists, or ``None`` when the geometry has no photos at all.
+
+        Heuristic geometry carries no photos by design (an empty map), and the scene
+        is then built without training views. But a frame missing from a non-empty
+        map, or whose file is gone, raises: it would silently drop that frame.
+        """
+        src_map = self._photo_map(geometry_artifact)
+        if not src_map:
+            return None
         path = src_map.get(frame_key)
-        return str(path) if path is not None else None
+        if path is None or not Path(path).exists():
+            raise FileNotFoundError(
+                f"geometry frame {frame_key} has no photo on disk (debug_image_paths entry: {path!r})"
+            )
+        return str(path)
+
+    @staticmethod
+    def _geometry_photo(path: str, geometry_artifact, stream_id: str) -> np.ndarray:
+        """A frame's photo in the geometry's pixels, through its recorded image transform.
+
+        VGGT's cameras and depth describe a resized, centre-cropped square; the photo
+        is cropped and resized the same way (never squashed) so it matches them.
+        """
+        with Image.open(path) as img:
+            photo = img.convert("RGB")
+        transform = image_transform_for(geometry_artifact, str(stream_id), source_size=photo.size)
+        return transform.apply_to_image(photo)
 
     def _camera_state_for_frame(self, geometry_artifact, frame_ref: FrameRef):
         states = list((geometry_artifact.camera_states_by_stream or {}).get(frame_ref.stream_id, []))
@@ -99,13 +137,12 @@ class SingleVideoSceneAssembler:
         rgb_by_frame: dict[str, np.ndarray] = {}
         for frame in geometry_artifact.selected_frames:
             key = self._frame_key(frame.stream_id, frame.frame_idx)
+            if key not in (geometry_artifact.depthmaps_by_frame or {}):
+                continue  # no depth to seed from: the frame contributes no seed points
             path = self._gt_image_path(key, geometry_artifact)
             if path is None:
                 continue
-            try:
-                rgb_by_frame[key] = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
-            except Exception:
-                continue
+            rgb_by_frame[key] = self._geometry_photo(path, geometry_artifact, frame.stream_id)
         means, colors, scales = seed_arrays_from_geometry(
             geometry_artifact,
             rgb_by_frame,
@@ -124,34 +161,61 @@ class SingleVideoSceneAssembler:
             "num_gaussians": int(means.shape[0]),
         }
 
-    def _build_train_views(self, geometry_artifact) -> list[dict[str, Any]]:
+    def _write_train_photos(self, views: list[dict[str, Any]], geometry_artifact, save_dir) -> list[dict[str, Any]]:
+        """Write each view's photo, in the geometry's pixels, to its final place in the scene.
+
+        The file lands exactly where :meth:`SceneArtifact.save` keeps it, and the
+        view's ``image_path`` points there -- so the render stage trains on the same
+        pixels whether it gets this in-memory scene or reloads the saved one. The
+        photo must come out at the view's camera size, or it would not match it.
+        """
+        views_dir = Path(save_dir) / TRAIN_VIEWS_DIR
+        views_dir.mkdir(parents=True, exist_ok=True)
+        out: list[dict[str, Any]] = []
+        for idx, view in enumerate(views):
+            view = dict(view)
+            source = view.pop("source_image_path")
+            rgb = self._geometry_photo(source, geometry_artifact, str(view["frame_key"]).rpartition(":")[0])
+            if rgb.shape[:2] != (int(view["height"]), int(view["width"])):
+                raise ValueError(
+                    f"training view {view['frame_key']}: photo comes out {rgb.shape[1]}x{rgb.shape[0]} in the geometry's "
+                    f"pixels but its camera is {view['width']}x{view['height']}"
+                )
+            dst = views_dir / train_view_filename(idx, str(view["frame_key"]))
+            Image.fromarray(rgb).save(dst)
+            view["image_path"] = str(dst.resolve())
+            out.append(view)
+        return out
+
+    def _build_train_views(self, geometry_artifact, save_dir) -> list[dict[str, Any]]:
         views: list[dict[str, Any]] = []
         frames = sorted(geometry_artifact.selected_frames, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         for frame in frames:
             key = self._frame_key(frame.stream_id, frame.frame_idx)
             state = self._camera_state_for_frame(geometry_artifact, frame)
+            if state is None:
+                continue  # no camera for this frame: it cannot be a training view
             path = self._gt_image_path(key, geometry_artifact)
-            if state is None or path is None or not Path(path).exists():
-                continue
-            try:
-                with Image.open(path) as img:
-                    width, height = int(img.width), int(img.height)
-            except Exception:
-                continue
+            if path is None:
+                continue  # the geometry carries no photos at all (heuristic)
+            with Image.open(path) as img:
+                photo_size = (int(img.width), int(img.height))
+            transform = image_transform_for(geometry_artifact, str(frame.stream_id), source_size=photo_size)
+            width, height = transform.output_size
             intr = state.intrinsics
             views.append({
                 "frame_key": key,
                 "time_id": int(frame.frame_idx),
                 "t_world_cam": np.asarray(state.pose.T_world_cam, dtype=np.float32),
                 "intrinsics": {"fx": float(intr.fx), "fy": float(intr.fy), "cx": float(intr.cx), "cy": float(intr.cy)},
-                "width": width,
-                "height": height,
-                "image_path": str(path),
+                "width": int(width),
+                "height": int(height),
+                "source_image_path": str(path),
             })
         if self.max_train_views is not None and len(views) > self.max_train_views:
             idx = np.linspace(0, len(views) - 1, int(self.max_train_views)).round().astype(int)
             views = [views[i] for i in idx]
-        return views
+        return self._write_train_photos(views, geometry_artifact, save_dir)
 
     def _orbit_trajectory(self, seed: dict[str, Any], train_views: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not train_views:
@@ -241,19 +305,20 @@ class SingleVideoSceneAssembler:
                 out[key] = union.astype(np.float32)
         return out
 
-    def _dynamic_train_views(self, cams_train, height: int, width: int, geometry_artifact) -> list[dict[str, Any]]:
+    def _dynamic_train_views(self, cams_train, height: int, width: int, geometry_artifact, save_dir) -> list[dict[str, Any]]:
         """Training views from the (scene-normalized) dynamic cameras + GT frames.
 
         Cameras are the normalized train cameras the init produced (so they sit in
-        the gaussians' frame); intrinsics/size are the lift resolution; GT is the
-        geometry artifact's frame per ``frame_key`` (resized to size at load).
+        the gaussians' frame); intrinsics/size are the lift resolution, i.e. the
+        geometry's pixels; each GT photo is put into those pixels through the
+        geometry's recorded image transform and written into the scene.
         """
         views: list[dict[str, Any]] = []
         for cam in cams_train:
             key = str(cam.frame_name)
             path = self._gt_image_path(key, geometry_artifact)
-            if path is None or not Path(path).exists():
-                continue
+            if path is None:
+                raise FileNotFoundError(f"dynamic training camera {key} has no photo (the geometry lists none)")
             t_world_cam = np.linalg.inv(np.asarray(cam.w2c, dtype=np.float32)).astype(np.float32)
             K = np.asarray(cam.K, dtype=np.float32)
             views.append({
@@ -263,9 +328,9 @@ class SingleVideoSceneAssembler:
                 "intrinsics": {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "cx": float(K[0, 2]), "cy": float(K[1, 2])},
                 "width": int(width),
                 "height": int(height),
-                "image_path": str(path),
+                "source_image_path": str(path),
             })
-        return views
+        return self._write_train_photos(views, geometry_artifact, save_dir)
 
     def _dynamic_orbit_trajectory(self, scene, train_views: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Novel-view orbit for a dynamic scene: the static orbit + a time sweep."""
@@ -344,7 +409,7 @@ class SingleVideoSceneAssembler:
 
         norm.transfm = self._fold_ground_plane_into_norm(norm.transfm, geometry_artifact)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
-        train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact)
+        train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact, save_dir)
         render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
         notes = [
             f"dynamic_fg={scene.fg.num_gaussians}",
@@ -355,7 +420,8 @@ class SingleVideoSceneAssembler:
             f"render_cameras={len(render_trajectory)}",
         ]
         return SceneArtifact(
-            run_id=run_id, stage_name="scene", save_dir=save_dir, metadata=dict(metadata or {}),
+            run_id=run_id, stage_name="scene", save_dir=save_dir,
+            metadata=self._scene_metadata(metadata, geometry_artifact),
             kind="dynamic", render_seed={}, train_views=train_views,
             render_trajectory=render_trajectory, dynamic_bundle=bundle,
             frame_refs=frame_refs, timeline=timeline, notes=notes,
@@ -397,7 +463,7 @@ class SingleVideoSceneAssembler:
         """Build a static scene (depth-backprojected seed). Also the graceful fallback for
         a degenerate dynamic scene (no usable foreground)."""
         seed = self._build_seed(geometry_artifact)
-        train_views = self._build_train_views(geometry_artifact)
+        train_views = self._build_train_views(geometry_artifact, save_dir)
         render_trajectory = self._orbit_trajectory(seed, train_views)
         notes = list(extra_notes or []) + [
             f"seed_gaussians={seed['num_gaussians']}",
@@ -405,7 +471,8 @@ class SingleVideoSceneAssembler:
             f"render_cameras={len(render_trajectory)}",
         ]
         return SceneArtifact(
-            run_id=run_id, stage_name="scene", save_dir=save_dir, metadata=dict(metadata or {}),
+            run_id=run_id, stage_name="scene", save_dir=save_dir,
+            metadata=self._scene_metadata(metadata, geometry_artifact),
             kind="static", render_seed=seed, train_views=train_views,
             render_trajectory=render_trajectory, dynamic_bundle={},
             frame_refs=frame_refs, timeline=timeline, notes=notes,

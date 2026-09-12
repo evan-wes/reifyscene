@@ -37,6 +37,7 @@ from reifyscene.common.types import (
 )
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import ImageTransform, Resize, transform_record
 
 
 class DatasetGeometryInitializer(GeometryInitializer):
@@ -55,8 +56,11 @@ class DatasetGeometryInitializer(GeometryInitializer):
         self.dataset_root = Path(cfg["dataset_root"])
         self.factor = int(cfg.get("factor", 1))
         self.split = str(cfg.get("split", "train"))
-        # time_sec = time_id / fps; fps=1.0 makes time_sec == time_id (a stable
-        # monotonic key, which is all downstream ordering needs here).
+        # Camera times follow the ingest stream's clock (frame / stream fps) whenever an
+        # ingest artifact is given, so they line up with every other stage's frames. This
+        # fps is only the fallback for standalone use. (It used to be the clock itself:
+        # time = frame number, and tracking-frame cameras interpolated between the wrong
+        # dataset frames.)
         self.fps = float(cfg.get("fps", 1.0))
         self.name_pad = int(cfg.get("name_pad", 5))
         self.run_id = str(cfg.get("run_id", f"dataset:{self.dataset_root.name}"))
@@ -184,6 +188,29 @@ class DatasetGeometryInitializer(GeometryInitializer):
             return specs
         return [(str(fr.stream_id), int(fr.frame_idx), int(fr.frame_idx)) for fr in source]
 
+    def _image_transforms(
+        self, depth_sizes: dict[str, tuple[int, int]], ingest_artifact
+    ) -> dict[str, Any]:
+        """Ingest frame -> this dataset's ``{factor}x`` pixels, per stream.
+
+        The dataset ships its frames already scaled, so the op is a plain resize
+        whose filter is unknown; the ``debug_image_paths`` images are the dataset's
+        own, already in geometry pixels. Without an ingest artifact (standalone
+        use) the geometry's own size is the frame size.
+        """
+        streams = {s.stream_id: s for s in getattr(ingest_artifact, "streams", []) or []}
+        records: dict[str, Any] = {}
+        for stream_id, out_size in depth_sizes.items():
+            stream = streams.get(stream_id)
+            source = out_size
+            if stream is not None and stream.width > 0:
+                source = (int(stream.width), int(stream.height))
+            ops = () if source == out_size else (Resize(out_size, "unknown"),)
+            records[stream_id] = transform_record(
+                ImageTransform(source, ops), recorded_by=self.backend_name
+            )
+        return records
+
     def initialize(
         self,
         frames=None,
@@ -203,15 +230,24 @@ class DatasetGeometryInitializer(GeometryInitializer):
         depthmaps_by_frame: dict[str, Any] = {}
         pointmaps_by_frame: dict[str, Any] = {}
         debug_image_paths: dict[str, str] = {}
+        depth_sizes: dict[str, tuple[int, int]] = {}
         selected_frames: list[FrameRef] = []
 
+        stream_fps = {
+            str(s.stream_id): float(s.fps)
+            for s in getattr(ingest_artifact, "streams", []) or []
+            if float(getattr(s, "fps", 0) or 0) > 0
+        }
         for stream_id, frame_idx, time_id in specs:
             stream_id = str(stream_id)
             frame_idx = int(frame_idx)
             name = self.frame_name(stream_id, frame_idx)
             intrinsics, t_world_cam, _wh = self.load_camera(name)
             depth = np.squeeze(np.asarray(self.load_depth(name), dtype=np.float32))
-            time_sec = float(time_id) / self.fps
+            if stream_id in stream_fps:
+                time_sec = float(frame_idx) / stream_fps[stream_id]  # the ingest clock
+            else:
+                time_sec = float(time_id) / self.fps
 
             frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx, timestamp_sec=time_sec)
             selected_frames.append(frame_ref)
@@ -237,6 +273,7 @@ class DatasetGeometryInitializer(GeometryInitializer):
             rgb_path = self.rgb_dir / f"{name}.png"
             if rgb_path.exists():
                 debug_image_paths[key] = str(rgb_path.resolve())
+            depth_sizes.setdefault(stream_id, (int(depth.shape[1]), int(depth.shape[0])))
 
         return GeometryArtifact(
             run_id=self.run_id,
@@ -248,7 +285,10 @@ class DatasetGeometryInitializer(GeometryInitializer):
             camera_states_by_stream=camera_states_by_stream,
             depthmaps_by_frame=depthmaps_by_frame,
             pointmaps_by_frame=pointmaps_by_frame,
-            metadata={"debug_image_paths": debug_image_paths},
+            metadata={
+                "debug_image_paths": debug_image_paths,
+                "image_transforms": self._image_transforms(depth_sizes, ingest_artifact),
+            },
             notes=[
                 f"dataset_root={self.dataset_root}",
                 f"factor={self.factor}",

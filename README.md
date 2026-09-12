@@ -58,8 +58,10 @@ geometry at full frame count.
   rendering.
 
 **Partial / scaffold:**
-- The scene **graph** stage builds camera + per-stream track nodes, but relation and
-  uncertainty inference and cross-view entity association are still placeholders.
+- The scene **graph** stage holds the cameras, the people and objects the perception
+  stages found, and the background, each carrying the point tracks that are evidence for
+  it and a position over time; relation and uncertainty inference and cross-view entity
+  association are still placeholders.
 - The joint **optimization** stage is a staged scaffold — `pose_refine` does the real
   bundle adjustment today.
 
@@ -116,22 +118,57 @@ scripts/run_single_video_reifyscene.py \
 Each stage persists a self-describing artifact under the run dir (reloadable, e.g.
 `GeometryArtifact.load(...)`). `--start-stage` / `--stop-stage` + `--prior-run-dir` resume
 from a prior run's cached stages — e.g. re-run only `scene` / `render` without recomputing
-geometry. The final render writes `render/trained_dynamic.npz` + a novel-view flythrough,
-and the run records a covisibility-masked novel-view score.
+geometry. The final render writes the trained scene + a novel-view flythrough, and the run
+records a covisibility-masked novel-view score.
 
-### Results (v0.2.0.0)
+A resume loads a prior stage only when it is what this run would make: every artifact records
+the settings its stage used (from whichever config sections it reads), the input frames it read,
+its contract version and the artifacts it was built from, and each stage lists what a loaded
+artifact must carry. The whole resume is checked before anything is written. What can be derived
+from what is loaded is (a moved input or dataset folder, missing photos, a crop box, re-lifted
+tracks), cheap stages that run no model are re-run, and anything else is refused with the stage
+to restart from. Add `--check-resume` to see that report — every prior stage's verdict and the
+latest `--start-stage` the prior run supports — without running or writing anything.
 
-Masked novel-view PSNR on the DyCheck "spin" sequence (full held-out set):
+`configs/base.yaml` builds a **static** scene (`render/trained_gaussians.npz`). The dynamic
+4D scene (`render/trained_dynamic.npz`) needs `scene: {kind: dynamic}` in the config, as in
+`configs/experiment/spin_native_full.yaml`.
 
-| geometry | frames | masked mPSNR |
-|---|---|---|
-| VGGT-Long + pose_refine (native) | 426 (all) | 12.56 |
-| GT-oracle (upper bound) | 426 (all) | ~19 |
-| Shape-of-Motion reference | all | 17.42 |
+### Results
+
+Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views):
+
+| geometry | scene | frames | masked mPSNR | mLPIPS |
+|---|---|---|---|---|
+| VGGT-Long + pose_refine (native) | dynamic | 426 (all) | 13.97 ¹ | 0.53 |
+| VGGT-Long + pose_refine (native) | static | 426 (all) | 13.34 ¹ | 0.62 |
+| GT-oracle (upper bound) | dynamic | 426 (all) | 19.65 | 0.34 |
+| GT-oracle | static | 426 (all) | 16.22 ¹ | 0.32 |
+| Shape-of-Motion reference | dynamic | all | 17.42 | — |
+
+¹ Held-out cameras are placed through a similarity (rotation, translation, scale) fitted on the
+training cameras, whose poses are known in both frames — the usual way to score a method that
+estimates its own cameras. A self-reconstructed scene lives in its own frame, and a static scene
+in its geometry's ground-plane-rotated one (for the GT oracle the fit is exact). The fit absorbs
+one global offset; per-camera drift still counts (median rotation left after the fit: 0.60° for
+the native rows), and so do parts of the room a held-out camera sees that VGGT-Long's centre crop
+never did.
+
+Both native rows come from one fresh run of `configs/experiment/spin_native_full.yaml`, scored
+before pose refinement was made repeatable; the geometry a refinement lands on moves the score,
+and another converged run of the same config scored 14.96 dynamic / 14.56 static. Pose refinement
+now repeats: its tracker always did (three runs, byte-identical seed models), and the bundle
+adjustment does too once it stops refining cameras the observations cannot constrain and runs
+single-threaded. A run whose bundle adjustment *diverges* is refused — it keeps the unrefined
+poses and says so — rather than quietly scoring 12.67.
 
 Held-out quality is limited by the reconstruction's geometry (native chunk-stitch pose
 drift), not the dynamic modeling; the remaining gap to the oracle is the cost of
 self-reconstructed vs. ground-truth geometry.
+
+Reproduce the native row with `configs/experiment/spin_native_full.yaml` (the full command is
+in its header). To see a trained scene rather than only its score, export held-out views, a
+replay and the score with `scripts/export_checkpoint_views.py RUN_DIR --dataset-root DATASET`.
 
 
 ## Reference comparison tool (Shape of Motion)

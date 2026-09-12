@@ -7,6 +7,9 @@ installed locally.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from contextlib import contextmanager
 
 from pathlib import Path
@@ -20,7 +23,26 @@ from rich.progress import track
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import (
+    ImageTransform,
+    materialize_resize,
+    pad_to_batch,
+    transform_record,
+    vggt_input_transform,
+)
 from reifyscene.ingest.decoder import VideoDecoder
+
+# Default root of the materialized-input cache shared by VGGT and VGGT-Long. Each
+# materialization lives in its own subdirectory keyed by what decides its pixels
+# (see ``VGGTInitializer._input_cache_identity``), so runs never overwrite each other.
+DEFAULT_INPUT_CACHE_ROOT = Path(".reifyscene_cache") / "vggt_inputs"
+
+
+def _file_identity(path: str | Path) -> dict[str, Any]:
+    """Name, size and modification time of a source file (not its path: a moved input is the same input)."""
+    p = Path(path)
+    stat = p.stat()
+    return {"name": p.name, "size_bytes": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
 
 
 class VGGTInitializer(GeometryInitializer):
@@ -34,6 +56,8 @@ class VGGTInitializer(GeometryInitializer):
       deterministic heuristic initializer so the prototype remains runnable.
     - ``backend_mode='heuristic'``: skip VGGT and emit simple geometric priors.
     """
+
+    backend_name = "vggt"
 
     def __init__(self, cfg: dict | None = None) -> None:
         """Store backend configuration.
@@ -51,8 +75,10 @@ class VGGTInitializer(GeometryInitializer):
         use_autocast:
             Enable autocast during inference.
         frame_cache_dir:
-            Optional directory where selected frames are materialized before
-            being passed into the official VGGT preprocessing helper.
+            Optional root under which selected frames are materialized before
+            being passed into the official VGGT preprocessing helper (default
+            ``.reifyscene_cache/vggt_inputs``); each materialization gets its own
+            content-keyed subdirectory.
         """
         self.cfg = cfg or {}
         self.backend_mode = str(self.cfg.get("backend_mode", "auto"))
@@ -70,6 +96,7 @@ class VGGTInitializer(GeometryInitializer):
 
         self._is_loaded = False
         self._model: Any | None = None
+        self._last_input_cache: dict[str, Any] | None = None
         self._load_and_preprocess_images = None
         self._pose_encoding_to_extri_intri = None
         self._unproject_depth_map_to_point_map = None
@@ -188,6 +215,39 @@ class VGGTInitializer(GeometryInitializer):
             return list(ingest_artifact.keyframes)
         return []
 
+    def _input_cache_identity(
+        self, frames: list[FrameRef], ingest_artifact, resize_max_dim: int | None
+    ) -> dict[str, Any]:
+        """Everything that decides the materialized images' pixels.
+
+        The source of each stream (a video file, or for a frame directory every frame
+        file used) by name, size and modification time -- not by path, so a moved input
+        is the same input -- plus the frames selected and the cache downscale.
+        """
+        stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
+        streams: dict[str, Any] = {}
+        for stream_id in sorted({str(frame.stream_id) for frame in frames}):
+            stream = stream_lookup[stream_id]
+            meta = stream.metadata or {}
+            if meta.get("source") == "frames":
+                frame_index = meta.get("frame_index", {}) or {}
+                used = sorted({int(f.frame_idx) for f in frames if str(f.stream_id) == stream_id})
+                missing = [idx for idx in used if str(idx) not in frame_index]
+                if missing:
+                    raise IndexError(f"frames {missing[:5]} are not in frame-sequence stream '{stream_id}'")
+                streams[stream_id] = {
+                    "kind": "frames",
+                    "frames": {str(idx): _file_identity(frame_index[str(idx)]) for idx in used},
+                }
+            else:
+                streams[stream_id] = {"kind": "video", **_file_identity(stream.video_path)}
+        return {
+            "writer": "vggt_inputs/v1",
+            "streams": streams,
+            "frames": [[str(frame.stream_id), int(frame.frame_idx)] for frame in frames],
+            "resize_max_dim": resize_max_dim,
+        }
+
     def _materialize_images(
         self,
         frames: list[FrameRef],
@@ -196,7 +256,15 @@ class VGGTInitializer(GeometryInitializer):
         *,
         resize_max_dim: int | None = None,
     ) -> tuple[list[Path], list[str]]:
-        """Decode and save selected frames to disk for VGGT preprocessing."""
+        """Decode and save selected frames to disk for VGGT preprocessing.
+
+        ``target_root`` is the cache root: the images go in a subdirectory keyed by
+        :meth:`_input_cache_identity`, so a run never overwrites another run's inputs
+        (whose ``debug_image_paths`` still point at them), and a run with the same
+        inputs reuses the same files. Nothing is ever deleted; each image is written
+        to a temporary name and renamed, so an interrupted run leaves no partial file.
+        Returns absolute paths.
+        """
         if ingest_artifact is None:
             raise ValueError("ingest_artifact is required for the real VGGT backend.")
 
@@ -205,37 +273,95 @@ class VGGTInitializer(GeometryInitializer):
         notes: list[str] = []
         applied_resize = self.resize_max_dim if resize_max_dim is None else resize_max_dim
         applied_resize = None if applied_resize in (None, 0) else int(applied_resize)
-        resized_any = False
 
-        target_root.mkdir(parents=True, exist_ok=True)
-        for old_png in target_root.glob("*.png"):
-            old_png.unlink()
+        identity = self._input_cache_identity(frames, ingest_artifact, applied_resize)
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        tag = "orig" if applied_resize is None else f"maxdim_{applied_resize}"
+        target_dir = (Path(target_root) / f"{tag}-{key}").resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        identity_path = target_dir / "identity.json"
+        if not identity_path.exists():
+            tmp = identity_path.with_name(f".{identity_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, identity_path)
+
+        written = reused = resized = 0
         frame_iter = enumerate(frames)
         if self.debug_shapes:
             frame_iter = track(frame_iter, total=len(frames), description="[cyan]VGGT · materializing frames")
         for idx, frame in frame_iter:
+            out_path = target_dir / f"{idx:04d}_{frame.stream_id}_{frame.frame_idx:06d}.png"
+            image_paths.append(out_path)
+            if out_path.exists():
+                reused += 1
+                continue
             stream = stream_lookup[frame.stream_id]
             image = self.decoder.get_frame(stream, frame.frame_idx)
             pil_image = Image.fromarray(image)
-            if applied_resize is not None:
-                width, height = pil_image.size
-                max_dim = max(width, height)
-                if max_dim > applied_resize:
-                    scale = float(applied_resize) / float(max_dim)
-                    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
-                    pil_image = pil_image.resize(new_size, resample=Image.BILINEAR)
-                    resized_any = True
-            out_path = target_root / f"{idx:04d}_{frame.stream_id}_{frame.frame_idx:06d}.png"
-            pil_image.save(out_path)
-            image_paths.append(out_path)
+            source_size = (int(stream.width), int(stream.height))
+            if source_size != tuple(pil_image.size):
+                raise ValueError(
+                    f"stream '{frame.stream_id}' frame {frame.frame_idx} decodes to {pil_image.size[0]}x{pil_image.size[1]}, "
+                    f"not the stream's recorded {source_size[0]}x{source_size[1]}; the recorded image transform would be wrong"
+                )
+            pre = materialize_resize(pil_image.size, applied_resize)
+            if pre is not None:
+                pil_image = pil_image.resize(pre.size, resample=Image.BILINEAR)
+                resized += 1
+            tmp_path = out_path.with_name(f".{out_path.stem}.{os.getpid()}.tmp.png")
+            pil_image.save(tmp_path)
+            os.replace(tmp_path, out_path)
+            written += 1
 
-        notes.append(f"Materialized VGGT inputs under cache: {target_root}")
+        self._last_input_cache = {
+            "root": str(Path(target_root).resolve()),
+            "key": key,
+            "dir": str(target_dir),
+            "identity": identity,
+        }
+        notes.append(
+            f"Materialized VGGT inputs under cache: {target_dir} ({written} written, {reused} reused)."
+        )
         if applied_resize is not None:
-            if resized_any:
+            if resized:
                 notes.append(f"Materialized images were resized to max_dim={applied_resize} before backend execution.")
-            else:
+            elif written:
                 notes.append(f"Materialized images fit within resize_max_dim={applied_resize}; no resize was needed.")
         return image_paths, notes
+
+    @staticmethod
+    def _stream_source_sizes(frames: list[FrameRef], ingest_artifact) -> dict[str, tuple[int, int]]:
+        """(width, height) of each selected stream's ingest frames."""
+        stream_lookup = {stream.stream_id: stream for stream in getattr(ingest_artifact, "streams", []) or []}
+        sizes: dict[str, tuple[int, int]] = {}
+        for stream_id in sorted({str(frame.stream_id) for frame in frames}):
+            stream = stream_lookup.get(stream_id)
+            if stream is None or int(stream.width) <= 0 or int(stream.height) <= 0:
+                raise ValueError(f"stream '{stream_id}' has no ingest frame size; cannot record its image transform")
+            sizes[stream_id] = (int(stream.width), int(stream.height))
+        return sizes
+
+    def _input_transforms(self, frames: list[FrameRef], ingest_artifact) -> dict[str, ImageTransform]:
+        """Ingest frame -> model input pixels, per stream, for one upstream-loader batch.
+
+        The upstream loader pads a batch of mixed sizes up to the largest, so streams
+        of different sizes get that pad recorded too.
+        """
+        sizes = self._stream_source_sizes(frames, ingest_artifact)
+        transforms = {
+            stream_id: vggt_input_transform(size, loader="upstream", resize_max_dim=self.resize_max_dim)
+            for stream_id, size in sizes.items()
+        }
+        return pad_to_batch(transforms)
+
+    def _record_transforms(self, artifact: GeometryArtifact, transforms: dict[str, ImageTransform]) -> None:
+        artifact.metadata = dict(artifact.metadata or {})
+        artifact.metadata["image_transforms"] = {
+            stream_id: transform_record(transform, recorded_by=self.backend_name)
+            for stream_id, transform in transforms.items()
+        }
+        if self._last_input_cache is not None:
+            artifact.metadata["input_cache"] = dict(self._last_input_cache)
 
     def _numpyify(self, value: Any) -> Any:
         """Recursively convert tensors to CPU numpy arrays."""
@@ -604,6 +730,16 @@ class VGGTInitializer(GeometryInitializer):
         if sync_artifact is not None and sync_artifact.offsets_by_stream:
             notes.append("Sync priors were available when geometry initialization ran.")
 
+        # The heuristic intrinsics are in the ingest frame's pixels (and there is no depth).
+        image_transforms = {}
+        for stream_id in sorted({str(frame.stream_id) for frame in frames}):
+            stream = stream_lookup.get(stream_id)
+            if stream is not None and stream.width > 0 and stream.height > 0:
+                image_transforms[stream_id] = transform_record(
+                    ImageTransform.identity((int(stream.width), int(stream.height))),
+                    recorded_by=f"{self.backend_name}:heuristic",
+                )
+
         return GeometryArtifact(
             run_id=(ingest_artifact.run_id if ingest_artifact is not None else "dev"),
             stage_name="geometry",
@@ -626,6 +762,7 @@ class VGGTInitializer(GeometryInitializer):
                 "save_debug_html": bool(self.debug_shapes),
                 "debug_max_points": int(self.cfg.get('debug_max_points', 5000)),
                 "debug_image_paths": {},
+                "image_transforms": image_transforms,
             },
         )
 
@@ -647,8 +784,9 @@ class VGGTInitializer(GeometryInitializer):
         if self._model is None:
             return self._initialize_heuristic(selected_frames, ingest_artifact, sync_artifact)
 
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path(".reifyscene_cache") / "vggt_inputs"
+        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
+        transforms = self._input_transforms(selected_frames, ingest_artifact)
         images = self._load_and_preprocess_images([str(path) for path in image_paths]).to(self.device)
 
         dtype = torch.bfloat16 if self.device.startswith("cuda") and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -694,10 +832,12 @@ class VGGTInitializer(GeometryInitializer):
             predictions["world_points_from_depth"] = point_map
             notes.append("Point maps were derived by unprojecting the VGGT depth branch.")
 
-        return self._initialize_from_predictions(
+        artifact = self._initialize_from_predictions(
             selected_frames,
             predictions,
             ingest_artifact,
             notes=notes,
             image_paths=image_paths,
         )
+        self._record_transforms(artifact, transforms)
+        return artifact

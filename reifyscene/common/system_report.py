@@ -123,11 +123,13 @@ def recommend_tracking_profile(report: dict[str, Any], *, device: str | None = N
         else:
             profile = 'full'
 
+    # Every preset tracks in windows, which is what bounds memory; none caps the frame count
+    # (they used to stop at 24 / 48 / 96, so a 426-frame clip was tracked to frame 95).
     presets = {
         'lowmem': {
             'resize_max_dim': 256,
             'frame_stride': 2,
-            'max_frames': 24,
+            'max_frames': None,
             'window_size': 12,
             'window_overlap': 4,
             'cpu_threads': 4,
@@ -135,7 +137,7 @@ def recommend_tracking_profile(report: dict[str, Any], *, device: str | None = N
         'balanced': {
             'resize_max_dim': 384,
             'frame_stride': 2,
-            'max_frames': 48,
+            'max_frames': None,
             'window_size': 24,
             'window_overlap': 8,
             'cpu_threads': 6,
@@ -143,7 +145,7 @@ def recommend_tracking_profile(report: dict[str, Any], *, device: str | None = N
         'full': {
             'resize_max_dim': 512,
             'frame_stride': 1,
-            'max_frames': 96,
+            'max_frames': None,
             'window_size': 48,
             'window_overlap': 12,
             'cpu_threads': 8,

@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
-from reifyscene.common.io import read_json, write_json
+from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, ObjectState
 
@@ -93,7 +93,12 @@ class ObjectArtifact(BaseArtifact):
 
     def _object_from_dict(self, raw: dict[str, Any], embedding_vectors: dict[str, np.ndarray]) -> ObjectState:
         det_id = raw.get('detection_id', raw['object_id'])
+        # The stage files embeddings under the canonical track id (one per tracklet), not
+        # the detection id; looking up only the detection id lost every one on reload.
+        track_id = (raw.get('attributes') or {}).get('track_id')
         embedding = embedding_vectors.get(det_id)
+        if embedding is None and track_id is not None:
+            embedding = embedding_vectors.get(str(track_id))
         return ObjectState(
             object_id=str(raw['object_id']),
             frame_ref=self._frame_ref_from_dict(raw['frame_ref']),
@@ -411,20 +416,18 @@ class ObjectArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
         for det_id, filename in raw.get('mask_index', {}).items():
-            path = save_dir / 'masks' / filename
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
+            path = require_file(save_dir / 'masks' / filename, "objects file")
+            with np.load(path, allow_pickle=True) as npz:
+                mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         embedding_vectors: dict[str, np.ndarray] = {}
         for det_id, filename in raw.get('embedding_index', {}).items():
-            path = save_dir / 'embeddings' / filename
-            if path.exists():
-                with np.load(path, allow_pickle=True) as npz:
-                    embedding_vectors[det_id] = np.asarray(npz['embedding'], dtype=np.float32)
+            path = require_file(save_dir / 'embeddings' / filename, "objects file")
+            with np.load(path, allow_pickle=True) as npz:
+                embedding_vectors[det_id] = np.asarray(npz['embedding'], dtype=np.float32)
         artifact = cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
-            save_dir=Path(raw['save_dir']),
+            save_dir=Path(save_dir),
             metadata=raw.get('metadata', {}),
             objects=[],
             raw_objects=[],
