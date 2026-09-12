@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [Unreleased]
+
+### Fixed
+- **Pose refinement could not run on a landscape clip.** The VGGSfM tracker scales image
+  coordinates onto its confidence grid with a single factor, so it asserts that both are
+  square and raises a bare `AssertionError` otherwise. VGGT-Long's loader takes a frame's
+  width to the target and keeps its height in proportion, so a landscape clip lands at
+  518x280 and pose refinement died there — the whole run with it. Every clip used so far
+  (spin, paper-windmill) is portrait, which is why it never showed. The frame stack is now
+  padded to a square at the **bottom-right**, which leaves every real pixel's coordinates
+  unchanged, so the tracks come back in the geometry's own pixel space with nothing to
+  undo; the padding carries zero confidence, which the tracker's own filter drops, and any
+  observation that lands in it anyway is marked invisible. A square clip is returned
+  untouched, so runs on portrait footage are unaffected. The vendored tracker itself is not
+  patched: `third_party/` is gitignored and re-cloned at a pinned commit by the setup
+  script, so a patch there would not survive a fresh environment.
+
 ## [0.3.0.0] - 2026-09-11
 
 ### Added

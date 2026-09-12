@@ -433,3 +433,39 @@ def test_the_reanchor_leaves_an_unrefined_camera_exactly_where_it_was() -> None:
     # The skipped camera is untouched, to the bit.
     assert np.array_equal(refined["4"], untouched_before)
     assert np.array_equal(refined["4"], seed_c2w["4"])
+
+
+def test_a_landscape_geometry_is_padded_square_without_moving_its_pixels() -> None:
+    """The tracker needs a square frame; padding must not move a real pixel."""
+    import torch
+
+    from reifyscene.geometry.pose_refine import _pad_to_square
+
+    images = torch.arange(2 * 3 * 4 * 7, dtype=torch.float32).reshape(2, 3, 4, 7)  # H=4, W=7
+    conf = np.arange(2 * 4 * 7, dtype=np.float32).reshape(2, 4, 7)
+    points = np.arange(2 * 4 * 7 * 3, dtype=np.float32).reshape(2, 4, 7, 3)
+
+    out_images, out_conf, out_points, pad_h, pad_w = _pad_to_square(images, conf, points)
+
+    assert (pad_h, pad_w) == (3, 0)
+    assert tuple(out_images.shape) == (2, 3, 7, 7)
+    assert out_conf.shape == (2, 7, 7) and out_points.shape == (2, 7, 7, 3)
+    # Every original pixel keeps its coordinates, so a track needs no unpadding.
+    assert torch.equal(out_images[:, :, :4, :7], images)
+    assert np.array_equal(out_conf[:, :4, :7], conf)
+    assert np.array_equal(out_points[:, :4, :7], points)
+    # The padding carries no confidence, so the tracker's own filter drops it.
+    assert not out_conf[:, 4:, :].any()
+
+
+def test_a_square_geometry_is_left_alone() -> None:
+    import torch
+
+    from reifyscene.geometry.pose_refine import _pad_to_square
+
+    images = torch.zeros(2, 3, 5, 5)
+    conf = np.zeros((2, 5, 5), dtype=np.float32)
+    points = np.zeros((2, 5, 5, 3), dtype=np.float32)
+    out_images, out_conf, out_points, pad_h, pad_w = _pad_to_square(images, conf, points)
+    assert (pad_h, pad_w) == (0, 0)
+    assert out_images is images and out_conf is conf and out_points is points

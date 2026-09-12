@@ -114,6 +114,32 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(int(seed))  # every device, CUDA's generator included
 
 
+def _pad_to_square(images, conf, points):
+    """Pad a landscape/portrait frame stack to a square, bottom-right, for the tracker.
+
+    The VGGSfM tracker scales image coordinates onto the confidence grid with a single
+    factor, so it asserts both are square and refuses anything else. VGGT-Long's loader
+    takes a frame's width to the target and keeps its height in proportion, so a landscape
+    clip (940x496) lands at 518x280 and pose refinement would fail outright.
+
+    Padding at the bottom-right leaves every real pixel's coordinate unchanged, so the
+    tracks come back in the geometry's own pixel space with nothing to undo. The padding
+    carries zero confidence, which the tracker's own filter drops. Returns the padded
+    arrays and how much was added; a square input is returned untouched.
+    """
+    height, width = int(images.shape[-2]), int(images.shape[-1])
+    if height == width:
+        return images, conf, points, 0, 0
+    side = max(height, width)
+    pad_h, pad_w = side - height, side - width
+    import torch
+
+    images = torch.nn.functional.pad(images, (0, pad_w, 0, pad_h))
+    conf = np.pad(np.asarray(conf), ((0, 0), (0, pad_h), (0, pad_w)))
+    points = np.pad(np.asarray(points), ((0, 0), (0, pad_h), (0, pad_w), (0, 0)))
+    return images, conf, points, pad_h, pad_w
+
+
 def _rotation_delta_deg(a_w2c: np.ndarray, b_w2c: np.ndarray) -> float:
     """The angle between two cameras' orientations, in degrees."""
     cos = (np.trace(np.asarray(a_w2c)[:3, :3] @ np.asarray(b_w2c)[:3, :3].T) - 1.0) / 2.0
@@ -544,6 +570,22 @@ class PoseRefiner:
                 "maps — refusing to seed BA with mismatched coordinates."
             )
 
+        # The VGGSfM tracker refuses a non-square frame (it scales image coordinates onto
+        # the confidence grid with a single factor, so it asserts both are square). A
+        # landscape clip gives landscape geometry -- VGGT-Long's loader takes the width to
+        # the target and keeps the height in proportion, so a 940x496 clip lands at
+        # 518x280 -- and pose refinement would simply fail on it. Padding to a square at
+        # the BOTTOM-RIGHT leaves every real pixel's coordinates unchanged, so the tracks
+        # come back in the geometry's own pixel space with nothing to undo. The padding is
+        # zero confidence, which the tracker's own filter drops; observations that land in
+        # it anyway are marked invisible below. A square clip is untouched.
+        images, conf, points, pad_h, pad_w = _pad_to_square(images, conf, points)
+        if pad_h or pad_w:
+            self._log(
+                f"stream {stream_id}: geometry is {W}x{H}; padded to {max(H, W)}x{max(H, W)} "
+                "for the tracker, which requires a square frame"
+            )
+
         self._log(f"stream {stream_id}: {len(frames)} keyframes at {W}x{H}; predicting VGGSfM tracks.")
         _seed_everything(self.cfg.seed)
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
@@ -561,6 +603,18 @@ class PoseRefiner:
 
         N = len(frames)
         obs_mask = pred_vis > self.cfg.vis_thresh
+        if pad_h or pad_w:
+            # Anything the tracker put in the padding is not an observation of this scene.
+            inside = (
+                (pred_tracks[..., 0] >= 0)
+                & (pred_tracks[..., 0] < W)
+                & (pred_tracks[..., 1] >= 0)
+                & (pred_tracks[..., 1] < H)
+            )
+            dropped = int((obs_mask & ~inside).sum())
+            obs_mask = obs_mask & inside
+            if dropped:
+                self._log(f"stream {stream_id}: dropped {dropped} observations that fell in the padding")
         refine_K_any = self.cfg.refine_focal or self.cfg.refine_pp
         rec, npts, nobs = _seed_reconstruction_via_text(
             names, w2c, K, pred_tracks, obs_mask, pred_pts3d, pred_rgb,
