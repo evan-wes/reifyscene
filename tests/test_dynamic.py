@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from room4d.render.gaussian4d.densify import _quat_to_rotmat
-from room4d.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
-from room4d.render.gaussian4d.gaussian_field import GaussianField, logit
-from room4d.render.gaussian4d.motion import MotionBases
-from room4d.render.gaussian4d.transforms import (
+from reifyscene.render.gaussian4d.densify import _quat_to_rotmat
+from reifyscene.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
+from reifyscene.render.gaussian4d.gaussian_field import GaussianField, logit
+from reifyscene.render.gaussian4d.motion import MotionBases
+from reifyscene.render.gaussian4d.transforms import (
     cont_6d_to_rmat,
     quat_multiply,
     rmat_to_cont_6d,
@@ -105,7 +105,7 @@ def test_dynamic_scene_cloud_and_entity_ids() -> None:
 def test_load_borrowed_init_roundtrip(tmp_path) -> None:
     import numpy as np
 
-    from room4d.render.gaussian4d.motion_init import load_borrowed_init
+    from reifyscene.render.gaussian4d.motion_init import load_borrowed_init
 
     n_fg, n_bg, k, t = 5, 3, 2, 4
     ident_q = np.tile([1.0, 0.0, 0.0, 0.0], (n_fg, 1)).astype("f4")
@@ -138,8 +138,8 @@ def test_normalize_w2c_matches_lift_convention() -> None:
     """The dynamic scorer's camera-normalization agrees with the lift's in-place one."""
     import numpy as np
 
-    from room4d.lifting.native_track_lift import CameraRecords, SceneNorm, apply_scene_norm_cameras
-    from room4d.render.eval.masked_nvs_benchmark import _normalize_w2c
+    from reifyscene.lifting.native_track_lift import CameraRecords, SceneNorm, apply_scene_norm_cameras
+    from reifyscene.render.eval.masked_nvs_benchmark import _normalize_w2c
 
     rng = np.random.default_rng(1)
     w2c = np.eye(4, dtype=np.float32)
@@ -159,8 +159,8 @@ def test_normalize_w2c_matches_lift_convention() -> None:
 
 
 def test_dynamic_densification_grows_motion_coefs() -> None:
-    from room4d.render.gaussian4d.densify import DensificationController, DensifyConfig
-    from room4d.render.gaussian4d.dynamic_field import FG_PARAM_NAMES
+    from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig
+    from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES
 
     n, k = 10, 3
     quats = torch.zeros(n, 4)

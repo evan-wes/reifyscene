@@ -9,12 +9,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, FrameRef
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, FrameRef
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 def _fake_poses(indices):
@@ -78,7 +78,7 @@ def test_colmap_partial_registration(tmp_path, monkeypatch):
 def test_geometry_ladder_selects_colmap_and_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0]))
     ingest = _ingest_for(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
     assert isinstance(pipe.geometry_init, ColmapPoseInitializer)
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)
@@ -96,7 +96,7 @@ def test_geometry_ladder_colmap_degrades_to_empty(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", _boom)
     ingest = _ingest_for(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)  # must not crash
     cap = art.capability

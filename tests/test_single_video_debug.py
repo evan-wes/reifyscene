@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from scripts.run_single_video_vggt import build_config
 
 

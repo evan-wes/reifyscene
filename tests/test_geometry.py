@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.vggt_wrapper import VGGTInitializer
-from room4d.geometry.world_frame import GroundPlaneCanonicalizer
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
 
 
 def test_vggt_initializer_constructs() -> None:

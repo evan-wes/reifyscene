@@ -35,5 +35,5 @@ third_party/
 .idea/
 
 # Internal cache
-.room4d_cache
+.reifyscene_cache
 .claude/

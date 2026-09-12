@@ -22,11 +22,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.io import read_yaml
-from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
-from room4d.common.memory import release_memory
-from room4d.common.system_report import collect_system_report, recommend_vggt_long_profile, save_system_report
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.io import read_yaml
+from reifyscene.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from reifyscene.common.memory import release_memory
+from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile, save_system_report
 
 
 def build_config(args: argparse.Namespace, *, system_report: dict | None = None) -> dict:
@@ -173,7 +173,7 @@ def _print_run_header(console: Console, args: argparse.Namespace, geometry_recom
             body.append(
                 f"recommended seed: chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}  ladder=[{resize_preview}]"
             )
-    console.print(Panel(body, title="room4d single-video geometry run", expand=False))
+    console.print(Panel(body, title="reifyscene single-video geometry run", expand=False))
 
 
 def _print_stage_summary(console: Console, ingest, sync, geometry) -> None:
@@ -298,7 +298,7 @@ def main() -> None:
             f"delete_temp_files={args.vggt_long_delete_temp_files}  output_cache_dir={args.vggt_long_output_cache_dir}"
         )
 
-    pipeline = Room4DPipeline(build_config(args, system_report=system_report))
+    pipeline = ReifyScenePipeline(build_config(args, system_report=system_report))
 
     started = _debug_stage(console, args.debug, "Stage 1/3 · Ingest / preprocess")
     ingest = pipeline.preprocess([args.video])

@@ -6,8 +6,8 @@ import importlib.util
 import numpy as np
 import pytest
 
-from room4d.common.types import FrameRef
-from room4d.perception.instance.sam2_segment import (
+from reifyscene.common.types import FrameRef
+from reifyscene.perception.instance.sam2_segment import (
     SAM2InstanceSegmenter,
     _box_iou,
     _mask_bbox_xyxy,
@@ -15,7 +15,7 @@ from room4d.perception.instance.sam2_segment import (
 )
 
 requires_sam2 = pytest.mark.skipif(
-    importlib.util.find_spec("sam2") is None, reason="needs sam2 installed (setup_room4d.sh --with-sam2)"
+    importlib.util.find_spec("sam2") is None, reason="needs sam2 installed (setup_reifyscene.sh --with-sam2)"
 )
 
 

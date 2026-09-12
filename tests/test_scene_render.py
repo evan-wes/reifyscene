@@ -14,16 +14,16 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from room4d.render.gaussian4d.rasterizer import gsplat_available
+from reifyscene.render.gaussian4d.rasterizer import gsplat_available
 
 requires_gsplat = pytest.mark.skipif(
     not gsplat_available(), reason="rendering tests need gsplat and a CUDA device"
 )
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.scene.assembler import SingleVideoSceneAssembler
-from room4d.scene.scene_artifact import SceneArtifact
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.scene.assembler import SingleVideoSceneAssembler
+from reifyscene.scene.scene_artifact import SceneArtifact
 
 H = W = 16
 
@@ -114,11 +114,11 @@ def test_dynamic_scene_artifact_bundle_roundtrip(tmp_path: Path) -> None:
     """
     import torch
 
-    from room4d.common.io import read_json
-    from room4d.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
-    from room4d.render.gaussian4d.gaussian_field import GaussianField, logit
-    from room4d.render.gaussian4d.motion import MotionBases
-    from room4d.render.gaussian4d.motion_init import BorrowedCamera, bundle_to_scene, dump_bundle
+    from reifyscene.common.io import read_json
+    from reifyscene.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
+    from reifyscene.render.gaussian4d.gaussian_field import GaussianField, logit
+    from reifyscene.render.gaussian4d.motion import MotionBases
+    from reifyscene.render.gaussian4d.motion_init import BorrowedCamera, bundle_to_scene, dump_bundle
 
     n_fg, n_bg, k, t = 6, 4, 2, 5
     fg_q = torch.zeros(n_fg, 4)
@@ -173,7 +173,7 @@ def test_dynamic_scene_artifact_bundle_roundtrip(tmp_path: Path) -> None:
 
 def test_dynamic_fg_mask_union_matches_provider_keys() -> None:
     """Segment instance masks union per frame into ArtifactGeometryProvider keys."""
-    from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+    from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 
     fr0 = FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)
     fr1 = FrameRef(stream_id="cam_00", frame_idx=1, timestamp_sec=0.1)
@@ -213,7 +213,7 @@ def test_dynamic_tracker_defaults_cap_query_work() -> None:
 
 @requires_gsplat
 def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
-    from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
+    from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=3).assemble(
@@ -233,7 +233,7 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
 
 def test_render_backend_dynamic_empty_bundle_skips(tmp_path: Path) -> None:
     """Dynamic dispatch with an empty bundle emits an empty render, not a crash (CPU)."""
-    from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
+    from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=2).assemble(
@@ -249,12 +249,12 @@ def test_render_backend_dynamic_trains_and_checkpoints(tmp_path: Path) -> None:
     """End-to-end dynamic render smoke: bundle -> DynamicGaussianTrainer -> checkpoint."""
     import torch
 
-    from room4d.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
-    from room4d.render.gaussian4d.gaussian_field import GaussianField, logit
-    from room4d.render.gaussian4d.motion import MotionBases
-    from room4d.render.gaussian4d.motion_init import BorrowedCamera, dump_bundle
-    from room4d.render.gaussian4d.rasterizer import look_at_viewmat
-    from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
+    from reifyscene.render.gaussian4d.dynamic_field import DynamicGaussianField, DynamicScene
+    from reifyscene.render.gaussian4d.gaussian_field import GaussianField, logit
+    from reifyscene.render.gaussian4d.motion import MotionBases
+    from reifyscene.render.gaussian4d.motion_init import BorrowedCamera, dump_bundle
+    from reifyscene.render.gaussian4d.rasterizer import look_at_viewmat
+    from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
 
     rng = np.random.default_rng(0)
     n_fg, n_bg, k, t = 30, 30, 2, 3

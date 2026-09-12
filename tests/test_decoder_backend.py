@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from room4d.ingest.decoder import VideoDecoder
+from reifyscene.ingest.decoder import VideoDecoder
 from tests.conftest import write_test_video
 
 

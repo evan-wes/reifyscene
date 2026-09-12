@@ -1,4 +1,4 @@
-"""Unit tests for room4d/calibration/gt_scoring.py (calibration arc M0-minimal).
+"""Unit tests for reifyscene/calibration/gt_scoring.py (calibration arc M0-minimal).
 
 Pose-math trust comes from tests (design decision D6): the Umeyama fixture
 below is pinned against an independent oracle — evo v1.36.5
@@ -18,12 +18,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import room4d.calibration.gt_scoring as gs
-from room4d.calibration.model_io import ParsedColmapModel, qvec_to_rotmat
+import reifyscene.calibration.gt_scoring as gs
+from reifyscene.calibration.model_io import ParsedColmapModel, qvec_to_rotmat
 
 # Real-data tests gate on the data root (overridable, matching the
 # env-gated optional-test convention); they skip cleanly elsewhere.
-_DATA = Path(os.environ.get("ROOM4D_DATA", "/path/to/data"))
+_DATA = Path(os.environ.get("REIFYSCENE_DATA", "/path/to/data"))
 Z_NVIDIA = _DATA / "shape_of_motion" / "nvidia" / "Balloon1"
 Z_IPHONE = _DATA / "shape_of_motion" / "iphone" / "paper-windmill"
 
@@ -655,7 +655,7 @@ def test_cli_not_alignable_exit_and_output_override(tmp_path: Path) -> None:
 
 
 def test_runner_image_options_injection() -> None:
-    from room4d.calibration.hloc_colmap import HlocColmapSfMRunner
+    from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
 
     # no cfg -> empty (existing video path unchanged: run() passes
     # `image_options or None`, so {} still becomes None downstream)

@@ -367,14 +367,14 @@ def test_compare_warns_on_eval_protocol_mismatch(
         "schema": rb.SCHEMA, "method": "shape-of-motion", "sequence": "Jumping",
         "metrics": {"masked_mpsnr": 18.7}, "eval": nvidia_eval,
     }))
-    b = _write_benchmark_json(tmp_path / "b.json", "room4d", "Jumping", {"masked_mpsnr": 19.0})
+    b = _write_benchmark_json(tmp_path / "b.json", "reifyscene", "Jumping", {"masked_mpsnr": 19.0})
     rb.compare(str(a), str(b))
     assert "comparing different eval protocols" in capsys.readouterr().out
 
     # identical protocols stay silent
     c = tmp_path / "c.json"
     c.write_text(json.dumps({
-        "schema": rb.SCHEMA, "method": "room4d", "sequence": "Jumping",
+        "schema": rb.SCHEMA, "method": "reifyscene", "sequence": "Jumping",
         "metrics": {"masked_mpsnr": 19.0}, "eval": nvidia_eval,
     }))
     rb.compare(str(a), str(c))
@@ -502,7 +502,7 @@ def test_compare_nvidia_results_uses_fg_bg_directions(
     # direction values exercised behaviorally: flipping fg_lpips to
     # higher-is-better would award the wrong method here.
     a = _write_benchmark_json(
-        tmp_path / "room4d.json", "room4d", "Balloon1",
+        tmp_path / "reifyscene.json", "reifyscene", "Balloon1",
         {"masked_mpsnr": 20.0, "fg_lpips": 0.20, "bg_psnr": 25.0},
     )
     b = _write_benchmark_json(
@@ -515,7 +515,7 @@ def test_compare_nvidia_results_uses_fg_bg_directions(
         for line in capsys.readouterr().out.splitlines()
         if line.strip().startswith(("masked_", "fg_", "bg_"))
     }
-    assert rows["fg_lpips"].endswith("room4d")  # lower lpips wins
+    assert rows["fg_lpips"].endswith("reifyscene")  # lower lpips wins
     assert rows["bg_psnr"].endswith("shape-of-motion")  # higher psnr wins
     assert not rows["fg_lpips"].endswith("?")  # known direction, never '?'
 
@@ -605,8 +605,8 @@ def test_compare_via_main_direction_tie_and_missing_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     a = _write_benchmark_json(
-        tmp_path / "room4d.json",
-        "room4d",
+        tmp_path / "reifyscene.json",
+        "reifyscene",
         "paper-windmill",
         {"masked_mpsnr": 20.0, "masked_mssim": 0.559, "masked_mlpips": 0.25, "track3d_epe": 0.08},
     )
@@ -624,14 +624,14 @@ def test_compare_via_main_direction_tie_and_missing_values(
         for line in out.splitlines()
         if line.strip().startswith(("masked_", "track"))
     }
-    assert rows["masked_mpsnr"][-1] == "room4d"  # higher is better
+    assert rows["masked_mpsnr"][-1] == "reifyscene"  # higher is better
     assert rows["masked_mlpips"][-1] == "shape-of-motion"  # lower is better
     assert rows["masked_mssim"] == ["masked_mssim", "0.5590", "0.5590"]  # tie -> no winner
     assert rows["track3d_epe"][1:] == ["0.0800", "—"]  # missing metric -> em dash, no winner
 
 
 def test_compare_rejects_wrong_schema(tmp_path: Path) -> None:
-    a = _write_benchmark_json(tmp_path / "a.json", "room4d", "apple", {"masked_mpsnr": 20.0})
+    a = _write_benchmark_json(tmp_path / "a.json", "reifyscene", "apple", {"masked_mpsnr": 20.0})
     b = _write_benchmark_json(
         tmp_path / "b.json", "som", "apple", {"masked_mpsnr": 19.0}, schema="other_schema_v0"
     )
@@ -644,7 +644,7 @@ def test_compare_rejects_wrong_schema(tmp_path: Path) -> None:
 def test_compare_warns_on_sequence_mismatch_without_metrics(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    a = _write_benchmark_json(tmp_path / "a.json", "room4d", "apple", {})
+    a = _write_benchmark_json(tmp_path / "a.json", "reifyscene", "apple", {})
     b = _write_benchmark_json(tmp_path / "b.json", "som", "spin", {})
     rb.compare(str(a), str(b))  # no shared metrics: header-only table, no crash
     out = capsys.readouterr().out
@@ -1303,7 +1303,7 @@ def test_compare_nan_metric_renders_dash_and_no_winner(
     # to the other method regardless of direction.
     a = tmp_path / "a.json"
     a.write_text(
-        '{"schema": "%s", "method": "room4d", "sequence": "s",'
+        '{"schema": "%s", "method": "reifyscene", "sequence": "s",'
         ' "metrics": {"masked_mpsnr": NaN}}' % rb.SCHEMA
     )
     b = _write_benchmark_json(tmp_path / "b.json", "som", "s", {"masked_mpsnr": 19.5})
@@ -1319,7 +1319,7 @@ def test_compare_nan_metric_renders_dash_and_no_winner(
     # accepts the literal; inf passes a NaN-only guard and always "wins").
     c = tmp_path / "c.json"
     c.write_text(
-        '{"schema": "%s", "method": "room4d", "sequence": "s",'
+        '{"schema": "%s", "method": "reifyscene", "sequence": "s",'
         ' "metrics": {"masked_mpsnr": Infinity}}' % rb.SCHEMA
     )
     rb.compare(str(c), str(b))
@@ -1328,7 +1328,7 @@ def test_compare_nan_metric_renders_dash_and_no_winner(
         if line.strip().startswith("masked_mpsnr")
     )
     assert "—" in row
-    assert not row.rstrip().endswith("room4d")
+    assert not row.rstrip().endswith("reifyscene")
 
 
 def test_metric_patterns_handle_scientific_notation(
@@ -1350,7 +1350,7 @@ def test_compare_shows_unknown_metrics_with_undefined_direction(
     # not be silently dropped; with both sides present but no known direction,
     # the better column shows '?'.
     a = _write_benchmark_json(
-        tmp_path / "a.json", "room4d", "s",
+        tmp_path / "a.json", "reifyscene", "s",
         {"masked_mpsnr": 20.0, "heldout_psnr_mean": 21.0},
     )
     b = _write_benchmark_json(
@@ -1362,7 +1362,7 @@ def test_compare_shows_unknown_metrics_with_undefined_direction(
     row = next(line for line in out.splitlines() if "heldout_psnr_mean" in line)
     assert row.rstrip().endswith("?")
     known_row = next(line for line in out.splitlines() if line.strip().startswith("masked_mpsnr"))
-    assert known_row.rstrip().endswith("room4d")
+    assert known_row.rstrip().endswith("reifyscene")
 
 
 def test_bash_validator_parity_and_exit_codes(tmp_path: Path) -> None:
@@ -1429,7 +1429,7 @@ def test_bash_validator_nvidia_parity(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("args", "code", "needle"),
     [
-        (["--conda-env", "room4d"], 1, "Refusing to run against protected"),
+        (["--conda-env", "reifyscene"], 1, "Refusing to run against protected"),
         (["--conda-env", "base"], 1, "Refusing to run against protected"),
         (["--with-mosca"], 2, "not implemented"),
         (["--bogus-flag"], 2, "Unknown option"),
@@ -1439,7 +1439,7 @@ def test_bash_validator_nvidia_parity(tmp_path: Path) -> None:
 def test_setup_script_guards_fire_before_any_install(args: list, code: int, needle: str) -> None:
     """The installer's safety guards (protected-env refusal, MoSca stub,
     arg validation) are conda-free paths — the highest-cost regressions the
-    script could have, since the env guard is what protects the main room4d
+    script could have, since the env guard is what protects the main reifyscene
     env's torch from being downgraded."""
     proc = subprocess.run(
         ["bash", str(SETUP_SCRIPT), *args], capture_output=True, text=True

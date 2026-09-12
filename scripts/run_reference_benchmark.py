@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run a reference 4D reconstruction benchmark and emit a normalized result.
 
-This is the room4d-side wrapper around the vendored Shape of Motion repo
+This is the reifyscene-side wrapper around the vendored Shape of Motion repo
 (third_party/shape-of-motion, installed into an isolated conda env by
 scripts/setup_reference_tool.sh). It turns a processed dataset sequence into a
-normalized ``reference_benchmark.json`` that room4d's own renderer results can
+normalized ``reference_benchmark.json`` that reifyscene's own renderer results can
 be compared against.
 
 Pipeline:
@@ -23,7 +23,7 @@ Pipeline:
   4. write ``reference_benchmark.json`` into the run directory
 
 The JSON schema (``reference_benchmark_v1``) is the comparison contract:
-room4d's renderer evaluation should emit the same shape so that
+reifyscene's renderer evaluation should emit the same shape so that
 ``--compare a.json b.json`` can score any two methods on the same sequence.
 
 This script needs only the Python stdlib and may run from any environment;
@@ -41,8 +41,8 @@ Examples:
     --data-dir .../nvidia/Balloon1 \
     --run-dir  .../runs/balloon1-full
 
-  # compare two results (e.g. room4d vs the reference)
-  python scripts/run_reference_benchmark.py --compare room4d.json reference.json
+  # compare two results (e.g. reifyscene vs the reference)
+  python scripts/run_reference_benchmark.py --compare reifyscene.json reference.json
 """
 
 from __future__ import annotations
@@ -63,13 +63,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOM_DIR = REPO_ROOT / "third_party" / "shape-of-motion"
 # Must match the CONDA_ENV_NAME default in scripts/setup_reference_tool.sh.
-DEFAULT_CONDA_ENV = "room4d_som_ref"
+DEFAULT_CONDA_ENV = "reifyscene_som_ref"
 
 # The reference_benchmark_v1 contract (schema id, metric directions, compare)
-# lives in room4d so this Shape-of-Motion emitter and room4d's own renderer eval
+# lives in reifyscene so this Shape-of-Motion emitter and reifyscene's own renderer eval
 # share one source of truth.
 sys.path.insert(0, str(REPO_ROOT))
-from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  # noqa: E402
+from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  # noqa: E402
     HIGHER_IS_BETTER,
     SCHEMA,
     compare,
@@ -78,7 +78,7 @@ from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  #
 # itself writes checkpoints/last.ckpt at epoch 0 and every 200 steps, so a
 # bare checkpoint does NOT prove training completed — only this sentinel
 # (or final-epoch video detection, for runs predating it) does.
-TRAINING_COMPLETE_SENTINEL = ".room4d_training_complete"
+TRAINING_COMPLETE_SENTINEL = ".reifyscene_training_complete"
 
 # evaluate_iphone.py prints "mean <name>: <float>" lines; these patterns are
 # stable at the pinned SoM commit (see setup_reference_tool.sh SOM_COMMIT).
@@ -346,7 +346,7 @@ def clear_run_state(run_dir: Path) -> None:
         event_file.unlink()
 
 
-RUN_LOCK_NAME = ".room4d_benchmark.lock"
+RUN_LOCK_NAME = ".reifyscene_benchmark.lock"
 
 
 def acquire_run_lock(run_dir: Path) -> int:

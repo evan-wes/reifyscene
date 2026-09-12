@@ -63,7 +63,7 @@ feature/dataset-backends; deferred when the run-dir lock shipped.
 
 ### Calibration arc: M0-minimal GT scorer + S1 kyotovision spike — DONE
 
-**M0-minimal — DONE (2026-06-12, PR #8).** `room4d/calibration/gt_scoring.py` +
+**M0-minimal — DONE (2026-06-12, PR #8).** `reifyscene/calibration/gt_scoring.py` +
 `scripts/score_calibration_gt.py`: score recovered extrinsics against dataset GT
 with pairwise-relative errors (primary) + guarded Sim(3) APE (secondary). Turns
 the calibration stage's correctness into a number.
@@ -116,7 +116,7 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
   `eval/benchmarks/covisibility_masked_novel_view_synthesis/` (schema + compare
   + README, the single source of truth for `reference_benchmark_v1`).
   `run_render_proof.py train` emits the record over the val split and
-  `--compare`s vs SoM. First numbers (room4d static vs SoM dynamic,
+  `--compare`s vs SoM. First numbers (reifyscene static vs SoM dynamic,
   paper-windmill, 419 val frames): masked mPSNR 18.51 vs 19.53 — the residual
   gap is motion, closed by PR 4. (Satisfies the former "emit
   reference_benchmark_v1" P2 item.)
@@ -128,17 +128,17 @@ PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
 - **PR 5 landed (v0.1.9.0):** CLI flythrough — `orbit_cameras` (near-trajectory
   arc) + `write_video` (cv2 mp4); `run_render_proof.py dynamic` emits
   `flythrough.mp4`. **Renderer track (design-doc steps 8–11) COMPLETE.** Next
-  phase is step 12 (swap in room4d's own VGGT/CoTracker, one backend at a time)
+  phase is step 12 (swap in reifyscene's own VGGT/CoTracker, one backend at a time)
   plus the two PR-4 follow-ups above (own motion init, dynamic densification).
 
 ### Follow-up: own motion initializer (replace the borrowed SoM init)
 
 **What:** PR 4's dynamic init is borrowed from SoM (`scripts/borrow_som_motion_init.py`
 runs SoM's cuML-clustering + Procrustes track init in the reference env and dumps
-a bundle). Replace it with a native room4d `MotionInitializer` behind the existing
+a bundle). Replace it with a native reifyscene `MotionInitializer` behind the existing
 `render/gaussian4d/motion_init.py` seam. Split into two PRs:
 
-- **PR-A — track-lifting bridge: DONE (v0.1.11.0).** `room4d/lifting/native_track_lift.py`
+- **PR-A — track-lifting bridge: DONE (v0.1.11.0).** `reifyscene/lifting/native_track_lift.py`
   ports SoM's lift natively (TAPIR parse, scene-norm, `get_tracks_3d`,
   `get_bkgd_points`) onto `DatasetGeometryInitializer`, from aligned inverse-depth
   + COLMAP-refined cameras. Reproduces the borrowed frame on paper-windmill to
@@ -154,13 +154,13 @@ a bundle). Replace it with a native room4d `MotionInitializer` behind the existi
   **20.74** vs borrowed **20.68**. The only borrowed input left is the 2D tracker
   output (own tracker = separate future work).
 
-**Why:** the borrow is a stopgap; the dynamic init is now room4d's own, like
+**Why:** the borrow is a stopgap; the dynamic init is now reifyscene's own, like
 every other stage. **Status:** DONE.
 
 ### Follow-up: own 2D point tracker — DONE (v0.1.13.0)
 
-room4d's own tracker now produces the 2D tracks the native motion init consumes —
-the last borrowed input in the motion-init path is closed. `room4d/tracking/tapnet/`
+reifyscene's own tracker now produces the 2D tracks the native motion init consumes —
+the last borrowed input in the motion-init path is closed. `reifyscene/tracking/tapnet/`
 vendors the DeepMind TAPIR torch model byte-for-byte and `TAPIRWrapper` (a real
 `PointTracker` backend, sibling to the CoTracker wrapper) faithfully ports SoM's
 `compute_tracks_torch.py` all-pairs FG-seeded loop to `(x, y, occ, dist)`.
@@ -176,11 +176,11 @@ truth, not borrowed reconstruction.
 
 ### Step 12: native geometry (VGGT-Long) → real renderer — pose rung DONE
 
-Replace the borrowed DyCheck geometry (depth/poses; masks deferred) with room4d's
+Replace the borrowed DyCheck geometry (depth/poses; masks deferred) with reifyscene's
 own VGGT-Long reconstruction, scored against the DyCheck-GT oracle (masked mPSNR
 ~20.75 on paper-windmill), one input at a time.
 
-- **PR 2 — geometry-provider seam: DONE (v0.1.14.0).** `room4d/lifting/geometry_provider.py`
+- **PR 2 — geometry-provider seam: DONE (v0.1.14.0).** `reifyscene/lifting/geometry_provider.py`
   (`GeometryProvider` ABC + `DyCheckGeometryProvider`, the permanent oracle);
   `build_native_init_inputs`/`NativeMotionInitializer` take an optional `provider`.
   Byte-identical to the old direct path (lossless refactor).
@@ -196,10 +196,10 @@ own VGGT-Long reconstruction, scored against the DyCheck-GT oracle (masked mPSNR
 - **Remaining rungs (lower priority — poses were the dominant gap):** native DEPTH
   (explored in spike R3, not productionized) and native FG masks (needs a
   segmenter, none wired in). Score each vs the oracle when picked up.
-- **The big convergence** — making the *production* `Room4DPipeline` use the trained
+- **The big convergence** — making the *production* `ReifyScenePipeline` use the trained
   renderer end-to-end — is its own headline item below.
 
-### Productionize the trained renderer into Room4DPipeline — → F0 (design doc)
+### Productionize the trained renderer into ReifyScenePipeline — → F0 (design doc)
 
 **Superseded by the full-pipeline design.** This is now **F0 (renderable core)** in
 `docs/design/2026-06-24-full-pipeline-architecture-neurosymbolic-queryable-4d.md`: delete the
@@ -242,7 +242,7 @@ contract) but is only driven by `run_render_proof.py`.
 (see "Productionize the trained renderer") — there is no real in-pipeline render to
 benchmark until then.
 
-**Effort:** L **Priority:** P2 **Depends on:** trained renderer in Room4DPipeline
+**Effort:** L **Priority:** P2 **Depends on:** trained renderer in ReifyScenePipeline
 **→ Now folded into** the design doc's eval: in-pipeline masked-NVS lands in F0; the round-trip
 graph-diff eval is P7. The "permanent measuring instrument" role is the design's eval stage.
 

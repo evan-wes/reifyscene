@@ -35,16 +35,16 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.perception.instance.instance_artifact import InstanceArtifact
-from room4d.perception.reid.dino_reid import DinoReid
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.reid.dino_reid import DinoReid
 
 
 def _segment_windmill(rgbs_np: np.ndarray):
     """SAM 2 over the frames -> (observations, mask_arrays). Mirrors f0_validate."""
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     images = [rgbs_np[i] for i in range(rgbs_np.shape[0])]
 

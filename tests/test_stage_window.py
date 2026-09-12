@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from room4d.api.resume import resolve_stage_window
-from room4d.api.stages import STAGE_ORDER
+from reifyscene.api.resume import resolve_stage_window
+from reifyscene.api.stages import STAGE_ORDER
 
 
 def _window(start: str, stop: str) -> list[str]:

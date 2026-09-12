@@ -1,6 +1,6 @@
 run:
-  name: room4d_dev
-  output_dir: artifacts/runs/room4d_dev
+  name: reifyscene_dev
+  output_dir: artifacts/runs/reifyscene_dev
 
 dataset:
   input_dir: data/raw
@@ -50,6 +50,13 @@ calibration:
     camera_model: SIMPLE_RADIAL
     fix_intrinsics: false
     verbose: false
+
+graph:
+  # A point track is evidence for the person or object whose mask it sits inside: on at
+  # least this fraction of the frames the two share, over at least this many frames.
+  # Tracks inside nothing are the background's evidence.
+  track_membership_min_ratio: 0.5
+  track_membership_min_frames: 2
 
 optimization:
   schedule: stage1_sync_pose

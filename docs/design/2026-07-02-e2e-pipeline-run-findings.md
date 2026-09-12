@@ -1,7 +1,7 @@
 # End-to-end pipeline run — integration findings (spin, geometry-backend matrix)
 
 **Date:** 2026-07-02 (runs 2026-07-01→02) · **Data:** `shape_of_motion/iphone/spin` (426 frames, 720×960)
-· **Driver:** `scripts/run_single_video_room4d.py`, incremental stage windows, GPU-guarded (87 °C watchdog).
+· **Driver:** `scripts/run_single_video_reifyscene.py`, incremental stage windows, GPU-guarded (87 °C watchdog).
 
 ## Purpose
 

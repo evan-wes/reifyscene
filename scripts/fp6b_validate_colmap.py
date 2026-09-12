@@ -6,7 +6,7 @@ GT focal, scored vs the dataset GT camera poses. Reports registered-frame fracti
 gauge-free pairwise-relative rotation (the M0 metric that caught the calibration arc's
 silent cam-12 miss) + Sim(3)-aligned APE (monocular SfM is up-to-scale).
 
-Run (GPU; hloc/pycolmap via setup_room4d.sh --with-calibration):
+Run (GPU; hloc/pycolmap via setup_reifyscene.sh --with-calibration):
     python scripts/fp6b_validate_colmap.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 60
 """
 
@@ -18,8 +18,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 
 
 def geodesic_deg(Ra: np.ndarray, Rb: np.ndarray) -> float:

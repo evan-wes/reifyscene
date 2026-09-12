@@ -1,15 +1,15 @@
-"""Dump room4d's *native* motion init to an .npz (parity with the SoM borrow).
+"""Dump reifyscene's *native* motion init to an .npz (parity with the SoM borrow).
 
-Builds the motion init natively (`NativeMotionInitializer`: room4d lifts the 2D
+Builds the motion init natively (`NativeMotionInitializer`: reifyscene lifts the 2D
 tracks to 3D, then clusters + Procrustes + places Gaussians) and writes the same
 bundle layout as ``scripts/borrow_som_motion_init.py`` — so the native bundle can
 be inspected, diffed against the borrowed one, and loaded back through
 ``render/gaussian4d/motion_init.py::load_borrowed_init``.
 
-Unlike the borrow script, this runs in the plain ``room4d`` env (no SoM reference
+Unlike the borrow script, this runs in the plain ``reifyscene`` env (no SoM reference
 env, no cuML): the only borrowed input is the 2D point tracker output.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/native_motion_init.py \
         --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --num-bases 10 --seed 0 \
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.render.gaussian4d.motion_init import NativeMotionInitializer
+from reifyscene.render.gaussian4d.motion_init import NativeMotionInitializer
 
 
 def _np(t) -> np.ndarray:
@@ -31,7 +31,7 @@ def _np(t) -> np.ndarray:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Dump room4d's native motion init (no SoM env / cuML)")
+    ap = argparse.ArgumentParser(description="Dump reifyscene's native motion init (no SoM env / cuML)")
     ap.add_argument("--dataset-root", required=True)
     ap.add_argument("--num-fg", type=int, default=40_000)
     ap.add_argument("--num-bg", type=int, default=100_000)

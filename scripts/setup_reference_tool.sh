@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible installer for the room4d reference comparison tool.
+# Reproducible installer for the reifyscene reference comparison tool.
 #
 # Purpose:
 #   Stand up an ISOLATED conda environment containing third-party reference 4D
-#   reconstruction methods, so room4d's own renderer can be benchmarked against
+#   reconstruction methods, so reifyscene's own renderer can be benchmarked against
 #   a known-good implementation (and published numbers) on shared datasets
 #   (DyCheck iPhone, NVIDIA Dynamic Scenes). This env is intentionally separate
-#   from the main `room4d` env: the reference repos pin older torch/CUDA, and we
+#   from the main `reifyscene` env: the reference repos pin older torch/CUDA, and we
 #   do not want them downgrading the main env's torch (which must keep sm_120).
 #
 # What this installs today (Shape of Motion):
@@ -29,8 +29,8 @@ set -euo pipefail
 #     errors out if asked for it until that work is scoped.
 #
 # Environment behavior:
-#   - conda-only, mirroring scripts/setup_room4d.sh (no silent venv fallback).
-#   - Provide --conda-env NAME (default: room4d_som_ref).
+#   - conda-only, mirroring scripts/setup_reifyscene.sh (no silent venv fallback).
+#   - Provide --conda-env NAME (default: reifyscene_som_ref).
 #   - The env is created with the pinned Python if it does not already exist.
 
 # ------------------------------------------------------------------------------
@@ -41,7 +41,7 @@ SOM_REPO="https://github.com/vye16/shape-of-motion.git"
 SOM_COMMIT="579753e1c7ba96f60cd7690e5b835627bd1935e9"   # 2025-08-02 "update iccv v2"
 
 # PyTorch: cu128 build is the lowest CUDA that ships sm_120 (Blackwell) kernels
-# AND aligns with RAPIDS cu12 wheels. (The main room4d env uses cu130; these
+# AND aligns with RAPIDS cu12 wheels. (The main reifyscene env uses cu130; these
 # envs are isolated, so they need not match.)
 TORCH_VERSION="2.11.0"
 TORCHVISION_VERSION="0.26.0"
@@ -76,13 +76,17 @@ GSPLAT_ARCH_LIST="12.0"   # TORCH_CUDA_ARCH_LIST for the 5090 (sm_120)
 CONDA_GCC_VERSION="${CONDA_GCC_VERSION:-13}"
 CUDA_HOST_GXX_MAX_MAJOR=14   # exclusive upper bound enforced below
 PINNED_PYTHON="${PINNED_PYTHON:-3.10}"
+# Upper bound for the bootstrap setuptools install; must satisfy the pinned torch
+# (2.11.0+cu128 declares setuptools<82). Bump alongside a torch pin bump.
+SETUPTOOLS_MAX_SPEC="${SETUPTOOLS_MAX_SPEC:-<82}"
+CREATE_ENV=0
 
 # ------------------------------------------------------------------------------
 # Config
 # ------------------------------------------------------------------------------
 
 # Must match DEFAULT_CONDA_ENV in scripts/run_reference_benchmark.py.
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-room4d_som_ref}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-reifyscene_som_ref}"
 INSTALL_SOM=1
 INSTALL_MOSCA=0
 UNLOCKED=0
@@ -90,12 +94,14 @@ UNLOCKED=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 SOM_DIR="${THIRD_PARTY_DIR}/shape-of-motion"
-LOCK_FILE="${ROOT_DIR}/scripts/locks/room4d_som_ref.lock"
+LOCK_FILE="${ROOT_DIR}/scripts/locks/reifyscene_som_ref.lock"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --conda-env)
       CONDA_ENV_NAME="$2"; shift 2 ;;
+    --create-env)
+      CREATE_ENV=1; shift ;;
     --python)
       PINNED_PYTHON="$2"; shift 2 ;;
     --no-shape-of-motion)
@@ -109,14 +115,20 @@ while [[ $# -gt 0 ]]; do
 Usage: scripts/setup_reference_tool.sh [options]
 
 Sets up an isolated conda env with reference 4D reconstruction methods for
-benchmarking room4d's renderer.
+benchmarking reifyscene's renderer.
 
 Options:
-  --conda-env NAME        Conda env to create/use (default: room4d_som_ref)
+  --conda-env NAME        Conda env to use (default: reifyscene_som_ref)
+  --create-env            Create the conda env if it does not exist. Opt-in for the
+                          same reason as setup_reifyscene.sh: creating this env is a
+                          ~21 GB, multi-minute operation including a gsplat source
+                          build, so a typo in --conda-env must fail loudly rather
+                          than silently build one. Python version comes from the
+                          lockfile header.
   --python VERSION        Python version if the env must be created (default: 3.10)
   --no-shape-of-motion    Skip the Shape of Motion install
   --unlocked              Resolve dependencies fresh instead of installing from
-                          scripts/locks/room4d_som_ref.lock (regenerate locks
+                          scripts/locks/reifyscene_som_ref.lock (regenerate locks
                           with scripts/gen_env_locks.sh)
   --with-mosca            (NOT YET IMPLEMENTED) set up MoSca — errors out
 
@@ -134,7 +146,7 @@ EOF
 done
 
 # ------------------------------------------------------------------------------
-# Helpers (mirrors scripts/setup_room4d.sh conventions)
+# Helpers (mirrors scripts/setup_reifyscene.sh conventions)
 # ------------------------------------------------------------------------------
 
 run_conda_relaxed() {
@@ -181,13 +193,51 @@ conda_base_dir() {
   fi
 }
 
+# Read the Python version this lockfile was captured under, from its header:
+#   "# Platform: Linux/x86_64 | Python 3.10.20 | torch ..."
+# Mirrors the same helpers in setup_reifyscene.sh; these are standalone scripts
+# with no shared library, so the parsing lives in both.
+lockfile_python_full() {
+  [[ -f "${LOCK_FILE}" ]] || return 0
+  sed -n 's/.*| *Python \([0-9][0-9.]*\) *|.*/\1/p' "${LOCK_FILE}" | head -n 1
+}
+
+lockfile_python_minor() {
+  local full; full="$(lockfile_python_full)"
+  [[ -n "${full}" ]] || return 0
+  echo "${full}" | cut -d. -f1,2
+}
+
+# MAJOR.MINOR must match the lockfile: wheels are tagged by minor version, so a
+# 3.10-pinned tree will not install on 3.11. A PATCH difference is reported and
+# allowed - the patch level is not part of the ABI, and demanding an exact match
+# would fail on a perfectly good env every time Python is updated.
+check_env_python_version() {
+  local want_minor want_full have_full have_minor
+  want_minor="$(lockfile_python_minor)"
+  want_full="$(lockfile_python_full)"
+  [[ -n "${want_minor}" ]] || return 0
+  have_full="$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)" || return 0
+  have_minor="$(echo "${have_full}" | cut -d. -f1,2)"
+
+  if [[ "${have_minor}" != "${want_minor}" ]]; then
+    echo "Python version mismatch: env has ${have_full}, lockfile pins ${want_full}." >&2
+    echo "  The pinned wheels are built for Python ${want_minor} and will not install on ${have_minor}." >&2
+    echo "  Use an env with Python ${want_minor}, or re-resolve with --unlocked." >&2
+    exit 1
+  fi
+  if [[ "${have_full}" != "${want_full}" ]]; then
+    echo "Note: env Python ${have_full}, lockfile captured under ${want_full} (same ${want_minor} series - fine)."
+  fi
+}
+
 activate_or_create_env() {
   # Safety: this script only ever sets up an ISOLATED reference env. Refuse to
-  # target protected envs so it can never modify the main room4d environment.
+  # target protected envs so it can never modify the main reifyscene environment.
   case "${CONDA_ENV_NAME}" in
-    room4d|base|"")
+    reifyscene|base|"")
       echo "Refusing to run against protected/empty env '${CONDA_ENV_NAME}'." >&2
-      echo "This script is for an isolated reference env (e.g. room4d_som_ref)." >&2
+      echo "This script is for an isolated reference env (e.g. reifyscene_som_ref)." >&2
       exit 1 ;;
   esac
 
@@ -198,9 +248,22 @@ activate_or_create_env() {
   # shellcheck disable=SC1091
   source "$(conda_base_dir)/etc/profile.d/conda.sh"
 
-  if ! conda env list | awk '{print $1}' | grep -qx "${CONDA_ENV_NAME}"; then
-    echo "Creating conda env '${CONDA_ENV_NAME}' (python=${PINNED_PYTHON})..."
-    run_conda_relaxed create -y -n "${CONDA_ENV_NAME}" "python=${PINNED_PYTHON}"
+  _envs="$(conda env list | awk '{print $1}' || true)"
+  if ! grep -qx "${CONDA_ENV_NAME}" <<<"${_envs}"; then
+    # Creating this env is ~21 GB and includes a gsplat source build, so it is
+    # opt-in: without --create-env a typo in --conda-env fails here instead of
+    # silently building an environment nobody asked for. Matches
+    # setup_reifyscene.sh.
+    if [[ ${CREATE_ENV} -eq 0 ]]; then
+      echo "Conda environment '${CONDA_ENV_NAME}' does not exist." >&2
+      echo "Re-run with --create-env to create it, or pass an existing --conda-env NAME." >&2
+      exit 1
+    fi
+    local create_py
+    create_py="$(lockfile_python_minor)"
+    [[ -n "${create_py}" ]] || create_py="${PINNED_PYTHON}"
+    echo "Creating conda env '${CONDA_ENV_NAME}' (python=${create_py})..."
+    run_conda_relaxed create -y -n "${CONDA_ENV_NAME}" "python=${create_py}"
   fi
 
   echo "Activating conda environment: ${CONDA_ENV_NAME}"
@@ -217,6 +280,7 @@ activate_or_create_env() {
   fi
   echo "Confirmed active env: ${CONDA_DEFAULT_ENV} (${CONDA_PREFIX})"
   echo "Python executable: $(command -v python)"
+  check_env_python_version
 }
 
 ensure_cuda_home_exports() {
@@ -324,8 +388,8 @@ install_som_requirements() {
   # cannot influence unrelated packages) and (b) split out RAPIDS, moving it
   # from cu11/24.6 to a Blackwell-capable cu12 release.
   local upstream="${SOM_DIR}/requirements.txt"
-  local patched="${SOM_DIR}/requirements.room4d.txt"
-  local rapids="${SOM_DIR}/requirements.room4d-rapids.txt"
+  local patched="${SOM_DIR}/requirements.reifyscene.txt"
+  local rapids="${SOM_DIR}/requirements.reifyscene-rapids.txt"
   [[ -f "${upstream}" ]] || { echo "Missing ${upstream}" >&2; exit 1; }
 
   sed -E \
@@ -504,7 +568,12 @@ if [[ ${INSTALL_MOSCA} -eq 1 ]]; then
 fi
 
 activate_or_create_env
-python -m pip install --upgrade pip setuptools wheel
+# Bounded, not floating: this runs before the pinned tree, and an unbounded
+# `--upgrade setuptools` installs whatever is newest that day. The pinned torch
+# here (2.11.0+cu128) declares `setuptools<82`, so a fresh build today would land
+# on 84 and violate it — this env sits on 70.2.0 only because that was current
+# when it was last built. Same escape setup_reifyscene.sh had.
+python -m pip install --upgrade pip wheel "setuptools${SETUPTOOLS_MAX_SPEC}"
 
 install_torch
 ensure_cuda_toolkit

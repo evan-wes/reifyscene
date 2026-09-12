@@ -7,7 +7,7 @@ keypoints land inside the person box, body-part seg has multiple parts, and
 depth/normals are well-formed. Runs the actual dense-ladder rung over Mask R-CNN
 human instances.
 
-Run (GPU; weights via setup_room4d.sh --with-sapiens):
+Run (GPU; weights via setup_reifyscene.sh --with-sapiens):
     python scripts/fp5_validate_humans.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 8
 """
 
@@ -18,14 +18,14 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.perception.humans.dense_ladder import SapiensDenseRung
-from room4d.perception.instance.instance_artifact import InstanceArtifact
-from room4d.perception.instance.segment import FloorInstanceSegmenter
-from room4d.perception.objects.detector import ObjectDetector
-from room4d.perception.objects.segmenter import ObjectSegmenter
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.perception.humans.dense_ladder import SapiensDenseRung
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.instance.segment import FloorInstanceSegmenter
+from reifyscene.perception.objects.detector import ObjectDetector
+from reifyscene.perception.objects.segmenter import ObjectSegmenter
 
 
 def main() -> None:

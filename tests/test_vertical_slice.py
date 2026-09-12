@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from tests.conftest import write_test_video
 
 
@@ -13,7 +13,7 @@ def test_vertical_slice_smoke(tmp_path: Path) -> None:
     write_test_video(cam_a, color_offset=0)
     write_test_video(cam_b, color_offset=25)
 
-    pipeline = Room4DPipeline({'run_dir': tmp_path / 'run', 'geometry': {'backend_mode': 'heuristic'}})
+    pipeline = ReifyScenePipeline({'run_dir': tmp_path / 'run', 'geometry': {'backend_mode': 'heuristic'}})
     outputs = pipeline.run([cam_a, cam_b])
 
     assert outputs['ingest'].num_streams() == 2

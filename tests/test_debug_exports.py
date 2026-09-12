@@ -3,10 +3,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, VideoStreamRef
-from room4d.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, VideoStreamRef
+from reifyscene.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
 
 
 def test_materialize_shared_debug_frames(tmp_path: Path) -> None:
@@ -15,7 +15,7 @@ def test_materialize_shared_debug_frames(tmp_path: Path) -> None:
     from tests.conftest import write_test_video
     write_test_video(video_path, num_frames=6, width=32, height=24, fps=3.0)
 
-    pipe = Room4DPipeline({'run_dir': tmp_path / 'run', 'tracking': {'frame_stride': 2, 'max_frames': 3}})
+    pipe = ReifyScenePipeline({'run_dir': tmp_path / 'run', 'tracking': {'frame_stride': 2, 'max_frames': 3}})
     ingest = pipe.preprocess([str(video_path)])
     cfg = {'enabled': True, 'shared_rgb_frames': {'enabled': True, 'dir_name': 'debug_rgb_frames'}, 'geometry': {'enabled': True}, 'tracking': {'enabled': True}}
     index = materialize_shared_debug_frames(pipe, ingest, cfg)

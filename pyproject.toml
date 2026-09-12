@@ -3,11 +3,11 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "room4d"
+name = "reifyscene"
 # Canonical version lives in the VERSION file (single source of truth, read
 # by the tag workflows and gstack tooling); setuptools reads it at build time.
 dynamic = ["version"]
-description = "Prototype room-scale 4D reconstruction pipeline scaffold."
+description = "Single-video dynamic 4D reconstruction with an interpretable, queryable, semantically editable scene representation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -41,7 +41,7 @@ vision = [
   "Pillow>=10.0",
   "huggingface_hub[cli]>=0.23",
   # einshape is required by the ported tapnet (bootstapir) point-tracker model
-  # in room4d/tracking/tapnet/ — kept as a real dep so that port stays
+  # in reifyscene/tracking/tapnet/ — kept as a real dep so that port stays
   # byte-faithful to Shape-of-Motion's preproc/tapnet_torch reference.
   "einshape>=1.0",
 ]
@@ -52,10 +52,10 @@ calibration = [
   "pycolmap==3.13.0",
 ]
 pose_refine = [
-  # Bundle-adjustment pose refinement (room4d/geometry/pose_refine.py): seeds a
+  # Bundle-adjustment pose refinement (reifyscene/geometry/pose_refine.py): seeds a
   # pycolmap Reconstruction with the backend geometry + VGGSfM tracks and runs
   # robust iterative BA. pycolmap is pinned to match the calibration extra (and
-  # the hloc patches in setup_room4d.sh); hydra-core/omegaconf are required by
+  # the hloc patches in setup_reifyscene.sh); hydra-core/omegaconf are required by
   # the vendored VGGSfM tracker (third_party/vggt) and are otherwise undeclared.
   "pycolmap==3.13.0",
   "hydra-core>=1.3",
@@ -69,7 +69,7 @@ vggt_long = [
 ]
 
 [project.scripts]
-room4d = "room4d.cli.main:app"
+reifyscene = "reifyscene.cli.main:app"
 
 [tool.setuptools]
 include-package-data = true
@@ -79,7 +79,7 @@ version = { file = "VERSION" }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["room4d*"]
+include = ["reifyscene*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -89,7 +89,7 @@ line-length = 100
 target-version = "py311"
 # Vendored byte-for-byte from DeepMind's tapnet torch port (kept re-diffable
 # against upstream); not linted to our style.
-extend-exclude = ["room4d/tracking/tapnet"]
+extend-exclude = ["reifyscene/tracking/tapnet"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from room4d.common.backend_ladder import (
+from reifyscene.common.backend_ladder import (
     BackendLadder,
     BackendRung,
     CapabilityManifest,
@@ -116,3 +116,52 @@ def test_manifest_roundtrip():
     )
     restored = CapabilityManifest.from_dict(manifest.to_dict())
     assert restored == manifest
+
+
+# --- strict rungs: a backend asked for as real does not fall back silently ------------
+
+def _boom(_inp):
+    raise RuntimeError("model crashed")
+
+
+def test_a_strict_fail_rung_raises_when_it_fails_but_not_when_skipped() -> None:
+    from reifyscene.common.backend_ladder import BackendRequired
+
+    failing = BackendLadder("s", [BackendRung("real", "best", runner=_boom, strict="fail"),
+                                  BackendRung("floor", "empty", runner=lambda inp: "floor")])
+    with pytest.raises(BackendRequired, match="asked for as real, failed"):
+        failing.run({})
+    skipped = BackendLadder("s", [BackendRung("real", "best", runner=_boom, probe=lambda: "not-installed",
+                                              strict="fail"),
+                                  BackendRung("floor", "empty", runner=lambda inp: "floor")])
+    result, manifest = skipped.run({})
+    assert result == "floor" and manifest.rungs[0].status == "skipped"
+
+
+def test_a_strict_always_rung_raises_when_skipped_too() -> None:
+    from reifyscene.common.backend_ladder import BackendRequired
+
+    ladder = BackendLadder("geometry", [
+        BackendRung("vggt-long", "best", runner=lambda inp: "x", probe=lambda: "not-installed",
+                    strict="always"),
+        BackendRung("empty", "empty", runner=lambda inp: "empty"),
+    ])
+    with pytest.raises(BackendRequired, match="unavailable"):
+        ladder.run({})
+
+
+def test_fallbacks_are_read_from_the_manifest_and_the_tracker() -> None:
+    from types import SimpleNamespace
+
+    from reifyscene.common.backend_ladder import fallbacks_of
+
+    ladder = BackendLadder("segment", [BackendRung("sam2", "best", runner=_boom),
+                                       BackendRung("maskrcnn_iou", "floor", runner=lambda inp: "ok")])
+    _, manifest = ladder.run({})
+    seg = SimpleNamespace(metadata={"capability": manifest.to_dict()})
+    [f] = fallbacks_of("segment", seg)
+    assert f["wanted"] == "sam2" and f["used"] == "maskrcnn_iou" and "model crashed" in f["why"]
+    tracks = SimpleNamespace(metadata={}, track_payloads_by_stream={"0": {"backend_used": "heuristic"}})
+    assert fallbacks_of("tracking", tracks)[0]["used"] == "heuristic"
+    best = SimpleNamespace(metadata={}, track_payloads_by_stream={"0": {"backend_used": "cotracker_windowed"}})
+    assert fallbacks_of("tracking", best) == []

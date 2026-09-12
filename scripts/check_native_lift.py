@@ -1,6 +1,6 @@
 """Validate the native 3D-track lift against SoM's cached lifted tracks.
 
-Runs room4d's native lift (``room4d.lifting.native_track_lift``) on a DyCheck
+Runs reifyscene's native lift (``reifyscene.lifting.native_track_lift``) on a DyCheck
 sequence and compares the foreground trajectories + scene normalization to the
 Shape-of-Motion cache that produced the *borrowed* init bundle
 (``flow3d_preprocessed/cache/tracks_3d_40000.pth`` + ``scene_norm_dict.pth``).
@@ -11,7 +11,7 @@ come from a random track subsample, so they're checked for agreement within a
 tolerance rather than equality. This is the PR-A acceptance check; the full
 mPSNR≈20.7 validation lands with the initializer in PR-B.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/check_native_lift.py \
         --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --seed 0
@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from room4d.lifting.native_track_lift import build_native_init_inputs
+from reifyscene.lifting.native_track_lift import build_native_init_inputs
 
 
 def _bbox(xyz: torch.Tensor) -> str:
