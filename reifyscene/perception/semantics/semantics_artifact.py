@@ -31,11 +31,26 @@ UNKNOWN_CATEGORY = 'unknown'
 
 @dataclass
 class SemanticRecord:
-    """Open-vocab semantics for one canonical tracklet."""
+    """Open-vocab semantics for one canonical tracklet.
+
+    ``category`` is ``"unknown"`` whenever the rung declined to name the track.
+    An abstention is a *value*, not a missing field: ``abstained`` says the rung
+    was asked and refused, ``abstain_reason`` says why, and ``score``/``margin``/
+    ``category_topk`` still carry the (rejected) evidence so a consumer can audit
+    the call. A record with ``abstained=False`` and ``category="unknown"`` was
+    never asked -- a different thing entirely.
+    """
 
     category: str = UNKNOWN_CATEGORY
     score: float = 0.0
     category_topk: list[tuple[str, float]] = field(default_factory=list)  # [(label, score), ...]
+    # top1 - top2 cosine, or None when there was no runner-up to measure against.
+    # The discriminative signal: an off-domain vocabulary produces a high-scoring
+    # but near-flat ranking, so absolute score does not separate a real hit from a
+    # forced one and this does. Measurements in `score_zero_shot`.
+    margin: float | None = None
+    abstained: bool = False
+    abstain_reason: str | None = None  # 'low_margin' | 'low_score' | 'no_labels' | 'no_concept'
     attributes: dict[str, Any] = field(default_factory=dict)
     caption: Optional[str] = None  # free-form; filled by Qwen-VL at FP4b
 
@@ -51,6 +66,9 @@ class SemanticRecord:
             category=str(raw.get('category', UNKNOWN_CATEGORY)),
             score=float(raw.get('score', 0.0)),
             category_topk=topk,
+            margin=None if raw.get('margin') is None else float(raw['margin']),
+            abstained=bool(raw.get('abstained', False)),
+            abstain_reason=raw.get('abstain_reason'),
             attributes=dict(raw.get('attributes', {})),
             caption=raw.get('caption'),
         )

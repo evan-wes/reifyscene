@@ -17,6 +17,7 @@ from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 from reifyscene.perception.semantics.semantics_artifact import UNKNOWN_CATEGORY
 from reifyscene.perception.semantics.siglip_semantics import (
+    DEFAULT_MIN_MARGIN,
     FloorSemantics,
     SiglipSemantics,
     score_zero_shot,
@@ -32,31 +33,86 @@ def _unit(*xs: float) -> np.ndarray:
 
 def test_score_picks_argmax() -> None:
     text = np.eye(2, dtype=np.float32)  # cat=[1,0], dog=[0,1]
-    cat, score, topk = score_zero_shot(_unit(1, 0), text, ['cat', 'dog'])
-    assert cat == 'cat'
-    assert score == 1.0
-    assert topk[0] == ('cat', 1.0)
+    res = score_zero_shot(_unit(1, 0), text, ['cat', 'dog'])
+    assert res.category == 'cat'
+    assert res.score == 1.0
+    assert res.topk[0] == ('cat', 1.0)
+    assert not res.abstained and res.abstain_reason is None
 
 
 def test_score_topk_ranked() -> None:
     text = np.eye(2, dtype=np.float32)
-    cat, score, topk = score_zero_shot(_unit(0.6, 0.8), text, ['cat', 'dog'], topk=2)
-    assert cat == 'dog'
-    assert [lbl for lbl, _ in topk] == ['dog', 'cat']  # 0.8 > 0.6
-    assert abs(score - 0.8) < 1e-6
+    res = score_zero_shot(_unit(0.6, 0.8), text, ['cat', 'dog'], topk=2)
+    assert res.category == 'dog'
+    assert [lbl for lbl, _ in res.topk] == ['dog', 'cat']  # 0.8 > 0.6
+    assert abs(res.score - 0.8) < 1e-6
 
 
 def test_score_empty_vocab_is_unknown() -> None:
-    cat, score, topk = score_zero_shot(_unit(1, 0), np.empty((0, 2), np.float32), [])
-    assert cat == UNKNOWN_CATEGORY and score == 0.0 and topk == []
+    res = score_zero_shot(_unit(1, 0), np.empty((0, 2), np.float32), [])
+    assert res.category == UNKNOWN_CATEGORY and res.score == 0.0 and res.topk == []
+    assert res.abstained and res.abstain_reason == 'no_labels'
+    assert res.margin is None  # nothing to be uncertain between
 
 
 def test_score_min_score_abstains() -> None:
     text = np.stack([_unit(0.3, 0.954)])  # cosine 0.3 with [1,0]
-    cat, score, topk = score_zero_shot(_unit(1, 0), text, ['cat'], min_score=0.5)
-    assert cat == UNKNOWN_CATEGORY
-    assert abs(score - 0.3) < 1e-3  # the (rejected) best score is still reported
-    assert topk[0][0] == 'cat'
+    res = score_zero_shot(_unit(1, 0), text, ['cat'], min_score=0.5)
+    assert res.category == UNKNOWN_CATEGORY
+    assert abs(res.score - 0.3) < 1e-3  # the (rejected) best score is still reported
+    assert res.topk[0][0] == 'cat'
+    assert res.abstain_reason == 'low_score'
+
+
+# --- margin abstention: the guard that catches an off-domain vocabulary ------
+
+def test_score_margin_abstains_on_flat_ranking() -> None:
+    """A near-tie between the top two is the model saying "none of these"."""
+    text = np.stack([_unit(1, 0.0), _unit(1, 0.02)])  # 1.0 vs 0.9998 against [1,0]
+    res = score_zero_shot(_unit(1, 0), text, ['cup', 'handbag'], min_margin=0.02)
+    assert res.category == UNKNOWN_CATEGORY
+    assert res.abstained and res.abstain_reason == 'low_margin'
+    assert res.margin is not None and res.margin < 0.02
+    assert res.topk[0][0] == 'cup'  # the rejected winner is still reported
+
+
+def test_score_margin_keeps_a_clear_win() -> None:
+    text = np.eye(2, dtype=np.float32)
+    res = score_zero_shot(_unit(1, 0), text, ['cat', 'dog'], min_margin=0.02)
+    assert res.category == 'cat'
+    assert not res.abstained
+    assert res.margin is not None and res.margin > 0.02
+
+
+def test_score_single_label_vocab_has_no_margin_gate() -> None:
+    """One candidate has no runner-up; the margin gate must not reject it."""
+    text = np.stack([_unit(1, 0)])
+    res = score_zero_shot(_unit(1, 0), text, ['cat'], min_margin=0.5)
+    assert res.category == 'cat'
+    assert res.margin is None and not res.abstained
+
+
+def test_labcoat_margins_separate_people_from_junk() -> None:
+    """Regression on the real numbers that motivated the default.
+
+    Measured top1/top2 cosines from davis_lab-coat_full. The default threshold
+    must keep both people and reject every off-vocabulary label.
+    """
+    measured = {  # track -> (top1 label, top1, top2)
+        'person_a': ('person', 0.1151, 0.0821),
+        'person_b': ('person', 0.1080, 0.0631),
+        'junk_handbag': ('handbag', 0.1170, 0.1065),  # highest score in the run, and wrong
+        'junk_bird': ('bird', 0.1077, 0.1055),
+        'junk_cup': ('cup', 0.0850, 0.0848),
+    }
+    kept, refused = [], []
+    for name, (label, top1, top2) in measured.items():
+        text = np.stack([_unit(top1, np.sqrt(max(1 - top1 ** 2, 0))),
+                         _unit(top2, np.sqrt(max(1 - top2 ** 2, 0)))])
+        res = score_zero_shot(_unit(1, 0), text, [label, 'other'], min_margin=DEFAULT_MIN_MARGIN)
+        (refused if res.abstained else kept).append(name)
+    assert sorted(kept) == ['person_a', 'person_b']
+    assert sorted(refused) == ['junk_bird', 'junk_cup', 'junk_handbag']
 
 
 # --- FloorSemantics ----------------------------------------------------------
@@ -88,6 +144,9 @@ def test_floor_carries_majority_concept() -> None:
     assert records['track_0'].category == 'car'
     assert records['track_0'].score == 1.0
     assert records['track_1'].category == UNKNOWN_CATEGORY
+    assert records['track_1'].abstained
+    assert records['track_1'].abstain_reason == 'no_concept'
+    assert not records['track_0'].abstained  # a real concept is not a refusal
     assert embeddings == {}  # floor has no embeddings
 
 

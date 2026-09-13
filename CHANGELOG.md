@@ -7,6 +7,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [0.3.0.1] - 2026-09-12
+
+### Fixed
+- **The `semantics` stage no longer asserts a category it has no warrant for**
+  (`reifyscene/perception/semantics/siglip_semantics.py`, `semantics_artifact.py`,
+  `reifyscene/api/pipeline.py`). On `davis_lab-coat_full` the open-vocab rung named 8 of 8
+  tracks — `cup`, `bird`, `handbag` — for a scene of people in lab coats behind a fence. The
+  rung was working; it was being asked a closed-vocabulary question, since `DEFAULT_VOCAB` is
+  COCO-80 so the SigLIP rung stays A/B-comparable against the detector floor. With no right
+  answer available the model still returns a winner, and nothing downstream could tell that
+  winner from a real one.
+  - **Abstain on the top1−top2 margin, not the absolute score.** Absolute score does not
+    separate: the junk label `handbag` scored 0.1170, the highest in the run and above both
+    correctly-named people. The gap to the runner-up does — the two people scored margins of
+    0.045 and 0.033, every junk label 0.0105 or less. `score_zero_shot` gains `min_margin`
+    (`DEFAULT_MIN_MARGIN = 0.02`, override via `cfg['min_margin']`) and returns a
+    `ZeroShotResult` carrying the margin and an abstention reason. The pre-existing `min_score`
+    hook is kept — a scene-appropriate vocabulary makes it meaningful again — but it is off by
+    default and is not the guard that catches an off-domain vocabulary. A single-label
+    vocabulary has no runner-up, so its margin is `None` and the gate does not fire.
+  - **An abstention is no longer overwritten by something worse.** `objects` fell through to the
+    detector's COCO `concept` when semantics said `unknown`; `segment` is class-agnostic and
+    emits `concept=''`, so a refusal became an **empty-string category**, indistinguishable
+    downstream from a real label. It now resolves to `unknown`.
+  - **An abstention is recorded as a value, not a gap.** `SemanticRecord` gains `margin`,
+    `abstained` and `abstain_reason` (`low_margin` / `low_score` / `no_labels` / `no_concept`),
+    so a consumer can tell "asked and refused" from "never asked", and the rejected evidence
+    stays available for audit. Records written before this change load with the new fields
+    defaulted.
+
+  Effect on `davis_lab-coat_full`, replayed against the stored rankings: `named_tracks` 8/8 → 2/8,
+  keeping exactly the two people and refusing all six off-vocabulary labels. The threshold is
+  tuned on eight tracks of one clip — a starting value, not a validated one. The real repair is a
+  scene-appropriate vocabulary, which is a rung above this one and a separate change; this makes
+  the failure visible in the meantime instead of silently labelled.
+
 ## [0.3.0.0] - 2026-09-11
 
 ### Added

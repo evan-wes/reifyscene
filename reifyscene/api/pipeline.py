@@ -49,7 +49,10 @@ from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 from reifyscene.perception.reid.reid_artifact import ReidArtifact
 from reifyscene.perception.reid.reid_stage import FloorReid
 from reifyscene.perception.reid.dino_reid import DinoReid
-from reifyscene.perception.semantics.semantics_artifact import SemanticsArtifact
+from reifyscene.perception.semantics.semantics_artifact import (
+    UNKNOWN_CATEGORY,
+    SemanticsArtifact,
+)
 from reifyscene.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
 from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from reifyscene.query.parser import PromptParser
@@ -862,7 +865,7 @@ class ReifyScenePipeline:
             metadata={},
         )
         artifact.attach_manifest(manifest)
-        named = sum(1 for r in artifact.records.values() if r.category != 'unknown')
+        named = sum(1 for r in artifact.records.values() if r.category != UNKNOWN_CATEGORY)
         artifact.notes.append(f"named_tracks={named}/{len(artifact.records)}")
         self._stamp_stage_metadata(artifact, 'semantics', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
@@ -991,9 +994,14 @@ class ReifyScenePipeline:
             """Open-vocab (category, topk) from the semantics stage; COCO-concept fallback."""
             if semantics_artifact is not None:
                 rec = semantics_artifact.records.get(canonical)
-                if rec is not None and rec.category and rec.category != 'unknown':
+                if rec is not None and rec.category and rec.category != UNKNOWN_CATEGORY:
                     return rec.category, list(rec.category_topk)
-            return str(concept), []
+            # The detector floor is the fallback, but `segment` is class-agnostic and
+            # emits concept=''. Falling through to that blank would turn a semantics
+            # abstention into an empty-string category -- worse than the refusal it
+            # replaced, and indistinguishable from a real label downstream.
+            fallback = str(concept).strip()
+            return (fallback or UNKNOWN_CATEGORY), []
 
         observations = [] if instance_artifact is None else [o for o in instance_artifact.observations if o.kind != 'human']
         for o in observations:
