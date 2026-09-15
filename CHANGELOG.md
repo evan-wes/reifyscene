@@ -23,6 +23,49 @@ version scheme (canonical version in the `VERSION` file, read by
   untouched, so runs on portrait footage are unaffected. The vendored tracker itself is not
   patched: `third_party/` is gitignored and re-cloned at a pinned commit by the setup
   script, so a patch there would not survive a fresh environment.
+## [0.3.0.1] - 2026-09-12
+
+### Fixed
+- **The `semantics` stage no longer asserts a category it has no warrant for**
+  (`reifyscene/perception/semantics/siglip_semantics.py`, `semantics_artifact.py`,
+  `reifyscene/api/pipeline.py`). On `davis_lab-coat_full` the open-vocab rung named 8 of 8
+  tracks — `cup`, `bird`, `handbag` — for a scene of people in lab coats behind a fence. The
+  rung was working; it was being asked a closed-vocabulary question, since `DEFAULT_VOCAB` is
+  COCO-80 so the SigLIP rung stays A/B-comparable against the detector floor. With no right
+  answer available the model still returns a winner, and nothing downstream could tell that
+  winner from a real one.
+  - **Record separation, and act on it only when asked.** Absolute score does not separate:
+    the junk label `handbag` scored 0.1170, the highest in the run and above both
+    correctly-named people. Separation does — the two people led their runner-up by 0.045
+    and 0.033, every junk label by 0.0105 or less. Every record now carries `margin` (raw
+    top1−top2 cosine) and `margin_z` (standard deviations above the typical candidate, over
+    the whole vocabulary), and `score_zero_shot` returns a `ZeroShotResult` carrying both
+    plus an abstention reason.
+
+    **Abstention is off by default**, because a raw gap is not a quantity a constant can be
+    set against: it shrinks as the candidate list grows, so a threshold tuned on COCO-80
+    would over-abstain on a 500-word vocabulary and under-abstain on a 5-word one — the same
+    defect as handing an open-vocab model a closed list. When enabled
+    (`cfg['min_margin_z']`) the gate uses the z-score, which stays comparable as the
+    vocabulary changes size. Its limitation is pinned by test: a bulk of near-identical
+    candidates collapses the spread and inflates the z, so a threshold is not transferable
+    between vocabularies of different shape. Recording both statistics on every run is what
+    lets a threshold be chosen from measurements rather than guessed.
+  - **An abstention is no longer overwritten by something worse.** `objects` fell through to the
+    detector's COCO `concept` when semantics said `unknown`; `segment` is class-agnostic and
+    emits `concept=''`, so a refusal became an **empty-string category**, indistinguishable
+    downstream from a real label. It now resolves to `unknown`.
+  - **An abstention is recorded as a value, not a gap.** `SemanticRecord` gains `margin`,
+    `abstained` and `abstain_reason` (`low_margin` / `low_score` / `no_labels` / `no_concept`),
+    so a consumer can tell "asked and refused" from "never asked", and the rejected evidence
+    stays available for audit. Records written before this change load with the new fields
+    defaulted.
+
+  With the gate enabled at a threshold that separates them, `davis_lab-coat_full` goes from
+  `named_tracks` 8/8 to 2/8 — keeping exactly the two people and refusing all six
+  off-vocabulary labels. No default does that: shipping the mechanism and the measurements,
+  not a constant. The real repair is a scene-appropriate vocabulary, which is a rung above
+  this one and a separate change.
 
 ## [0.3.0.0] - 2026-09-11
 
