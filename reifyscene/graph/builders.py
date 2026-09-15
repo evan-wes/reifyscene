@@ -111,8 +111,8 @@ class DynamicSceneGraphBuilder:
                 edges.append(self.edge_factory.observed_by(background_id, stream_id, conf=1.0))
 
         notes.append(
-            f"track support: inside its mask on at least {self.min_frames} frames and "
-            f"at least {self.min_ratio:.0%} of the frames the two share"
+            f"track support: inside its mask on at least {self.min_frames} frames, and on "
+            f"at least {self.min_ratio:.0%} of the frames it was inside any entity"
         )
         notes.append(
             "TODO: associate entities across streams; a person seen by two cameras is two nodes."
@@ -322,13 +322,19 @@ class _Evidence:
             return _empty_evidence()
         inside = self.support.inside_frames.get(node_id, {})
         shared = self.support.shared_frames.get(node_id, {})
+        anywhere = self.support.inside_any_frames
         track_ids = sorted(inside)
-        ratios = [inside[t] / shared[t] for t in track_ids if shared.get(t)]
+        # How decisively each track belongs to *this* entity rather than another.
+        ratios = [inside[t] / anywhere[t] for t in track_ids if anywhere.get(t)]
+        # And, separately, how much of the entity's own co-visible life it covers --
+        # worth knowing, but not what decides whose evidence it is.
+        coverage = [inside[t] / shared[t] for t in track_ids if shared.get(t)]
         return {
             "support_track_ids": track_ids,
             "support_frames": {str(t): int(inside[t]) for t in track_ids},
             "num_support_tracks": len(track_ids),
             "mean_support_ratio": float(np.mean(ratios)) if ratios else None,
+            "mean_covisible_ratio": float(np.mean(coverage)) if coverage else None,
             "support_motion": self._motion(track_ids),
             "positions": self._positions(track_ids),
         }
@@ -388,6 +394,7 @@ def _empty_evidence() -> dict[str, Any]:
         "support_frames": {},
         "num_support_tracks": 0,
         "mean_support_ratio": None,
+        "mean_covisible_ratio": None,
         "support_motion": {"static": 0, "moving": 0, "uncertain": 0, "static_fraction": None},
         "positions": [],
     }

@@ -491,10 +491,15 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "graph",
-            version=2,
+            version=3,
             changes={
                 2: "entities carry the point tracks that are evidence for them (the graph held "
-                "a node per track); the tracks inside no entity are the background's"
+                "a node per track); the tracks inside no entity are the background's",
+                3: "entity positions and extents come from the geometry's dense pointmaps "
+                "intersected with the masks (they came from the handful of point tracks that "
+                "happened to land on an entity), and a track's support ratio is measured "
+                "against the frames it was inside any entity rather than the entity's whole "
+                "co-visible life (which punished long presence, and so punished re-id)",
             },
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects"),

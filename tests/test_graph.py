@@ -202,17 +202,51 @@ def test_an_entity_reports_whether_its_evidence_moved() -> None:
 
 
 def test_the_thresholds_come_from_the_config() -> None:
-    # Inside the person on two of four frames: accepted at 0.5, refused at 0.75.
-    half_inside = [(10.0, 10.0), (10.0, 10.0), (28.0, 35.0), (28.0, 35.0)]
-    loose = build(tracking([half_inside]), humans(), objects())
+    """A genuinely ambiguous track: half its inside-frames on the person, half on the mug."""
+    ambiguous = [(10.0, 10.0), (10.0, 10.0), (45.0, 15.0), (45.0, 15.0)]
+    loose = build(tracking([ambiguous]), humans(), objects())
     strict = build(
-        tracking([half_inside]),
+        tracking([ambiguous]),
         humans(),
         objects(),
         cfg={"track_membership_min_ratio": 0.75, "track_membership_min_frames": 2},
     )
+    # At 0.5 the tie goes to the person (equal counts, equal ratio, smaller id).
     assert nodes_by_id(loose)["human:cam0:p1"].attrs["support_track_ids"] == [0]
+    # At 0.75 neither entity owns it decisively enough, so it supports neither.
     assert nodes_by_id(strict)["human:cam0:p1"].attrs["support_track_ids"] == []
+    assert nodes_by_id(strict)["object:cam0:o1"].attrs["support_track_ids"] == []
+
+
+def test_a_track_inside_one_entity_only_is_its_evidence_however_briefly() -> None:
+    """The ratio asks *which* entity, not how long -- min_frames asks how long.
+
+    A point on the person for two frames of four, and inside nothing on the others, is
+    unambiguously the person's. Under the old rule its denominator was the person's whole
+    co-visible life, so it scored 0.5 and only survived a lenient threshold; a longer
+    clip would have thrown it away entirely.
+    """
+    brief = [(10.0, 10.0), (10.0, 10.0), (28.0, 35.0), (28.0, 35.0)]  # (28,35) is in neither box
+    strict = build(
+        tracking([brief]),
+        humans(),
+        objects(),
+        cfg={"track_membership_min_ratio": 0.9, "track_membership_min_frames": 2},
+    )
+    person = nodes_by_id(strict)["human:cam0:p1"]
+    assert person.attrs["support_track_ids"] == [0]
+    assert person.attrs["mean_support_ratio"] == 1.0      # decisive: inside nothing else
+    assert person.attrs["mean_covisible_ratio"] == 0.5    # and honest about its coverage
+
+
+def test_dwell_is_still_required() -> None:
+    """Unambiguous is not the same as sufficient: one frame inside is still one frame."""
+    glancing = [(10.0, 10.0), (28.0, 35.0), (28.0, 35.0), (28.0, 35.0)]
+    artifact = build(
+        tracking([glancing]), humans(), objects(),
+        cfg={"track_membership_min_ratio": 0.5, "track_membership_min_frames": 2},
+    )
+    assert nodes_by_id(artifact)["human:cam0:p1"].attrs["support_track_ids"] == []
 
 
 def test_entities_without_masks_carry_no_evidence_and_the_notes_say_so() -> None:
