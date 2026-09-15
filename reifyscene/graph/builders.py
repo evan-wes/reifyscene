@@ -22,7 +22,9 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.types import GraphEdge, GraphNode
+from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.graph.edges import EdgeFactory
+from reifyscene.graph.entity_geometry import entity_positions_from_pointmaps
 from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.graph.nodes import NodeFactory
 from reifyscene.graph.track_support import assign_track_support, positions_by_frame
@@ -72,9 +74,15 @@ class DynamicSceneGraphBuilder:
             )
             notes.append(_coverage_note(stream_id, payload, mask_frames, support))
 
+            geometry_positions = _positions_from_geometry(
+                geometry_artifact, stream_id, masks_by_frame
+            )
+            notes.append(_position_note(stream_id, entities[stream_id], geometry_positions))
+
             for entity in entities[stream_id]:
                 attrs = dict(entity.attrs)
                 attrs.update(evidence.for_entity(entity.node_id))
+                _apply_positions(attrs, geometry_positions.get(entity.node_id))
                 node = (
                     self.node_factory.human_node(entity.node_id, attrs)
                     if entity.kind == "human"
@@ -234,6 +242,48 @@ def _masks_by_frame(entities: list[_Entity]) -> tuple[dict[int, dict[str, np.nda
     return by_frame, set(by_frame)
 
 
+def _positions_from_geometry(geometry_artifact, stream_id: str, masks_by_frame) -> dict:
+    """Per-entity position and extent from the geometry's dense pointmaps.
+
+    The geometry stage already wrote a world point for every pixel; ``segment`` already
+    said which pixels are which entity. That is a far better answer than the handful of
+    point tracks that happened to land on an entity -- on a clip where four of eight
+    entities had no supporting track at all, this gives every one of them a position on
+    every frame it is masked. See :mod:`reifyscene.graph.entity_geometry`.
+
+    Anything missing (no pointmaps, no recorded image transform) returns ``{}`` and the
+    track-derived positions stand: empty in, empty out, never a crash.
+    """
+    pointmaps = getattr(geometry_artifact, "pointmaps_by_frame", None) or {}
+    if not pointmaps or not masks_by_frame:
+        return {}
+
+    def load(frame_idx: int):
+        payload = pointmaps.get(f"{stream_id}:{int(frame_idx)}")
+        if not payload:
+            return None
+        points = payload.get("points")
+        return None if points is None else (np.asarray(points), payload.get("confidence"))
+
+    # The masks are in ingest pixels; their own shape is the only honest source for the
+    # size the transform maps from.
+    first = next(iter(masks_by_frame.values()), None)
+    sample = next(iter((first or {}).values()), None)
+    if sample is None:
+        return {}
+    height, width = np.asarray(sample).shape[:2]
+    try:
+        transform = image_transform_for(
+            geometry_artifact, stream_id, source_size=(int(width), int(height))
+        )
+    except MissingImageTransform:
+        return {}
+
+    return entity_positions_from_pointmaps(
+        masks_by_frame, pointmap_for_frame=load, transform=transform
+    )
+
+
 def _support_for_stream(payload, masks_by_frame, min_ratio: float, min_frames: int):
     """Assign the stream's tracks to its entities and summarize the evidence."""
     if not payload or not masks_by_frame:
@@ -341,6 +391,35 @@ def _empty_evidence() -> dict[str, Any]:
         "support_motion": {"static": 0, "moving": 0, "uncertain": 0, "static_fraction": None},
         "positions": [],
     }
+
+
+def _apply_positions(attrs: dict[str, Any], geometry_positions) -> None:
+    """Put the best available positions on an entity, and say which they are.
+
+    Dense geometry wins when it is there: it covers every frame the entity is masked,
+    not the handful a point track happened to reach, and it carries an extent, which a
+    centroid of sparse tracks cannot. The track-derived positions stay as the fallback,
+    and ``position_source`` records which one answered so a consumer weighs it rather
+    than trusting it. ``extent`` is the per-frame median, the scale-free summary the
+    relation vocabulary needs for above / below / in / on.
+    """
+    if geometry_positions:
+        attrs["positions"] = geometry_positions
+        attrs["position_source"] = "pointmap"
+        extents = np.asarray([r["extent"] for r in geometry_positions], dtype=float)
+        attrs["extent"] = [float(v) for v in np.median(extents, axis=0)]
+        return
+    attrs["position_source"] = "track_support" if attrs.get("positions") else "none"
+    attrs["extent"] = None
+
+
+def _position_note(stream_id: str, entities: list, geometry_positions) -> str:
+    """How many entities dense geometry could place, against how many there are."""
+    placed = sum(1 for e in entities if geometry_positions.get(e.node_id))
+    return (
+        f"{stream_id}: dense geometry placed {placed} of {len(entities)} entities "
+        f"({'pointmaps' if geometry_positions else 'unavailable -- track support only'})"
+    )
 
 
 def _coverage_note(stream_id: str, payload, mask_frames: set[int], support) -> str:
