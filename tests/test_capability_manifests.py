@@ -66,43 +66,32 @@ def test_every_stage_that_runs_records_a_manifest() -> None:
 
 # --- a naming stage is graded on its ability to refuse ------------------------
 
-def test_labels_without_abstention_cannot_be_graded_grounded() -> None:
+def _sem(category_grade=None):
+    """A semantics artifact carrying (or lacking) its own capability verdict."""
+    from types import SimpleNamespace
+
+    cap = {'provides': {'category': category_grade}} if category_grade else {}
+    return SimpleNamespace(metadata={'capability': cap} if cap else {})
+
+
+def test_downstream_inherits_the_naming_stage_s_verdict() -> None:
+    from reifyscene.api.pipeline import _grade_category
+
+    assert _grade_category(['e'], _sem('grounded')) == 'grounded'
+    assert _grade_category(['e'], _sem('degraded')) == 'degraded'
+    assert _grade_category(['e'], _sem('absent')) == 'absent'
+
+
+def test_no_verdict_to_inherit_is_not_permission_to_assume_the_best() -> None:
     """The failure this axis exists to prevent, pinned.
 
-    Asked a closed-vocabulary question, an open-vocab model named fence panels `cup` and
-    `handbag` with complete confidence. A stage that cannot say "I don't know" has no
-    way to distinguish that from a good name, and must not claim it does.
+    Read from the outside, a run whose separation gate was never armed looks exactly like
+    one where every label was checked and stood: in both cases nothing abstained. Deriving
+    a grade from the records is how a fence panel ends up labelled `cup` and graded
+    `grounded`, so a consumer with nothing to inherit must assume the weaker answer.
     """
-    from types import SimpleNamespace
-
     from reifyscene.api.pipeline import _grade_category
 
-    confident = SimpleNamespace(records={
-        'a': SimpleNamespace(category='cup'),       # no `abstained` attribute at all
-        'b': SimpleNamespace(category='handbag'),
-    })
-    assert _grade_category(['e1', 'e2'], confident) == 'degraded'
-
-
-def test_abstention_evidence_grades_by_what_stood() -> None:
-    from types import SimpleNamespace
-
-    from reifyscene.api.pipeline import _grade_category
-
-    def rec(cat, abstained):
-        return SimpleNamespace(category=cat, abstained=abstained)
-
-    all_named = SimpleNamespace(records={'a': rec('person', False), 'b': rec('chair', False)})
-    some_refused = SimpleNamespace(records={'a': rec('person', False), 'b': rec('unknown', True)})
-    all_refused = SimpleNamespace(records={'a': rec('unknown', True), 'b': rec('unknown', True)})
-
-    assert _grade_category(['e'], all_named) == 'grounded'
-    assert _grade_category(['e'], some_refused) == 'degraded'
-    assert _grade_category(['e'], all_refused) == 'absent'
-
-
-def test_no_semantics_at_all_is_not_grounded_either() -> None:
-    from reifyscene.api.pipeline import _grade_category
-
+    assert _grade_category(['e1', 'e2'], _sem(None)) == 'degraded'
     assert _grade_category(['e1'], None) == 'degraded'
     assert _grade_category([], None) == 'absent'

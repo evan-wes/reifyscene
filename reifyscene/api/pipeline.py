@@ -56,7 +56,11 @@ from reifyscene.perception.semantics.semantics_artifact import (
     UNKNOWN_CATEGORY,
     SemanticsArtifact,
 )
-from reifyscene.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
+from reifyscene.perception.semantics.siglip_semantics import (
+    DEFAULT_MIN_MARGIN_Z,
+    FloorSemantics,
+    SiglipSemantics,
+)
 from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from reifyscene.query.parser import PromptParser
 from reifyscene.api.contracts import input_identity, stage_fingerprint
@@ -79,28 +83,21 @@ _GEOMETRY_FIDELITY = {
 
 
 def _grade_category(items, semantics_artifact) -> str:
-    """How far a naming stage can be trusted, not merely whether it returned strings.
+    """Inherit the naming stage's own verdict; never re-derive it from the labels.
 
-    A label is only as good as the stage's ability to refuse one. Asked a
-    closed-vocabulary question, an open-vocab model names everything and means none of
-    it -- on davis_lab-coat_full it called fence panels `cup` and `handbag` with complete
-    confidence. Counting non-empty labels would grade that `grounded`, which is the exact
-    failure the second axis exists to make impossible.
-
-    So the grade rests on abstention. When the records carry it, the fraction that stood
-    is the fidelity. When they do not, the stage cannot distinguish a good name from a
-    forced one and must not claim it can: `degraded`, whatever the labels look like.
+    A label is only as good as the stage's ability to refuse one, and the stage is the
+    only thing that knows whether it had that ability -- the answer is in its
+    configuration, not in its output. Read from the outside, a run with the separation
+    gate disarmed looks exactly like one where every label was checked and stood, because
+    in both cases nothing abstained. Deriving a grade here from the records is how a node
+    ends up labelled `cup` and graded `grounded` for a fence panel.
     """
     if not items:
         return 'absent'
-    by_track = getattr(semantics_artifact, 'records', {}) if semantics_artifact else {}
-    records = list(by_track.values())
-    if not records:
-        return 'degraded'
-    if not any(hasattr(r, 'abstained') for r in records):
-        return 'degraded'  # it was never able to say "I don't know"
-    stood = sum(1 for r in records if not getattr(r, 'abstained', False))
-    return _grade_axis(stood, len(records))
+    capability = (getattr(semantics_artifact, 'metadata', {}) or {}).get('capability') or {}
+    inherited = (capability.get('provides') or {}).get('category')
+    # No manifest to inherit from is not permission to assume the best.
+    return str(inherited) if inherited else 'degraded'
 
 
 def _grade_axis(produced: int, total: int) -> str:
@@ -1000,6 +997,23 @@ class ReifyScenePipeline:
             embeddings=embeddings or {},
             metadata={},
         )
+        # Only this stage knows whether it was *able* to refuse. With the separation gate
+        # disarmed -- the default -- no record can ever abstain, so counting the ones that
+        # "stood" grades an off-domain vocabulary `grounded`: it named fence panels `cup`
+        # and `handbag` and nothing contradicted it. A stage that cannot say "I don't know"
+        # has not earned `grounded`, whatever its labels look like.
+        gate_armed = semantics_cfg.get('min_margin_z', DEFAULT_MIN_MARGIN_Z) is not None
+        if not artifact.records:
+            category_grade = 'absent'
+        elif not gate_armed:
+            category_grade = 'degraded'
+        else:
+            stood = sum(1 for r in artifact.records.values() if not r.abstained)
+            category_grade = _grade_axis(stood, len(artifact.records))
+        manifest.provides = {
+            'category': category_grade,
+            'embedding': 'grounded' if artifact.embeddings else 'absent',
+        }
         artifact.attach_manifest(manifest)
         named = sum(1 for r in artifact.records.values() if r.category != UNKNOWN_CATEGORY)
         artifact.notes.append(f"named_tracks={named}/{len(artifact.records)}")
