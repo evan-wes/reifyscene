@@ -31,11 +31,31 @@ UNKNOWN_CATEGORY = 'unknown'
 
 @dataclass
 class SemanticRecord:
-    """Open-vocab semantics for one canonical tracklet."""
+    """Open-vocab semantics for one canonical tracklet.
+
+    ``category`` is ``"unknown"`` whenever the rung declined to name the track.
+    An abstention is a *value*, not a missing field: ``abstained`` says the rung
+    was asked and refused, ``abstain_reason`` says why, and ``score``/``margin``/
+    ``category_topk`` still carry the (rejected) evidence so a consumer can audit
+    the call. A record with ``abstained=False`` and ``category="unknown"`` was
+    never asked -- a different thing entirely.
+    """
 
     category: str = UNKNOWN_CATEGORY
     score: float = 0.0
     category_topk: list[tuple[str, float]] = field(default_factory=list)  # [(label, score), ...]
+    # How separated the winner was. `margin` is the raw top1 - top2 cosine; `margin_z`
+    # is the same evidence made scale-free -- standard deviations above the typical
+    # candidate, over the whole vocabulary. Absolute score does not separate a real hit
+    # from a forced one (an off-domain vocabulary yields a high-scoring but near-flat
+    # ranking); separation does. Both are None when there was nothing to separate from.
+    # Recorded on every record whether or not abstention is enabled, so a threshold can
+    # be chosen from measurements. Measurements in `score_zero_shot`.
+    margin: float | None = None
+    margin_z: float | None = None
+    abstained: bool = False
+    # 'low_separation' | 'low_score' | 'no_labels' | 'no_concept'
+    abstain_reason: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     caption: Optional[str] = None  # free-form; filled by Qwen-VL at FP4b
 
@@ -51,6 +71,10 @@ class SemanticRecord:
             category=str(raw.get('category', UNKNOWN_CATEGORY)),
             score=float(raw.get('score', 0.0)),
             category_topk=topk,
+            margin=None if raw.get('margin') is None else float(raw['margin']),
+            margin_z=None if raw.get('margin_z') is None else float(raw['margin_z']),
+            abstained=bool(raw.get('abstained', False)),
+            abstain_reason=raw.get('abstain_reason'),
             attributes=dict(raw.get('attributes', {})),
             caption=raw.get('caption'),
         )
