@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from reifyscene.graph.entity_geometry import (
+from reifyscene.lifting.entity_geometry import (
     entity_positions_from_pointmaps,
     erode_mask,
     robust_centre_and_extent,

@@ -423,11 +423,14 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "reid",
-            version=2,
+            version=3,
             changes={
                 2: "point tracks spanning an occlusion gap relax the appearance threshold for "
                 "the pair they bridge (the merge was appearance-only, which is weakest on the "
                 "similar-looking entities re-identification exists for)",
+                3: "tracklets in the same 3D place at the same time are merged as one entity "
+                "(co-visible pairs were refused outright, so a duplicate mask became two "
+                "entity nodes and nothing anywhere could join them)",
             },
             settings={
                 "reid": {},
@@ -435,8 +438,8 @@ CONTRACTS: dict[str, StageContract] = {
                 "objects.embedder_max_inference_side": None,
             },
             pinned=("objects.embedder_max_inference_side",),
-            relinks=("tracking",),
-            upstream=("ingest", "segment", "tracking"),
+            relinks=("tracking", "pose_refine"),
+            upstream=("ingest", "segment", "tracking", "pose_refine"),
         ),
         StageContract(
             "semantics", settings={"semantics": {}}, relinks=("reid",),

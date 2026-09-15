@@ -24,10 +24,10 @@ import numpy as np
 from reifyscene.common.types import GraphEdge, GraphNode
 from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.graph.edges import EdgeFactory
-from reifyscene.graph.entity_geometry import entity_positions_from_pointmaps
 from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.graph.nodes import NodeFactory
 from reifyscene.graph.track_support import assign_track_support, positions_by_frame
+from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
 DEFAULT_MIN_RATIO = 0.5
 DEFAULT_MIN_FRAMES = 2
@@ -270,7 +270,7 @@ def _positions_from_geometry(geometry_artifact, stream_id: str, masks_by_frame) 
     said which pixels are which entity. That is a far better answer than the handful of
     point tracks that happened to land on an entity -- on a clip where four of eight
     entities had no supporting track at all, this gives every one of them a position on
-    every frame it is masked. See :mod:`reifyscene.graph.entity_geometry`.
+    every frame it is masked. See :mod:`reifyscene.lifting.entity_geometry`.
 
     Anything missing (no pointmaps, no recorded image transform) returns ``{}`` and the
     track-derived positions stand: empty in, empty out, never a crash.

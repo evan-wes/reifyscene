@@ -748,6 +748,19 @@ def _tracking_grid_seeded(ctx: ResumeContext) -> Derivation:
     )
 
 
+def _reid_no_covisible_dedup(ctx: ResumeContext) -> Derivation:
+    """A version-2 reid artifact is a valid version-3 one built without the dedup.
+
+    Version 3 merges tracklets that occupy the same 3D place at the same time. An older
+    artifact simply never asked that question, so its merge map is a subset of what this
+    code would produce -- nothing to recompute, only something to record.
+    """
+    del ctx
+    return Derivation(
+        note="merges did not include co-visible duplicates (that check did not exist then)"
+    )
+
+
 def _reid_appearance_only(ctx: ResumeContext) -> Derivation:
     """A version-1 reid artifact is a valid version-2 one built without track bridges.
 
@@ -767,7 +780,7 @@ def _reid_appearance_only(ctx: ResumeContext) -> Derivation:
 UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {
     "tracking": {1: _relift_tracks, 2: _tracking_grid_seeded},
     "pose_refine": {1: _pose_refine_v2},
-    "reid": {1: _reid_appearance_only},
+    "reid": {1: _reid_appearance_only, 2: _reid_no_covisible_dedup},
 }
 
 # stage -> how it absorbs a change of the upstream stages its contract ``relinks``.

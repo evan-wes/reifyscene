@@ -29,7 +29,9 @@ from reifyscene.graph.builders import DynamicSceneGraphBuilder
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.ingest.quality import ClipQualityAssessor
+from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.lifting.backproject import TrackLifter3D
+from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
 from reifyscene.optimize.solver import JointSpatiotemporalSolver
 from reifyscene.perception.humans.detector import HumanDetector
@@ -46,6 +48,7 @@ from reifyscene.perception.objects.segmenter import ObjectSegmenter
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 from reifyscene.perception.instance.segment import FloorInstanceSegmenter
 from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from reifyscene.perception.reid.covisible import build_covisible_merge_map
 from reifyscene.perception.reid.reid_artifact import ReidArtifact
 from reifyscene.perception.reid.reid_stage import FloorReid
 from reifyscene.perception.reid.dino_reid import DinoReid
@@ -790,7 +793,62 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def compute_reid(self, ingest_artifact, instance_artifact=None, track_artifact=None):
+    def _covisible_duplicates(self, instance_artifact, geometry_artifact) -> dict[str, str]:
+        """Tracklets the segmenter emitted twice for one object, found by where they are.
+
+        Needs the geometry's dense pointmaps and the instance masks; without either it
+        returns nothing and the appearance merge stands alone.
+        """
+        if instance_artifact is None or geometry_artifact is None:
+            return {}
+        by_stream: dict[str, dict[int, dict[str, Any]]] = {}
+        for obs in getattr(instance_artifact, 'observations', []):
+            mask = instance_artifact.mask_arrays.get(obs.instance_id)
+            if mask is None:
+                continue
+            by_stream.setdefault(obs.frame_ref.stream_id, {}).setdefault(
+                int(obs.frame_ref.frame_idx), {}
+            )[str(obs.track_id)] = mask
+
+        merged: dict[str, str] = {}
+        pointmaps = getattr(geometry_artifact, 'pointmaps_by_frame', None) or {}
+        for stream_id, masks_by_frame in by_stream.items():
+            if not masks_by_frame or not pointmaps:
+                continue
+
+            def load(frame_idx: int, _stream=stream_id):
+                payload = pointmaps.get(f"{_stream}:{int(frame_idx)}")
+                if not payload:
+                    return None
+                points = payload.get('points')
+                return None if points is None else (np.asarray(points), payload.get('confidence'))
+
+            sample = next(iter(next(iter(masks_by_frame.values())).values()), None)
+            if sample is None:
+                continue
+            height, width = np.asarray(sample).shape[:2]
+            try:
+                transform = image_transform_for(
+                    geometry_artifact, stream_id, source_size=(int(width), int(height))
+                )
+            except MissingImageTransform:
+                continue
+            placed = entity_positions_from_pointmaps(
+                masks_by_frame, pointmap_for_frame=load, transform=transform
+            )
+            positions = {
+                t: {int(r['frame_idx']): np.asarray(r['xyz']) for r in rows}
+                for t, rows in placed.items()
+            }
+            extents = {
+                t: np.median([r['extent'] for r in rows], axis=0)
+                for t, rows in placed.items() if rows
+            }
+            merged.update(build_covisible_merge_map(positions, extents))
+        return merged
+
+    def compute_reid(self, ingest_artifact, instance_artifact=None, track_artifact=None,
+                     geometry_artifact=None):
         """Per-tracklet appearance embeddings + cross-gap merges → ReidArtifact.
 
         Consumes the `InstanceArtifact` track ids. Runs a backend ladder: the
@@ -825,6 +883,13 @@ class ReifyScenePipeline:
             'tracks': track_artifact,
         })
         embeddings, merge_map = result if result is not None else ({}, {})
+
+        # Geometry settles what appearance cannot: two tracklets in the same place at the
+        # same time are one thing. This runs whichever rung produced the embeddings --
+        # it is a fact about the reconstruction, not about the appearance model.
+        duplicates = self._covisible_duplicates(instance_artifact, geometry_artifact)
+        merge_map = {**(merge_map or {}), **duplicates}
+
         artifact = ReidArtifact(
             run_id=ingest_artifact.run_id,
             stage_name='reid',
@@ -835,6 +900,10 @@ class ReifyScenePipeline:
         )
         artifact.attach_manifest(manifest)
         artifact.notes.append(f"embedded_tracks={len(artifact.embeddings)}")
+        artifact.notes.append(
+            f"merged {len(merge_map)} tracklet(s): {len(duplicates)} co-visible duplicate(s) "
+            f"by 3D coincidence, {len(merge_map) - len(duplicates)} across occlusion gaps"
+        )
         self._stamp_stage_metadata(artifact, 'reid', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact

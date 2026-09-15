@@ -111,9 +111,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'reid': StageSpec(
             name='reid',
-            dependencies=('ingest', 'segment', 'tracking'),
+            dependencies=('ingest', 'segment', 'tracking', 'pose_refine'),
             artifact_cls=ReidArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment'], track_artifact=outputs['tracking']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment'], track_artifact=outputs['tracking'], geometry_artifact=outputs['pose_refine']),
             load_fn=ReidArtifact.load,
         ),
         'semantics': StageSpec(

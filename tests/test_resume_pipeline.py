@@ -135,7 +135,7 @@ def test_stage_registry_dependencies() -> None:
     assert registry['geometry'].dependencies == ('ingest', 'sync', 'dyn_mask')
     assert registry['pose_refine'].dependencies == ('ingest', 'geometry')
     assert registry['segment'].dependencies == ('ingest', 'pose_refine')
-    assert registry['reid'].dependencies == ('ingest', 'segment', 'tracking')
+    assert registry['reid'].dependencies == ('ingest', 'segment', 'tracking', 'pose_refine')
     assert registry['semantics'].dependencies == ('ingest', 'segment', 'reid')
     assert registry['objects'].dependencies == ('ingest', 'segment', 'reid', 'semantics')
     assert registry['tracking'].dependencies == ('ingest', 'pose_refine', 'segment')
