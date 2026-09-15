@@ -283,6 +283,15 @@ class BaseArtifact:
         artifact.save_dir = Path(artifact.save_dir)
         return artifact
 
+    def attach_manifest(self, manifest: Any) -> None:
+        """Record how this stage resolved, so its fidelity is readable downstream.
+
+        Every stage owes this, not only the ones that choose between backends: the
+        guarantee that matters to a consumer is about the artifact it is holding, and a
+        stage that stamps nothing is indistinguishable from one that ran perfectly.
+        """
+        self.metadata['capability'] = manifest.to_dict()
+
     def save(self) -> None:
         """Persist artifact metadata to disk."""
         ensure_dir(self.save_dir)

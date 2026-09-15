@@ -18,7 +18,7 @@ graceful-empty, so a missing/ungated model degrades *fidelity*, never
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 class BackendRequired(RuntimeError):
     """A rung whose backend was asked for as ``real`` could not run: no silent fallback."""
@@ -26,7 +26,7 @@ class BackendRequired(RuntimeError):
 
 # A probe returns ``None`` when the rung is available, else a short string
 # explaining why it is not (e.g. ``'not-installed'``, ``'no-access'``).
-Probe = Callable[[], Optional[str]]
+Probe = Callable[[], str | None]
 Runner = Callable[[Any], Any]
 
 
@@ -43,7 +43,7 @@ class RungStatus:
         return {'name': self.name, 'fidelity': self.fidelity, 'status': self.status, 'reason': self.reason}
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> 'RungStatus':
+    def from_dict(cls, d: dict[str, Any]) -> RungStatus:
         return cls(name=str(d['name']), fidelity=str(d.get('fidelity', '')), status=str(d['status']), reason=str(d.get('reason', '')))
 
 
@@ -53,12 +53,23 @@ class CapabilityManifest:
 
     Stamped into ``artifact.metadata['capability']`` so downstream stages
     (graph / scene / eval) can read the *fidelity* the artifact carries.
+
+    ``backend_used`` and ``fidelity`` answer *which backend ran*. That is not the same
+    question as *what can be asserted from the result*, and the difference is where a
+    green manifest over a worthless artifact hides: the semantics stage reported
+    ``open_vocab`` while naming a person ``cup``, because it was asked a closed-vocabulary
+    question, and every rung below it would have reported a degradation that never
+    happened. ``provides`` answers the second question -- per graph-relevant capability,
+    one of ``grounded`` (usable evidence), ``degraded`` (produced, but weakly) or
+    ``absent`` (not produced at all) -- so "all green, graph is garbage" stops being
+    representable.
     """
 
     stage: str
-    backend_used: Optional[str] = None  # None => nothing ran (no graceful-empty rung)
-    fidelity: Optional[str] = None
+    backend_used: str | None = None  # None => nothing ran (no graceful-empty rung)
+    fidelity: str | None = None
     rungs: list[RungStatus] = field(default_factory=list)
+    provides: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,16 +78,36 @@ class CapabilityManifest:
             'backend_used': self.backend_used,
             'fidelity': self.fidelity,
             'rungs': [r.to_dict() for r in self.rungs],
+            'provides': dict(self.provides),
             'notes': list(self.notes),
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> 'CapabilityManifest':
+    def direct(
+        cls, stage: str, *, backend_used: str, fidelity: str,
+        provides: dict[str, str] | None = None, notes: list[str] | None = None,
+    ) -> CapabilityManifest:
+        """A manifest for a stage with no ladder to probe.
+
+        Not every stage chooses between backends -- `graph` and `objects` assemble what
+        upstream produced, and `tracking` runs one tracker. They still have to say what
+        they produced, because the guarantee that matters downstream is about the
+        *artifact's* fidelity, not about how many alternatives were considered.
+        """
+        return cls(
+            stage=stage, backend_used=backend_used, fidelity=fidelity,
+            rungs=[RungStatus(name=backend_used, fidelity=fidelity, status='ran')],
+            provides=dict(provides or {}), notes=list(notes or []),
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CapabilityManifest:
         return cls(
             stage=str(d.get('stage', '')),
             backend_used=d.get('backend_used'),
             fidelity=d.get('fidelity'),
             rungs=[RungStatus.from_dict(r) for r in d.get('rungs', [])],
+            provides=dict(d.get('provides') or {}),
             notes=list(d.get('notes', [])),
         )
 
@@ -98,7 +129,7 @@ class BackendRung:
               backend asked for).
     """
 
-    def __init__(self, name: str, fidelity: str, runner: Runner, probe: Optional[Probe] = None,
+    def __init__(self, name: str, fidelity: str, runner: Runner, probe: Probe | None = None,
                  strict: str = '') -> None:
         if strict not in ('', 'fail', 'always'):
             raise ValueError(f"strict must be '', 'fail' or 'always', got {strict!r}")
@@ -108,7 +139,7 @@ class BackendRung:
         self._probe = probe
         self.strict = strict
 
-    def availability(self) -> Optional[str]:
+    def availability(self) -> str | None:
         """Return ``None`` if available, else a short skip reason."""
         if self._probe is None:
             return None
@@ -130,7 +161,7 @@ class BackendLadder:
         self.stage = stage
         self.rungs = rungs
 
-    def resolve(self) -> tuple[Optional[BackendRung], CapabilityManifest]:
+    def resolve(self) -> tuple[BackendRung | None, CapabilityManifest]:
         """Probe top-down; return the first available rung + a manifest of skips.
 
         Does not run anything. The returned manifest records every rung above
@@ -195,7 +226,7 @@ def importable(*modules: str) -> Probe:
     via :func:`importlib.util.find_spec`.
     """
 
-    def _probe() -> Optional[str]:
+    def _probe() -> str | None:
         import importlib.util
 
         for mod in modules:

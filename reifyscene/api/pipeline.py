@@ -75,6 +75,38 @@ _GEOMETRY_FIDELITY = {
 }
 
 
+def _grade_category(items, semantics_artifact) -> str:
+    """How far a naming stage can be trusted, not merely whether it returned strings.
+
+    A label is only as good as the stage's ability to refuse one. Asked a
+    closed-vocabulary question, an open-vocab model names everything and means none of
+    it -- on davis_lab-coat_full it called fence panels `cup` and `handbag` with complete
+    confidence. Counting non-empty labels would grade that `grounded`, which is the exact
+    failure the second axis exists to make impossible.
+
+    So the grade rests on abstention. When the records carry it, the fraction that stood
+    is the fidelity. When they do not, the stage cannot distinguish a good name from a
+    forced one and must not claim it can: `degraded`, whatever the labels look like.
+    """
+    if not items:
+        return 'absent'
+    by_track = getattr(semantics_artifact, 'records', {}) if semantics_artifact else {}
+    records = list(by_track.values())
+    if not records:
+        return 'degraded'
+    if not any(hasattr(r, 'abstained') for r in records):
+        return 'degraded'  # it was never able to say "I don't know"
+    stood = sum(1 for r in records if not getattr(r, 'abstained', False))
+    return _grade_axis(stood, len(records))
+
+
+def _grade_axis(produced: int, total: int) -> str:
+    """How far a stage got on one capability: all of it, some of it, or none."""
+    if not total or not produced:
+        return 'absent'
+    return 'grounded' if produced == total else 'degraded'
+
+
 class ReifyScenePipeline:
     """Top-level orchestrator for the staged reconstruction pipeline."""
 
@@ -674,6 +706,27 @@ class ReifyScenePipeline:
             instance_artifact=instance_artifact,
         )
 
+        seeded = any(
+            'sampled on the entity masks' in str(n) for n in (artifact.notes or [])
+        )
+        backend = next(
+            (str(n).split(': ')[-1].rstrip('.') for n in (artifact.notes or [])
+             if str(n).startswith('Tracker backend used')), 'unknown'
+        )
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'tracking',
+            backend_used=backend,
+            fidelity='mask_seeded' if seeded else 'grid_only',
+            provides={
+                # What the graph can ask of these tracks. Position is not among them --
+                # it comes from the geometry's dense pointmaps, and tracks were always
+                # the wrong source for it.
+                'motion': 'grounded' if backend.startswith('cotracker') else 'degraded',
+                'track_support': 'grounded' if seeded else 'degraded',
+                'identity_bridges': 'grounded' if seeded else 'degraded',
+            },
+        ))
+
         # Preserve the actual tracking timeline on the artifact so later stages
         # (scene/render) can use it instead of falling back to geometry frames.
         selected_frames = []
@@ -1047,6 +1100,18 @@ class ReifyScenePipeline:
                 'num_human_tracks': len({h.human_id for h in human_states}),
             },
         )
+        # `humans` is two independent sub-ladders (design §4A) -- dense maps and SMPL --
+        # and the manifest has one backend slot. On davis_lab-coat_full that reported
+        # `sapiens_dense` while the SMPL directory was empty, so a whole missing
+        # capability was invisible. Record each axis by what it actually produced.
+        total = len(human_states)
+        manifest.provides = {
+            'keypoints': _grade_axis(
+                sum(1 for h in human_states if h.keypoints_2d is not None), total
+            ),
+            'dense': _grade_axis(sum(1 for h in human_states if (h.dense or {})), total),
+            'smpl': _grade_axis(sum(1 for h in human_states if (h.smpl_params or {})), total),
+        }
         artifact.attach_manifest(manifest)
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
         artifact.notes.append(f"human_instances={len(human_states)} human_tracks={artifact.metadata['num_human_tracks']}")
@@ -1128,6 +1193,15 @@ class ReifyScenePipeline:
             },
         )
         artifact.frame_index = artifact._build_frame_index(artifact.objects)
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'objects',
+            backend_used='semantics' if semantics_artifact is not None else 'detector',
+            fidelity='open_vocab' if semantics_artifact is not None else 'closed_vocab',
+            provides={
+                'instances': 'grounded' if object_states else 'absent',
+                'category': _grade_category(object_states, semantics_artifact),
+            },
+        ))
         artifact.notes.append(f"object_instances={len(object_states)} object_tracks={artifact.metadata['num_object_tracks']}")
         self._stamp_stage_metadata(artifact, 'objects', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
@@ -1146,6 +1220,30 @@ class ReifyScenePipeline:
             geometry_artifact, track_artifact, human_artifact, object_artifact,
             semantics_artifact=semantics_artifact,
         )
+        entities = [n for n in artifact.nodes if n.node_type in ('human', 'object')]
+        placed = [n for n in entities if (n.attrs or {}).get('position_source') == 'pointmap']
+        gravity = bool((artifact.metadata.get('world_frame') or {}).get('gravity_aligned'))
+
+        def grade(hit: int, total: int) -> str:
+            if not total or not hit:
+                return 'absent'
+            return 'grounded' if hit == total else 'degraded'
+
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'graph',
+            backend_used='entity_builder',
+            fidelity='entities_with_evidence',
+            provides={
+                'entities': 'grounded' if entities else 'absent',
+                'position': grade(len(placed), len(entities)),
+                'extent': grade(len(placed), len(entities)),
+                'identity': _grade_category(entities, semantics_artifact),
+                # Vertical relations are defined against gravity; without a canonicalized
+                # world the graph cannot claim them at all.
+                'vertical_relations': 'grounded' if gravity else 'absent',
+                'renderable': 'absent',  # landed as a library, wired to nothing
+            },
+        ))
         artifact.save_dir = self._stage_dir('graph')
         self._stamp_stage_metadata(artifact, 'graph', video_paths=self._video_paths_for_stage())
         artifact.save()
