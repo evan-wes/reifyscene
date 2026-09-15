@@ -255,3 +255,31 @@ def test_siglip_run_labels_tracks(tmp_path: Path) -> None:
     assert records['track_b'].category == 'dog'
     assert set(embeddings) == {'track_a', 'track_b'}
     assert records['track_a'].attributes['source'] == 'siglip2'
+
+
+# --- records written before these fields existed still load -------------------
+
+def test_a_record_without_the_new_fields_loads_with_them_defaulted() -> None:
+    """Runs on disk predate margin / margin_z / abstained; they must still read back."""
+    from reifyscene.perception.semantics.semantics_artifact import SemanticRecord
+
+    legacy = {'category': 'car', 'score': 0.42, 'category_topk': [['car', 0.42]],
+              'attributes': {'source': 'siglip2'}}
+    rec = SemanticRecord.from_dict(legacy)
+    assert rec.category == 'car' and rec.score == 0.42
+    assert rec.margin is None and rec.margin_z is None
+    assert rec.abstained is False and rec.abstain_reason is None
+
+
+def test_a_record_round_trips_through_json() -> None:
+    import json
+
+    from reifyscene.perception.semantics.semantics_artifact import SemanticRecord
+
+    rec = SemanticRecord(
+        category=UNKNOWN_CATEGORY, score=0.117, category_topk=[('handbag', 0.117)],
+        margin=0.0105, margin_z=3.004, abstained=True, abstain_reason='low_separation',
+    )
+    payload = rec.to_dict()
+    assert json.loads(json.dumps(payload)) == payload  # JSON-safe, no numpy scalars
+    assert SemanticRecord.from_dict(payload) == rec
