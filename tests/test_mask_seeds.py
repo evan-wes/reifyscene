@@ -112,3 +112,19 @@ def test_window_queries_are_rebased_onto_the_window() -> None:
     entity_rows = out[1:]
     assert entity_rows.shape[0] == 1          # only the t=12 query is in [10, 20)
     assert entity_rows[0, 0] == 2.0           # rebased to window-local time
+
+
+# --- the run says how it was seeded ------------------------------------------
+
+def test_the_seeding_note_says_which_points_were_tracked() -> None:
+    """A run that cannot report its own seeding is a silent degradation."""
+    from reifyscene.tracking.cotracker_wrapper import _seeding_note
+
+    seeded = _seeding_note('cotracker', np.zeros((143, 3), np.float32), 12)
+    assert '143 sampled on the entity masks' in seeded
+
+    grid_only = _seeding_note('cotracker', np.zeros((0, 3), np.float32), 12)
+    assert 'uniform grid on the first frame only' in grid_only
+    assert 'no instance masks' in grid_only
+
+    assert 'heuristic' in _seeding_note('heuristic', None, 12)

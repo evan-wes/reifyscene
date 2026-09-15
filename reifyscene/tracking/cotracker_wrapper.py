@@ -17,6 +17,22 @@ from reifyscene.tracking.mask_seeds import entity_seed_queries, queries_for_wind
 from reifyscene.tracking.track_artifact import TrackArtifact
 
 
+def _seeding_note(backend_used: str, entity_queries: np.ndarray, grid_size: int) -> str:
+    """One line saying where the tracker's query points came from."""
+    if backend_used == 'heuristic':
+        return "Query points: none (the heuristic backend synthesizes tracks)."
+    count = 0 if entity_queries is None else int(np.asarray(entity_queries).shape[0])
+    if count == 0:
+        return (
+            f"Query points: a {grid_size}x{grid_size} uniform grid on the first frame only "
+            "(no instance masks were available to seed the entities)."
+        )
+    return (
+        f"Query points: {count} sampled on the entity masks, plus a {grid_size}x{grid_size} "
+        "uniform grid per window for the background."
+    )
+
+
 class CoTrackerWrapper(PointTracker):
     """Foundation-model wrapper for point tracking.
 
@@ -607,6 +623,11 @@ class CoTrackerWrapper(PointTracker):
         notes = [
             f"Tracker backend used: {backend_used}.",
             f"Tracked {tracks_xy.shape[1]} points over {tracks_xy.shape[0]} frames.",
+            # How the points were chosen decides what the tracks can answer, so the run has
+            # to say it. The payload's `windowing` block does not survive serialization, and
+            # a run that cannot report its own seeding is the silent degradation the ladder
+            # design exists to prevent.
+            _seeding_note(backend_used, entity_queries, self.grid_size),
         ]
         if backend_meta.get('windowed'):
             notes.append(
