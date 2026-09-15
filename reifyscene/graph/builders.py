@@ -45,11 +45,13 @@ class DynamicSceneGraphBuilder:
         self.edge_factory = EdgeFactory()
 
     def build(
-        self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None
+        self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None,
+        semantics_artifact=None,
     ) -> GraphArtifact:
         """Build the graph: a node per camera, person, object and room, with their evidence."""
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
+        embeddings: dict[str, Any] = {}
         notes: list[str] = []
 
         for stream_id in geometry_artifact.stream_ids():
@@ -83,11 +85,14 @@ class DynamicSceneGraphBuilder:
                 attrs = dict(entity.attrs)
                 attrs.update(evidence.for_entity(entity.node_id))
                 _apply_positions(attrs, geometry_positions.get(entity.node_id))
+                label, embedding = _apply_identity(attrs, entity, semantics_artifact)
+                if embedding is not None:
+                    embeddings[entity.node_id] = embedding
                 node = (
-                    self.node_factory.human_node(entity.node_id, attrs)
+                    self.node_factory.human_node(entity.node_id, attrs, label=label)
                     if entity.kind == "human"
                     else self.node_factory.object_node(
-                        entity.node_id, label=entity.label, attrs=attrs
+                        entity.node_id, label=label, attrs=attrs
                     )
                 )
                 nodes.append(node)
@@ -118,19 +123,30 @@ class DynamicSceneGraphBuilder:
             "TODO: associate entities across streams; a person seen by two cameras is two nodes."
         )
 
+        named = sum(
+            1 for n in nodes
+            if n.node_type in ("human", "object") and not (n.attrs or {}).get("abstained", False)
+            and (n.attrs or {}).get("semantics_source") == "semantics"
+        )
+        entity_count = sum(len(v) for v in entities.values())
+        if semantics_artifact is not None:
+            notes.append(f"semantics named {named} of {entity_count} entities")
+
         return GraphArtifact(
             run_id=geometry_artifact.run_id,
             stage_name="graph",
             save_dir=Path("."),
             nodes=nodes,
             edges=edges,
+            embeddings=embeddings,
             node_histories={},
             uncertainty={},
             source_summary={
                 "num_geometry_streams": len(geometry_artifact.stream_ids()),
                 "num_track_streams": len(track_artifact.stream_ids()),
-                "num_entities": sum(len(v) for v in entities.values()),
+                "num_entities": entity_count,
             },
+            metadata={"world_frame": _world_frame(geometry_artifact)},
             notes=notes,
         )
 
@@ -205,6 +221,11 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
                     "num_observations": len(instances),
                     "frame_indices": sorted({int(o.frame_ref.frame_idx) for o in instances}),
                     "avg_confidence": avg_conf,
+                    # The detector's own id and the ranked alternatives `objects` carried
+                    # down: dropped here for the life of the stage, because this dict was
+                    # built fresh instead of extending what the instance already held.
+                    "detector_backend": (instances[0].attributes or {}).get("detector_backend"),
+                    "label_id": (instances[0].attributes or {}).get("label_id"),
                 },
             )
             entity.masks = _instance_masks(instances, object_artifact, "object_id")
@@ -398,6 +419,75 @@ def _empty_evidence() -> dict[str, Any]:
         "support_motion": {"static": 0, "moving": 0, "uncertain": 0, "static_fraction": None},
         "positions": [],
     }
+
+
+def _world_frame(geometry_artifact) -> dict[str, Any]:
+    """Whether the positions in this graph are gravity-aligned, and on which axis.
+
+    ``above`` / ``below`` / ``on`` are defined against gravity, and the answer lives two
+    stages upstream in the geometry metadata. Nothing carried it here, so a consumer
+    reading only ``graph/artifact.json`` could not tell whether a missing vertical
+    relation meant *false* or *not computable* -- and those are different claims.
+    """
+    md = getattr(geometry_artifact, "metadata", {}) or {}
+    frame = dict(md.get("world_frame") or {})
+    applied = bool(md.get("ground_plane_applied"))
+    return {
+        "gravity_aligned": applied and frame.get("type") == "ground_plane_z_up",
+        "type": frame.get("type"),
+        "up_axis": "+z" if frame.get("type") == "ground_plane_z_up" else None,
+        "ground_plane_applied": applied,
+        "inlier_ratio": frame.get("inlier_ratio"),
+    }
+
+
+def _apply_identity(attrs: dict[str, Any], entity, semantics_artifact) -> tuple[str, Any]:
+    """Put what the `semantics` stage decided onto the node, refusal included.
+
+    The graph never saw the semantics artifact: an object's category reached it
+    second-hand through `objects`, its ranked alternatives and embedding were dropped at
+    this boundary, and a human node was hardcoded ``label="human"`` with no category at
+    all. Everything here already existed, correct, one stage upstream.
+
+    An abstention travels as a value, not a gap. ``category`` is ``"unknown"`` with
+    ``abstained`` and the margins beside it, so a consumer can tell a refusal from a
+    question never asked -- the distinction the semantics stage exists to make.
+
+    Returns ``(label, embedding)``: the label the node should carry, and the vector to
+    store beside the graph if there is one.
+    """
+    record = None
+    if semantics_artifact is not None:
+        record = semantics_artifact.records.get(entity.node_id.split(":", 2)[-1])
+    if record is None:
+        # `objects` already copied a category down; keep it, and say nothing was asked.
+        attrs.setdefault("category", None)
+        attrs["semantics_source"] = "objects" if attrs.get("category") else "none"
+        return entity.label, None
+
+    # The separation statistics and the abstention flag arrive with the semantics
+    # abstention change (PR #5), which is not on this branch yet. Read them for what they
+    # are -- optional evidence a record may carry -- so the graph picks them up when the
+    # stage starts producing them, rather than requiring the two changes to land together.
+    abstained = bool(getattr(record, "abstained", False))
+    attrs.update(
+        {
+            "category": record.category,
+            "category_topk": [[str(lbl), float(sc)] for lbl, sc in record.category_topk],
+            "category_score": float(record.score),
+            "category_margin": getattr(record, "margin", None),
+            "category_margin_z": getattr(record, "margin_z", None),
+            "abstained": abstained,
+            "abstain_reason": getattr(record, "abstain_reason", None),
+            "caption": record.caption,
+            "semantics_source": "semantics",
+        }
+    )
+    embedding = None
+    if semantics_artifact is not None:
+        embedding = semantics_artifact.embeddings.get(entity.node_id.split(":", 2)[-1])
+    label = record.category if record.category and not abstained else entity.label
+    return label, embedding
 
 
 def _apply_positions(attrs: dict[str, Any], geometry_positions) -> None:

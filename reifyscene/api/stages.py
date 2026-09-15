@@ -146,9 +146,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'graph': StageSpec(
             name='graph',
-            dependencies=('pose_refine', 'tracking', 'humans', 'objects'),
+            dependencies=('pose_refine', 'tracking', 'humans', 'objects', 'semantics'),
             artifact_cls=GraphArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.build_graph(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.build_graph(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], semantics_artifact=outputs['semantics']),
             load_fn=GraphArtifact.load,
         ),
         'optimization': StageSpec(

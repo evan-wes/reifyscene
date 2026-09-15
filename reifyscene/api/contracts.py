@@ -491,7 +491,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "graph",
-            version=3,
+            version=4,
             changes={
                 2: "entities carry the point tracks that are evidence for them (the graph held "
                 "a node per track); the tracks inside no entity are the background's",
@@ -500,9 +500,13 @@ CONTRACTS: dict[str, StageContract] = {
                 "happened to land on an entity), and a track's support ratio is measured "
                 "against the frames it was inside any entity rather than the entity's whole "
                 "co-visible life (which punished long presence, and so punished re-id)",
+                4: "nodes carry what the semantics stage decided -- category, ranked "
+                "alternatives, abstention and embedding -- and the graph records whether its "
+                "positions are gravity-aligned (a human node was hardcoded 'human' with no "
+                "category, and nothing said whether above/below were computable)",
             },
             settings={"graph": {}},
-            upstream=("pose_refine", "tracking", "humans", "objects"),
+            upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
         ),
         StageContract(

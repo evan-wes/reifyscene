@@ -1064,9 +1064,19 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def build_graph(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None):
-        """Build the dynamic scene graph."""
-        artifact = self.graph_builder.build(geometry_artifact, track_artifact, human_artifact, object_artifact)
+    def build_graph(self, geometry_artifact, track_artifact, human_artifact=None,
+                    object_artifact=None, semantics_artifact=None):
+        """Build the dynamic scene graph.
+
+        ``semantics_artifact`` carries the open-vocab category, its ranked alternatives,
+        its abstention and its embedding onto the entity nodes. The graph never received
+        it: an object's category arrived second-hand through `objects`, and a human node
+        had none at all.
+        """
+        artifact = self.graph_builder.build(
+            geometry_artifact, track_artifact, human_artifact, object_artifact,
+            semantics_artifact=semantics_artifact,
+        )
         artifact.save_dir = self._stage_dir('graph')
         self._stamp_stage_metadata(artifact, 'graph', video_paths=self._video_paths_for_stage())
         artifact.save()
