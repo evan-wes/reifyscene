@@ -17,7 +17,6 @@ from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 from reifyscene.perception.semantics.semantics_artifact import UNKNOWN_CATEGORY
 from reifyscene.perception.semantics.siglip_semantics import (
-    DEFAULT_MIN_MARGIN,
     FloorSemantics,
     SiglipSemantics,
     score_zero_shot,
@@ -64,55 +63,104 @@ def test_score_min_score_abstains() -> None:
     assert res.abstain_reason == 'low_score'
 
 
-# --- margin abstention: the guard that catches an off-domain vocabulary ------
+# --- separation: recorded always, gated only on request ----------------------
 
-def test_score_margin_abstains_on_flat_ranking() -> None:
-    """A near-tie between the top two is the model saying "none of these"."""
-    text = np.stack([_unit(1, 0.0), _unit(1, 0.02)])  # 1.0 vs 0.9998 against [1,0]
-    res = score_zero_shot(_unit(1, 0), text, ['cup', 'handbag'], min_margin=0.02)
-    assert res.category == UNKNOWN_CATEGORY
-    assert res.abstained and res.abstain_reason == 'low_margin'
-    assert res.margin is not None and res.margin < 0.02
-    assert res.topk[0][0] == 'cup'  # the rejected winner is still reported
+def _spread(top1: float, rest: list[float]) -> tuple[np.ndarray, list[str]]:
+    """Text embeddings whose cosines with [1,0] are exactly the given scores."""
+    scores = [top1, *rest]
+    rows = [_unit(c, float(np.sqrt(max(1 - c ** 2, 0.0)))) for c in scores]
+    return np.stack(rows), [f"l{i}" for i in range(len(scores))]
 
 
-def test_score_margin_keeps_a_clear_win() -> None:
-    text = np.eye(2, dtype=np.float32)
-    res = score_zero_shot(_unit(1, 0), text, ['cat', 'dog'], min_margin=0.02)
-    assert res.category == 'cat'
-    assert not res.abstained
-    assert res.margin is not None and res.margin > 0.02
+def test_abstention_is_off_by_default() -> None:
+    """A near-tie still gets named unless a caller asks for the gate.
 
-
-def test_score_single_label_vocab_has_no_margin_gate() -> None:
-    """One candidate has no runner-up; the margin gate must not reject it."""
-    text = np.stack([_unit(1, 0)])
-    res = score_zero_shot(_unit(1, 0), text, ['cat'], min_margin=0.5)
-    assert res.category == 'cat'
-    assert res.margin is None and not res.abstained
-
-
-def test_labcoat_margins_separate_people_from_junk() -> None:
-    """Regression on the real numbers that motivated the default.
-
-    Measured top1/top2 cosines from davis_lab-coat_full. The default threshold
-    must keep both people and reject every off-vocabulary label.
+    A raw gap shrinks as the candidate list grows, so no constant is a safe default.
+    The evidence is always recorded; acting on it is opt-in.
     """
-    measured = {  # track -> (top1 label, top1, top2)
-        'person_a': ('person', 0.1151, 0.0821),
-        'person_b': ('person', 0.1080, 0.0631),
-        'junk_handbag': ('handbag', 0.1170, 0.1065),  # highest score in the run, and wrong
-        'junk_bird': ('bird', 0.1077, 0.1055),
-        'junk_cup': ('cup', 0.0850, 0.0848),
+    text, labels = _spread(0.101, [0.100, 0.099, 0.098, 0.097])
+    res = score_zero_shot(_unit(1, 0), text, labels)
+    assert res.category == 'l0'
+    assert not res.abstained
+    assert res.margin is not None and res.margin_z is not None
+
+
+def _vocab(top1: float, bulk_hi: float, bulk_lo: float, n: int = 79):
+    """A realistic candidate spread: one winner over a bulk that fans out."""
+    return _spread(top1, list(np.linspace(bulk_hi, bulk_lo, n)))
+
+
+def test_margin_z_separates_a_real_hit_from_a_forced_one() -> None:
+    """Shaped like the measured lab-coat distributions: winner clear vs winner crowded."""
+    hit = score_zero_shot(_unit(1, 0), *_vocab(0.1151, 0.0821, 0.045))
+    forced = score_zero_shot(_unit(1, 0), *_vocab(0.1170, 0.1065, 0.050))
+    assert hit.margin_z > forced.margin_z
+    # and absolute score points the wrong way, which is the whole point
+    assert forced.score > hit.score
+
+
+def test_margin_z_gate_fires_when_enabled() -> None:
+    forced = score_zero_shot(_unit(1, 0), *_vocab(0.1170, 0.1065, 0.050), min_margin_z=3.5)
+    assert forced.category == UNKNOWN_CATEGORY
+    assert forced.abstained and forced.abstain_reason == 'low_separation'
+    assert forced.topk[0][0] == 'l0'  # the rejected winner is still reported
+
+
+def test_margin_z_gate_keeps_a_clear_win() -> None:
+    hit = score_zero_shot(_unit(1, 0), *_vocab(0.1151, 0.0821, 0.045), min_margin_z=3.5)
+    assert hit.category == 'l0' and not hit.abstained
+
+
+def test_margin_z_is_inflated_by_a_degenerate_bulk() -> None:
+    """A known limitation, pinned so it is not rediscovered as a surprise.
+
+    The z-score measures the winner against the spread of the candidates. When the
+    bulk is nearly identical that spread collapses, and a negligible gap reads as many
+    sigma. Real vocabularies fan out, which is why the statistic works on them -- but a
+    tiny or highly redundant vocabulary breaks it, and the threshold is not transferable
+    between vocabularies of different shape.
+    """
+    tight = score_zero_shot(_unit(1, 0), *_spread(0.101, [0.100] * 20))
+    assert tight.margin < 0.002        # a negligible raw gap
+    assert tight.margin_z > 3.0        # nonetheless reads as strongly separated
+
+
+def test_margin_z_is_none_when_there_is_no_distribution() -> None:
+    """With two candidates the z-score is 1.0 whatever the scores -- not evidence."""
+    text, labels = _spread(0.9, [0.1])
+    res = score_zero_shot(_unit(1, 0), text, labels, min_margin_z=3.0)
+    assert res.margin_z is None
+    assert res.category == 'l0' and not res.abstained  # the gate cannot fire on nothing
+    assert res.margin is not None                      # the raw gap still is recorded
+
+
+def test_labcoat_separation_measurements() -> None:
+    """Regression on the real numbers, as measurements rather than as a threshold.
+
+    Measured top1/top2 cosines from davis_lab-coat_full. The raw gap separates the two
+    correctly-named people from every off-vocabulary label by roughly 3x, and the
+    highest-scoring track in the run is one of the wrong ones -- which is why absolute
+    score is not the instrument. No default acts on this; it is the evidence a
+    threshold would be chosen from.
+    """
+    measured = {  # track -> (top1, top2)
+        'person_a': (0.1151, 0.0821),
+        'person_b': (0.1080, 0.0631),
+        'junk_handbag': (0.1170, 0.1065),  # highest absolute score in the run, and wrong
+        'junk_bird': (0.1077, 0.1055),
+        'junk_cup': (0.0850, 0.0848),
     }
-    kept, refused = [], []
-    for name, (label, top1, top2) in measured.items():
-        text = np.stack([_unit(top1, np.sqrt(max(1 - top1 ** 2, 0))),
-                         _unit(top2, np.sqrt(max(1 - top2 ** 2, 0)))])
-        res = score_zero_shot(_unit(1, 0), text, [label, 'other'], min_margin=DEFAULT_MIN_MARGIN)
-        (refused if res.abstained else kept).append(name)
-    assert sorted(kept) == ['person_a', 'person_b']
-    assert sorted(refused) == ['junk_bird', 'junk_cup', 'junk_handbag']
+    margins = {}
+    for name, (top1, top2) in measured.items():
+        text, labels = _spread(top1, [top2])
+        res = score_zero_shot(_unit(1, 0), text, labels)
+        assert not res.abstained  # nothing is refused by default
+        margins[name] = res.margin
+
+    people = [margins['person_a'], margins['person_b']]
+    junk = [v for k, v in margins.items() if k.startswith('junk')]
+    assert min(people) > 3 * max(junk)
+    assert measured['junk_handbag'][0] > measured['person_a'][0]  # score misleads
 
 
 # --- FloorSemantics ----------------------------------------------------------

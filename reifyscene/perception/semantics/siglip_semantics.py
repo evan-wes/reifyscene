@@ -31,12 +31,18 @@ from reifyscene.perception.semantics.semantics_artifact import UNKNOWN_CATEGORY,
 DEFAULT_MODEL_ID = 'google/siglip2-so400m-patch14-384'  # ungated; fixed-resolution variant
 DEFAULT_PROMPT = 'This is a photo of a {}.'  # SigLIP zero-shot template
 DEFAULT_TOPK = 5
-# Abstain when top1 - top2 cosine falls below this. Tuned on davis_lab-coat_full,
-# where the separating band is 0.011-0.033 (see score_zero_shot); 0.02 sits near
-# its centre. Eight tracks on one clip is a starting value, not a validated one --
-# override via cfg['min_margin'], and revisit once a scene-appropriate vocabulary
-# rung exists.
-DEFAULT_MIN_MARGIN = 0.02
+# Abstention is OFF by default. A raw top1-top2 cosine gap is not a quantity a
+# constant can be set against: it shrinks as the candidate list grows, because more
+# near-neighbours crowd the runner-up. A threshold tuned on COCO-80 would
+# over-abstain on a 500-word open vocabulary and under-abstain on a 5-word scene
+# vocabulary -- the same defect as handing an open-vocab model a closed list.
+#
+# When abstention IS enabled, it is enabled on the z-score (cfg['min_margin_z']):
+# how many standard deviations above the typical candidate the winner sits, over the
+# whole vocabulary. That statistic stays comparable as the vocabulary changes size,
+# which is the property a default needs. Both statistics are recorded on every
+# record either way, so the threshold can be chosen from data rather than guessed.
+DEFAULT_MIN_MARGIN_Z: float | None = None
 # Default candidate vocabulary = COCO-80 (drops the torchvision placeholders), so
 # the SigLIP rung is comparable to the detector floor; override via cfg['vocab'].
 DEFAULT_VOCAB = [c for c in COCO_INSTANCE_CATEGORY_NAMES if c not in ('__background__', 'N/A')]
@@ -68,7 +74,8 @@ class ZeroShotResult(NamedTuple):
     category: str
     score: float
     topk: list[tuple[str, float]]
-    margin: float | None  # top1 - top2; None when there is no runner-up
+    margin: float | None  # top1 - top2 cosine; None when there is no runner-up
+    margin_z: float | None  # (top1 - mean) / sd over the whole vocabulary
     abstain_reason: str | None  # None when the match stands
 
     @property
@@ -84,7 +91,7 @@ def score_zero_shot(
     *,
     topk: int = DEFAULT_TOPK,
     min_score: float = float('-inf'),
-    min_margin: float = 0.0,
+    min_margin_z: float | None = DEFAULT_MIN_MARGIN_Z,
 ) -> ZeroShotResult:
     """Zero-shot category for one tracklet (pure: no torch / no model).
 
@@ -94,26 +101,38 @@ def score_zero_shot(
         labels: the ``M`` candidate label strings.
         topk: how many ranked ``(label, score)`` pairs to return.
         min_score: if the best cosine is below this, abstain to ``"unknown"``.
-        min_margin: if ``top1 - top2`` is below this, abstain to ``"unknown"``.
+        min_margin_z: if the winner's z-score is below this, abstain to ``"unknown"``.
+            ``None`` (the default) never abstains on separation.
 
-    **``min_margin`` is the instrument that works.** When the vocabulary does not
-    contain the right answer the model still returns a winner, and that winner can
-    outscore the correct labels elsewhere in the run: on ``davis_lab-coat_full``
-    the junk label ``handbag`` scored 0.1170, above both correctly-named people.
-    What separates them is the gap to the runner-up -- the two people scored
-    margins of 0.045 and 0.033, every junk label 0.0105 or less. ``min_score`` is
-    kept because a scene-appropriate vocabulary makes it meaningful again, but it
-    is off by default and it is *not* the guard that catches an off-domain
-    vocabulary.
+    **Absolute score does not say whether a label is right.** When the vocabulary does
+    not contain the right answer the model still returns a winner, and that winner can
+    outscore the correct labels elsewhere in the run: on ``davis_lab-coat_full`` the
+    junk label ``handbag`` scored 0.1170, above both correctly-named people. What
+    separates them is *separation* -- the two people led their runner-up by 0.045 and
+    0.033, every junk label by 0.0105 or less.
 
-    A single-label vocabulary has no runner-up, so ``margin`` is ``None`` and the
-    margin gate does not fire -- there is no alternative to be uncertain between.
+    **But a raw gap is not a quantity a threshold can be set against**, because it
+    shrinks as the candidate list grows. ``margin_z`` is the same evidence made
+    scale-free: how many standard deviations above the typical candidate the winner
+    sits, over the whole vocabulary. That is what the gate uses, and it is off unless
+    a caller asks for it. Both statistics are reported regardless, so a threshold can
+    be chosen from measurements instead of guessed.
+
+    A single-label vocabulary has nothing to be separated from, so both statistics are
+    ``None`` and the gate does not fire.
+
+    **Known limitation of the z-score.** It places the winner against the *spread* of
+    the candidates, so a bulk of near-identical candidates collapses that spread and a
+    negligible gap reads as many sigma. Real vocabularies fan out, which is why the
+    statistic works on them -- but a tiny or highly redundant candidate list breaks it,
+    and a threshold is not transferable between vocabularies of different shape. Pinned
+    by ``test_margin_z_is_inflated_by_a_degenerate_bulk``.
 
     Returns a :class:`ZeroShotResult`. The rejected best label and its evidence are
     still reported when it abstains, so the call can be audited downstream.
     """
     if text_embs is None or len(labels) == 0 or np.asarray(text_embs).size == 0:
-        return ZeroShotResult(UNKNOWN_CATEGORY, 0.0, [], None, 'no_labels')
+        return ZeroShotResult(UNKNOWN_CATEGORY, 0.0, [], None, None, 'no_labels')
     img = _l2norm(image_emb)
     txt = np.asarray(text_embs, dtype=np.float32)
     sims = txt @ img  # (M,) cosine if rows are unit-norm
@@ -121,11 +140,19 @@ def score_zero_shot(
     ranked = [(str(labels[i]), float(sims[i])) for i in order]
     best_label, best_score = ranked[0]
     margin = best_score - ranked[1][1] if len(ranked) > 1 else None
+    # Over the WHOLE vocabulary, not the top-k: the point is to place the winner
+    # against the bulk of candidates, which is what stays stable as the list grows.
+    # Needs a real distribution to sit in: with two candidates the z-score is exactly
+    # 1.0 whatever the scores are, which is a constant masquerading as evidence.
+    sd = float(np.std(sims))
+    margin_z = (best_score - float(np.mean(sims))) / sd if sims.size > 2 and sd > 0 else None
     if best_score < min_score:
-        return ZeroShotResult(UNKNOWN_CATEGORY, best_score, ranked, margin, 'low_score')
-    if margin is not None and margin < min_margin:
-        return ZeroShotResult(UNKNOWN_CATEGORY, best_score, ranked, margin, 'low_margin')
-    return ZeroShotResult(best_label, best_score, ranked, margin, None)
+        return ZeroShotResult(UNKNOWN_CATEGORY, best_score, ranked, margin, margin_z, 'low_score')
+    if min_margin_z is not None and margin_z is not None and margin_z < min_margin_z:
+        return ZeroShotResult(
+            UNKNOWN_CATEGORY, best_score, ranked, margin, margin_z, 'low_separation'
+        )
+    return ZeroShotResult(best_label, best_score, ranked, margin, margin_z, None)
 
 
 def _group_by_canonical(instance_artifact: InstanceArtifact, canonical) -> dict[str, list]:
@@ -177,7 +204,8 @@ class SiglipSemantics:
         self.prompt: str = cfg.get('prompt', DEFAULT_PROMPT)
         self.topk: int = int(cfg.get('topk', DEFAULT_TOPK))
         self.min_score: float = float(cfg.get('min_score', float('-inf')))
-        self.min_margin: float = float(cfg.get('min_margin', DEFAULT_MIN_MARGIN))
+        raw_z = cfg.get('min_margin_z', DEFAULT_MIN_MARGIN_Z)
+        self.min_margin_z: float | None = None if raw_z is None else float(raw_z)
         self.device: Optional[str] = cfg.get('device')
         self.use_mask: bool = bool(cfg.get('use_mask', True))
         self._model = None
@@ -272,13 +300,14 @@ class SiglipSemantics:
             embeddings[key] = emb
             result = score_zero_shot(
                 emb, self._text_embs, self.vocab,
-                topk=self.topk, min_score=self.min_score, min_margin=self.min_margin,
+                topk=self.topk, min_score=self.min_score, min_margin_z=self.min_margin_z,
             )
             records[key] = SemanticRecord(
                 category=result.category,
                 score=float(result.score),
                 category_topk=result.topk,
                 margin=result.margin,
+                margin_z=result.margin_z,
                 abstained=result.abstained,
                 abstain_reason=result.abstain_reason,
                 attributes={'source': 'siglip2', 'model_id': self.model_id},

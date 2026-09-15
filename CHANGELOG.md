@@ -18,15 +18,23 @@ version scheme (canonical version in the `VERSION` file, read by
   COCO-80 so the SigLIP rung stays A/B-comparable against the detector floor. With no right
   answer available the model still returns a winner, and nothing downstream could tell that
   winner from a real one.
-  - **Abstain on the top1−top2 margin, not the absolute score.** Absolute score does not
-    separate: the junk label `handbag` scored 0.1170, the highest in the run and above both
-    correctly-named people. The gap to the runner-up does — the two people scored margins of
-    0.045 and 0.033, every junk label 0.0105 or less. `score_zero_shot` gains `min_margin`
-    (`DEFAULT_MIN_MARGIN = 0.02`, override via `cfg['min_margin']`) and returns a
-    `ZeroShotResult` carrying the margin and an abstention reason. The pre-existing `min_score`
-    hook is kept — a scene-appropriate vocabulary makes it meaningful again — but it is off by
-    default and is not the guard that catches an off-domain vocabulary. A single-label
-    vocabulary has no runner-up, so its margin is `None` and the gate does not fire.
+  - **Record separation, and act on it only when asked.** Absolute score does not separate:
+    the junk label `handbag` scored 0.1170, the highest in the run and above both
+    correctly-named people. Separation does — the two people led their runner-up by 0.045
+    and 0.033, every junk label by 0.0105 or less. Every record now carries `margin` (raw
+    top1−top2 cosine) and `margin_z` (standard deviations above the typical candidate, over
+    the whole vocabulary), and `score_zero_shot` returns a `ZeroShotResult` carrying both
+    plus an abstention reason.
+
+    **Abstention is off by default**, because a raw gap is not a quantity a constant can be
+    set against: it shrinks as the candidate list grows, so a threshold tuned on COCO-80
+    would over-abstain on a 500-word vocabulary and under-abstain on a 5-word one — the same
+    defect as handing an open-vocab model a closed list. When enabled
+    (`cfg['min_margin_z']`) the gate uses the z-score, which stays comparable as the
+    vocabulary changes size. Its limitation is pinned by test: a bulk of near-identical
+    candidates collapses the spread and inflates the z, so a threshold is not transferable
+    between vocabularies of different shape. Recording both statistics on every run is what
+    lets a threshold be chosen from measurements rather than guessed.
   - **An abstention is no longer overwritten by something worse.** `objects` fell through to the
     detector's COCO `concept` when semantics said `unknown`; `segment` is class-agnostic and
     emits `concept=''`, so a refusal became an **empty-string category**, indistinguishable
@@ -37,11 +45,11 @@ version scheme (canonical version in the `VERSION` file, read by
     stays available for audit. Records written before this change load with the new fields
     defaulted.
 
-  Effect on `davis_lab-coat_full`, replayed against the stored rankings: `named_tracks` 8/8 → 2/8,
-  keeping exactly the two people and refusing all six off-vocabulary labels. The threshold is
-  tuned on eight tracks of one clip — a starting value, not a validated one. The real repair is a
-  scene-appropriate vocabulary, which is a rung above this one and a separate change; this makes
-  the failure visible in the meantime instead of silently labelled.
+  With the gate enabled at a threshold that separates them, `davis_lab-coat_full` goes from
+  `named_tracks` 8/8 to 2/8 — keeping exactly the two people and refusing all six
+  off-vocabulary labels. No default does that: shipping the mechanism and the measurements,
+  not a constant. The real repair is a scene-appropriate vocabulary, which is a rung above
+  this one and a separate change.
 
 ## [0.3.0.0] - 2026-09-11
 

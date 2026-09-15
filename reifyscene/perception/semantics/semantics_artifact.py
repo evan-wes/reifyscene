@@ -44,13 +44,18 @@ class SemanticRecord:
     category: str = UNKNOWN_CATEGORY
     score: float = 0.0
     category_topk: list[tuple[str, float]] = field(default_factory=list)  # [(label, score), ...]
-    # top1 - top2 cosine, or None when there was no runner-up to measure against.
-    # The discriminative signal: an off-domain vocabulary produces a high-scoring
-    # but near-flat ranking, so absolute score does not separate a real hit from a
-    # forced one and this does. Measurements in `score_zero_shot`.
+    # How separated the winner was. `margin` is the raw top1 - top2 cosine; `margin_z`
+    # is the same evidence made scale-free -- standard deviations above the typical
+    # candidate, over the whole vocabulary. Absolute score does not separate a real hit
+    # from a forced one (an off-domain vocabulary yields a high-scoring but near-flat
+    # ranking); separation does. Both are None when there was nothing to separate from.
+    # Recorded on every record whether or not abstention is enabled, so a threshold can
+    # be chosen from measurements. Measurements in `score_zero_shot`.
     margin: float | None = None
+    margin_z: float | None = None
     abstained: bool = False
-    abstain_reason: str | None = None  # 'low_margin' | 'low_score' | 'no_labels' | 'no_concept'
+    # 'low_separation' | 'low_score' | 'no_labels' | 'no_concept'
+    abstain_reason: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     caption: Optional[str] = None  # free-form; filled by Qwen-VL at FP4b
 
@@ -67,6 +72,7 @@ class SemanticRecord:
             score=float(raw.get('score', 0.0)),
             category_topk=topk,
             margin=None if raw.get('margin') is None else float(raw['margin']),
+            margin_z=None if raw.get('margin_z') is None else float(raw['margin_z']),
             abstained=bool(raw.get('abstained', False)),
             abstain_reason=raw.get('abstain_reason'),
             attributes=dict(raw.get('attributes', {})),
