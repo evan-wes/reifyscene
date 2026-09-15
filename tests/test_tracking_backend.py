@@ -39,7 +39,11 @@ class _FakeCoTrackerWrapper(CoTrackerWrapper):
             video[i, ..., 2] = 100
         return video, np.asarray(frame_indices, dtype=np.int32), (w, h), (model_w, model_h)
 
-    def _run_real_backend_single(self, video_rgb: np.ndarray):
+    def _run_real_backend_single(self, video_rgb: np.ndarray, queries=None):
+        # `queries` is what mask seeding passes; this fake emits a fixed pair of
+        # trajectories either way, so the seeding path is exercised for plumbing
+        # without the fake having to imitate CoTracker's query semantics.
+        del queries
         t, h, w, _ = video_rgb.shape
         # Recover exact absolute frame indices from the synthetic video so
         # overlapping windows produce globally consistent trajectories.

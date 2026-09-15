@@ -423,16 +423,24 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "reid",
+            version=2,
+            changes={
+                2: "point tracks spanning an occlusion gap relax the appearance threshold for "
+                "the pair they bridge (the merge was appearance-only, which is weakest on the "
+                "similar-looking entities re-identification exists for)",
+            },
             settings={
                 "reid": {},
                 "objects.embedder_backend_mode": None,
                 "objects.embedder_max_inference_side": None,
             },
             pinned=("objects.embedder_max_inference_side",),
-            upstream=("ingest", "segment"),
+            relinks=("tracking",),
+            upstream=("ingest", "segment", "tracking"),
         ),
         StageContract(
-            "semantics", settings={"semantics": {}}, upstream=("ingest", "segment", "reid")
+            "semantics", settings={"semantics": {}}, relinks=("reid",),
+            upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
         StageContract(
@@ -452,15 +460,19 @@ CONTRACTS: dict[str, StageContract] = {
                 "humans.backend_mode",
             ),
             pinned=("humans.max_inference_side", "humans.pose_max_inference_side"),
+            relinks=("reid",),
             upstream=("ingest", "segment", "reid"),
         ),
         StageContract(
             "tracking",
-            version=2,
+            version=3,
             changes={
                 2: "tracks are lifted from the geometry's depth and cameras through its recorded "
                 "crop box (they were read off VGGT's point maps with the frame squashed onto the "
                 "crop, and positions outside it clamped to its edge)",
+                3: "query points are seeded on the segment masks as well as the uniform grid "
+                "(the grid was seeded on frame 0 only, so an entity that was small or absent "
+                "there got almost no points and one appearing later got none at all)",
             },
             settings={"tracking": {}, "lifting": {}},
             relinks=("pose_refine",),
@@ -470,8 +482,12 @@ CONTRACTS: dict[str, StageContract] = {
                 "tracking.resize_max_dim",
                 "tracking.window_size",
                 "tracking.window_overlap",
+                "tracking.seed_min_points",
+                "tracking.seed_per_kilopixel",
+                "tracking.seed_max_points",
+                "tracking.seed_reseed_gap",
             ),
-            upstream=("ingest", "pose_refine"),
+            upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
             "graph",

@@ -652,8 +652,15 @@ class ReifyScenePipeline:
         refined.save()
         return refined
 
-    def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
-        """Run point tracking, 3D lifting, and static/dynamic partitioning."""
+    def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None, instance_artifact=None):
+        """Run point tracking, 3D lifting, and static/dynamic partitioning.
+
+        ``instance_artifact`` (the `segment` stage) puts the tracker's query points on
+        the entities instead of only on a uniform grid over frame 0 -- the dependency
+        was declared from the start and never passed, so an entity that was small or
+        absent at the seed frame got almost no points and nothing downstream could
+        recover them.
+        """
         frame_refs_by_stream: dict[str, list] = {}
         for stream in ingest_artifact.streams:
             frame_refs_by_stream[stream.stream_id] = self.tracker.plan_frame_refs(stream)
@@ -661,6 +668,7 @@ class ReifyScenePipeline:
         artifact = self.tracker.track_many(
             ingest_artifact.streams,
             frame_refs_by_stream=frame_refs_by_stream,
+            instance_artifact=instance_artifact,
         )
 
         # Preserve the actual tracking timeline on the artifact so later stages
@@ -782,7 +790,7 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def compute_reid(self, ingest_artifact, instance_artifact=None):
+    def compute_reid(self, ingest_artifact, instance_artifact=None, track_artifact=None):
         """Per-tracklet appearance embeddings + cross-gap merges → ReidArtifact.
 
         Consumes the `InstanceArtifact` track ids. Runs a backend ladder: the
@@ -801,7 +809,9 @@ class ReifyScenePipeline:
             # can't load, run() raises and the ladder degrades to the floor.
             BackendRung(
                 'dinov2', 'dino_features',
-                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
+                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(
+                    inp['ingest'], inp['instances'], inp.get('tracks')
+                ),
                 probe=importable('transformers'),
             ),
             BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances']),
@@ -809,7 +819,11 @@ class ReifyScenePipeline:
             BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
         ])
         empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
-        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instance_artifact if instance_artifact is not None else empty})
+        result, manifest = ladder.run({
+            'ingest': ingest_artifact,
+            'instances': instance_artifact if instance_artifact is not None else empty,
+            'tracks': track_artifact,
+        })
         embeddings, merge_map = result if result is not None else ({}, {})
         artifact = ReidArtifact(
             run_id=ingest_artifact.run_id,

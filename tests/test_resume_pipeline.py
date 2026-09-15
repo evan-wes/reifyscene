@@ -94,14 +94,48 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
     assert loaded_graph.node_histories['n0']['frames'] == [0, 1]
 
 
+def test_stage_order_is_a_topological_sort_of_the_declared_dependencies() -> None:
+    """Every stage must run after everything it declares, whatever the order becomes.
+
+    The hardcoded list is a record of the order we chose; this is the property that
+    makes any order correct. It is also the guard that was missing when `tracking`
+    declared `segment` and sat five stages further down than it needed to, with nothing
+    to notice that the placement bought nothing.
+    """
+    registry = build_stage_registry()
+    seen: set[str] = set()
+    for stage in STAGE_ORDER:
+        missing = [d for d in registry[stage].dependencies if d not in seen]
+        assert not missing, f"{stage} runs before its dependencies {missing}"
+        seen.add(stage)
+
+
+def test_every_declared_dependency_is_actually_passed() -> None:
+    """A dependency that is declared and never used is a lie the resume checker believes.
+
+    `tracking` declared `segment` from the start and was only ever handed `ingest` and
+    `pose_refine`, so the masks it needed to seed its query points were sitting one
+    stage upstream, unreachable, for the life of the stage.
+    """
+    import inspect
+
+    registry = build_stage_registry()
+    for stage, spec in registry.items():
+        if not spec.dependencies:
+            continue
+        source = inspect.getsource(spec.run_fn)
+        for dep in spec.dependencies:
+            assert f"'{dep}'" in source, f"{stage} declares {dep!r} but never passes it"
+
+
 def test_stage_registry_dependencies() -> None:
-    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking', 'graph', 'optimization', 'scene', 'render')
+    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'tracking', 'reid', 'semantics', 'objects', 'humans', 'graph', 'optimization', 'scene', 'render')
     registry = build_stage_registry()
     assert registry['dyn_mask'].dependencies == ('ingest', 'sync')
     assert registry['geometry'].dependencies == ('ingest', 'sync', 'dyn_mask')
     assert registry['pose_refine'].dependencies == ('ingest', 'geometry')
     assert registry['segment'].dependencies == ('ingest', 'pose_refine')
-    assert registry['reid'].dependencies == ('ingest', 'segment')
+    assert registry['reid'].dependencies == ('ingest', 'segment', 'tracking')
     assert registry['semantics'].dependencies == ('ingest', 'segment', 'reid')
     assert registry['objects'].dependencies == ('ingest', 'segment', 'reid', 'semantics')
     assert registry['tracking'].dependencies == ('ingest', 'pose_refine', 'segment')
@@ -328,11 +362,14 @@ def test_a_model_stage_built_from_a_different_upstream_is_rejected(prior, tmp_pa
     shutil.copytree(run_dir, mixed)
     shutil.rmtree(mixed / 'segment')
     shutil.copytree(other / 'segment', mixed / 'segment')
-    plan = _check(mixed, tmp_path / 'new', 'tracking', copy.deepcopy(other_cfg), [video])
+    plan = _check(mixed, tmp_path / 'new', 'graph', copy.deepcopy(other_cfg), [video])
     assert plan.verdicts['segment'].action == 'load'
-    assert plan.verdicts['reid'].action == 'reject'  # runs a model: not rebuilt behind your back
-    assert 'built from a different segment artifact' in plan.verdicts['reid'].problems[0]
-    assert plan.latest_start() == 'reid'
+    # `tracking` consumes segment now (it seeds its query points from the masks), so it
+    # is the earliest model stage the swap invalidates -- it used to be `reid`.
+    # runs a model: not rebuilt behind your back
+    assert plan.verdicts['tracking'].action == 'reject'
+    assert 'built from a different segment artifact' in plan.verdicts['tracking'].problems[0]
+    assert plan.latest_start() == 'tracking'
 
 
 def test_a_missing_cheap_stage_is_rebuilt(prior, tmp_path) -> None:
@@ -410,14 +447,26 @@ def _make_legacy(
 
 
 def test_a_legacy_run_resumes_with_derived_fingerprints(prior, tmp_path) -> None:
+    """A pre-fingerprint run still resumes all the way, through two contract upgrades.
+
+    `tracking` gained mask seeding and `reid` gained point-track bridges, so a legacy
+    artifact of either is an older *version*, not an older encoding: its upgrade records
+    what it actually was (grid-seeded; no bridges available) rather than pretending it
+    is what this code would write. Everything downstream follows the relink rather than
+    rejecting, which is the property this suite exists to protect.
+    """
     root, run_dir, cfg, video = prior
     legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
     plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
     assert plan.ok, plan.report()
     for verdict in plan.verdicts.values():
         assert any('fingerprint derived from' in d for d in verdict.derived)
-    # Derived records are the ones a fresh run would write: same digests.
+    # Derived records are the ones a fresh run would write -- except where this code now
+    # produces a materially different artifact than the legacy one, which is exactly what
+    # a contract version bump means.
     for stage, record in plan.records.items():
+        if stage in ('tracking', 'reid'):
+            continue
         fresh = json.loads((run_dir / stage / 'artifact.json').read_text())['metadata']['contract']
         assert record['digest'] == fresh['digest'], stage
 

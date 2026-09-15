@@ -623,10 +623,17 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
     diffs = _settings_diff(recorded, effective_settings(stage, cfg))
     if diffs:
         stale.append("settings differ: " + "; ".join(diffs))
+    # An upstream the record does not mention at all is not evidence of a change: it is
+    # an artifact made before that stage was an upstream of this one (reid gained
+    # `tracking` when point-track bridges started corroborating its merges). Such an
+    # artifact is caught -- or cleared -- by the contract version above, which is the
+    # check that knows what the older output meant. Only an entry that is present and
+    # different proves the upstream moved underneath it.
+    recorded_upstream = record.get("upstream", {}) or {}
     changed = [
         up for up in contract.upstream
         if up in digests and digests[up] is not None
-        and record.get("upstream", {}).get(up) != digests[up]
+        and up in recorded_upstream and recorded_upstream[up] != digests[up]
     ]
     relinked = False
     if changed and not stale and set(changed) <= set(contract.relinks):

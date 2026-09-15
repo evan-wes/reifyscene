@@ -46,11 +46,17 @@ STAGE_ORDER: tuple[str, ...] = (
     'geometry',
     'pose_refine',
     'segment',
+    # `tracking` runs here, not after `humans`. Design §4A asked only for it to follow
+    # `segment` (so its dynamic split is seeded by real foreground masks); placing it
+    # five stages later also put it after `reid`, which meant identity was decided
+    # before point tracks existed and could never use them. The fourth invariant
+    # forbids the *ladder* reordering the pipeline, not redesign, and tracking's
+    # declared dependencies are all satisfied here.
+    'tracking',
     'reid',
     'semantics',
     'objects',
     'humans',
-    'tracking',
     'graph',
     'optimization',
     'scene',
@@ -105,9 +111,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'reid': StageSpec(
             name='reid',
-            dependencies=('ingest', 'segment'),
+            dependencies=('ingest', 'segment', 'tracking'),
             artifact_cls=ReidArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment'], track_artifact=outputs['tracking']),
             load_fn=ReidArtifact.load,
         ),
         'semantics': StageSpec(
@@ -135,7 +141,7 @@ def build_stage_registry() -> dict[str, StageSpec]:
             name='tracking',
             dependencies=('ingest', 'pose_refine', 'segment'),
             artifact_cls=TrackArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine'], instance_artifact=outputs['segment']),
             load_fn=TrackArtifact.load,
         ),
         'graph': StageSpec(

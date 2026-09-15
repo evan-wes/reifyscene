@@ -24,12 +24,13 @@ rung is import-safe when ``transformers`` is absent (the ladder probe gates it).
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
 from reifyscene.common.types import FrameRef
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.reid.track_bridges import bridge_counts, tracklet_point_sets
 
 # Default (ungated, Apache) appearance backbone. DINOv3-L is a drop-in id swap.
 DEFAULT_MODEL_ID = 'facebook/dinov2-large'
@@ -46,12 +47,22 @@ DEFAULT_MERGE_THRESHOLD = 0.6
 DEFAULT_RATIO_MARGIN = 0.0
 
 
+# Point tracks spanning a gap admit a pair that appearance alone would refuse. Two is
+# the smallest count that is not a single point clipping a mask in passing; the relax is
+# deliberately small, because geometry here is corroboration, not proof.
+DEFAULT_BRIDGE_MIN = 2
+DEFAULT_BRIDGE_RELAX = 0.05
+
+
 def build_cross_occlusion_merge_map(
     vectors: dict[str, np.ndarray],
     spans: dict[str, tuple[str, int, int]],
     *,
     threshold: float = DEFAULT_MERGE_THRESHOLD,
     ratio_margin: float = DEFAULT_RATIO_MARGIN,
+    bridges: dict[tuple[str, str], int] | None = None,
+    bridge_min: int = DEFAULT_BRIDGE_MIN,
+    bridge_relax: float = DEFAULT_BRIDGE_RELAX,
 ) -> dict[str, str]:
     """Fold appearance-similar, time-disjoint tracklets onto one canonical id.
 
@@ -64,6 +75,10 @@ def build_cross_occlusion_merge_map(
         threshold: minimum cosine similarity for a pair to be a merge candidate.
         ratio_margin: each side's best candidate must beat its second-best by at
             least this margin (abstain on near-ties).
+        bridges: ``{(id_a, id_b): shared point tracks}`` from
+            :mod:`~reifyscene.perception.reid.track_bridges`, sorted-pair keyed.
+        bridge_min: how many shared point tracks make a pair bridged.
+        bridge_relax: how far a bridged pair's appearance threshold is lowered.
 
     Returns:
         ``{track_id: canonical_id}`` for every *non-canonical* member of a merged
@@ -77,6 +92,13 @@ def build_cross_occlusion_merge_map(
     precise than greedy thresholding on near-identical instances: a tracklet that
     looks slightly more like a *different* entity than its own other half is
     correctly left unmerged rather than confidently mis-joined.
+
+    **Geometry admits candidates; it never merges them.** A pair bridged by point
+    tracks that sat inside both tracklets' masks has its appearance threshold lowered by
+    ``bridge_relax`` -- so the same thing observed continuously through a gap can be
+    considered even when it does not look quite like itself. It still has to win
+    mutual-nearest-neighbour and the ratio test. A point track can drift off one entity
+    onto another, and that failure must not be able to fuse two people on its own.
 
     Candidates are restricted to **same-stream**, **span-disjoint** pairs — two
     tracklets sharing any frame are co-visible (e.g. over-segmented parts), a
@@ -99,7 +121,9 @@ def build_cross_occlusion_merge_map(
             if not (xi < mj or xj < mi):  # spans touch/overlap -> co-visible, skip
                 continue
             sim = float(np.dot(np.asarray(vectors[ti]).ravel(), np.asarray(vectors[tj]).ravel()))
-            if sim >= threshold:
+            shared = 0 if not bridges else int(bridges.get(tuple(sorted((ti, tj))), 0))
+            limit = threshold - bridge_relax if shared >= int(bridge_min) else threshold
+            if sim >= limit:
                 cand[ti].append((sim, tj))
                 cand[tj].append((sim, ti))
     for t in tracks:
@@ -190,12 +214,20 @@ class DinoReid:
             feats = out.last_hidden_state[:, 0]
         return feats.float().cpu().numpy()
 
-    def run(self, ingest_artifact, instance_artifact: InstanceArtifact) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+    def run(
+        self, ingest_artifact, instance_artifact: InstanceArtifact, track_artifact=None
+    ) -> tuple[dict[str, np.ndarray], dict[str, str]]:
         """Return ``({track_id: mean DINO vector}, merge_map)``.
 
         Frames are decoded once; all instances in a frame are cropped + embedded
         together. Per-track vectors are mean-pooled then L2-normalized; the merge
         map is built from those vectors + each track's temporal span.
+
+        ``track_artifact`` adds geometric corroboration: point tracks that sat inside
+        both tracklets' masks bridge the gap between them, and a bridged pair's
+        appearance threshold is relaxed (:mod:`reifyscene.perception.reid.track_bridges`).
+        It cannot merge anything on its own, and without it the merge is exactly the
+        appearance-only one.
         """
         self._load_model()
         stream_lookup = {s.stream_id: s for s in ingest_artifact.streams}
@@ -228,7 +260,42 @@ class DinoReid:
 
         embeddings = {t: _l2norm(total / max(counts[t], 1)) for t, total in sums.items()}
         span_tuples = {t: (s[0], s[1], s[2]) for t, s in spans.items()}
+        bridges = self._bridges(instance_artifact, track_artifact)
         merge_map = build_cross_occlusion_merge_map(
-            embeddings, span_tuples, threshold=self.merge_threshold, ratio_margin=self.ratio_margin,
+            embeddings, span_tuples, threshold=self.merge_threshold,
+            ratio_margin=self.ratio_margin, bridges=bridges,
         )
         return embeddings, merge_map
+
+    @staticmethod
+    def _bridges(instance_artifact, track_artifact) -> dict[tuple[str, str], int]:
+        """Point tracks shared between tracklets, per stream. Empty when unavailable."""
+        if track_artifact is None:
+            return {}
+        payloads = getattr(track_artifact, 'track_payloads_by_stream', {}) or {}
+        if not payloads:
+            return {}
+        by_stream: dict[str, dict[int, dict[str, Any]]] = {}
+        for obs in instance_artifact.observations:
+            mask = instance_artifact.mask_arrays.get(obs.instance_id)
+            if mask is None:
+                continue
+            stream = obs.frame_ref.stream_id
+            by_stream.setdefault(stream, {}).setdefault(int(obs.frame_ref.frame_idx), {})[
+                str(obs.track_id)
+            ] = mask
+        out: dict[tuple[str, str], int] = {}
+        for stream_id, masks_by_frame in by_stream.items():
+            payload = payloads.get(stream_id) or {}
+            if not payload:
+                continue
+            point_sets = tracklet_point_sets(
+                masks_by_frame,
+                frame_indices=np.asarray(payload.get('frame_indices', []), dtype=int),
+                points_xy=np.asarray(
+                    payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32))
+                ),
+                visibility=payload.get('visibility'),
+            )
+            out.update(bridge_counts(point_sets))
+        return out

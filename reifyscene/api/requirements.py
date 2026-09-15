@@ -728,13 +728,88 @@ def _pose_refine_v2(ctx: ResumeContext) -> Derivation:
     )
 
 
+def _tracking_grid_seeded(ctx: ResumeContext) -> Derivation:
+    """A version-2 tracking artifact is a valid version-3 one that was grid-seeded.
+
+    Version 3 added query points sampled on the ``segment`` masks *alongside* the
+    uniform grid. It did not make mask seeding mandatory: a run whose masks are
+    unavailable seeds the grid alone, and that is exactly what every version-2 artifact
+    is. So there is nothing to recompute -- the artifact is already what this code
+    produces in that case, and it only needs to say so.
+
+    No ``revision``: the tracks themselves are unchanged, so everything built from them
+    stays valid. What it does change is the honesty of the record -- a consumer asking
+    how this artifact was seeded gets an answer instead of an absence.
+    """
+    del ctx
+    return Derivation(
+        note="tracks were seeded on the uniform grid alone (no mask seeding in that version)",
+        metadata={"seeding": "grid", "num_entity_queries": 0},
+    )
+
+
+def _reid_appearance_only(ctx: ResumeContext) -> Derivation:
+    """A version-1 reid artifact is a valid version-2 one built without track bridges.
+
+    Version 2 lets point tracks spanning an occlusion gap relax the appearance threshold
+    for the pair they bridge. Bridges only ever *admit* candidates -- a merge still has
+    to win mutual-nearest-neighbour and the ratio test -- so a merge map built without
+    them is a subset of what this code would produce, not a different kind of thing.
+    Nothing to recompute; record that it had no bridges to work with.
+    """
+    del ctx
+    return Derivation(
+        note="merges were appearance-only (point-track bridges were not available then)",
+        metadata={"bridges": "unavailable"},
+    )
+
+
 UPGRADES: dict[str, dict[int, Callable[[ResumeContext], Derivation]]] = {
-    "tracking": {1: _relift_tracks},
+    "tracking": {1: _relift_tracks, 2: _tracking_grid_seeded},
     "pose_refine": {1: _pose_refine_v2},
+    "reid": {1: _reid_appearance_only},
 }
 
 # stage -> how it absorbs a change of the upstream stages its contract ``relinks``.
+def _reid_follows_tracking(ctx: ResumeContext) -> Derivation:
+    """reid absorbs a tracking change, because the part it uses cannot have changed.
+
+    Its merges are corroborated by **bridges** -- point tracks seen inside two tracklets'
+    masks -- and that is a question about the tracks' 2D positions and visibility. The
+    only thing that happens to a tracking artifact a resume *loads* is a re-lift: the
+    3D and the static/dynamic split are recomputed, the 2D tracks are the expensive
+    model-made part and are kept exactly. So the bridges are identical and the merge map
+    still holds.
+
+    If the 2D tracks themselves were to change, tracking would have been re-run rather
+    than loaded, and reid would be rejected before reaching here.
+    """
+    del ctx
+    return Derivation(
+        note="follows its tracking: the re-lift leaves the 2D tracks its bridges are read from"
+    )
+
+
+def _follows_reid(ctx: ResumeContext) -> Derivation:
+    """semantics / humans absorb a reid relink: what they read from it is unchanged.
+
+    They consume reid's canonical track ids -- which tracklets are one entity. A relink
+    only moves reid's fingerprint (its tracking upstream was re-lifted); the embeddings
+    and the merge map those ids come from are untouched, because a loaded tracking
+    artifact keeps its 2D tracks and the bridges are read from those.
+
+    Without this, giving reid a `tracking` upstream would make every geometry revision
+    reject the two model stages downstream of it -- turning a revision that the design
+    deliberately *follows* into one that rejects.
+    """
+    del ctx
+    return Derivation(note="follows its reid: the canonical track ids it reads are unchanged")
+
+
 RELINKS: dict[str, Callable[[ResumeContext], Derivation]] = {
     "pose_refine": _relink_pose_refine,
     "tracking": _relift_tracks,
+    "reid": _reid_follows_tracking,
+    "semantics": _follows_reid,
+    "humans": _follows_reid,
 }
