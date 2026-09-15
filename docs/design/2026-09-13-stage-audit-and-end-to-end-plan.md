@@ -23,7 +23,8 @@ configuration that delivers the full vision end to end** — interpret, query, e
 verify — on real footage. Degradability returns once that path exists and is worth protecting.
 
 Concretely: the ladders in the superseded document are retained as *design notes about what a rung
-would be*, not as work items. Work items below target the **golden path** — the top rung of every
+would be*, not as work items. **§7 records the standing decision this implies** — fusion is the
+target, the cascade is a measured phase with an exit condition. Work items below target the **golden path** — the top rung of every
 stage — and nothing else.
 
 ---
@@ -72,20 +73,39 @@ emitting `cup` for a person is a green manifest over a worthless output. **Propo
 — each stage declares, per graph-relevant capability, whether it is `grounded`, `degraded` or
 `absent`, so "all green, graph is garbage" stops being representable.
 
-### 2.2 Per-person depth already exists, and the graph discards it
+### 2.2 Dense 3D already exists for every entity, and the graph discards it
 
-`humans/dense/` holds **94 files, 89 MB**: Sapiens per-instance `depth` (usable on **94/94**),
-`normals`, and `seg`. `HumanState` also carries `keypoints_2d` (94/94).
+**Revised 2026-09-14.** The first draft named Sapiens per-person depth as the route. There is a
+better one: `pose_refine/pointmaps/` holds **70 MB** of per-frame dense 3D — a world-space point per
+pixel, **already in the canonical ground-plane frame**, needing no scale alignment and covering
+objects as well as people.
 
-`graph/builders.py` reduces all of it to `mean_visible_keypoints`, `has_densepose` and `has_smpl` —
-two booleans and a float. It never opens `dense/`.
+Intersecting those pointmaps with the masks the `segment` stage already produces, measured on this
+clip:
 
-Meanwhile the two human nodes on this clip carry **5 and 0** 3D positions across **47 masked
-frames**. The position evidence the graph is starved of is already on disk, per person, per frame.
+| entity | positions today | frames with 3D | 3D points per frame |
+|---|---:|---:|---:|
+| human A | 5 | **47** (all) | ~11,200 |
+| human B | **0** | **47** (all) | ~14,400 |
+| handbag | **0** | **47** (all) | ~1,000 |
+| small tall object | 2 | **7** (its full presence) | ~1,100 |
 
-**This is the single highest-value repair in the audit.** Sapiens depth plus the (good) camera poses
-yields a dense 3D point set per person per frame — position *and* extent — with no dependence on
-whether a point track happened to land on them.
+Every entity gains **full presence coverage**, with centroid *and* extent, from data already on
+disk. No new model, no new dependency, no per-crop scale reconciliation.
+
+**The consequence for §2.4:** the point-track starvation does not need to be *fixed* to get
+positions — it needs to be **bypassed**. Tracks stay the right source for the jobs in §2.7; they are
+the wrong source for position and always were.
+
+Sapiens `dense/` (94 files, 89 MB, depth usable 94/94) remains a **secondary refinement** for people
+specifically — higher resolution inside the person crop — but it is per-crop and would need scale
+alignment into the world frame, so it is not the first move. `graph/builders.py` currently reduces
+all of it to `mean_visible_keypoints`, `has_densepose` and `has_smpl`: two booleans and a float.
+
+**Care required.** Mask edges straddle depth discontinuities, so a naive centroid drags toward
+background. This needs a robust estimator — median plus depth-consistency trimming — not a mean.
+Absolute magnitudes are meaningless on their own: monocular scale is arbitrary up to the Sim(3), so
+only ratios are interpretable.
 
 ### 2.3 Motion labels and entity assignment contradict each other
 
@@ -174,6 +194,72 @@ These are the cheapest repairs in the audit: the data is already computed and al
 - **`ingest` / `sync` — no graph-relevant defect found**, beyond stamping no manifest.
 - **`dyn_mask` — correctly a no-op** under the VGGT joint rung, per §4A.1.
 
+### 2.7 What point tracks are actually for — and why the order forecloses it
+
+**Added 2026-09-14**, correcting §2.4's framing that tracking is simply broken.
+
+Tracks do four jobs. The pipeline asks them for the one they are worst at and none of the three they
+are uniquely good at.
+
+| Job | Who does it today | State |
+|---|---|---|
+| **position** | point tracks — the only source | badly; superseded by §2.2's pointmaps |
+| **motion / static-dynamic** | point tracks | contradicts the assignment (§2.3) |
+| **identity continuity through occlusion** | `reid`, by DINOv2 appearance | **tracks not used at all** |
+| **objectness — catching mask false positives/negatives** | nothing | **not implemented** |
+
+A point that physically persists through an occlusion and lands inside a different tracklet
+afterwards is *geometric proof* they are the same entity — evidence appearance cannot supply, and
+precisely what is needed on a clip chosen because three similar-looking people are a re-id stress
+test. A region whose points scatter across incompatible depths and motions is evidence it is not one
+object; a mask that blinks out while points continue coherently is evidence segmentation dropped a
+frame.
+
+**The stage order forecloses the identity use.** `reid` declares only `(ingest, segment)` and runs
+*before* `tracking`, so identity is decided before point tracks exist.
+
+**And the reordering is legal.** §4A.1's fourth invariant reads "the ladder gates whether each
+upstream stage does real work — **it** never reorders": the *ladder* must not reorder the pipeline,
+i.e. order must not be a function of which rung runs. It does not freeze the order against redesign.
+Verified against the real registry: `tracking` declares `(ingest, pose_refine, segment)`, so moving
+it to immediately after `segment` is dependency-legal **with no other change**, and its only
+consumer (`graph`) stays downstream. `reid` can then declare `tracking` and merge on geometric
+continuity as well as appearance.
+
+§4A's own rationale asked only for tracking *after `segment`* ("so its dynamic split is seeded by
+real foreground masks"). Placing it five stages later, after `reid`/`semantics`/`objects`/`humans`,
+buys nothing and is what costs us track-informed identity.
+
+**Cost to weigh:** `STAGE_ORDER` defines what counts as upstream for resume, and every run in
+`../runs/` was produced under the old order. A migration decision, not a blocker.
+
+**The cycle this does not resolve.** Using tracks to catch mask errors needs tracks *before*
+`segment`, and tracks want masks to be seeded well. Genuinely circular. The repo already has the
+shape of the answer: `dyn_mask` is a deliberately coarse, geometry-free pass placed before
+`geometry` purely to break the SfM-needs-a-motion-mask cycle. The same pattern applies — a coarse
+grid pass before `segment` for objectness, a mask-seeded pass after it for identity.
+
+### 2.8 The fusion stage is a scaffold with no solver
+
+`reifyscene/optimize/` carries a full factor-graph layout — `reprojection`, `depth_consistency`,
+`epipolar`, `smoothness`, `track_consistency`, `graph_factors`, `human_factors`, `object_factors`,
+`priors`, `time_alignment` — and a three-stage schedule that runs on every clip.
+
+It optimizes nothing. From the lab-coat artifact's own `pending_todos`: *"Connect stage variables to
+a real optimizer backend."*, *"Add depth and epipolar consistency terms."*, *"Add object and
+scene-graph consistency factors."* Its reported residuals are **observation counts** —
+`track_consistency: 6768` is exactly 47 frames × 144 tracks. `human_trajectories: 0`,
+`object_trajectories: 0`.
+
+**And its position is wrong for what fusion would be for.** `optimization` runs *after* `graph`, so
+even fully built it would refine cameras and trajectories *given* an entity inventory. It could
+never revise the inventory. That is the structural reason a `segment` error is permanent.
+
+**Parallelism is not the prize.** The true dependency DAG is **13 deep against 15 stages** — only
+`(reid, tracking)` and `(semantics, humans)` can overlap. Extraction is genuinely sequential because
+nearly everything needs poses. What a joint solve buys is not speed; it is not having to break the
+cycles by hand.
+
 ---
 
 ## 3. The golden path
@@ -182,7 +268,7 @@ The end-to-end vision, and what each step needs to stop being blocked:
 
 | Step | Blocked on | From |
 |---|---|---|
-| **Interpret** — entities with identity, presence, position, extent | human positions from Sapiens depth; mask-seeded tracking; semantics reaching the graph | §2.2, §2.4, §2.5 |
+| **Interpret** — entities with identity, presence, position, extent | positions + extents from pointmaps ∩ masks; mask-seeded tracking for *identity*; semantics reaching the graph | §2.2, §2.7, §2.5 |
 | **Relate** — typed relations with validity intervals | extents (which §2.2 also supplies); scale-relative thresholds; gravity axis recorded | §1, §2.5 |
 | **Query** — language in, entities out | the graph being worth querying; a typed schema | §2.5 |
 | **Edit** — `remove`, `move` | entity→Gaussian assignment **wired into the pipeline** (landed as a library, zero callers) | — |
@@ -236,9 +322,9 @@ From `2026-09-12-back-half-ladders-and-graph-contract.md`:
 
 - **§0 and §2 (the five back-half ladders) are demoted** to design notes. Rung enumeration is not a
   work item under the new posture.
-- **§2.2's cross-position extents ladder is withdrawn.** Human extents come from Sapiens depth at
-  `humans` position (§2.2 of this document); the backward-edge problem it tried to solve does not
-  arise.
+- **§2.2's cross-position extents ladder is withdrawn.** Positions and extents come from the
+  geometry pointmaps already available at `graph` position (§2.2 of this document); the backward-edge
+  problem it tried to solve does not arise.
 - **§3 (the contract) stands**, with three corrections: `position(t)` is *not* shipped as "one point
   per observed frame"; per-frame uncertainty is *not* shipped; `category` is absent on human nodes.
 - **§1 (the abstention defect) shipped** as PR #5, with the threshold caveat of §1 above outstanding.
@@ -250,9 +336,10 @@ the adoption verdicts stand.
 
 ## 6. Work items, in order
 
-1. **Human node positions and extents from Sapiens depth** (§2.2). Highest value; the data exists.
-2. **Pass `segment` into `tracking` and seed query points from masks** (§2.4). Fixes late arrivals,
-   which density cannot.
+1. **Entity positions and extents from pointmaps ∩ masks** (§2.2) — all eight entities, data already
+   on disk, robust estimator required.
+2. **Move `tracking` after `segment`, seed query points from masks, give `reid` the tracks** (§2.4,
+   §2.7). For identity and objectness — *not* position, which item 1 supersedes.
 3. **Fix the support denominator** (§2.4) so re-id success stops destroying 3D support.
 4. **Stop dropping data at the graph boundary** (§2.5) — pass `SemanticsArtifact` to `graph`, carry
    `semantic_topk` and embeddings, label human nodes, record the gravity axis.
@@ -260,7 +347,62 @@ the adoption verdicts stand.
 6. **Manifests for `tracking`, `objects`, `graph`** plus the second axis (§2.1), and per-axis entries
    for `humans`.
 7. **Wire `entity_gaussians` into the pipeline** — it has zero callers today.
-8. **Reference comparison** (§4), starting with ConceptGraphs and Feature4X.
+8. **Reference comparison** (§4), starting with ConceptGraphs on our own geometry.
 
-Items 1–4 are the ones that decide whether the graph means anything. 8 can run in parallel with all
-of them and should start early, because it is the only item that produces an outside opinion.
+Items 1–4 decide whether the graph means anything. Item 8 runs in parallel and should start early:
+it is the only item that produces an outside opinion, and it feeds §7's exit condition.
+
+---
+
+## 7. Standing decision — fusion is the target, the cascade is a measured phase
+
+**Decided 2026-09-14.** Recorded here so it is not relitigated each time a stage misbehaves.
+
+### The target is fusion
+
+The project's claim is a **correct, enumerable inventory** grounded in something you can re-render.
+Not a better reconstruction — Feature4X already has that, from the same monocular input, and has no
+entities at all. The inventory is the differentiator, and it is the one thing that can be *plainly
+wrong* rather than gracefully vague.
+
+A cascade structurally cannot guarantee it. `segment` commits to an entity count from 2D appearance
+before any 3D evidence exists, and every later stage inherits that commitment. This clip shows both
+halves: the count is wrong, **and** the evidence to correct it is sitting in the same run —
+pointmaps (§2.2), motion coherence (§2.3), track continuity (§2.7). Reordering does not fix it,
+because whichever stage runs first commits first (§2.7's cycle). The architecture already agrees: the
+factor graph exists and was never connected (§2.8).
+
+### The cascade is the next phase, and it has a job
+
+Not convenience — evidence:
+
+1. **We do not yet know how much of the error is structural.** The audit found mostly *wiring*.
+   Those are cascade-compatible fixes, and the one clearly structural failure (the entity count) is
+   measured on a single clip where the third person is marginal anyway (7 of 47 frames, 0.7% of
+   frame). One clip is not a mandate to rebuild.
+2. **Fusion needs uncertainty and we have none.** Every `GraphNode.confidence` is hardcoded `1.0`
+   (`nodes.py:11,15,19,23`). A solve weights evidence; ours cannot say which evidence is weak.
+   Producing calibrated uncertainty *is* the cascade work.
+3. **You cannot fuse your way out of a bad question.** A joint solve over a `semantics` stage that
+   was asked a closed-vocabulary question yields a confidently fused wrong answer.
+
+### Four rules that make cascade work count as fusion groundwork
+
+1. **Every stage emits evidence with uncertainty, not a committed answer.** PR #5 is the template: a
+   stage saying "I am not sure, and here is the margin" instead of asserting `cup`.
+2. **No stage destroys information it merely cannot use** (§2.5).
+3. **Thresholds are relative to quantities the pipeline measures**, never absolute constants (§1).
+4. **The graph's inputs stay observations, not conclusions**, so a future solve has something to
+   weigh.
+
+Follow these and the cascade work *is* the fusion substrate. Ignore them and it is a rewrite later.
+
+### The exit condition, stated so it can fire
+
+After items 1–4 land, run the inventory against clips with a known answer. **If the inventory is
+still wrong on a clip where the correcting evidence demonstrably exists elsewhere in the run, that is
+the fusion trigger**: `optimization` moves ahead of `graph` and gets a real solver backend. If the
+inventory comes out right, the cascade was sufficient and fusion was premature.
+
+Item 8 feeds the same decision from outside: if ConceptGraphs builds a better inventory **from our
+own geometry**, the limit is our architecture rather than our reconstruction.
