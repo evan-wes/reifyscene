@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -156,3 +158,119 @@ def test_uncovered_person_boxes_finds_only_what_no_mask_claims() -> None:
     assert out[0].tolist() == [50.0, 10.0, 70.0, 60.0]
 
     assert len(seg._uncovered_person_boxes(frame, [])) == 2      # nothing claimed yet
+
+
+# --- seeding people who arrive after the keyframe -----------------------------
+
+def test_late_arrivals_are_seeded_once_each_not_once_per_frame() -> None:
+    """The loop re-propagates between rounds, which is what bounds the seeding.
+
+    The first version judged coverage against boxes claimed on *earlier* frames. A walking
+    person's box drifts away from her own earlier one, so she looked uncovered again every
+    few frames and was re-seeded each time: eight tracks became fifty-four. Re-propagating
+    means coverage is judged against where tracks actually are, so once she is tracked she
+    stops being uncovered.
+
+    No DAVIS sequence exercises this -- 205 of its 206 annotated objects are present on
+    frame 0 -- so the loop is pinned here rather than by the benchmark.
+    """
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+
+    LATE = np.array([50.0, 10.0, 70.0, 60.0], np.float32)
+
+    class _Det:
+        def detect(self, _frame):                      # one person, on every frame
+            return [{"category": "person", "bbox_xyxy": LATE}]
+
+    seg = SAM2InstanceSegmenter.__new__(SAM2InstanceSegmenter)
+    seg.detector = _Det()
+    seg.person_iou = 0.5
+    seg.person_seed_stride = 1
+    seg.person_seed_rounds = 3
+    seg.person_seed_patience = 3
+    seg._person_box_cache = {}
+
+    images = [np.zeros((80, 100, 3), np.uint8) for _ in range(10)]
+    propagations = []
+
+    def _fake_propagate(_tmp, _masks, box_seeds):
+        propagations.append({k: len(v) for k, v in box_seeds.items()})
+        # Once seeded, she is tracked from that frame onward -- which is what a real
+        # propagation does, and what the broken version never got to see.
+        tracked: dict[int, dict[int, np.ndarray]] = {}
+        first = min(box_seeds, default=None)
+        for pos in range(len(images)):
+            masks = {}
+            if first is not None and pos >= first:
+                m = np.zeros((80, 100), bool)
+                m[10:60, 50:70] = True
+                masks[0] = m
+            tracked[pos] = masks
+        return tracked
+
+    seg._propagate = _fake_propagate
+    per_frame = seg._seed_late_arrivals(Path("/tmp"), images, [], {}, {})
+
+    assert len(propagations) == 1, f"one seed should settle it, got {propagations}"
+    assert propagations[0] == {0: 1}, "seeded once, where she was first unaccounted for"
+    assert per_frame[9]  # and she is tracked to the end
+
+
+def test_no_late_arrival_costs_no_propagation() -> None:
+    """The common case -- everyone present at the keyframe -- must stay free."""
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+
+    class _Det:
+        def detect(self, _frame):
+            return []                                   # nobody to find
+
+    seg = SAM2InstanceSegmenter.__new__(SAM2InstanceSegmenter)
+    seg.detector = _Det()
+    seg.person_iou = 0.5
+    seg.person_seed_stride = 1
+    seg.person_seed_rounds = 3
+    seg.person_seed_patience = 3
+    seg._person_box_cache = {}
+    seg._propagate = lambda *a, **k: pytest.fail("should not re-propagate")
+
+    images = [np.zeros((80, 100, 3), np.uint8) for _ in range(5)]
+    assert seg._seed_late_arrivals(Path("/tmp"), images, [], {}, {"x": 1}) == {"x": 1}
+
+
+def test_a_brief_mask_dropout_is_not_a_new_arrival() -> None:
+    """Patience, and the reason for it.
+
+    A tracked person whose mask degrades for a frame falls below person_iou against her
+    own detection box and looks unaccounted for. Acting on that seeds a second track for
+    someone already present -- which is what fired on davis_lab-coat, where all three
+    people are there from frame 0 and nobody arrives at all.
+    """
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+
+    BOX = np.array([50.0, 10.0, 70.0, 60.0], np.float32)
+
+    class _Det:
+        def detect(self, _frame):
+            return [{"category": "person", "bbox_xyxy": BOX}]
+
+    seg = SAM2InstanceSegmenter.__new__(SAM2InstanceSegmenter)
+    seg.detector = _Det()
+    seg.person_iou = 0.5
+    seg.person_seed_stride = 1
+    seg.person_seed_rounds = 3
+    seg.person_seed_patience = 3
+    seg._person_box_cache = {}
+
+    good = np.zeros((80, 100), bool)
+    good[10:60, 50:70] = True
+    tiny = np.zeros((80, 100), bool)
+    tiny[10:20, 50:55] = True          # a bad frame: IoU with the box drops below 0.5
+
+    images = [np.zeros((80, 100, 3), np.uint8) for _ in range(8)]
+    per_frame = {p: {0: (tiny if p == 4 else good)} for p in range(8)}
+    assert seg._earliest_uncovered_people(images, per_frame) is None
+
+    # Genuinely absent from frame 4 onward: that outlasts the patience and is seeded.
+    per_frame = {p: ({0: good} if p < 4 else {}) for p in range(8)}
+    found = seg._earliest_uncovered_people(images, per_frame)
+    assert found is not None and found[0] == 4
