@@ -26,3 +26,21 @@ only the objects of interest, so a fence panel or a patch of foliage is legitima
 unannotated; a node matching no ground truth may be a real thing nobody labelled. It is
 reported because it says something about how the proposer behaves, not because it is
 wrong.
+
+## `amg_keyframe_cache.json`
+
+Every mask SAM 2's automatic generator proposes on each sequence's first frame, reduced to
+the four quantities the mask filter tests plus each proposal's IoU against each
+ground-truth object. No masks are stored -- once those numbers exist, any filter setting
+scores in milliseconds.
+
+    python scripts/sweep_mask_filter.py            # rebuild the cache (GPU, ~10 min)
+    python scripts/sweep_mask_filter.py --sweep    # score settings against it
+
+**Finding (2026-09-16):** the filter thresholds are not where recall is hiding. Across 36
+settings, kept proposals match between 85 and 89 of 205 objects; the shipped setting is
+85. Admitting a koala at 58% of frame gains one object.
+
+**What it cannot tell you:** the pipeline's propagated masks match 141 of 205 on the same
+frame, because SAM 2's video predictor re-segments from a seed rather than keeping the
+proposal. Proposal quality is a lower bound on what the inventory achieves, not a ceiling.
