@@ -44,3 +44,24 @@ settings, kept proposals match between 85 and 89 of 205 objects; the shipped set
 **What it cannot tell you:** the pipeline's propagated masks match 141 of 205 on the same
 frame, because SAM 2's video predictor re-segments from a seed rather than keeping the
 proposal. Proposal quality is a lower bound on what the inventory achieves, not a ceiling.
+
+## `detector_keyframe_cache.json`
+
+Every box an open-vocabulary detector (GroundingDINO) proposes on each sequence's first
+frame, reduced to its IoU against each ground-truth object. Same trick as the mask cache:
+the detector depends on nothing downstream, so it runs once and any question about
+coverage is then arithmetic.
+
+    python scripts/probe_detector_coverage.py            # build the cache (GPU, ~1 min)
+    python scripts/probe_detector_coverage.py --report
+
+**Finding (2026-09-16):** 45 of the 63 objects the inventory misses have *no* SAM 2
+proposal overlapping them at all. GroundingDINO covers **31 of those 45** with a blind
+COCO-80 list, and **26 of 45** with a generic list whose most specific noun is "animal".
+Across all objects it covers 173 of 205, against 116 for SAM 2's proposals counted at
+IoU 0.01.
+
+So the bottleneck is evidence *acquisition*, not evidence *combination*: a detector
+trained to localise objects proposes things a class-agnostic mask generator does not. The
+vocabularies are fixed and applied to all ninety sequences unseen -- a list written after
+looking at the clips proves nothing a pipeline can use.
