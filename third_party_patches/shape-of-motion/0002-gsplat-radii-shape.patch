@@ -1,0 +1,22 @@
+Collapse gsplat >= 1.4 per-gaussian radii from (C, G, 2) to (C, G).
+
+Upstream pin: shape-of-motion @ 579753e1c7ba96f60cd7690e5b835627bd1935e9
+
+gsplat >= 1.4 returns screen-space radii with a trailing dimension; SoM's densification expects a
+scalar radius and uses it as a visibility mask. The guard is shape-conditional, so it is inert
+against an older gsplat.
+
+Without it: densification indexes with a wrongly-shaped mask.
+diff --git a/flow3d/trainer.py b/flow3d/trainer.py
+index da38a92..5f046d9 100644
+--- a/flow3d/trainer.py
++++ b/flow3d/trainer.py
+@@ -572,6 +572,8 @@ class Trainer:
+         for _current_xys, _current_radii, _current_img_wh in zip(
+             self._batched_xys, self._batched_radii, self._batched_img_wh
+         ):
++            if _current_radii.dim() == 3:  # gsplat>=1.4 radii (C,G,2) -> (C,G)
++                _current_radii = _current_radii.amax(dim=-1)
+             sel = _current_radii > 0
+             gidcs = torch.where(sel)[1]
+             # normalize grads to [-1, 1] screen space
