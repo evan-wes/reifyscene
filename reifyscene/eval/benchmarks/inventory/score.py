@@ -122,35 +122,80 @@ def score_run(
         score.notes.append("segment produced no masks")
         return score
 
+    return score_masks_by_frame(
+        by_frame, annotation_dir, sequence=run_dir.name, frames=frames,
+        match_iou=match_iou, notes=score.notes,
+    )
+
+
+def score_masks_by_frame(
+    by_frame: Mapping[int, Mapping[str, np.ndarray]],
+    annotation_dir: Path,
+    *,
+    sequence: str,
+    frames: Sequence[int] | None = None,
+    match_iou: float = 0.5,
+    notes: Sequence[str] | None = None,
+) -> SequenceScore:
+    """Score any system's per-frame instance masks against one DAVIS sequence.
+
+    This is the whole of the scoring policy -- which frames are sampled, how a frame is
+    matched, how the frames are combined -- and it takes plain ``{frame: {id: mask}}`` so
+    that a reference implementation and this pipeline traverse *the same code*. A
+    comparison in which each side is scored by its own function is not a comparison.
+
+    **An object counts as recovered if some entity matched it on any sampled frame, and the
+    denominator is every ground-truth object annotated on any sampled frame.** A miss that
+    persists across every sampled frame is a real miss; one frame of occlusion is not the
+    claim being tested.
+
+    Both halves of that are deliberate, because an earlier version got them wrong in a way
+    that only shows up when two systems are compared. It reported whichever frame the system
+    scored best on, so the denominator was *that* frame's object count -- and two systems
+    peaking on different frames were then scored against different ground truth (on
+    ``lindy-hop``: ours against 8 objects, the reference against 5). It also skipped frames
+    where the system produced no masks at all, which quietly excused a system from the
+    objects it found nothing on. Both are now frame-set properties rather than system
+    properties, so any two systems given the same ``frames`` are measured against the same
+    denominator.
+    """
+    score = SequenceScore(sequence=sequence, notes=list(notes or []))
     available = sorted(by_frame)
+    if not available:
+        score.notes.append("no masks to score")
+        return score
     if frames is None:
         frames = [available[0], available[len(available) // 2], available[-1]]
 
-    best: SequenceScore | None = None
-    tracks_seen: set[str] = set()
+    gt_ids: set[int] = set()
+    matched: dict[int, dict[str, Any]] = {}
+    entities: set[str] = set()
     for frame_idx in frames:
         gt = _gt_masks(annotation_dir, frame_idx)
-        ours = by_frame.get(frame_idx, {})
-        if not gt or not ours:
+        if not gt:
             continue
-        tracks_seen |= set(ours)
-        matches, missed, spurious = score_sequence_masks(gt, ours, match_iou=match_iou)
-        frame_score = SequenceScore(
-            sequence=run_dir.name, num_gt=len(gt), num_entities=len(ours),
-            recovered=len(matches), missed=len(missed), spurious=spurious,
-            matches=matches, missed_ids=missed,
-        )
-        # Report the frame the inventory did best on: a miss that persists across every
-        # sampled frame is a real miss, while one frame of occlusion is not the claim
-        # being tested.
-        if best is None or frame_score.recovered > best.recovered:
-            best = frame_score
         score.frames_scored += 1
+        gt_ids |= set(gt)
+        # Note the frame is counted and its objects are in the denominator even when this
+        # system produced nothing here.
+        ours = by_frame.get(frame_idx, {})
+        if not ours:
+            continue
+        entities |= set(ours)
+        for m in score_sequence_masks(gt, ours, match_iou=match_iou)[0]:
+            gid = int(m["gt_id"])
+            if gid not in matched or m["iou"] > matched[gid]["iou"]:
+                matched[gid] = {**m, "frame_idx": int(frame_idx)}
 
-    if best is None:
-        score.notes.append("no frame had both annotations and masks")
+    if not gt_ids:
+        score.notes.append("no sampled frame had annotations")
         return score
-    best.frames_scored = score.frames_scored
-    best.num_entities = len(tracks_seen)
-    best.spurious = len(tracks_seen) - best.recovered
-    return best
+
+    score.num_gt = len(gt_ids)
+    score.num_entities = len(entities)
+    score.recovered = len(matched)
+    score.missed_ids = sorted(gt_ids - set(matched))
+    score.missed = len(score.missed_ids)
+    score.matches = [matched[g] for g in sorted(matched)]
+    score.spurious = len(entities) - score.recovered
+    return score
