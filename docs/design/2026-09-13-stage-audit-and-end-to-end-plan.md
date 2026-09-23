@@ -5,6 +5,11 @@
 **Evidence run:** `../runs/davis_lab-coat_full` (47 frames, all 15 stages, VGGT-Long top rung)
 **Supersedes in part:** `docs/design/2026-09-12-back-half-ladders-and-graph-contract.md` (see §5)
 **Grounding survey:** `docs/research/2026-09-12-third-party-components-for-the-back-half.md`
+**Graph plan + reference verdict:** `docs/design/2026-09-20-conceptgraphs-verdict-and-graph-plan.md` — what ConceptGraphs taught us, what we
+adopt from it, and the ordered G1-G4 slice for the graph.
+**Direction beyond this plan:** `docs/design/2026-09-19-roadmap-inhouse-components-and-modalities.md` — in-house components,
+audio as a second modality, and the grounding law they all depend on. This document's work
+items remain the near-term path; that one says where they lead.
 
 ---
 

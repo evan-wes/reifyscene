@@ -76,10 +76,15 @@ dataset scale. Eight predicates, all **view-independent**:
 Computed by heuristics over object bounding boxes, with a filter that drops relations when
 target/anchor boxes significantly overlap or one encloses the other.
 
-They deliberately exclude `left-of` / `right-of` because viewpoint-dependent relations are
-ambiguous for referring expressions. **This overrides the camera-relative proposal made earlier in
-the spike discussion.** A camera-relative relation flips meaning whenever the camera moves — and
-for us the camera always moves; that is the only reason we can reconstruct at all.
+Their eight predicates contain no `left-of` / `right-of`; they name view-dependent relations as
+future work rather than giving a reason for leaving them out. (An earlier draft of this document
+attributed a rationale to them — that view-dependent relations are ambiguous for referring
+expressions. They do not say that, and the sentence was ours, not theirs.)
+
+**The argument for excluding them here is our own, and it stands on its own:** a camera-relative
+relation flips meaning whenever the camera moves — and for us the camera always moves; that is the
+only reason we can reconstruct at all. **This overrides the camera-relative proposal made earlier
+in the spike discussion.**
 
 **Verdict:** adopt the predicate set and the overlap filter. View-dependent relations are a
 **query-time** concern, resolved against a named reference frame, not scene-graph content.

@@ -196,6 +196,7 @@ non-claim** of this contract rather than an implicit gap.
 | **motion** | `velocity(t)`, `speed`, `path_length`, `is_moving` | static/moving shipped; rest new |
 | **support** | member track ids, per-frame uncertainty, `mean_support_ratio` | shipped |
 | **renderable** | Gaussian index set over the **trained** cloud | assignment landed; storage open, §4 |
+| **audible** | speech/sound intervals + separation handle | **proposed — §3.5** |
 
 **An entity that cannot be named does not become unnamed-but-labelled.** `category` is `unknown`
 with `abstained=true` and the margin recorded. Consumers must treat `unknown` as a value, not a
@@ -263,6 +264,42 @@ entities too small or too occluded to earn a majority. On lab-coat: two human no
 | `remove(entity)` | honored — leaves a real hole | planned, not executed |
 | `move(entity, delta)` | honored for static transform; **dynamic motion bases are the open risk** | planned |
 | `recolor` | not implemented | planned |
+
+---
+
+### 3.5 Grounding handles — the general form
+
+*Added 2026-09-19. Full direction in
+`docs/design/2026-09-19-roadmap-inhouse-components-and-modalities.md`.*
+
+§3.4 is the first instance of a general requirement, not a one-off field. The op-support matrix
+promises `remove(entity)` "leaves a real hole", and nothing can leave a hole in a representation
+it cannot decompose. So:
+
+> **Grounding law.** Every modality attached to the graph must be decomposable along entity
+> boundaries. A modality that cannot answer *which part of me is this entity* cannot support the
+> edit operations, and so cannot be attached — only carried alongside, unedited.
+
+**A grounding handle**, for one modality, is: entity id → the subset of that modality's
+representation attributable to the entity, plus the three numbers §3.4 already reports — assigned
+count, assigned fraction, and an explicit **`unassignable`** flag.
+
+The flag carries the weight. `unassignable` says *this entity is here and I cannot isolate it*,
+which is a different claim from *this entity is absent*. Collapsing the two is the failure mode
+this contract exists to prevent, and it is the same distinction `abstained` makes for identity.
+
+Two handles are in scope now — `renderable` (Gaussians) and `audible` (audio) — and a third
+representation, the compositional 4D NeRF, is bound by the same law without adding a handle: it
+is a different lowering of `renderable`.
+
+**Consequences for the rest of §3, all of which fall out rather than needing new rules:**
+
+- An **`utterance`** node (`text`, `[t_start, t_end]`, confidence) joined to its speaker by a
+  **`spoken_by`** edge, and **`emitted_by`** for non-speech events. Nodes rather than attributes,
+  because the text is queryable content in its own right.
+- **Deletion is already specified.** §3.3's law — a relation's validity interval is intersected
+  with both endpoints' presence — means removing an entity kills its `spoken_by` edges with it.
+  That no new rule is required is the evidence the abstraction sits in the right place.
 
 ---
 
