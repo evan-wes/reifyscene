@@ -15,7 +15,11 @@ import torch
 from reifyscene.graph.id_maps import IGNORE
 from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig
 from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES
-from reifyscene.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
+from reifyscene.render.gaussian4d.dynamic_trainer import (
+    DynamicGaussianTrainer,
+    DynamicTrainConfig,
+    knn_indices,
+)
 from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM
 from reifyscene.render.gaussian4d.motion_init import bundle_to_scene, dump_bundle
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, gsplat_available
@@ -221,7 +225,10 @@ def test_one_batch_overfit_separates_two_gaussians() -> None:
     assert int((id_map == 1).sum()) > 20 and int((id_map == 2).sum()) > 20
 
     logs: list[dict] = []
-    cfg = DynamicTrainConfig(iters=400, lr_identity=2e-2, lr_identity_classifier=2e-2, log_every=50)
+    # The 3D term is off: with two Gaussians each is the other's only neighbour, and I3 would
+    # rightly pull them together. This pins the 2D loss alone.
+    cfg = DynamicTrainConfig(iters=400, lr_identity=2e-2, lr_identity_classifier=2e-2,
+                             log_every=50, lambda_identity_3d=0.0)
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
         [(cam, gt, 0, id_map)], on_log=logs.append
     )
@@ -258,3 +265,117 @@ def test_detached_identity_reads_geometry_and_never_writes_it(detach: bool) -> N
                 scene.fg.motion_coefs, scene.motion_bases.transls]
     touched = [p.grad is not None and bool(p.grad.abs().sum() > 0) for p in geometry]
     assert not any(touched) if detach else any(touched)
+
+
+# -- I3: 3D neighbour consistency -------------------------------------------------------------
+
+def test_knn_matches_brute_force_across_chunks_and_never_returns_self() -> None:
+    g = torch.Generator().manual_seed(0)
+    pts = torch.randn((500, 3), generator=g)
+    idx = torch.randperm(500, generator=g)[:40]
+    got = knn_indices(pts[idx], pts, 5, exclude=idx, chunk=64)       # 8 chunks
+    d = torch.cdist(pts[idx], pts)
+    d[torch.arange(40), idx] = float("inf")
+    want = d.topk(5, largest=False).indices
+    assert torch.equal(torch.sort(got, 1).values, torch.sort(want, 1).values)
+    assert not (got == idx[:, None]).any()
+
+
+def _clusters(n_per: int = 30):
+    """Two tight, well-separated clusters per field."""
+    g = torch.Generator().manual_seed(1)
+    a = torch.randn((n_per, 3), generator=g) * 0.01
+    means = torch.cat([a - 1.0, a + 1.0]).numpy().astype(np.float32)
+    scene, _ = bundle_to_scene(_bundle(g=2 * n_per, nb=2 * n_per, means=means), device="cpu")
+    with torch.no_grad():
+        scene.bg.means.copy_(torch.as_tensor(means) + 10.0)
+    scene.enable_identity(20, NODES, seed=0)
+    return scene
+
+
+def test_consistency_is_zero_when_neighbours_agree() -> None:
+    scene = _clusters()
+    with torch.no_grad():
+        scene.fg.identity.zero_()
+        scene.bg.identity.zero_()
+    loss = _trainer(scene).identity_consistency_loss(torch.Generator().manual_seed(0))
+    assert float(loss.detach()) < 1e-8
+
+
+def test_consistency_reaches_identity_and_never_geometry() -> None:
+    scene = _clusters()
+    _trainer(scene).identity_consistency_loss(torch.Generator().manual_seed(0)).backward()
+    assert scene.fg.identity.grad.abs().sum() > 0 and scene.bg.identity.grad.abs().sum() > 0
+    assert scene.identity_classifier.weight.grad.abs().sum() > 0
+    for p in (scene.fg.means, scene.bg.means, scene.fg.log_scales, scene.fg.logit_opacities):
+        assert p.grad is None or not p.grad.any()
+
+
+def test_consistency_raises_agreement_within_clusters_not_across() -> None:
+    """Noisy identity inside each of two separated clusters: optimising the 3D term alone
+    makes each cluster agree with itself, and does not merge the clusters."""
+    scene = _clusters()
+    n = scene.fg.num_gaussians
+    with torch.no_grad():
+        head = scene.identity_classifier
+        head.weight.zero_()
+        head.bias.zero_()
+        head.weight[1, 0], head.weight[2, 1] = 5.0, 5.0            # dim 0 -> class 1, dim 1 -> 2
+        ident = torch.zeros((n, 20))
+        ident[: n // 2, 0] = 1.0
+        ident[n // 2:, 1] = 1.0
+        flip = torch.randperm(n, generator=torch.Generator().manual_seed(2))[: n // 5]
+        ident[flip] = ident[flip].flip(0)                          # 20% noise, both ways
+        scene.fg.identity.copy_(ident)
+    cfg = DynamicTrainConfig(iters=1, identity_3d_samples=n, lr_identity=5e-2)
+    tr = _trainer(scene)
+    tr.cfg = cfg
+    opt = torch.optim.Adam([scene.fg.identity, scene.bg.identity], lr=5e-2)
+    gen = torch.Generator().manual_seed(0)
+
+    def agreement() -> float:
+        arg = torch.softmax(head(scene.fg.identity), -1).argmax(-1)
+        nn = knn_indices(scene.fg.means.detach(), scene.fg.means.detach(), 5,
+                         exclude=torch.arange(n))
+        return float((arg[nn] == arg[:, None]).float().mean())
+
+    before = agreement()
+    for _ in range(200):
+        opt.zero_grad()
+        tr.identity_consistency_loss(gen).backward()
+        opt.step()
+    arg = torch.softmax(head(scene.fg.identity), -1).argmax(-1)
+    assert agreement() > before + 0.1
+    assert set(arg[: n // 2].tolist()) != set(arg[n // 2:].tolist())   # clusters not merged
+
+
+def test_the_3d_term_defaults_are_gaussian_groupings() -> None:
+    """k=5, lambda=2, every 2 steps: their reg3d defaults. Their tuning only carries over
+    because the KL is divided by their class count (200), not ours (4-24 per scene)."""
+    cfg = DynamicTrainConfig()
+    assert (cfg.identity_3d_k, cfg.lambda_identity_3d, cfg.identity_3d_every) == (5, 2.0, 2)
+    assert cfg.identity_3d_norm == 200.0
+
+
+def test_the_3d_term_strength_does_not_depend_on_the_scene_class_count() -> None:
+    """Same neighbours, same distributions over the first classes: a scene with more
+    (unused) classes must not be smoothed more gently -- or, as before, fewer more harshly."""
+    losses = []
+    for extra in (0, 20):
+        scene = _clusters()
+        nodes = NODES + [f"object:cam_00:sam2:cam_00:{9 + i}" for i in range(extra)]
+        scene.enable_identity(20, nodes, seed=0)
+        with torch.no_grad():
+            head = scene.identity_classifier
+            head.weight.zero_()
+            head.bias.fill_(-1e4)
+            head.bias[:3] = 0.0
+            head.weight[1, 0], head.weight[2, 1] = 5.0, 5.0
+            ident = torch.zeros_like(scene.fg.identity)
+            ident[::2, 0] = 1.0
+            ident[1::2, 1] = 1.0
+            scene.fg.identity.copy_(ident)
+            scene.bg.identity.copy_(ident)
+        losses.append(float(_trainer(scene).identity_consistency_loss(
+            torch.Generator().manual_seed(0)).detach()))
+    assert losses[0] > 0 and abs(losses[0] - losses[1]) < 1e-6 * losses[0]

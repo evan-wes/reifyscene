@@ -177,7 +177,7 @@ stage.
 | **I0** ✅ | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today — **done, see §4.1** |
 | **I1** ✅ | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint — **done, see §4.2** |
 | **I2** ✅ | identity parameter (**D=20**, §4.2) on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss — **done, see §4.3; geometry detached** |
-| **I3** | 3D consistency regularizer on canonical means (fg) and 3D means (bg), identity only (§4.4) | neighbouring Gaussians agree measurably more than without it, on all ten; PSNR within noise of each scene's control |
+| **I3** ✅ | 3D consistency regularizer on canonical means (fg) and 3D means (bg), identity only (§4.4) — **done, see §4.5** | neighbouring Gaussians agree measurably more than without it, on all ten; PSNR within noise of each scene's control |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
 
@@ -334,6 +334,46 @@ earn its cost. Which frames go wrong, and why, is §8's new open item 4.
 background, positions detached — identity only, as in I2. Every 2 steps, 800 samples, λ=2.
 A stretch filter on neighbour pairs is held in reserve, for if the gate shows identity leaking
 across entities that were adjacent in the canonical pose.
+
+### 4.5 I3 — done; and why their lambda did not carry over at first
+
+`DynamicGaussianTrainer.identity_consistency_loss`: every 2 steps, 800 sampled Gaussians per
+field, KL from each one's class distribution to its k=5 nearest neighbours' (chunked k-NN,
+self excluded) — canonical means for the foreground, means for the background, never across
+fields. Positions detached; the loss reaches identity vectors and the classifier only. λ=2.
+
+**The normalisation.** Gaussian Grouping divides the KL by `num_classes`, which is 200 in their
+setup. The first build divided by ours (4–24 per scene), which made λ=2 8–50× stronger than
+theirs *and* scene-dependent — fewer classes, harder smoothing. It bought agreement by
+flattening: `motocross-bumps` foreground entropy 0.39 → 0.66, `crossing` confident entity
+Gaussians 50.5k → 22.8k. The divisor is now a fixed `identity_3d_norm = 200`, so their λ means
+the same here and no scene is smoothed harder for having fewer entities.
+
+All ten, I2 / I3 with per-scene divisor / **I3 as committed**:
+
+| scene | fg agreement | bg agreement | fg entropy | confident entity Gaussians (k, p ≥ 0.5) | PSNR / control |
+|---|---|---|---|---|---|
+| lab-coat | 0.69 / 0.94 / **0.87** | 0.91 / 0.96 / 0.94 | 0.27 / 0.27 / 0.22 | 93.8 / 86.3 / 96.4 | 25.60 / 25.63 |
+| blackswan | 0.94 / 0.99 / 0.98 | 0.95 / 0.98 / 0.98 | 0.04 / 0.04 / 0.04 | 58.7 / 56.6 / 58.0 | 22.33 / 22.35 |
+| dogs-scale | 0.65 / 0.84 / 0.74 | 0.79 / 0.92 / 0.90 | 0.27 / 0.34 / 0.28 | 93.9 / 85.3 / 90.1 | 19.73 / 20.15 |
+| lindy-hop | 0.60 / 0.87 / 0.76 | 0.83 / 0.91 / 0.89 | 0.43 / 0.46 / 0.43 | 73.7 / 64.5 / 71.5 | 19.89 / 19.24 |
+| india | 0.53 / 0.92 / 0.92 | 0.65 / 0.82 / 0.73 | 0.91 / 0.99 / 0.96 | 19.0 / 12.5 / 17.8 | 21.72 / 21.91 |
+| motocross-bumps | 0.79 / 0.98 / 0.93 | 0.89 / 0.96 / 0.92 | 0.39 / 0.66 / 0.44 | 163.9 / 153.6 / 162.8 | 27.34 / 27.45 |
+| judo | 0.76 / 0.94 / 0.89 | 0.81 / 0.94 / 0.91 | 0.21 / 0.26 / 0.24 | 129.9 / 122.7 / 126.6 | 32.39 / 31.82 |
+| gold-fish | 0.77 / 0.95 / 0.91 | 0.89 / 0.96 / 0.94 | 0.28 / 0.24 / 0.22 | 77.3 / 77.5 / 82.3 | 24.49 / 24.54 |
+| crossing | 0.63 / 0.92 / 0.87 | 0.70 / 0.91 / 0.83 | 0.58 / 0.55 / 0.59 | 50.5 / 22.8 / 34.4 | 15.64 / 15.77 |
+| miami-surf | 0.86 / 0.99 / 0.99 | 0.93 / 0.97 / 0.95 | 0.74 / 0.78 / 0.65 | 50.2 / 48.4 / 55.0 | 18.96 / 18.77 |
+
+Done-when met: foreground and background agreement rise on all ten (fg +0.04 to +0.39, +0.09
+or more on seven), PSNR within noise of each control (−0.42 to +0.65 dB, I2's spread).
+
+Still open, and for I4 to show rather than for tuning now:
+
+- **`crossing` loses a third of its confident entity Gaussians** (50.5k → 34.4k), mostly in the
+  background field. It has the weakest geometry of the ten (PSNR 15.6); smoothing may be merging
+  entities whose Gaussians interleave.
+- **Small classes are absorbed** where they have few Gaussians: `india` keeps 12 of 15
+  confidently-owned classes, `lindy-hop` 17 of 18.
 
 ---
 

@@ -5,10 +5,16 @@
     python scripts/retrain_with_identity.py ../runs/loop_lab-coat --no-identity   # control
 
 Runs the render stage's own dynamic fit on the run's persisted scene artifact, with the run's
-own render config plus ``dynamic.identity = {enabled, dim, lambda}`` (I2 of the identity
-scope). Output goes to ``<run>/render_identity/`` (``render_identity_coupled/`` with
-``--coupled``, ``render_control/`` with ``--no-identity``); the pipeline's ``render/``
-checkpoint is never touched, so it stays the "before" side of the gate.
+own render config plus ``dynamic.identity = {enabled, dim, lambda, lambda_3d}`` (I2 and I3
+of the identity scope). Output goes to a sibling of ``render/``, named for what was trained:
+
+    render_identity_3d/       identity + the I3 3D consistency term (the default)
+    render_identity/          identity without it (``--lambda-3d 0``; the I2 baseline)
+    render_identity_coupled/  identity allowed to move geometry (``--coupled``)
+    render_control/           identity off (``--no-identity``)
+
+``--out`` overrides the name. The pipeline's ``render/`` checkpoint is never touched, so it
+stays the "before" side of the gate.
 
 ``--no-identity`` retrains the same way with identity off. Training is not bit-deterministic
 (gsplat accumulates with atomics), so the fair PSNR comparison is identity vs this control,
@@ -43,6 +49,10 @@ def main() -> int:
     ap.add_argument("--no-identity", action="store_true", help="the control: identity off")
     ap.add_argument("--dim", type=int, default=20)
     ap.add_argument("--lambda-identity", type=float, default=1.0)
+    ap.add_argument("--lambda-3d", type=float, default=2.0,
+                    help="3D neighbour-consistency weight (I3); 0 turns it off")
+    ap.add_argument("--out", default=None,
+                    help="output dir name inside the run; default derived from the flags")
     ap.add_argument("--iters", type=int, default=None, help="default: the run's own")
     ap.add_argument("--coupled", action="store_true",
                     help="let the identity loss move geometry (single pass); default detached")
@@ -57,12 +67,14 @@ def main() -> int:
     dyn = dict(cfg.get("dynamic", cfg.get("trainer", {})) or {})
     if not args.no_identity:
         dyn["identity"] = {"enabled": True, "dim": args.dim, "lambda": args.lambda_identity,
-                           "detach_geometry": not args.coupled}
+                           "detach_geometry": not args.coupled, "lambda_3d": args.lambda_3d}
     cfg["dynamic"] = dyn
     if args.iters is not None:
         cfg["iters"] = args.iters
-    out_dir = run / ("render_control" if args.no_identity
-                     else "render_identity_coupled" if args.coupled else "render_identity")
+    default = ("render_control" if args.no_identity
+               else "render_identity_coupled" if args.coupled
+               else "render_identity" if args.lambda_3d == 0 else "render_identity_3d")
+    out_dir = run / (args.out or default)
 
     t0 = time.time()
     scene_art = SceneArtifact.load(run / "scene")

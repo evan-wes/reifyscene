@@ -315,9 +315,12 @@ class GaussianRenderBackend(RenderBackend):
             )
             if "lambda" in ident_cfg:
                 train_cfg.lambda_identity = float(ident_cfg["lambda"])
+            if "lambda_3d" in ident_cfg:
+                train_cfg.lambda_identity_3d = float(ident_cfg["lambda_3d"])
             if "detach_geometry" in ident_cfg:
                 train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
             identity_summary["detach_geometry"] = train_cfg.identity_detach_geometry
+            identity_summary["lambda_3d"] = train_cfg.lambda_identity_3d
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []

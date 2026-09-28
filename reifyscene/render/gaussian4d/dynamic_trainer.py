@@ -2,9 +2,10 @@
 
 Trains a :class:`DynamicScene` (fg deformed by motion bases + static bg) against
 posed RGB frames sampled across time: photometric L1 + D-SSIM plus a temporal
-motion-smoothness regularizer. When the scene carries identity
-(:meth:`DynamicScene.enable_identity`) and a view carries an id map, a
-cross-entropy term supervises the rasterized identity features through the
+motion-smoothness regularizer. Both fields get standard 3DGS adaptive density
+control, driven by the combined cloud's screen-space gradients. When the scene
+carries identity (:meth:`DynamicScene.enable_identity`) and a view carries an id
+map, a cross-entropy term supervises the rasterized identity features through the
 scene's linear classifier (Gaussian Grouping's 2D loss).
 
 By default identity **reads** the geometry and never writes it: the features are
@@ -13,8 +14,12 @@ reaches only the identity vectors and the classifier. The photometric loss match
 measured pixels; the id maps are pseudo-labels (SAM 2 masks through reid and the
 graph), and letting their errors move geometry cost 1.2 dB on lab-coat. Densification
 then also sees photometric gradients only. ``identity_detach_geometry=False`` is the
-coupled single-pass variant, kept for comparison. v1 refines a borrowed init and does NOT densify
-(the borrowed init is fixed-size); dynamic densification is tracked follow-up.
+coupled single-pass variant, kept for comparison.
+
+A 3D consistency term (Gaussian Grouping's ``loss_cls_3d``) pulls each sampled
+Gaussian's class distribution toward its k nearest neighbours' -- canonical means for
+the foreground, which stay neighbours on a typical frame across all ten loop scenes,
+and 3D means for the static background. Positions are detached: identity only.
 """
 
 from __future__ import annotations
@@ -35,6 +40,33 @@ from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 
 
+def knn_indices(
+    query: torch.Tensor, points: torch.Tensor, k: int, *,
+    exclude: torch.Tensor | None = None, chunk: int = 65536,
+) -> torch.Tensor:
+    """(M, k) indices of each query's k nearest ``points``, chunked over ``points``.
+
+    Chunked so a 400k-point background never materialises an (M, N) distance matrix.
+    ``exclude[i]`` is query i's own index in ``points``, skipped so a point is never its
+    own neighbour.
+    """
+    best_d = torch.full((query.shape[0], 0), float("inf"), device=query.device)
+    best_i = torch.zeros((query.shape[0], 0), dtype=torch.long, device=query.device)
+    for s in range(0, points.shape[0], chunk):
+        d = torch.cdist(query, points[s:s + chunk])
+        if exclude is not None:
+            own = exclude - s
+            hit = (own >= 0) & (own < d.shape[1])
+            d[hit.nonzero(as_tuple=True)[0], own[hit]] = float("inf")
+        kk = min(k, d.shape[1])
+        dv, di = d.topk(kk, dim=1, largest=False)
+        best_d = torch.cat([best_d, dv], dim=1)
+        best_i = torch.cat([best_i, di + s], dim=1)
+        best_d, order = best_d.topk(min(k, best_d.shape[1]), dim=1, largest=False)
+        best_i = best_i.gather(1, order)
+    return best_i
+
+
 @dataclass
 class DynamicTrainConfig:
     iters: int = 5000
@@ -50,6 +82,15 @@ class DynamicTrainConfig:
     lr_motion_bases: float = 1.6e-4
     lambda_identity: float = 1.0
     identity_detach_geometry: bool = True
+    lambda_identity_3d: float = 2.0
+    identity_3d_every: int = 2
+    identity_3d_k: int = 5
+    identity_3d_samples: int = 800
+    # Gaussian Grouping divides the 3D KL by num_classes, which is 200 in their setup. Ours
+    # is 4-24 per scene, so dividing by ours made lambda=2 8-50x stronger than theirs and
+    # flattened identity to buy agreement. A fixed divisor reproduces their strength and
+    # stops scenes with fewer classes being smoothed harder.
+    identity_3d_norm: float = 200.0
     lr_identity: float = 2.5e-3
     lr_identity_classifier: float = 5.0e-4
     random_seed: int = 0
@@ -156,6 +197,36 @@ class DynamicGaussianTrainer:
         dssim = 1.0 - ssim(_to_bchw(pred), _to_bchw(gt))
         return self.cfg.lambda_l1 * l1 + self.cfg.lambda_ssim * dssim, float(l1.detach())
 
+    def identity_consistency_loss(self, generator: torch.Generator | None = None) -> torch.Tensor:
+        """KL from each sampled Gaussian's class distribution to its k nearest neighbours'.
+
+        Per field, in that field's own space: canonical means for the foreground, means for
+        the background -- fg and bg are never each other's neighbours, since one is a
+        deformable cloud in its canonical pose and the other is static in the world.
+        Divided by a fixed ``identity_3d_norm`` (200, Gaussian Grouping's class count) rather
+        than our per-scene class count, so their lambda means the same here.
+        """
+        head = self.scene.identity_classifier
+        fields = [self.scene.fg] + ([self.scene.bg] if self.scene.bg is not None else [])
+        terms = []
+        for field in fields:
+            n = field.num_gaussians
+            k = min(self.cfg.identity_3d_k, n - 1)
+            if k < 1:
+                continue
+            probs = torch.softmax(head(field.identity), dim=-1)
+            pts = field.means.detach()
+            m = min(self.cfg.identity_3d_samples, n)
+            idx = torch.randperm(n, generator=generator)[:m].to(pts.device)
+            nn = knn_indices(pts[idx], pts, k, exclude=idx)
+            p = probs[idx].unsqueeze(1)                           # (m, 1, C)
+            q = probs[nn]                                         # (m, k, C)
+            kl = (p * (torch.log(p + 1e-10) - torch.log(q + 1e-10))).sum(-1).mean()
+            terms.append(kl / self.cfg.identity_3d_norm)
+        if not terms:
+            return torch.zeros((), device=self.scene.fg.means.device)
+        return torch.stack(terms).mean()
+
     def identity_term(self, cloud, camera: RenderCamera, id_map, out) -> torch.Tensor | None:
         """The weighted identity loss for one view, or None when nothing is labelled.
 
@@ -192,6 +263,8 @@ class DynamicGaussianTrainer:
                                                for v in train_views):
             raise ValueError("the scene carries identity but no training view has an id map")
         id_loss_value = float("nan")
+        id3d_value = float("nan")
+        gen3d = torch.Generator(device="cpu").manual_seed(self.cfg.random_seed + 1)
         for step in range(1, self.cfg.iters + 1):
             view = train_views[int(torch.randint(n, (1,), generator=gen).item())]
             camera, gt, time_id = view[:3]
@@ -212,6 +285,11 @@ class DynamicGaussianTrainer:
                 if id_term is not None:
                     loss = loss + id_term
                     id_loss_value = float(id_term.detach()) / max(self.cfg.lambda_identity, 1e-12)
+            if (self.scene.has_identity and self.cfg.lambda_identity_3d > 0
+                    and step % max(self.cfg.identity_3d_every, 1) == 0):
+                id3d = self.identity_consistency_loss(gen3d)
+                loss = loss + self.cfg.lambda_identity_3d * id3d
+                id3d_value = float(id3d.detach())
 
             loss.backward()
             self.fg_ctrl.after_backward(out, (0, n_fg))
@@ -230,6 +308,7 @@ class DynamicGaussianTrainer:
                           "num_gaussians": self.scene.num_gaussians}
                 if self.scene.has_identity:
                     record["identity_loss"] = id_loss_value
+                    record["identity_3d_loss"] = id3d_value
                 on_log(record)
 
         return self.scene
