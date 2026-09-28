@@ -203,8 +203,6 @@ It also decides whether §3.1's split is worth building.
   loop runs rebuild in ~90 minutes, so the ensemble stays cheap to re-measure.
 - **Entities that enter or leave mid-clip.** Their ids exist for part of the sequence only; the
   classifier sees them on some frames and not others. Untested.
-- **Wide-channel backward pass in gsplat.** Whether a 16-channel feature is efficient or a
-  performance problem — the one thing worth checking before I1.
 - **`india` and `miami-surf` are not addressed by any of this.** Their foreground never became
   substantive (median Gaussian scale 4–16× below `blackswan`'s) and the background carries the
   image. Identity cannot separate a foreground that does not render. That is a separate failure
@@ -233,7 +231,12 @@ hole". The same requirement was never applied to the Gaussian path we actually u
 
 ## 8. Open
 
-1. **Wide-channel cost in gsplat** (§6) — check before I1.
+1. ~~**Wide-channel cost in gsplat**~~ — **closed 2026-09-29, measured.** gsplat 1.5.3, 80k
+   Gaussians at 518x294, forward + backward: `D=3` 0.67 ms, `D=16` 0.91 ms, `D=19` 1.31 ms. Sixteen
+   identity channels cost **+0.24 ms** over three, and RGB *plus* identity in a single `D=19` pass
+   costs 1.31 ms. Wide channels are not a constraint, and one pass is viable rather than two.
+   (A `RGB+ED` row in the same run read 13.5 ms, but it ran first and absorbed CUDA warm-up — it is
+   not comparable, and the D=3/16/19 progression that answers the question is.)
 2. **Where the identity classifier lives at inference.** Theirs is a checkpoint beside the point
    cloud; ours has to reach the graph stage, which currently reads only the bundle.
 3. **`num_classes` per scene.** Theirs defaults to 200. Ours is entities + background, known per
