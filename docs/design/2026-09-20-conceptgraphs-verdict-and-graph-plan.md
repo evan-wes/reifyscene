@@ -233,7 +233,9 @@ a graph with excellent nodes that still cannot answer or change anything.
 §5a). Removing an entity damages the entities beside it wherever they are adjacent in depth,
 which is most of this footage. G1 and G2 below assume an entity set that can be separated in the
 representation it indexes; that assumption is what failed. **Entity separability comes first**,
-and it is upstream of every item here.
+and it is upstream of every item here — scoped at
+`docs/design/2026-09-29-per-gaussian-identity-scope.md`: per-Gaussian identity supervised by the masks we already have, so the
+representation is asked to be separable rather than assumed to be.
 
 **G1 — the graph answers a question.**
 Build the relation computer for a first subset of predicates that geometry already supports

@@ -186,13 +186,19 @@ makes the abstraction general once instead of retrofitted twice. The rest of aud
 | | work | why here | depends on |
 |---|---|---|---|
 | 0 | **§1, the grounding law + handles** | cheap now, expensive to retrofit | nothing |
-| 1 | visual close-out already in flight — ConceptGraphs baseline, relations, query | the graph must answer *something* before it answers across modalities | — |
-| 2 | component 1, the co-visible transformer | attacks a measured defect; establishes `learned/nn/` | the cached pair table |
-| 3 | audio integration stages (`audio_ingest`, `speech`, `diarization`, `sound_events`) | mostly wiring; gets real audio into the graph | §1 |
-| 4 | component 3, `av_association` | the part nothing off the shelf does | 3, `learned/nn/` |
-| 5 | component 2, the 4D NeRF | independent of everything above | poses, masks, the NVS benchmark |
+| **1** | **per-Gaussian identity** — `docs/design/2026-09-29-per-gaussian-identity-scope.md` | **the step-1 gate failed 9 of 10 because the trained scene is not separable by entity. Everything below indexes a representation that cannot yet be decomposed, so this is not a priority call — it is the precondition** | the ten loop runs |
+| 2 | visual close-out — relations, query | the graph must answer *something* before it answers across modalities | 1 |
+| 3 | component 1, the co-visible transformer | attacks a measured defect; establishes `learned/nn/` | the cached pair table |
+| 4 | audio integration stages (`audio_ingest`, `speech`, `diarization`, `sound_events`) | mostly wiring; gets real audio into the graph | §1 |
+| 5 | component 3, `av_association` | the part nothing off the shelf does | 4, `learned/nn/` |
+| 6 | component 2, the 4D NeRF | independent of everything above | poses, masks, the NVS benchmark |
 
-Item 5 is deliberately unpinned: it touches only the render registry and the grounding law, so it
+**Item 1 is the grounding law's first real test.** §0 states that a modality which cannot say
+*which part of me is this entity* cannot support the edit operations. The Gaussian path could not
+answer that, and nobody noticed until the renders were looked at — which is the argument for
+stating the law before the second modality arrives, not after.
+
+Item 6 is deliberately unpinned: it touches only the render registry and the grounding law, so it
 can slot wherever there is appetite for it.
 
 ---
