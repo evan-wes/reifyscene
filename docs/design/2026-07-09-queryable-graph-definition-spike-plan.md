@@ -144,6 +144,43 @@ steps 1 and 3 are the loop.
 
 ---
 
+## 5a. Step 1 outcome — 2026-09-28: the gate fails, 1 of 10
+
+Run on ten DAVIS sequences (§6's "no conclusion from one clip", finally honoured). Reviewed by
+eye at `claude.ai/artifact/P2JPufjkoVR6LgEJm7vxMA`.
+
+**Verdict: `blackswan` alone passes** — removed region is the entity (yes), rest intact (minor
+artefacts). The other nine fail, in the reviewer's words: *"either have very bad segmentation or
+barely change"*.
+
+**The bridge code is not what failed.** `blackswan` removes 99.5% of its entity and leaves the
+scene standing, from the same code path every other scene used. What fails is what the code is
+given.
+
+**Two failure shapes, and the first was mis-diagnosed in the first write-up.** It was recorded
+as a "halo" — the entity's Gaussian footprints reaching past its silhouette. Looking at the
+renders, that is not what happens. On `lab-coat` the three women stand shoulder to shoulder; the
+target's 2D mask is a clean silhouette, and removing its Gaussians **tears the heads off the two
+people beside her** while leaving her own body standing. That is not a footprint artefact. The
+trained Gaussians are **not separable per entity** where entities are adjacent in depth, which on
+this footage is most of them. The measured "92% intact" hid it, because the damage is small in
+pixels and catastrophic in meaning.
+
+The second shape is `india` and `miami-surf`: removing up to 55% of the foreground changes no
+pixel, because the foreground never became substantive (median Gaussian scale 4–16x below
+`blackswan`'s) and the background carries the image.
+
+**What this means for the remaining steps.** Step 2's relations and step 3's loop would be built
+over an entity set that cannot be separated in the representation it indexes. Relations between
+entangled entities, and edits that damage their neighbours, are not thin versions of the goal —
+they are the goal failing quietly. **The spike's remaining steps are blocked on entity
+separability**, which is upstream of everything the graph does.
+
+`blackswan` is the shape of success and says what separability needs: one dominant object, well
+apart from anything else, claiming 72.6% of a substantive foreground.
+
+---
+
 ## 6. Footage — and the constraint that decides it
 
 **The pipeline reconstructs from camera TRANSLATION.** Rotation gives no parallax, so a

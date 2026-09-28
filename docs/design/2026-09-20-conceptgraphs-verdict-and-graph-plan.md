@@ -228,6 +228,13 @@ full vision end to end, not every rung combination. So the plan is a **thin vert
 — ask, edit, re-render, verify on one clip — and depth afterwards. Breadth-first here would mean
 a graph with excellent nodes that still cannot answer or change anything.
 
+**Blocked as written — see the step-1 outcome.** The gate was run on ten sequences on
+2026-09-28 and one passed (`docs/design/2026-07-09-queryable-graph-definition-spike-plan.md`
+§5a). Removing an entity damages the entities beside it wherever they are adjacent in depth,
+which is most of this footage. G1 and G2 below assume an entity set that can be separated in the
+representation it indexes; that assumption is what failed. **Entity separability comes first**,
+and it is upstream of every item here.
+
 **G1 — the graph answers a question.**
 Build the relation computer for a first subset of predicates that geometry already supports
 (`near`, `above`/`below`, `on`), each edge carrying a validity interval intersected with both
