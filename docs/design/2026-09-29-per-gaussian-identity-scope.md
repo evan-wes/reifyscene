@@ -175,8 +175,8 @@ stage.
 | | build | done when |
 |---|---|---|
 | **I0** ✅ | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today — **done, see §4.1** |
-| **I1** | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint |
-| **I2** | identity parameter on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss |
+| **I1** ✅ | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint — **done, see §4.2** |
+| **I2** | identity parameter (**D=20**, §4.2) on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss |
 | **I3** | 3D consistency regularizer on canonical means | neighbouring Gaussians agree measurably more than without it |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
@@ -217,6 +217,37 @@ resize). What it surfaced:
 - **Overlap is small** — under 3% of pixels everywhere — so ignoring it costs little supervision.
 - **Two `gold-fish` nodes (both "tv") own no unambiguous pixel on any frame**: every pixel they
   have is contested. Near-certain duplicates; they get a class and no supervision, which fails safe.
+
+### 4.2 I1 — done; the identity width is D=20
+
+`GaussianCloud.features` (N, D) and `rasterize(..., features=)` carry D channels in the **same**
+gsplat call as RGB — concatenated onto the colours, so they are sorted and alpha-composited with
+exactly RGB's weights — and `RasterOutput.features` (H, W, D) returns them with grad. Without
+`features` the call is unchanged. `concat` refuses mixing clouds with and without features:
+zero-filling would assert "no identity" for Gaussians never given one.
+
+Done-when, in `tests/test_raster_features.py`: a known vector renders as vector × alpha
+(D = 1, 13, 16, 20); overlapping Gaussians give features identical to RGB; the gradient reaches
+exactly the right channel of the right Gaussian; and **`loop_blackswan`'s trained checkpoint
+(208k Gaussians) renders bit-identical RGB, depth and alpha with 20 random channels attached.**
+
+**The width is set by gsplat's kernels, not by class count.** gsplat 1.5.3 compiles
+`rasterize_to_pixels` for 1–5, 8, 9, 16, 17, 24, 32, 33, 64, … channels and zero-pads anything
+else to the next power of two. Our call is `RGB+ED`, so it renders `3 + D + 1` channels.
+`scripts/bench_raster_channels.py`, RTX 5090 at 400 W, 518×294, forward + backward:
+
+| D | channels | kernel | synthetic 80k | blackswan 208k |
+|---|---|---|---|---|
+| 0 | 4 | 4 | 0.95 ms | 2.55 ms |
+| 13 | 17 | 17 | 1.05 | 3.76 |
+| 16 | 20 | 32 | 1.45 | 5.70 |
+| 19 | 23 | 32 | 1.47 | 5.73 |
+| 20 | 24 | 24 | 1.40 | 4.54 |
+| 28 | 32 | 32 | 1.62 | 5.76 |
+
+**D=20** is chosen: unpadded, cheaper than Gaussian Grouping's 16 on a real scene (4.54 vs
+5.70 ms), and a linear classifier from 20 dims covers the 4–24 classes I0 found. It costs about
+2 ms per step over plain RGB at 208k Gaussians.
 
 ---
 
@@ -274,6 +305,9 @@ hole". The same requirement was never applied to the Gaussian path we actually u
    costs 1.31 ms. Wide channels are not a constraint, and one pass is viable rather than two.
    (A `RGB+ED` row in the same run read 13.5 ms, but it ran first and absorbed CUDA warm-up — it is
    not comparable, and the D=3/16/19 progression that answers the question is.)
+   **Correction (§4.2):** those were raw channel counts, not features on top of `RGB+ED` — a
+   16-feature pass is 20 channels, which gsplat pads to 32. The conclusion stands (wide channels
+   are not a constraint), but the numbers above are superseded by §4.2's committed benchmark.
 2. **Where the identity classifier lives at inference.** Theirs is a checkpoint beside the point
    cloud; ours has to reach the graph stage, which currently reads only the bundle.
 3. **`num_classes` per scene.** Theirs defaults to 200. Ours is entities + background, known per

@@ -175,6 +175,9 @@ class GaussianCloud:
     scales: Any  # (N, 3) float32, world units
     opacities: Any  # (N,) float32 in [0, 1]
     colors: Any  # (N, 3) float32 in [0, 1]
+    # (N, D) float32, or None. Composited exactly like colour -- this is how per-Gaussian
+    # identity reaches the image. Unbounded: whatever the caller stores is what blends.
+    features: Any = None
 
     def __len__(self) -> int:
         return int(self.means.shape[0])
@@ -199,6 +202,7 @@ class GaussianCloud:
         opacities: np.ndarray,
         device: str,
         quats: np.ndarray | None = None,
+        features: np.ndarray | None = None,
     ) -> "GaussianCloud":
         require_gsplat()
         means = np.asarray(means, dtype=np.float32).reshape(-1, 3)
@@ -218,6 +222,13 @@ class GaussianCloud:
                 np.clip(np.asarray(opacities, dtype=np.float32).reshape(-1), 0.0, 1.0), device=device
             ),
             colors=torch.as_tensor(colors, device=device),
+            features=(
+                None
+                if features is None
+                else torch.as_tensor(
+                    np.asarray(features, dtype=np.float32).reshape(n, -1), device=device
+                )
+            ),
         )
 
     @classmethod
@@ -227,12 +238,24 @@ class GaussianCloud:
             return cls.empty(device)
         if len(clouds) == 1:
             return clouds[0]
+        widths = {None if c.features is None else int(c.features.shape[-1]) for c in clouds}
+        if len(widths) > 1:
+            # Filling the gap with zeros would assert "no identity" for Gaussians that were
+            # simply never given one -- the silent-wrong case, so refuse instead.
+            raise ValueError(
+                f"cannot concat clouds with differing feature widths {sorted(widths, key=str)}"
+            )
         return cls(
             means=torch.cat([c.means for c in clouds], dim=0),
             quats=torch.cat([c.quats for c in clouds], dim=0),
             scales=torch.cat([c.scales for c in clouds], dim=0),
             opacities=torch.cat([c.opacities for c in clouds], dim=0),
             colors=torch.cat([c.colors for c in clouds], dim=0),
+            features=(
+                None
+                if clouds[0].features is None
+                else torch.cat([c.features for c in clouds], dim=0)
+            ),
         )
 
 
@@ -257,6 +280,7 @@ class RasterOutput:
     radii: Any = None  # (1, N) or (1, N, 2) screen radii
     width: int = 0  # render width (needed to rescale the NDC means2d gradient)
     height: int = 0
+    features: Any = None  # (H, W, D) when features were rasterized, else None
 
 
 class Rasterizer(abc.ABC):
@@ -285,6 +309,7 @@ class Rasterizer(abc.ABC):
         camera: RenderCamera,
         *,
         with_telemetry: bool = False,
+        features: Any = None,
     ) -> RasterOutput:
         """Differentiably rasterize activated Gaussian params from a camera.
 
@@ -292,6 +317,10 @@ class Rasterizer(abc.ABC):
         ``opacities`` (N,) in [0,1], ``colors`` (N,3) in [0,1]. When
         ``with_telemetry`` is True the result carries grad-ready ``means2d``
         (with ``retain_grad``) and ``radii`` for densification.
+
+        ``features`` (N,D), when given, is alpha-composited in the same pass as
+        ``colors`` and returned as ``RasterOutput.features`` (H,W,D). Without it
+        the output is exactly what it was before features existed.
         """
         raise NotImplementedError
 
@@ -303,20 +332,28 @@ class Rasterizer(abc.ABC):
         """
         width, height = int(camera.width), int(camera.height)
         if len(cloud) == 0:
-            return {
+            empty = {
                 "rgb": np.zeros((height, width, 3), dtype=np.float32),
                 "alpha": np.zeros((height, width), dtype=np.float32),
                 "depth": np.full((height, width), np.inf, dtype=np.float32),
             }
+            if cloud.features is not None:
+                d = int(cloud.features.shape[-1])
+                empty["features"] = np.zeros((height, width, d), dtype=np.float32)
+            return empty
         with torch.no_grad():
             out = self.rasterize(
-                cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera
+                cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera,
+                features=cloud.features,
             )
         rgb = out.rgb.clamp(0.0, 1.0).float().cpu().numpy()
         depth = out.depth.float().cpu().numpy()
         alpha = out.alpha.clamp(0.0, 1.0).float().cpu().numpy()
         depth = np.where(alpha > 1e-4, depth, np.inf).astype(np.float32)
-        return {"rgb": rgb, "alpha": alpha, "depth": depth}
+        result = {"rgb": rgb, "alpha": alpha, "depth": depth}
+        if out.features is not None:
+            result["features"] = out.features.float().cpu().numpy()
+        return result
 
 
 class GsplatRasterizer(Rasterizer):
@@ -339,8 +376,19 @@ class GsplatRasterizer(Rasterizer):
         camera: RenderCamera,
         *,
         with_telemetry: bool = False,
+        features: Any = None,
     ) -> RasterOutput:
         require_gsplat()
+        # Features ride in the colour channels of the same call: one sort, one composite,
+        # so they blend with exactly the weights RGB does. gsplat appends ED depth last.
+        n_feat = 0
+        if features is not None:
+            if features.ndim != 2 or features.shape[0] != colors.shape[0]:
+                raise ValueError(
+                    f"features must be (N, D) with N={colors.shape[0]}, got {tuple(features.shape)}"
+                )
+            n_feat = int(features.shape[1])
+            colors = torch.cat([colors, features.to(colors.dtype)], dim=-1)
         viewmats = torch.as_tensor(camera.viewmat, dtype=torch.float32, device=self.device).reshape(1, 4, 4)
         Ks = torch.as_tensor(camera.K, dtype=torch.float32, device=self.device).reshape(1, 3, 3)
         width, height = int(camera.width), int(camera.height)
@@ -365,11 +413,12 @@ class GsplatRasterizer(Rasterizer):
         return RasterOutput(
             rgb=img[..., :3],
             alpha=render_alphas[0, ..., 0],
-            depth=img[..., 3],
+            depth=img[..., 3 + n_feat],
             means2d=means2d,
             radii=info.get("radii"),
             width=width,
             height=height,
+            features=img[..., 3:3 + n_feat] if n_feat else None,
         )
 
 
