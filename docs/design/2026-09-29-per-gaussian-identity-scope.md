@@ -177,7 +177,7 @@ stage.
 | **I0** ✅ | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today — **done, see §4.1** |
 | **I1** ✅ | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint — **done, see §4.2** |
 | **I2** ✅ | identity parameter (**D=20**, §4.2) on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss — **done, see §4.3; geometry detached** |
-| **I3** | 3D consistency regularizer on canonical means | neighbouring Gaussians agree measurably more than without it |
+| **I3** | 3D consistency regularizer on canonical means (fg) and 3D means (bg), identity only (§4.4) | neighbouring Gaussians agree measurably more than without it, on all ten; PSNR within noise of each scene's control |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
 
@@ -288,6 +288,53 @@ objects. Training identity on those instead of ours would separate "does the mec
 from "what do our upstream labels cost" — if GT-trained identity passes the gate and ours does
 not, the remaining problem is segmentation/reid/graph, not identity.
 
+### 4.4 I2 on all ten, and what it decided about I3
+
+`scripts/measure_identity_coherence.py` over the ten loop runs, each retrained with detached
+identity and with a no-identity control (`render_identity/`, `render_control/`):
+
+| scene | PSNR id / ctrl | fg agreement canonical / trajectory | bg agreement | fg entropy |
+|---|---|---|---|---|
+| lab-coat | 25.79 / 25.63 | 0.69 / 0.73 | 0.91 | 0.27 |
+| blackswan | 22.39 / 22.35 | 0.94 / 0.95 | 0.95 | 0.04 |
+| dogs-scale | 20.17 / 20.15 | 0.65 / 0.72 | 0.79 | 0.27 |
+| lindy-hop | 19.34 / 19.24 | 0.60 / 0.63 | 0.83 | 0.43 |
+| india | 21.37 / 21.91 | 0.53 / 0.52 | 0.65 | 0.91 |
+| motocross-bumps | 27.33 / 27.45 | 0.79 / 0.79 | 0.89 | 0.39 |
+| judo | 32.36 / 31.82 | 0.76 / 0.78 | 0.81 | 0.21 |
+| gold-fish | 24.60 / 24.54 | 0.77 / 0.76 | 0.89 | 0.28 |
+| crossing | 15.65 / 15.77 | 0.63 / 0.65 | 0.70 | 0.58 |
+| miami-surf | 19.04 / 18.77 | 0.86 / 0.85 | 0.93 | 0.74 |
+
+(Agreement: fraction of each Gaussian's 5 nearest neighbours sharing its argmax class.
+Trajectory: neighbours in the space of positions at 8 frames across the clip.)
+
+- **Detached identity costs no PSNR**: mean +0.04 dB against the control, range −0.54 to
+  +0.54 — run-to-run noise, in both directions.
+- **`india` and `miami-surf` barely learn foreground identity** (entropy 0.91, 0.74) — the
+  known non-substantive foreground, not an identity failure.
+- **Foreground agreement is 0.53–0.94**: I3 has work to do.
+
+**The neighbourhood.** Canonical-pose k-NN assumes neighbours stay neighbours. Measured for
+opaque Gaussians as distance-over-time / canonical distance ("stretch"):
+
+| | lab-coat | blackswan | dogs-scale | lindy-hop | india | motocross | judo | gold-fish | crossing | miami-surf |
+|---|---|---|---|---|---|---|---|---|---|---|
+| median frame | 2.8× | 2.0× | 2.5× | 1.9× | 5.1× | 3.8× | 1.3× | 4.2× | 2.3× | 6.6× |
+| worst 10% of frames | 19× | 3.4× | 5.6× | 3.8× | 12× | 11× | 2.1× | 13× | 4.6× | 21× |
+
+Neighbours mostly stay together and fly apart on a minority of frames: the motion model's
+error is **episodic**, not a uniformly non-rigid field. (A first reading used the max over
+frames and overstated it as ~50×.) So canonical k-NN is sound, and trajectory-space k-NN —
+barely higher agreement, and built from sampled frames that include the glitches — does not
+earn its cost. Which frames go wrong, and why, is §8's new open item 4.
+
+**I3 as built:** KL between each sampled Gaussian's class distribution and its k=5 neighbours'
+(Gaussian Grouping's `loss_cls_3d`), canonical means for the foreground, 3D means for the
+background, positions detached — identity only, as in I2. Every 2 steps, 800 samples, λ=2.
+A stretch filter on neighbour pairs is held in reserve, for if the gate shows identity leaking
+across entities that were adjacent in the canonical pose.
+
 ---
 
 ## 5. The measurement, as a deliverable
@@ -351,3 +398,8 @@ hole". The same requirement was never applied to the Gaussian path we actually u
    cloud; ours has to reach the graph stage, which currently reads only the bundle.
 3. **`num_classes` per scene.** Theirs defaults to 200. Ours is entities + background, known per
    run — which makes the normalisation term scene-dependent and worth stating in the manifest.
+4. **Episodic motion error.** Canonical neighbours sit within ~2–4× of their spacing on a
+   typical frame and fly apart (up to ~20×) on the worst 10% (§4.4). Which frames, whether
+   they coincide with the gate's per-frame swings (`motocross-bumps` 2.3% → 73.5% → 6.9%),
+   and whether a local-rigidity term on neighbours' motion coefficients removes them — the
+   motion model has smoothness over time on its bases and nothing across space.
