@@ -116,6 +116,11 @@ rung for us today.
 **Verdict:** keep. Record the learned methods as the ladder rungs above, and note the dependency
 inversion they would cause (§3.3 of the design doc).
 
+> **Overturned 2026-09-29.** Both stated advantages are real and still hold; the unstated cost
+> was **separability**, which is the whole capability this layer exists to provide. Removing one
+> entity mutilates the entity beside it wherever they are adjacent in depth — the step-1 gate
+> failed 9 of 10 sequences on exactly this. Scope for the learned rung: `docs/design/2026-09-29-per-gaussian-identity-scope.md`.
+
 ### 2.5 Query surface — **adopt the design**
 
 **Structured Interfaces for Automated Reasoning with 3D Scene Graphs** (arXiv 2510.16643,

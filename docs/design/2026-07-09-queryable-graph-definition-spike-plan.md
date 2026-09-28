@@ -179,6 +179,11 @@ separability**, which is upstream of everything the graph does.
 `blackswan` is the shape of success and says what separability needs: one dominant object, well
 apart from anything else, claiming 72.6% of a substantive foreground.
 
+**The cause, and the fix being scoped.** The entity masks never reach training: the render
+stage optimises one undifferentiated foreground field for photometric reconstruction, and
+identity is applied afterwards by a projection vote. The representation was never asked to be
+separable. See `docs/design/2026-09-29-per-gaussian-identity-scope.md`.
+
 ---
 
 ## 6. Footage — and the constraint that decides it
