@@ -18,6 +18,10 @@ from reifyscene.render.gaussian4d.rasterizer import GaussianCloud
 # Optimizer param groups are keyed by these names so densification can do
 # per-parameter Adam-state surgery.
 PARAM_NAMES = ("means", "quats", "log_scales", "logit_opacities", "colors_logit")
+# Optional per-Gaussian identity vector (D channels, rasterized as features). Not in
+# PARAM_NAMES: a field only carries it when identity training is on, and the trainer
+# adds it to the densifier's list then, so splits and prunes carry it with the rest.
+IDENTITY_PARAM = "identity"
 
 
 def logit(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -37,6 +41,7 @@ class GaussianField(nn.Module):
         colors_logit: torch.Tensor,
         *,
         color_model: str = "rgb",
+        identity: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.color_model = str(color_model)
@@ -45,6 +50,10 @@ class GaussianField(nn.Module):
         self.log_scales = nn.Parameter(log_scales.float())
         self.logit_opacities = nn.Parameter(logit_opacities.float())
         self.colors_logit = nn.Parameter(colors_logit.float())
+        self.identity: nn.Parameter | None
+        self.register_parameter(
+            IDENTITY_PARAM, None if identity is None else nn.Parameter(identity.float())
+        )
 
     @classmethod
     def from_cloud(cls, cloud: GaussianCloud, *, color_model: str = "rgb") -> "GaussianField":
@@ -80,6 +89,19 @@ class GaussianField(nn.Module):
     def get_quats(self) -> torch.Tensor:
         return F.normalize(self.quats, dim=-1)
 
+    @property
+    def identity_dim(self) -> int:
+        return 0 if self.identity is None else int(self.identity.shape[1])
+
+    def init_identity(self, dim: int, *, generator: torch.Generator | None = None) -> None:
+        """Give every Gaussian a small random identity vector (D channels).
+
+        Small and random rather than zero: identical vectors get identical gradients,
+        and a field that starts symmetric has nothing to break the tie with.
+        """
+        noise = torch.randn((self.num_gaussians, int(dim)), generator=generator)
+        self.identity = nn.Parameter((0.1 * noise).to(self.device))
+
     def activated(self) -> tuple[torch.Tensor, ...]:
         """(means, quats, scales, opacities, colors) ready for rasterization."""
         return (self.means, self.get_quats(), self.get_scales(), self.get_opacities(), self.get_colors())
@@ -94,6 +116,7 @@ class GaussianField(nn.Module):
             scales=scales.detach(),
             opacities=opacities.detach(),
             colors=colors.detach(),
+            features=None if self.identity is None else self.identity.detach(),
         )
 
     # -- densification support --------------------------------------------

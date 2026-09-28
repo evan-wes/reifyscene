@@ -95,8 +95,30 @@ def bundle_to_scene(data, device: str = "cuda") -> tuple[DynamicScene, dict[str,
             colors_logit=t("bg_colors"),
         )
     scene = DynamicScene(fg, bases, bg).to(device)
+    if _bundle_has(data, "identity_classifier_w"):
+        _load_identity(scene, data, device)
     cameras = {split: _cameras(data, split) for split in ("train", "val")}
     return scene, cameras
+
+
+def _load_identity(scene: DynamicScene, data, device: str) -> None:
+    """Attach a trained identity (both fields' vectors + classifier + class table)."""
+    import torch.nn as nn
+
+    def t(key: str) -> torch.Tensor:
+        return torch.as_tensor(np.asarray(data[key]), dtype=torch.float32, device=device)
+
+    scene.fg.identity = nn.Parameter(t("fg_identity"))
+    if scene.bg is not None:
+        scene.bg.identity = nn.Parameter(t("bg_identity"))
+    w, b = t("identity_classifier_w"), t("identity_classifier_b")
+    head = nn.Linear(int(w.shape[1]), int(w.shape[0])).to(device)
+    with torch.no_grad():
+        head.weight.copy_(w)
+        head.bias.copy_(b)
+    scene.identity_classifier = head
+    # Background is stored as "" (npz string arrays cannot hold None).
+    scene.identity_node_ids = [str(x) or None for x in np.asarray(data["identity_node_ids"])]
 
 
 def dump_bundle(
@@ -146,6 +168,13 @@ def dump_bundle(
             "bg_colors": n(scene.bg.colors_logit),
             "bg_opacities": n(scene.bg.logit_opacities),
         })
+    if scene.has_identity:
+        dump["fg_identity"] = n(fg.identity)
+        if scene.bg is not None:
+            dump["bg_identity"] = n(scene.bg.identity)
+        dump["identity_classifier_w"] = n(scene.identity_classifier.weight)
+        dump["identity_classifier_b"] = n(scene.identity_classifier.bias)
+        dump["identity_node_ids"] = np.asarray([nid or "" for nid in scene.identity_node_ids])
     for split, cam_list in cams.items():
         if not cam_list:
             continue

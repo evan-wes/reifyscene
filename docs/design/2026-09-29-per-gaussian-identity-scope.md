@@ -176,7 +176,7 @@ stage.
 |---|---|---|
 | **I0** ✅ | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today — **done, see §4.1** |
 | **I1** ✅ | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint — **done, see §4.2** |
-| **I2** | identity parameter (**D=20**, §4.2) on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss |
+| **I2** ✅ | identity parameter (**D=20**, §4.2) on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss — **done, see §4.3; geometry detached** |
 | **I3** | 3D consistency regularizer on canonical means | neighbouring Gaussians agree measurably more than without it |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
@@ -248,6 +248,45 @@ else to the next power of two. Our call is `RGB+ED`, so it renders `3 + D + 1` c
 **D=20** is chosen: unpadded, cheaper than Gaussian Grouping's 16 on a real scene (4.54 vs
 5.70 ms), and a linear classifier from 20 dims covers the 4–24 classes I0 found. It costs about
 2 ms per step over plain RGB at 208k Gaussians.
+
+### 4.3 I2 — done; identity reads geometry and never writes it
+
+Both fields carry a learnable identity vector (D=20); a linear classifier maps rendered
+features to the run's classes; the loss is `CE(logits, id_map, ignore=65535) / log(C)` at
+λ=1, with Gaussian Grouping's learning rates. Identity is in each densification controller's
+parameter list, so splits and prunes carry it. The render stage exports fresh id maps when
+`dynamic.identity.enabled`; the checkpoint carries both fields' vectors, the classifier and
+the class table. `scripts/retrain_with_identity.py` writes beside the pipeline's `render/`.
+
+**The departure from Gaussian Grouping: the identity loss does not reach geometry.** Theirs
+renders identity in the same pass and lets its gradient move means, scales and opacities. The
+photometric loss matches measured pixels; our id maps are pseudo-labels — SAM 2 masks through
+reid and the graph, with ~30% of annotated objects never proposed and therefore labelled
+*background*. Letting those errors shape geometry is letting the weakest signal overrule the
+strongest. Measured on `lab-coat` (5000 iters, one seed each):
+
+| | control (no identity) | coupled (theirs) | **detached (ours)** |
+|---|---|---|---|
+| train-view PSNR | 25.63 | 24.42 | **25.79** |
+| fg / bg Gaussians | 72.7k / 241.2k | 55.9k / 265.4k | 73.1k / 244.9k |
+| final identity CE (normalised) | — | 0.030 | 0.043 |
+| mean identity entropy fg / bg | — | 0.42 / 0.26 | **0.27 / 0.16** |
+
+Coupling cost 1.2 dB and 23% of the foreground Gaussians (identity gradients enter
+`means2d.grad`, which densification thresholds on) and bought a lower loss on labels we do not
+fully trust — while separating *worse*. Detached, the features get a second, feature-only
+rasterization over a geometry-detached cloud (~2 ms/step, §4.2); densification sees
+photometric gradients only. `identity_detach_geometry=False` keeps the coupled mode for
+comparison.
+
+**Static entities are addressable**: each of `lab-coat`'s three people owns 12.6k–14.6k
+background Gaussians at p ≥ 0.5 — the ones the motion split put in the static cloud, which the
+projection vote could not reach.
+
+**Next question the label source raises**: DAVIS ships hand-annotated masks for its main
+objects. Training identity on those instead of ours would separate "does the mechanism work"
+from "what do our upstream labels cost" — if GT-trained identity passes the gate and ours does
+not, the remaining problem is segmentation/reid/graph, not identity.
 
 ---
 

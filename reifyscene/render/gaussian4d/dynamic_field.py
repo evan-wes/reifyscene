@@ -35,8 +35,12 @@ class DynamicGaussianField(GaussianField):
         motion_coefs: torch.Tensor,
         *,
         color_model: str = "rgb",
+        identity: torch.Tensor | None = None,
     ) -> None:
-        super().__init__(means, quats, log_scales, logit_opacities, colors_logit, color_model=color_model)
+        super().__init__(
+            means, quats, log_scales, logit_opacities, colors_logit,
+            color_model=color_model, identity=identity,
+        )
         self.motion_coefs = nn.Parameter(motion_coefs.float())  # (G, K) raw logits
 
     @property
@@ -68,6 +72,38 @@ class DynamicScene(nn.Module):
         self.fg = fg
         self.motion_bases = motion_bases
         self.bg = bg
+        # Identity head: rendered D-channel features -> per-class logits. Set by
+        # enable_identity (training) or bundle_to_scene (a checkpoint that has one).
+        self.identity_classifier: nn.Linear | None = None
+        self.identity_node_ids: list[str | None] = []   # class index -> graph node id
+
+    @property
+    def has_identity(self) -> bool:
+        return self.identity_classifier is not None
+
+    def enable_identity(
+        self, dim: int, node_ids: list[str | None], *, seed: int = 0
+    ) -> None:
+        """Identity on BOTH fields plus a linear classifier over ``len(node_ids)`` classes.
+
+        ``node_ids[0]`` is background (None). The background field carries identity
+        too: fg/bg is a motion split, identity is semantic, and a standing person the
+        motion gate put in the static cloud must still be addressable.
+        """
+        gen = torch.Generator().manual_seed(int(seed))
+        self.fg.init_identity(dim, generator=gen)
+        if self.bg is not None:
+            self.bg.init_identity(dim, generator=gen)
+        self.identity_classifier = nn.Linear(int(dim), len(node_ids)).to(self.fg.device)
+        self.identity_node_ids = list(node_ids)
+
+    @torch.no_grad()
+    def gaussian_identity_probs(self) -> torch.Tensor:
+        """(N_fg + N_bg, C) class probabilities of each Gaussian's own identity vector."""
+        if not self.has_identity:
+            raise ValueError("this scene was not trained with identity")
+        ids = [self.fg.identity] + ([self.bg.identity] if self.bg is not None else [])
+        return torch.softmax(self.identity_classifier(torch.cat(ids, dim=0)), dim=-1)
 
     @property
     def num_frames(self) -> int:
@@ -89,13 +125,21 @@ class DynamicScene(nn.Module):
         fg_means, fg_quats = self.fg.warp(self.motion_bases, ts)
         means, quats = fg_means[:, 0], fg_quats[:, 0]
         scales, opacities, colors = self.fg.get_scales(), self.fg.get_opacities(), self.fg.get_colors()
+        features = self.fg.identity
         if self.bg is not None:
             means = torch.cat([means, self.bg.means], dim=0)
             quats = torch.cat([quats, self.bg.get_quats()], dim=0)
             scales = torch.cat([scales, self.bg.get_scales()], dim=0)
             opacities = torch.cat([opacities, self.bg.get_opacities()], dim=0)
             colors = torch.cat([colors, self.bg.get_colors()], dim=0)
-        return GaussianCloud(means=means, quats=quats, scales=scales, opacities=opacities, colors=colors)
+            if (features is None) != (self.bg.identity is None):
+                raise ValueError("identity is on one field and not the other")
+            if features is not None:
+                features = torch.cat([features, self.bg.identity], dim=0)
+        return GaussianCloud(
+            means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
+            features=features,
+        )
 
     def entity_ids(self) -> torch.Tensor:
         """Per-Gaussian entity id for the combined cloud (fg = 1, bg = 0)."""

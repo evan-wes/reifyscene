@@ -201,10 +201,45 @@ class GaussianRenderBackend(RenderBackend):
     def _dynamic_train_views(self, scene_artifact) -> list[tuple[RenderCamera, "torch.Tensor", int]]:
         """Train views for the dynamic trainer: (camera, gt[H,W,3], time_id)."""
         out: list[tuple[RenderCamera, torch.Tensor, int]] = []
+        self._train_frame_keys = []
         for view in scene_artifact.train_views:
             path = self._require_image_path(view)
             out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view.get("time_id", 0))))
+            self._train_frame_keys.append(view.get("frame_key"))
         return out
+
+    def _attach_identity(
+        self, scene, train_views: list[tuple], run_dir: Path, ident_cfg: dict[str, Any]
+    ) -> tuple[list[tuple], dict[str, Any]]:
+        """Export fresh id maps for the run, enable identity, and pair each view with its map.
+
+        The maps are regenerated here rather than read from disk so they cannot be stale
+        against the graph they encode. A view whose frame has no map, or whose map is not
+        the camera's size, is refused: training on a misaligned target is silent damage.
+        """
+        from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+
+        manifest = export_id_maps(run_dir)
+        _, maps = load_id_maps(run_dir / "identity")
+        stream = manifest["stream_id"]
+        node_ids = [c["node_id"] for c in sorted(manifest["classes"], key=lambda c: c["index"])]
+        scene.enable_identity(int(ident_cfg.get("dim", 20)), node_ids,
+                              seed=int(ident_cfg.get("seed", 0)))
+        paired: list[tuple] = []
+        for (camera, gt, time_id), key in zip(train_views, self._train_frame_keys, strict=True):
+            sid, _, idx = str(key).rpartition(":")
+            if sid != stream or int(idx) not in maps:
+                raise ValueError(f"train view {key} has no id map in {run_dir / 'identity'}")
+            arr = maps[int(idx)]
+            if arr.shape != tuple(gt.shape[:2]):
+                raise ValueError(
+                    f"id map for {key} is {arr.shape}, its photo is {tuple(gt.shape[:2])}"
+                )
+            paired.append((camera, gt, time_id,
+                           torch.as_tensor(arr.astype(np.int64), device=self.device)))
+        summary = {"dim": scene.fg.identity_dim, "num_classes": manifest["num_classes"],
+                   "ignore_fraction": manifest["fractions"]["ignore"]}
+        return paired, summary
 
     def _render_dynamic_trajectory(self, scene_artifact, scene, rasterizer, save_dir: Path) -> dict[str, list[str]]:
         traj = scene_artifact.render_trajectory or []
@@ -271,6 +306,18 @@ class GaussianRenderBackend(RenderBackend):
         train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
         densify_cfg = DensifyConfig.from_cfg(self.cfg.get("densify"), max_iters=iters, num_frames=scene.num_frames)
         rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
+        ident_cfg = dict(dyn_cfg.get("identity") or {})
+        identity_summary = None
+        if ident_cfg.get("enabled"):
+            # A run's stages are siblings; the render stage's parent is the run.
+            train_views, identity_summary = self._attach_identity(
+                scene, train_views, Path(save_dir).parent, ident_cfg
+            )
+            if "lambda" in ident_cfg:
+                train_cfg.lambda_identity = float(ident_cfg["lambda"])
+            if "detach_geometry" in ident_cfg:
+                train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
+            identity_summary["detach_geometry"] = train_cfg.identity_detach_geometry
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []
@@ -281,8 +328,8 @@ class GaussianRenderBackend(RenderBackend):
         eval_n = min(len(train_views), 8)
         with torch.no_grad():
             psnrs = [
-                float(image_psnr(trainer.render_at(cam, t), gt))
-                for cam, gt, t in train_views[:eval_n]
+                float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
+                for v in train_views[:eval_n]
             ]
         train_view_psnr = float(np.mean(psnrs)) if psnrs else 0.0
 
@@ -301,6 +348,9 @@ class GaussianRenderBackend(RenderBackend):
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
+                **({"identity": {**identity_summary, "final_identity_loss": next(
+                    (r["identity_loss"] for r in reversed(logs) if "identity_loss" in r), None
+                )}} if identity_summary else {}),
             },
             path_index=path_index,
         )
