@@ -138,7 +138,30 @@ its nearest labelled neighbours agree on the target. Same signal the 3D regulari
 and it cannot jump a gap into another entity. Off by default until measured, like every other
 threshold here.
 
-### 3.3 The learned identity is a rung, not a replacement
+### 3.3 The background field carries identity too
+
+**Foreground and background are split by motion; identity is semantic. Conflating them is a bug.**
+
+Today foreground is the union of the segment masks (`assembler._fg_mask_by_frame`), so a detected
+person is foreground whether or not they move, and would receive an identity. But the split is one
+config flag away from being motion-based: `motion_gate` demotes never-moved tracks to the static
+cloud, and its own comment says why it exists — *"static tracks (e.g. SAM-2-segmented background
+the segment fg let in) become static bg"*. It is not set in any config today.
+
+Turning it on looks like a reasonable optimisation and would **silently make a standing person
+unaddressable** — swept into an undifferentiated static cloud with no identity and no way to name
+them. A person leaning on a wall is semantically an entity and dynamically static; those two facts
+must not be forced into one decision.
+
+So identity goes on **both** fields. A static entity keeps its handle and stays removable; the
+motion gate goes back to being a question about deformation, which is all it should ever have
+been. The cost is small — `blackswan` carries 120,634 background Gaussians to 87,599 foreground, so
+a 16-dim vector on both is a few megabytes.
+
+What this does **not** fix: an entity the segmenter never proposes is background by omission, and
+no identity scheme recovers it. That is the 73-unproposed-object problem, and it stays where it is.
+
+### 3.4 The learned identity is a rung, not a replacement
 
 `graph/entity_gaussians.py`'s projection vote stays as the floor rung: it needs no retraining and
 runs on any existing checkpoint. The learned identity is the rung above it, and the
@@ -153,7 +176,7 @@ stage.
 |---|---|---|
 | **I0** | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today |
 | **I1** | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint |
-| **I2** | identity parameter on the dynamic field + classifier + 2D loss | identity survives densification and pruning; the one-batch overfit reaches ≈ zero classification loss |
+| **I2** | identity parameter on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss |
 | **I3** | 3D consistency regularizer on canonical means | neighbouring Gaussians agree measurably more than without it |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
@@ -180,7 +203,6 @@ It also decides whether §3.1's split is worth building.
   loop runs rebuild in ~90 minutes, so the ensemble stays cheap to re-measure.
 - **Entities that enter or leave mid-clip.** Their ids exist for part of the sequence only; the
   classifier sees them on some frames and not others. Untested.
-- **The background field.** Whether it needs an identity, or whether "not foreground" suffices.
 - **Wide-channel backward pass in gsplat.** Whether a 16-channel feature is efficient or a
   performance problem — the one thing worth checking before I1.
 - **`india` and `miami-surf` are not addressed by any of this.** Their foreground never became
