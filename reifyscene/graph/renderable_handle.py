@@ -131,6 +131,28 @@ def entity_masks_in_render_pixels(
     map folds onto its canonical -- a node is one physical thing, and its members are the
     tracklets that turned out to be it.
     """
+    placed = render_pixel_masks(run_dir, stream_id=stream_id)
+    return placed.by_frame, placed.labels, placed.notes
+
+
+@dataclass
+class RenderPixelMasks:
+    """Everything segmentation says about the render raster, including what the graph dropped.
+
+    ``unmapped`` holds, per frame, the union of the tracklets that have no graph node. They are
+    real things in the image that nothing can claim, so a consumer that trains on these masks
+    must not read their pixels as background.
+    """
+
+    by_frame: dict[int, dict[str, np.ndarray]]
+    labels: dict[str, str]
+    notes: list[str]
+    unmapped: dict[int, np.ndarray]
+    transform: Any                      # ImageTransform; Any keeps the import lazy
+
+
+def render_pixel_masks(run_dir: Path, *, stream_id: str = "cam_00") -> RenderPixelMasks:
+    """:func:`entity_masks_in_render_pixels`, plus the unmapped tracklets and the transform."""
     from reifyscene.geometry.image_transform import ImageTransform
     from reifyscene.perception.instance.instance_artifact import InstanceArtifact
 
@@ -170,6 +192,7 @@ def entity_masks_in_render_pixels(
 
     inst = InstanceArtifact.load(run_dir / "segment")
     by_frame: dict[int, dict[str, np.ndarray]] = {}
+    unmapped_masks: dict[int, np.ndarray] = {}
     unmapped: set[str] = set()
     for obs in inst.observations:
         if obs.frame_ref.stream_id != stream_id:
@@ -177,19 +200,21 @@ def entity_masks_in_render_pixels(
         mask = inst.mask_arrays.get(obs.instance_id)
         if mask is None:
             continue
+        placed = transform.apply_to_image(np.asarray(mask), kind="mask").astype(bool)
+        frame = int(obs.frame_ref.frame_idx)
         node_id = canonical_to_node.get(canonical(str(obs.track_id)))
         if node_id is None:
             unmapped.add(str(obs.track_id))
+            prev = unmapped_masks.get(frame)
+            unmapped_masks[frame] = placed if prev is None else (prev | placed)
             continue
-        placed = transform.apply_to_image(np.asarray(mask), kind="mask").astype(bool)
-        frame = int(obs.frame_ref.frame_idx)
         slot = by_frame.setdefault(frame, {})
         slot[node_id] = placed if node_id not in slot else (slot[node_id] | placed)
     if unmapped:
         # Tracklets the graph did not turn into a node: dropped by a support or size rule.
         # Named rather than silently ignored, because they are Gaussians nothing can claim.
         notes.append(f"{len(unmapped)} tracklet(s) have no graph node and were skipped")
-    return by_frame, labels, notes
+    return RenderPixelMasks(by_frame, labels, notes, unmapped_masks, transform)
 
 
 def compute_renderable_handles(

@@ -174,12 +174,49 @@ stage.
 
 | | build | done when |
 |---|---|---|
-| **I0** | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today |
+| **I0** ✅ | id-map export: per-frame PNGs of canonical node ids, through the recorded `ImageTransform` | ids match the graph's nodes; a round-trip read reproduces the masks the handle uses today — **done, see §4.1** |
 | **I1** | gsplat wrapper carries an N-channel feature alongside RGB | a known feature rasterizes to the expected image; RGB output is unchanged for an existing checkpoint |
 | **I2** | identity parameter on the dynamic field **and the background field** + classifier + 2D loss | identity survives densification and pruning; a static segmented entity is addressable; the one-batch overfit reaches ≈ zero classification loss |
 | **I3** | 3D consistency regularizer on canonical means | neighbouring Gaussians agree measurably more than without it |
 | **I4** | removal by probability threshold; no hull | the ten-scene gate re-run and re-reviewed against the recorded baseline (`blackswan` alone) |
 | **I5** | the conflict measurement (§5) | reported for all ten, and `motocross-bumps` explained |
+
+### 4.1 I0 — done
+
+`reifyscene/graph/id_maps.py`, run by `scripts/export_id_maps.py`, writes
+`<run>/identity/frame_NNNNN.png` (uint16) and `manifest.json` for every ingest frame. Encoding:
+`0` background, `1..K` the graph's entity nodes in sorted `node_id` order, `65535` **ignore**.
+Ignore covers three things: a pixel two entities claim (picking a winner would train a guess),
+a pixel a tracklet the graph dropped covers (background would teach that the thing is scenery),
+and transform padding. `num_classes` (= K + 1) lives in the manifest because the loss's
+normalisation depends on it.
+
+All ten runs round-trip with **zero** mismatched pixels against `entity_masks_in_render_pixels`:
+
+| run | classes | entity % | overlap % |
+|---|---|---|---|
+| blackswan | 9 | 10.0 | 0.18 |
+| crossing | 20 | 19.3 | 0.20 |
+| dogs-scale | 17 | 77.0 | 2.56 |
+| gold-fish | 19 | 23.5 | 0.27 |
+| india | 24 | 26.0 | 0.97 |
+| judo | 19 | 72.0 | 1.48 |
+| lab-coat | 9 | 36.7 | 0.03 |
+| lindy-hop | 21 | 67.3 | 1.50 |
+| miami-surf | 7 | 29.6 | 0.00 |
+| motocross-bumps | 4 | 34.1 | 0.00 |
+
+Unmapped and padding are 0% on all ten (every tracklet has a node; the transform is a pure
+resize). What it surfaced:
+
+- **Classes are 4–24, not DAVIS's 1–8.** The class table is every entity node the graph has,
+  clutter proposals included (`blackswan` carries a "spoon", a "toothbrush", two "cups"). That is
+  the contract — ids match the graph — but it means the feature width cannot be one channel per
+  class under the measured `D=19` budget on `india` (24) or `lindy-hop` (21). I2 must choose:
+  a fixed-width embedding plus a linear classifier (Gaussian Grouping's shape), or a per-scene width.
+- **Overlap is small** — under 3% of pixels everywhere — so ignoring it costs little supervision.
+- **Two `gold-fish` nodes (both "tv") own no unambiguous pixel on any frame**: every pixel they
+  have is contested. Near-certain duplicates; they get a class and no supervision, which fails safe.
 
 ---
 
