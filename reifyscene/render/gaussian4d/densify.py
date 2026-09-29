@@ -324,8 +324,11 @@ class DensificationController:
         cap = float(logit(torch.tensor(self.cfg.reset_opacity_value)))
         capped = torch.minimum(self.field.logit_opacities.data, torch.full_like(self.field.logit_opacities.data, cap))
         self.field.logit_opacities.data.copy_(capped)
+        # The group is named with this controller's prefix ("fg."/"bg." in the dynamic
+        # trainer). Matching the bare name missed both there, so the reset's momentum survived
+        # and pushed culled opacities straight back up.
         for group in self.optimizer.param_groups:
-            if group.get("name") == "logit_opacities":
+            if group.get("name") == self.group_prefix + "logit_opacities":
                 state = self.optimizer.state.get(group["params"][0])
                 if state:
                     state["exp_avg"].zero_()

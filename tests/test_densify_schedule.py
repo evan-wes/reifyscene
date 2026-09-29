@@ -66,3 +66,30 @@ def test_from_cfg_without_iters_is_backward_compatible() -> None:
     cfg = DensifyConfig.from_cfg({"grad2d_threshold": 0.0})
     assert cfg.start_iter == 500 and cfg.stop_iter == 15000
     assert cfg.grad2d_threshold == 0.0
+
+
+def test_opacity_reset_clears_momentum_under_a_group_prefix() -> None:
+    """The dynamic trainer names groups "fg.logit_opacities"/"bg.logit_opacities". A reset
+    that only matched the bare name left their Adam momentum alive, which pushes the capped
+    opacities straight back up -- the reset half-undone on every dynamic run."""
+    import torch
+
+    from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig
+    from reifyscene.render.gaussian4d.gaussian_field import PARAM_NAMES, GaussianField
+
+    n = 5
+    field = GaussianField(torch.zeros(n, 3), torch.tensor([[1.0, 0, 0, 0]] * n),
+                          torch.zeros(n, 3), torch.full((n,), 3.0), torch.zeros(n, 3))
+    opt = torch.optim.Adam([{"params": [getattr(field, k)], "name": "fg." + k}
+                            for k in PARAM_NAMES])
+    for g in opt.param_groups:
+        g["params"][0].grad = torch.ones_like(g["params"][0])
+    opt.step()
+    ctrl = DensificationController(field, opt, DensifyConfig(scene_extent=1.0),
+                                   group_prefix="fg.")
+    ctrl.reset_opacity()
+    for g in opt.param_groups:
+        st = opt.state[g["params"][0]]
+        cleared = not st["exp_avg"].any()
+        assert cleared == (g["name"] == "fg.logit_opacities"), g["name"]
+    assert float(field.get_opacities().max()) <= DensifyConfig().reset_opacity_value + 1e-6
