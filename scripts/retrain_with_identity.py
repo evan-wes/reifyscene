@@ -54,6 +54,10 @@ def main() -> int:
     ap.add_argument("--out", default=None,
                     help="output dir name inside the run; default derived from the flags")
     ap.add_argument("--iters", type=int, default=None, help="default: the run's own")
+    ap.add_argument("--trace-every", type=int, default=0,
+                    help="write <out>/identity_trace.jsonl every N steps (0: off)")
+    ap.add_argument("--snapshot-steps", type=int, nargs="*", default=[],
+                    help="also save <out>/trained_dynamic_step<N>.npz at these steps")
     ap.add_argument("--coupled", action="store_true",
                     help="let the identity loss move geometry (single pass); default detached")
     args = ap.parse_args()
@@ -67,7 +71,9 @@ def main() -> int:
     dyn = dict(cfg.get("dynamic", cfg.get("trainer", {})) or {})
     if not args.no_identity:
         dyn["identity"] = {"enabled": True, "dim": args.dim, "lambda": args.lambda_identity,
-                           "detach_geometry": not args.coupled, "lambda_3d": args.lambda_3d}
+                           "detach_geometry": not args.coupled, "lambda_3d": args.lambda_3d,
+                           "trace_every": args.trace_every,
+                           "snapshot_steps": args.snapshot_steps}
     cfg["dynamic"] = dyn
     if args.iters is not None:
         cfg["iters"] = args.iters

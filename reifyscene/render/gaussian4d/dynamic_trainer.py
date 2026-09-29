@@ -91,6 +91,10 @@ class DynamicTrainConfig:
     # flattened identity to buy agreement. A fixed divisor reproduces their strength and
     # stops scenes with fewer classes being smoothed harder.
     identity_3d_norm: float = 200.0
+    # Training-time diagnostics (identity_trace.IdentityTracer), off by default.
+    identity_trace_every: int = 0
+    identity_trace_views: int = 8
+    snapshot_steps: tuple[int, ...] = ()
     lr_identity: float = 2.5e-3
     lr_identity_classifier: float = 5.0e-4
     random_seed: int = 0
@@ -250,15 +254,27 @@ class DynamicGaussianTrainer:
         train_views: list[tuple],
         *,
         on_log: Callable[[dict], None] | None = None,
+        on_trace: Callable[[dict], None] | None = None,
+        on_snapshot: Callable[[int, DynamicScene], None] | None = None,
     ) -> DynamicScene:
+        """``train_views`` are ``(camera, gt, time_id)`` or, for identity training,
+        ``(camera, gt, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor.
+
+        ``on_trace`` receives an identity trace record every ``identity_trace_every`` steps
+        (and at step 1); ``on_snapshot`` receives the scene at each of ``snapshot_steps``.
+        """
         if not train_views:
             raise ValueError("DynamicGaussianTrainer.fit got no training views.")
         torch.manual_seed(self.cfg.random_seed)
         gen = torch.Generator(device="cpu").manual_seed(self.cfg.random_seed)
         n = len(train_views)
+        tracer = None
+        if on_trace is not None and self.cfg.identity_trace_every > 0 and self.scene.has_identity:
+            from reifyscene.render.gaussian4d.identity_trace import IdentityTracer
 
-        """``train_views`` are ``(camera, gt, time_id)`` or, for identity training,
-        ``(camera, gt, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor."""
+            tracer = IdentityTracer.from_train_views(train_views, n=self.cfg.identity_trace_views)
+        snapshots = set(int(s) for s in self.cfg.snapshot_steps)
+
         if self.scene.has_identity and not any(len(v) > 3 and v[3] is not None
                                                for v in train_views):
             raise ValueError("the scene carries identity but no training view has an id map")
@@ -310,6 +326,11 @@ class DynamicGaussianTrainer:
                     record["identity_loss"] = id_loss_value
                     record["identity_3d_loss"] = id3d_value
                 on_log(record)
+            if tracer is not None and (step == 1 or step % self.cfg.identity_trace_every == 0
+                                       or step == self.cfg.iters):
+                on_trace(tracer.record(self, step))
+            if on_snapshot is not None and step in snapshots:
+                on_snapshot(step, self.scene)
 
         return self.scene
 

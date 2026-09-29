@@ -30,8 +30,10 @@ Per object, method and tau, two questions answered separately:
   was taken is the object). This does not depend on what, if anything, was reconstructed
   behind the object -- a still person against unseen background leaves a smear on removal
   whatever the selection, which "changed pixels" cannot tell apart from a bad selection.
-  (The strip's "took" panels render the removed Gaussians alone, which shows parts hidden
-  behind other things too; they are for looking, the metric uses the visible share.)
+  The strip's "took" panels render the removed Gaussians *alone*, which also shows the
+  parts hidden behind other things in the training views; *alone recall / precision* score
+  that view too. Both are reported because they disagree: a selection can be clean where it
+  is visible and still carry hidden junk that removal takes and a new viewpoint would show.
 - **Is the rest intact?** *rest intact* is the fraction of pixels outside the GT mask that did
   not change; *halo* counts those that did. *entity removed* (changed pixels inside the mask)
   is kept for comparison with the first gate, which reported it.
@@ -232,12 +234,12 @@ def _mean(rows: list[dict], ref: str, key: str) -> float | None:
     return round(float(np.mean(vals)), 4) if vals else None
 
 
-def _taken_score(alpha: np.ndarray, gt: np.ndarray) -> dict:
+def _taken_score(alpha: np.ndarray, gt: np.ndarray, prefix: str = "taken") -> dict:
     took = alpha > 0.5
     hit = int((took & gt).sum())
-    return {"taken_recall": round(hit / max(1, int(gt.sum())), 4),
-            "taken_precision": round(hit / int(took.sum()), 4) if took.any() else None,
-            "taken_px": int(took.sum())}
+    return {f"{prefix}_recall": round(hit / max(1, int(gt.sum())), 4),
+            f"{prefix}_precision": round(hit / int(took.sum()), 4) if took.any() else None,
+            f"{prefix}_px": int(took.sum())}
 
 
 def gate_run(run: Path, args) -> dict:
@@ -301,7 +303,7 @@ def gate_run(run: Path, args) -> dict:
         tooks: dict[str, dict[int, tuple[np.ndarray, np.ndarray]]] = {}
         for name, (edited, rend, fg_i, bg_i) in methods.items():
             after = afters[name] = rend.after(edited, frames)
-            tooks[name] = rend.taken(fg_i, bg_i, frames)
+            took = tooks[name] = rend.taken(fg_i, bg_i, frames)
             share = rend.share(fg_i, bg_i, frames)
             per_frame, changed_maps[name] = [], {}
             for f in frames:
@@ -309,11 +311,14 @@ def gate_run(run: Path, args) -> dict:
                 changed_maps[name][f] = ch
                 gt = _fit(gt_by_frame[f][gid], ch.shape)
                 ours = _fit(placed.by_frame.get(f, {}).get(node, np.zeros_like(gt)), ch.shape)
-                alpha = share[f]
+                alpha, alone = share[f], took[f][1]
                 per_frame.append({"frame": f,
-                                  "vs_gt": {**_score(ch, gt), **_taken_score(alpha, gt)},
-                                  "vs_ours": {**_score(ch, ours), **_taken_score(alpha, ours)}})
-            keys = ("entity_removed", "rest_intact", "halo_px", "taken_recall", "taken_precision")
+                                  "vs_gt": {**_score(ch, gt), **_taken_score(alpha, gt),
+                                            **_taken_score(alone, gt, prefix="alone")},
+                                  "vs_ours": {**_score(ch, ours), **_taken_score(alpha, ours),
+                                              **_taken_score(alone, ours, prefix="alone")}})
+            keys = ("entity_removed", "rest_intact", "halo_px", "taken_recall", "taken_precision",
+                    "alone_recall", "alone_precision")
             agg = {ref: {k: _mean(per_frame, ref, k) for k in keys}
                    for ref in ("vs_gt", "vs_ours")} if per_frame else {}
             row["methods"][name] = {"removed_fg": len(fg_i), "removed_bg": len(bg_i),

@@ -263,7 +263,9 @@ class GaussianRenderBackend(RenderBackend):
             pass
         return {"flythrough": frame_paths}
 
-    def _save_dynamic_checkpoint(self, scene, cams, source_bundle: dict, save_dir: Path) -> str:
+    def _save_dynamic_checkpoint(
+        self, scene, cams, source_bundle: dict, save_dir: Path, name: str = "trained_dynamic.npz"
+    ) -> str:
         """Persist the trained DynamicScene as a dump_bundle npz the scorer reloads.
 
         Carries forward the scene-norm (and any held-out val cameras) from the
@@ -275,7 +277,7 @@ class GaussianRenderBackend(RenderBackend):
         for key in ("scene_norm_transfm", "scene_norm_scale"):
             if key in (source_bundle or {}):
                 ckpt[key] = np.asarray(source_bundle[key])
-        path = save_dir / "trained_dynamic.npz"
+        path = save_dir / name
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
         return path.name
 
@@ -324,7 +326,25 @@ class GaussianRenderBackend(RenderBackend):
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []
-        trained = trainer.fit(train_views, on_log=lambda record: logs.append(record))
+        on_trace = on_snapshot = None
+        if identity_summary is not None and int(ident_cfg.get("trace_every", 0)) > 0:
+            import json
+
+            trainer.cfg.identity_trace_every = int(ident_cfg["trace_every"])
+            trace_path = Path(save_dir) / "identity_trace.jsonl"
+            trace_path.write_text("")
+
+            def on_trace(record: dict) -> None:
+                with trace_path.open("a") as fh:
+                    fh.write(json.dumps(record) + "\n")
+        if ident_cfg.get("snapshot_steps"):
+            trainer.cfg.snapshot_steps = tuple(int(x) for x in ident_cfg["snapshot_steps"])
+
+            def on_snapshot(step: int, scene) -> None:
+                self._save_dynamic_checkpoint(scene, cams, bundle, Path(save_dir),
+                                              name=f"trained_dynamic_step{step}.npz")
+        trained = trainer.fit(train_views, on_log=lambda record: logs.append(record),
+                              on_trace=on_trace, on_snapshot=on_snapshot)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
         checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir)

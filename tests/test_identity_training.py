@@ -379,3 +379,60 @@ def test_the_3d_term_strength_does_not_depend_on_the_scene_class_count() -> None
         losses.append(float(_trainer(scene).identity_consistency_loss(
             torch.Generator().manual_seed(0)).detach()))
     assert losses[0] > 0 and abs(losses[0] - losses[1]) < 1e-6 * losses[0]
+
+
+# -- training-time identity trace -------------------------------------------------------------
+
+def _two_blob_views():
+    from reifyscene.render.gaussian4d.rasterizer import GsplatRasterizer
+
+    means = np.array([[0.0, -0.3, 0.0], [0.0, 0.3, 0.0]], np.float32)
+    scene, _ = bundle_to_scene(_bundle(g=2, nb=1, means=means, scale=0.12), device="cuda")
+    with torch.no_grad():
+        scene.bg.logit_opacities.fill_(-20.0)
+    scene.enable_identity(20, NODES, seed=0)
+    cam = RenderCamera.from_look_at([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 96, 64)
+    r = GsplatRasterizer("cuda")
+    id_map = torch.full((64, 96), IGNORE, dtype=torch.long, device="cuda")
+    with torch.no_grad():
+        c = scene.cloud_at(0)
+        for k in range(2):
+            op = torch.zeros_like(c.opacities)
+            op[k] = c.opacities[k]
+            id_map[r.rasterize(c.means, c.quats, c.scales, op, c.colors, cam).alpha > 0.5] = k + 1
+        gt = r.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors, cam).rgb
+    return scene, r, [(cam, gt, 0, id_map)]
+
+
+@requires_gsplat
+def test_the_trace_records_fit_stability_supervision_and_selection() -> None:
+    scene, r, views = _two_blob_views()
+    cfg = DynamicTrainConfig(iters=300, lr_identity=2e-2, lr_identity_classifier=2e-2,
+                             lambda_identity_3d=0.0, identity_trace_every=100)
+    records, snaps = [], []
+    DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
+        views, on_trace=records.append, on_snapshot=lambda s, sc: snaps.append(s))
+    assert [rec["step"] for rec in records] == [1, 100, 200, 300]
+    first, last = records[0], records[-1]
+    # identity learns its labels: 2D fit rises, entropy falls
+    assert last["iou_entities_mean"] > first["iou_entities_mean"]
+    assert last["iou_entities_mean"] > 0.8
+    assert last["entropy_fg"] < first["entropy_fg"]
+    # both visible blobs get supervision; the invisible background Gaussian gets none
+    assert last["unsupervised_frac_fg"] == 0.0 and last["unsupervised_frac_bg"] == 1.0
+    # no densification: per-Gaussian flips are comparable, and settle
+    assert first["flip_frac_fg"] is None and last["flip_frac_fg"] == 0.0
+    # each blob's own Gaussians select it: both scorings agree on a clean two-blob scene
+    assert last["sel_entities"] == 2
+    assert last["sel_visible_precision_median"] > 0.9 and last["sel_alone_recall_median"] > 0.8
+    assert snaps == []
+
+
+@requires_gsplat
+def test_snapshots_fire_at_the_requested_steps() -> None:
+    scene, r, views = _two_blob_views()
+    cfg = DynamicTrainConfig(iters=30, lambda_identity_3d=0.0, snapshot_steps=(10, 30))
+    snaps = []
+    DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
+        views, on_snapshot=lambda s, sc: snaps.append(s))
+    assert snaps == [10, 30]
