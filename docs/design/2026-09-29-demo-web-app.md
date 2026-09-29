@@ -1,6 +1,7 @@
 # A local web app for querying, browsing and editing a reconstructed scene
 
-**Status:** PROPOSED
+**Status:** PHASE A BUILT (2026-09-29) — the app runs on all ten loop runs over the graph as it
+stands; relations (VLA-3D, the old W0) come next and appear in the graph panel when they land
 **Date:** 2026-09-29
 **Serves:** the thin loop of `docs/design/2026-07-09-queryable-graph-definition-spike-plan.md`
 (step 3: select → edit → render) and G1/G2 of
@@ -141,6 +142,18 @@ Each step is checked before the next.
 | **W4** | all ten loop runs | every run opens, queries and edits; failures are shown, not hidden |
 
 W0 and W1 are the graph plan's G1/G2 slice, needed with or without an app; W2–W4 are the app.
+
+**As built (phase A).** The order changed: the app was stood up first, on the graph as it is, and
+W0 (relations) follows -- adopted from VLA-3D (MIT; the research verdict in the graph contract
+§3.2), not hand-written rules. Built: presence with labelled gaps, `SceneQuery` (select / count /
+when; `relate` reports that relations are not computed yet), `remove` via FlashSplat + floater
+filter, `reifyscene query` / `edit` / `serve`, the backend and the three-panel front end.
+`serve` prefers each run's 8-views-per-step checkpoint (`render_q3b_batch8_nodecay`) and falls
+back to `render/`. On all ten runs: the graph loads, queries answer, frames render, and a removal
+completes in about a second including the evidence matrix; the server holds all ten scenes in
+~2.6 GB host / ~1.8 GB GPU memory. Not yet: the pipeline manifest still reports `renderable:
+absent` (the edit's own result reports the assigned fraction); that moves when `remove` is wired
+into the pipeline rather than run beside it.
 
 ---
 

@@ -29,6 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The local demo app (`reifyscene serve`): docs/design/2026-09-29-demo-web-app.md
+web = [
+  "fastapi>=0.142",
+  "uvicorn>=0.54",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",
@@ -73,6 +78,9 @@ reifyscene = "reifyscene.cli.main:app"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.package-data]
+"reifyscene.api.web" = ["static/*"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

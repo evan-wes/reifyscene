@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>reifyscene</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">reifyscene</div>
+  <label class="field">run
+    <select id="run-select" aria-label="run"></select>
+  </label>
+  <span class="meta" id="run-meta"></span>
+  <span class="spacer"></span>
+  <span class="meta" id="queue-state"></span>
+</header>
+
+<main class="layout">
+  <section class="panel graph-panel" aria-label="scene graph">
+    <div class="panel-head">
+      <h2>Scene graph</h2>
+      <span class="meta" id="graph-note"></span>
+    </div>
+    <div id="cy" role="img" aria-label="entities in the scene"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="panel frame-panel" aria-label="frame view">
+    <div class="panel-head">
+      <h2>Frame <span id="frame-label">–</span></h2>
+      <div class="seg" id="view-seg" role="group" aria-label="view"></div>
+      <span class="spacer"></span>
+      <button type="button" class="ghost" id="prev" aria-label="previous frame">◀</button>
+      <button type="button" class="ghost" id="play" aria-label="play">▶ play</button>
+      <button type="button" class="ghost" id="next" aria-label="next frame">▶</button>
+    </div>
+    <div class="stage" id="stage" tabindex="0" role="img" aria-label="frame">
+      <img id="frame-img" alt="">
+      <img id="outline-img" alt="">
+      <span class="tag" id="stage-tag"></span>
+      <span class="spinner" id="stage-spinner" hidden>rendering…</span>
+    </div>
+    <input type="range" id="frame-slider" min="0" max="0" value="0" aria-label="frame">
+    <div class="timeline" id="timeline" aria-label="presence timeline"></div>
+  </section>
+
+  <section class="panel side-panel" aria-label="query and edit">
+    <div class="panel-head"><h2>Query</h2></div>
+    <form id="query-form" class="query">
+      <div class="row">
+        <select id="q-template" aria-label="template">
+          <option value="select">select</option>
+          <option value="count">count</option>
+          <option value="when">when</option>
+          <option value="relate">relate</option>
+        </select>
+        <select id="q-category" aria-label="category"></select>
+        <select id="q-entity" aria-label="entity" hidden></select>
+        <select id="q-predicate" aria-label="predicate" hidden>
+          <option>near</option><option>above</option><option>below</option><option>on</option>
+          <option>in</option><option>between</option><option>closest</option><option>farthest</option>
+        </select>
+      </div>
+      <label class="check"><input type="checkbox" id="q-at-frame"> at the current frame</label>
+      <button type="submit" class="primary">Run query</button>
+    </form>
+    <pre class="answer" id="q-answer" aria-live="polite">Ask something about the scene.</pre>
+
+    <div class="panel-head"><h2>Selection</h2></div>
+    <div id="selection" class="selection"><p class="meta">Click an entity in the graph or the timeline.</p></div>
+
+    <div class="panel-head"><h2>Edit</h2></div>
+    <div class="edit">
+      <div class="row">
+        <label class="field">slackness
+          <select id="e-slack">
+            <option value="0">0 · balanced</option>
+            <option value="0.4">+0.4 · be surer</option>
+            <option value="-0.8">−0.8 · take more</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="e-filter" checked> floater filter</label>
+      </div>
+      <button type="button" class="danger" id="e-remove" disabled>Remove selected entity</button>
+      <div class="edit-status" id="e-status" aria-live="polite"></div>
+      <ul class="edit-list" id="e-list"></ul>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
