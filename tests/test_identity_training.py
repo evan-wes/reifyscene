@@ -511,3 +511,20 @@ def test_a_hidden_gaussian_does_not_earn_its_identity_back(reset: bool) -> None:
         assert float(probs[2, 1:].max()) < 0.5              # no entity claims it
     else:
         assert torch.equal(tr.scene.fg.identity[2], stale)  # nothing ever checked it
+
+
+# -- training signal and schedule -------------------------------------------------------------
+
+@requires_gsplat
+def test_scales_lr_decays_to_its_final_ratio_and_batches_train() -> None:
+    scene, r, views = _two_blob_views()
+    views = views * 4                                   # four copies: a batch of distinct picks
+    cfg = DynamicTrainConfig(iters=20, lambda_identity_3d=0.0, views_per_step=3,
+                             lr_scales_final_ratio=0.1)
+    tr = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r)
+    logs: list[dict] = []
+    tr.fit(views, on_log=logs.append)
+    lrs = {g["name"]: g["lr"] for g in tr.optimizer.param_groups}
+    assert abs(lrs["fg.log_scales"] - 0.1 * cfg.lr_scales) < 1e-12
+    assert lrs["fg.means"] == cfg.lr_means                     # only scales decay, as in SoM
+    assert logs and all(np.isfinite(r_["loss"]) for r_ in logs)

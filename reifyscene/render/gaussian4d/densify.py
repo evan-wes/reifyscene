@@ -161,7 +161,9 @@ class DensificationController:
         self.count = torch.zeros(n, device=dev)
 
     @torch.no_grad()
-    def after_backward(self, output: Any, gaussian_range: tuple[int, int] | None = None) -> None:
+    def after_backward(
+        self, output: Any, gaussian_range: tuple[int, int] | None = None, grad_scale: float = 1.0
+    ) -> None:
         """Accumulate per-Gaussian screen-space gradient from a RasterOutput.
 
         ``gaussian_range`` selects this field's slice of a combined-cloud
@@ -179,8 +181,10 @@ class DensificationController:
         # gsplat's means2d gradient is in [-1, 1] NDC; rescale to pixel units so
         # the ported grad2d_threshold (0.0002) is applied in the same space as
         # gsplat's DefaultStrategy.
-        grad[..., 0] *= output.width / 2.0
-        grad[..., 1] *= output.height / 2.0
+        # grad_scale undoes a batch mean: with B views averaged, each view's gradient is 1/B of
+        # what the threshold was set for (Shape-of-Motion multiplies by the batch size too).
+        grad[..., 0] *= output.width / 2.0 * grad_scale
+        grad[..., 1] *= output.height / 2.0 * grad_scale
         gnorm = grad.norm(dim=-1)
 
         radii = output.radii

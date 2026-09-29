@@ -425,6 +425,43 @@ are too soft to tell a removal defect from detail that was never modelled. Train
 comes next (position LR decay, the opacity-reset momentum bug, views per step, a Gaussian cap);
 the gate is re-judged on sharper scenes.
 
+### 4.8 Training quality: 8 views per step, and the gate on sharp scenes
+
+The 5k-step scenes were too soft to judge a removal by eye. Measured with
+`scripts/eval_train_views.py` (PSNR and SSIM over every training frame; *sharpness* =
+Laplacian variance of render over photo, 1.0 = as sharp as the footage), lab-coat / gold-fish /
+judo, same 5k-step schedule throughout:
+
+| setting | PSNR | SSIM | sharpness |
+|---|---|---|---|
+| baseline, 1 view per step | 23.2 / 23.1 / 29.4 | 0.75 / 0.74 / 0.92 | 0.21 / 0.08 / 0.59 |
+| opacity-reset momentum fix | 23.1 / 22.9 / 29.3 | 0.74 / 0.74 / 0.92 | 0.21 / 0.08 / 0.59 |
+| + scales LR decay to 0.1× (SoM) | 22.9 / 22.4 / 28.8 | 0.73 / 0.72 / 0.91 | 0.15 / 0.07 / 0.56 |
+| 8 views + decay | 28.3 / 27.7 / 35.9 | 0.89 / 0.85 / 0.97 | 0.50 / 0.23 / 0.83 |
+| **8 views per step** | **28.8 / 28.1 / 36.8** | **0.90 / 0.86 / 0.97** | **0.56 / 0.27 / 0.85** |
+
+8 views per step (Shape-of-Motion's batch; the densification gradient is rescaled by the batch
+size, as theirs is) is now the default, at ~5× render-stage time. Scale decay stays available,
+off. Densification is capped at 1M Gaussians per field; `motocross-bumps` and `miami-surf`
+reach it.
+
+On all ten at 8 views per step, 31 matched objects, medians against DAVIS ground truth:
+
+| method | took | precision visible / alone | halo | neighbours |
+|---|---|---|---|---|
+| old projection vote | 0.36 | 0.58 / 0.26 | 1.25× | 5.0% |
+| **FlashSplat, slackness 0** | **0.55** | **0.94** / 0.30 | **0.61×** | 4.7% |
+| FlashSplat, −0.8 | 0.90 | 0.72 / 0.20 | 1.86× | 19.9% |
+| FlashSplat, +0.4 | 0.43 | 0.96 / 0.36 | 0.31× | 2.1% |
+
+Reviewed by eye, FlashSplat looks better than the old vote, with visible background
+contamination of two different kinds: (1) **the hole** -- what shows where a removed entity
+stood is whatever blurry Gaussians sit behind it, because that background was never observed;
+no selection fixes it, it needs inpainting (FlashSplat's paper follows removal with it), and it
+is recorded here as a known limitation outside the step-1 gate; (2) **selection junk** --
+needle-shaped and oversized Gaussians straddling the object's edge. The gate is judged on
+selection; (2) is the next thing addressed.
+
 ---
 
 ## 5. The measurement, as a deliverable

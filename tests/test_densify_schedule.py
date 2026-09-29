@@ -93,3 +93,30 @@ def test_opacity_reset_clears_momentum_under_a_group_prefix() -> None:
         cleared = not st["exp_avg"].any()
         assert cleared == (g["name"] == "fg.logit_opacities"), g["name"]
     assert float(field.get_opacities().max()) <= DensifyConfig().reset_opacity_value + 1e-6
+
+
+def test_grad_scale_undoes_a_batch_mean() -> None:
+    """With B views averaged, each view's screen gradient is 1/B of a single-view step's;
+    grad_scale=B must restore it or densification quietly slows down."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig
+    from reifyscene.render.gaussian4d.gaussian_field import GaussianField
+
+    n = 3
+    field = GaussianField(torch.zeros(n, 3), torch.tensor([[1.0, 0, 0, 0]] * n),
+                          torch.zeros(n, 3), torch.zeros(n), torch.zeros(n, 3))
+    opt = torch.optim.Adam([field.means])
+
+    def out(g: float):
+        m = torch.zeros((1, n, 2), requires_grad=True)
+        m.grad = torch.full((1, n, 2), g)
+        return SimpleNamespace(means2d=m, radii=torch.ones((1, n)), width=2, height=2)
+
+    single = DensificationController(field, opt, DensifyConfig(scene_extent=1.0))
+    single.after_backward(out(0.4))
+    batched = DensificationController(field, opt, DensifyConfig(scene_extent=1.0))
+    batched.after_backward(out(0.1), grad_scale=4)
+    assert torch.allclose(single.grad2d_accum, batched.grad2d_accum)

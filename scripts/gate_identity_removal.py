@@ -42,10 +42,14 @@ A third method, *flashsplat@s*, needs no training: FlashSplat's evidence-majorit
 (:mod:`reifyscene.graph.assignment`) on the pipeline's own ``render/`` checkpoint, from every
 training frame's id map, at each ``--slackness``.
 
-Writes ``<run>/<identity-sub>/gate/index.json`` and, per object-frame, one strip
-``obj<id>_<frame>_strip.jpg`` (identity-scene before | old after | identity after | old took
-| identity took | original-scene before | flashsplat after | flashsplat took; identity at
-tau=0.5, flashsplat at the first slackness) and ``obj<id>_<frame>_gt.png``, the GT outline.
+``--base-sub`` picks the checkpoint the old vote and FlashSplat run on (default the
+pipeline's ``render/``); ``--identity-sub none`` leaves learned identity out.
+
+Writes ``gate/index.json`` under the identity checkpoint (or the base one without identity)
+and, per object-frame, one strip ``obj<id>_<frame>_strip.jpg`` whose panels are listed in
+each object's ``strip_panels`` (before | old after | old took | flashsplat after | flashsplat
+took [| identity before | identity after | identity took]; identity at tau=0.5, flashsplat at
+the first slackness) and ``obj<id>_<frame>_gt.png``, the GT outline.
 
 Needs CUDA (gsplat). Renders only; a few minutes for all ten loop runs.
 """
@@ -306,12 +310,19 @@ def gate_run(run: Path, args) -> dict:
         with np.load(run / sub / "trained_dynamic.npz", allow_pickle=True) as z:
             return {k: z[k] for k in z.files}
 
-    base_bundle, id_bundle = load("render"), load(args.identity_sub)
-    base_r, id_r = _Renderer(base_bundle, args.device), _Renderer(id_bundle, args.device)
-    base_handles = compute_renderable_handles(run, device="cpu").entities
-    id_handles = {tau: identity_handles(id_bundle, threshold=tau) for tau in args.tau}
+    use_identity = args.identity_sub.lower() != "none"
+    base_bundle = load(args.base_sub)
+    base_r = _Renderer(base_bundle, args.device)
+    id_bundle = load(args.identity_sub) if use_identity else None
+    id_r = _Renderer(id_bundle, args.device) if use_identity else base_r
+    # compute_renderable_handles resolves its checkpoint under <run>/render/
+    ckpt = "trained_dynamic.npz" if args.base_sub == "render" else \
+        f"../{args.base_sub}/trained_dynamic.npz"
+    base_handles = compute_renderable_handles(run, device="cpu", checkpoint=ckpt).entities
+    id_handles = ({tau: identity_handles(id_bundle, threshold=tau) for tau in args.tau}
+                  if use_identity else {})
     fs_handles = _flashsplat_handles(run, base_r, args.slackness, args.device)
-    out_dir = run / args.identity_sub / "gate"
+    out_dir = run / (args.identity_sub if use_identity else args.base_sub) / "gate"
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("obj*"):
         stale.unlink()
@@ -337,7 +348,7 @@ def gate_run(run: Path, args) -> dict:
         base_idx = np.asarray([] if h is None else list(h.gaussian_indices), dtype=int)
         none = np.array([], dtype=int)
         methods["baseline"] = (drop_gaussians(base_bundle, base_idx), base_r, base_idx, none)
-        for tau in args.tau:
+        for tau in (args.tau if use_identity else []):
             fg_i, bg_i = id_handles[tau].get(node, (none, none))
             methods[f"identity@{tau:g}"] = (
                 drop_gaussians(id_bundle, fg_i, bg_indices=bg_i), id_r, fg_i, bg_i)
@@ -378,18 +389,24 @@ def gate_run(run: Path, args) -> dict:
                                     "frames": per_frame, **agg}
         from PIL import Image
 
+        fs = f"flashsplat@{args.slackness[0]:g}"
+        names = ["before", "old-after", "old-took", "fs-after", "fs-took"] + (
+            ["id-before", "id-after", "id-took"] if use_identity else [])
+        row["strip_panels"] = names
         for f in frames:
-            fs = f"flashsplat@{args.slackness[0]:g}"
-            strip = np.concatenate([id_r.before(f), afters["baseline"][f],
-                                    afters["identity@0.5"][f], tooks["baseline"][f][0],
-                                    tooks["identity@0.5"][f][0], base_r.before(f),
-                                    afters[fs][f], tooks[fs][f][0]], axis=1)
+            panels = [base_r.before(f), afters["baseline"][f], tooks["baseline"][f][0],
+                      afters[fs][f], tooks[fs][f][0]]
+            if use_identity:
+                panels += [id_r.before(f), afters["identity@0.5"][f],
+                           tooks["identity@0.5"][f][0]]
+            strip = np.concatenate(panels, axis=1)
             Image.fromarray(strip).save(out_dir / f"obj{gid}_{f:05d}_strip.jpg", quality=90)
             gt = _fit(gt_by_frame[f][gid], changed_maps["baseline"][f].shape)
             Image.fromarray(_outline(gt), "RGBA").save(out_dir / f"obj{gid}_{f:05d}_gt.png")
         objects.append(row)
 
-    result = {"run": run.name, "identity_sub": args.identity_sub, "tau": args.tau,
+    result = {"run": run.name, "base_sub": args.base_sub,
+              "identity_sub": args.identity_sub if use_identity else None, "tau": args.tau,
               "slackness": args.slackness,
               "match_iou": args.match_iou, "changed_threshold": args.changed_threshold,
               "objects": objects}
@@ -401,7 +418,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dirs", type=Path, nargs="+")
-    ap.add_argument("--identity-sub", default="render_identity_3d")
+    ap.add_argument("--identity-sub", default="render_identity_3d",
+                    help="identity-trained checkpoint dir, or 'none' to leave identity out")
+    ap.add_argument("--base-sub", default="render",
+                    help="checkpoint the old vote and FlashSplat run on")
     ap.add_argument("--tau", type=float, nargs="+", default=[0.3, 0.5, 0.7])
     ap.add_argument("--slackness", type=float, nargs="+", default=[0.0, -0.8, 0.4],
                     help="FlashSplat slackness values; the first fills the image strips")
@@ -417,7 +437,8 @@ def main() -> int:
         args.tau = sorted(set(args.tau) | {0.5})
 
     fs = f"flashsplat@{args.slackness[0]:g}"
-    cols = [("old vote", "baseline"), ("identity", "identity@0.5"), (fs, fs)]
+    cols = [("old vote", "baseline")] + (
+        [("identity", "identity@0.5")] if args.identity_sub.lower() != "none" else []) + [(fs, fs)]
     print(f"{'run':<22} {'obj':>3} {'label':<11}  " + "  ".join(
         f"{name + ' took/alone-P/vis-P/intact':>34}" for name, _ in cols))
     for run in args.run_dirs:

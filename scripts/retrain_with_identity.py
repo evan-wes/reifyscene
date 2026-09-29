@@ -55,6 +55,12 @@ def main() -> int:
     ap.add_argument("--out", default=None,
                     help="output dir name inside the run; default derived from the flags")
     ap.add_argument("--iters", type=int, default=None, help="default: the run's own")
+    ap.add_argument("--views-per-step", type=int, default=None,
+                    help="training views averaged per step (Shape-of-Motion uses 8)")
+    ap.add_argument("--lr-scales-final-ratio", type=float, default=None,
+                    help="decay the scales' learning rate to this fraction (SoM: 0.1)")
+    ap.add_argument("--max-gaussians", type=int, default=None,
+                    help="densification cap per field")
     ap.add_argument("--identity-reset-every", type=int, default=0,
                     help="zero identity every N steps so it must be re-earned (0: off)")
     ap.add_argument("--identity-reset-until", type=int, default=None,
@@ -81,7 +87,13 @@ def main() -> int:
                            "reset_every": args.identity_reset_every,
                            "reset_until": args.identity_reset_until,
                            "snapshot_steps": args.snapshot_steps}
+    if args.views_per_step is not None:
+        dyn["views_per_step"] = args.views_per_step
+    if args.lr_scales_final_ratio is not None:
+        dyn["lr_scales_final_ratio"] = args.lr_scales_final_ratio
     cfg["dynamic"] = dyn
+    if args.max_gaussians is not None:
+        cfg["densify"] = {**(cfg.get("densify") or {}), "max_gaussians": args.max_gaussians}
     if args.iters is not None:
         cfg["iters"] = args.iters
     default = ("render_control" if args.no_identity

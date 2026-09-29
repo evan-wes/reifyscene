@@ -306,7 +306,11 @@ class GaussianRenderBackend(RenderBackend):
         dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
         iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
         train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
-        densify_cfg = DensifyConfig.from_cfg(self.cfg.get("densify"), max_iters=iters, num_frames=scene.num_frames)
+        # A per-field cap, so a schedule can never run away again (a 40k-step run grew the
+        # background to 2.8M Gaussians and collapsed). 1M is above every loop scene at 8 views
+        # per step but two, which reach it; an explicit densify.max_gaussians wins.
+        densify_raw = {"max_gaussians": 1_000_000, **(self.cfg.get("densify") or {})}
+        densify_cfg = DensifyConfig.from_cfg(densify_raw, max_iters=iters, num_frames=scene.num_frames)
         rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
         ident_cfg = dict(dyn_cfg.get("identity") or {})
         identity_summary = None
