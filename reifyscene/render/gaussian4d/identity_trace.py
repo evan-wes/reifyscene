@@ -78,7 +78,8 @@ class IdentityTracer:
         n_fg = scene.fg.num_gaussians
         n_cls = head.out_features
         rec: dict[str, Any] = {"step": int(step), "num_fg": n_fg,
-                               "num_bg": scene.num_gaussians - n_fg}
+                               "num_bg": scene.num_gaussians - n_fg,
+                               "last_identity_reset": getattr(trainer, "last_identity_reset", None)}
 
         # supervision: identity-loss gradient per Gaussian on these views, identity only
         params = [f.identity for _, f in self._fields(scene)]

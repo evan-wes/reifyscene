@@ -317,12 +317,17 @@ class GaussianRenderBackend(RenderBackend):
             )
             if "lambda" in ident_cfg:
                 train_cfg.lambda_identity = float(ident_cfg["lambda"])
+            if ident_cfg.get("reset_every"):
+                train_cfg.identity_reset_every = int(ident_cfg["reset_every"])
+                if ident_cfg.get("reset_until") is not None:
+                    train_cfg.identity_reset_until = int(ident_cfg["reset_until"])
             if "lambda_3d" in ident_cfg:
                 train_cfg.lambda_identity_3d = float(ident_cfg["lambda_3d"])
             if "detach_geometry" in ident_cfg:
                 train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
             identity_summary["detach_geometry"] = train_cfg.identity_detach_geometry
             identity_summary["lambda_3d"] = train_cfg.lambda_identity_3d
+            identity_summary["reset_every"] = train_cfg.identity_reset_every
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []

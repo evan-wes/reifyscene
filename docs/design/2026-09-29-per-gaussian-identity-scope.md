@@ -375,6 +375,23 @@ Still open, and for I4 to show rather than for tuning now:
 - **Small classes are absorbed** where they have few Gaussians: `india` keeps 12 of 15
   confidently-owned classes, `lindy-hop` 17 of 18.
 
+### 4.6 Identity reset — built, measured, a small effect (off by default)
+
+Opacity reset's counterpart: every 1000 steps until 3000, identity vectors are zeroed with
+their Adam state, so a Gaussian must re-earn its label from the pixels. The idea is ours, not
+from the literature. `lab-coat`, `gold-fish`, `judo`, 5k steps, reset off → on: background
+Gaussians with no identity gradient 0.49 → 0.32 / 0.57 → 0.49 / 0.43 → 0.35, entropy down,
+PSNR unchanged — but selection precision rendered alone barely moves (trace 0.34 → 0.35,
+0.13 → 0.15, 0.47 → 0.52; gate against DAVIS within ±0.05 per object).
+
+The reason corrects the hypothesis the trace suggested: only 16–26% of the Gaussians a
+selection wrongly takes are unsupervised. Most receive gradient — large Gaussians whose
+footprint grazes the entity in some views while mostly covering something else. A loss that
+only pushes each Gaussian toward the pixels it touches has no rule against a Gaussian whose
+evidence is mostly *elsewhere*. FlashSplat's assignment (majority of rendered evidence, with
+a background bias) is that rule; it is the next step. `identity_reset_every` stays in the
+trainer, off by default, so the null result is on file.
+
 ---
 
 ## 5. The measurement, as a deliverable

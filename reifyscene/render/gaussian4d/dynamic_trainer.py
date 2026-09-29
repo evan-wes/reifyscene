@@ -20,6 +20,14 @@ A 3D consistency term (Gaussian Grouping's ``loss_cls_3d``) pulls each sampled
 Gaussian's class distribution toward its k nearest neighbours' -- canonical means for
 the foreground, which stay neighbours on a typical frame across all ten loop scenes,
 and 3D means for the static background. Positions are detached: identity only.
+
+**Identity reset** (off by default) is opacity reset's counterpart: every
+``identity_reset_every`` steps, until ``identity_reset_until``, every Gaussian's identity
+vector is set to zero -- the classifier's bias alone, no opinion -- and its Adam state
+cleared. A Gaussian the 2D loss reaches earns its identity back; one it never reaches
+(hidden in every training view) stays unassigned, below any selection threshold, instead
+of keeping a label it was never checked against. It also clears labels picked up early,
+while the geometry was still blobby, from Gaussians that sharper geometry later hid.
 """
 
 from __future__ import annotations
@@ -92,6 +100,8 @@ class DynamicTrainConfig:
     # stops scenes with fewer classes being smoothed harder.
     identity_3d_norm: float = 200.0
     # Training-time diagnostics (identity_trace.IdentityTracer), off by default.
+    identity_reset_every: int = 0
+    identity_reset_until: int | None = None     # None: iters - 2 * identity_reset_every
     identity_trace_every: int = 0
     identity_trace_views: int = 8
     snapshot_steps: tuple[int, ...] = ()
@@ -124,6 +134,7 @@ class DynamicGaussianTrainer:
         self.scene = scene.to(device)
         self.rasterizer = rasterizer or build_rasterizer({"device": device, "absgrad": (densify_cfg or DensifyConfig()).absgrad})
         self.optimizer = self._build_optimizer()
+        self.last_identity_reset: int | None = None
 
         # One densification controller per field (foreground grows motion_coefs
         # too), both driven by the same combined-cloud telemetry. Standard 3DGS
@@ -179,6 +190,35 @@ class DynamicGaussianTrainer:
                 "lr": c.lr_identity_classifier, "name": "identity_classifier",
             })
         return torch.optim.Adam(groups, eps=1e-15)
+
+    @torch.no_grad()
+    def reset_identity(self, step: int) -> None:
+        """Zero every Gaussian's identity vector and its optimizer momentum; keep the head.
+
+        The momentum must go too: Adam would otherwise push each vector straight back to
+        the label it just lost, which is the reset not happening.
+        """
+        names = {"fg.identity": self.scene.fg}
+        if self.scene.bg is not None:
+            names["bg.identity"] = self.scene.bg
+        for group in self.optimizer.param_groups:
+            field = names.get(group.get("name"))
+            if field is None:
+                continue
+            field.identity.zero_()
+            state = self.optimizer.state.get(group["params"][0])
+            if state:
+                state["exp_avg"].zero_()
+                state["exp_avg_sq"].zero_()
+        self.last_identity_reset = int(step)
+
+    def _identity_reset_due(self, step: int) -> bool:
+        every = self.cfg.identity_reset_every
+        if not self.scene.has_identity or every <= 0 or step % every:
+            return False
+        until = self.cfg.identity_reset_until
+        until = self.cfg.iters - 2 * every if until is None else until
+        return step <= until
 
     def identity_loss(self, features: torch.Tensor, id_map: torch.Tensor) -> torch.Tensor | None:
         """Cross-entropy of rendered identity against an id map, normalised to ~(0, 1).
@@ -316,6 +356,8 @@ class DynamicGaussianTrainer:
             self.fg_ctrl.after_step(step)
             if self.bg_ctrl is not None:
                 self.bg_ctrl.after_step(step)
+            if self._identity_reset_due(step):
+                self.reset_identity(step)
 
             if on_log is not None and (step % self.cfg.log_every == 0 or step == 1):
                 with torch.no_grad():

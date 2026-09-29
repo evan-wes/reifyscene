@@ -436,3 +436,78 @@ def test_snapshots_fire_at_the_requested_steps() -> None:
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
         views, on_snapshot=lambda s, sc: snaps.append(s))
     assert snaps == [10, 30]
+
+
+# -- identity reset ---------------------------------------------------------------------------
+
+def test_reset_zeroes_identity_and_its_momentum_and_keeps_the_head() -> None:
+    scene, _ = _scene()
+    tr = _trainer(scene)
+    for g in tr.optimizer.param_groups:           # give every param some Adam state
+        for p in g["params"]:
+            p.grad = torch.ones_like(p)
+    tr.optimizer.step()
+    head_w = scene.identity_classifier.weight.detach().clone()
+    tr.reset_identity(step=7)
+    assert not scene.fg.identity.any() and not scene.bg.identity.any()
+    for g in tr.optimizer.param_groups:
+        st = tr.optimizer.state[g["params"][0]]
+        cleared = not st["exp_avg"].any() and not st["exp_avg_sq"].any()
+        assert cleared == (g["name"] in ("fg.identity", "bg.identity")), g["name"]
+    assert torch.equal(scene.identity_classifier.weight, head_w)
+    assert tr.last_identity_reset == 7
+
+
+def test_reset_schedule_leaves_a_recovery_window() -> None:
+    scene, _ = _scene()
+    tr = DynamicGaussianTrainer(scene, DynamicTrainConfig(iters=5000, identity_reset_every=1000),
+                                device="cpu")
+    assert [s for s in range(1, 5001) if tr._identity_reset_due(s)] == [1000, 2000, 3000]
+    tr.cfg.identity_reset_until = 1500
+    assert [s for s in range(1, 5001) if tr._identity_reset_due(s)] == [1000]
+
+
+@requires_gsplat
+@pytest.mark.parametrize("reset", [False, True])
+def test_a_hidden_gaussian_does_not_earn_its_identity_back(reset: bool) -> None:
+    """Two visible blobs and a third Gaussian no training view sees, carrying a stale label.
+
+    Without a reset nothing ever touches its vector, so its class is whatever the (still
+    training) classifier happens to map that unchecked vector to. With one, the visible blobs
+    earn their classes back from the pixels and the hidden one is left at zero: the
+    classifier's prior, which in a scene with labelled background is background."""
+    from reifyscene.render.gaussian4d.rasterizer import GsplatRasterizer
+
+    # the third Gaussian sits behind the camera (at x=+2, looking at the origin): never seen
+    means = np.array([[0.0, -0.3, 0.0], [0.0, 0.3, 0.0], [6.0, 0.0, 0.0]], np.float32)
+    scene, _ = bundle_to_scene(_bundle(g=3, nb=1, means=means, scale=0.12), device="cuda")
+    with torch.no_grad():
+        scene.bg.logit_opacities.fill_(-20.0)
+    scene.enable_identity(20, NODES, seed=0)
+    cam = RenderCamera.from_look_at([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 96, 64)
+    r = GsplatRasterizer("cuda")
+    id_map = torch.zeros((64, 96), dtype=torch.long, device="cuda")     # background labelled
+    with torch.no_grad():
+        c = scene.cloud_at(0)
+        for k in range(2):
+            op = torch.zeros_like(c.opacities)
+            op[k] = c.opacities[k]
+            id_map[r.rasterize(c.means, c.quats, c.scales, op, c.colors, cam).alpha > 0.3] = k + 1
+        gt = r.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors, cam).rgb
+    cfg = DynamicTrainConfig(iters=600, lr_identity=2e-2, lr_identity_classifier=2e-2,
+                             lambda_identity_3d=0.0,
+                             identity_reset_every=200 if reset else 0, identity_reset_until=200)
+    tr = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r)
+    with torch.no_grad():                       # a stale, confident label on the hidden one
+        tr.scene.fg.identity[2] = 0.0
+        tr.scene.fg.identity[2, :] = 3.0 * tr.scene.identity_classifier.weight[1].sign()
+    stale = tr.scene.fg.identity[2].detach().clone()
+    tr.fit([(cam, gt, 0, id_map)])
+    probs = tr.scene.gaussian_identity_probs()
+    assert probs[:2].argmax(-1).tolist() == [1, 2]          # visible blobs earn their class
+    if reset:
+        assert not tr.scene.fg.identity[2].any()            # never re-earned
+        assert int(probs[2].argmax()) == 0                  # reads as the prior: background
+        assert float(probs[2, 1:].max()) < 0.5              # no entity claims it
+    else:
+        assert torch.equal(tr.scene.fg.identity[2], stale)  # nothing ever checked it

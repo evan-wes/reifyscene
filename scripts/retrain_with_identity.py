@@ -12,6 +12,7 @@ of the identity scope). Output goes to a sibling of ``render/``, named for what 
     render_identity/          identity without it (``--lambda-3d 0``; the I2 baseline)
     render_identity_coupled/  identity allowed to move geometry (``--coupled``)
     render_control/           identity off (``--no-identity``)
+    ..._reset                 any identity run with ``--identity-reset-every``
 
 ``--out`` overrides the name. The pipeline's ``render/`` checkpoint is never touched, so it
 stays the "before" side of the gate.
@@ -54,6 +55,10 @@ def main() -> int:
     ap.add_argument("--out", default=None,
                     help="output dir name inside the run; default derived from the flags")
     ap.add_argument("--iters", type=int, default=None, help="default: the run's own")
+    ap.add_argument("--identity-reset-every", type=int, default=0,
+                    help="zero identity every N steps so it must be re-earned (0: off)")
+    ap.add_argument("--identity-reset-until", type=int, default=None,
+                    help="last step a reset may happen (default: iters - 2 * every)")
     ap.add_argument("--trace-every", type=int, default=0,
                     help="write <out>/identity_trace.jsonl every N steps (0: off)")
     ap.add_argument("--snapshot-steps", type=int, nargs="*", default=[],
@@ -73,6 +78,8 @@ def main() -> int:
         dyn["identity"] = {"enabled": True, "dim": args.dim, "lambda": args.lambda_identity,
                            "detach_geometry": not args.coupled, "lambda_3d": args.lambda_3d,
                            "trace_every": args.trace_every,
+                           "reset_every": args.identity_reset_every,
+                           "reset_until": args.identity_reset_until,
                            "snapshot_steps": args.snapshot_steps}
     cfg["dynamic"] = dyn
     if args.iters is not None:
@@ -80,6 +87,8 @@ def main() -> int:
     default = ("render_control" if args.no_identity
                else "render_identity_coupled" if args.coupled
                else "render_identity" if args.lambda_3d == 0 else "render_identity_3d")
+    if args.identity_reset_every and not args.no_identity:
+        default += "_reset"
     out_dir = run / (args.out or default)
 
     t0 = time.time()
