@@ -462,6 +462,25 @@ is recorded here as a known limitation outside the step-1 gate; (2) **selection 
 needle-shaped and oversized Gaussians straddling the object's edge. The gate is judged on
 selection; (2) is the next thing addressed.
 
+### 4.9 A floater filter on the selection — the best so far, not yet good enough
+
+`assignment.filter_members` drops from an evidence-majority selection, per field in its own
+space, Gaussians more than 2 standard deviations isolated from their 8 nearest selected
+neighbours (statistical outlier removal) and Gaussians whose largest axis exceeds 3× the
+selection's median. Median per object: ~140 isolated and ~550 oversized dropped.
+
+Ten sharp scenes, 31 matched objects, medians against DAVIS ground truth:
+
+| method | took | precision visible / alone | halo | neighbours |
+|---|---|---|---|---|
+| FlashSplat | 0.55 | 0.94 / 0.30 | 0.61× | 4.7% |
+| FlashSplat, +0.4 | 0.43 | 0.96 / 0.36 | 0.31× | 2.1% |
+| **FlashSplat + filter** | 0.43 | 0.95 / **0.40** | 0.43× | 2.8% |
+
+Reviewed by eye, **FlashSplat + filter is the best selection**, and still not good enough:
+background contamination remains, and precision rendered alone tops out near 0.4. It is the
+removal path for now; improving it is open.
+
 ---
 
 ## 5. The measurement, as a deliverable

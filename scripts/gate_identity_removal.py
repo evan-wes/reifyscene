@@ -264,6 +264,12 @@ def _taken_score(alpha: np.ndarray, gt: np.ndarray, prefix: str = "taken") -> di
             f"{prefix}_px": int(took.sum())}
 
 
+def filter_members(scene, fg_idx, bg_idx):
+    from reifyscene.graph.assignment import filter_members as _filter
+
+    return _filter(scene, fg_idx, bg_idx)
+
+
 def _flashsplat_handles(run: Path, rend: _Renderer, slackness: list[float], device: str):
     """``{slackness: {node: (fg, bg)}}`` from evidence over every training frame's id map."""
     from reifyscene.graph.assignment import (
@@ -356,6 +362,12 @@ def gate_run(run: Path, args) -> dict:
             fg_i, bg_i = fs_handles[s].get(node, (none, none))
             methods[f"flashsplat@{s:g}"] = (
                 drop_gaussians(base_bundle, fg_i, bg_indices=bg_i), base_r, fg_i, bg_i)
+        # the first slackness again, with floaters (isolated, oversized) filtered out
+        fg_i, bg_i = fs_handles[args.slackness[0]].get(node, (none, none))
+        fg_f, bg_f, fstats = filter_members(base_r.scene, fg_i, bg_i)
+        row["filter_dropped"] = fstats
+        methods[f"flashsplat@{args.slackness[0]:g}+filter"] = (
+            drop_gaussians(base_bundle, fg_f, bg_indices=bg_f), base_r, fg_f, bg_f)
 
         row["methods"] = {}
         changed_maps: dict[str, dict[int, np.ndarray]] = {}
@@ -390,12 +402,17 @@ def gate_run(run: Path, args) -> dict:
         from PIL import Image
 
         fs = f"flashsplat@{args.slackness[0]:g}"
-        names = ["before", "old-after", "old-took", "fs-after", "fs-took"] + (
+        extra = [("fsp", f"flashsplat@{x:g}") for x in args.slackness if x > 0][:1] + [
+            ("fsf", f"{fs}+filter")]
+        names = ["before", "old-after", "old-took", "fs-after", "fs-took"] + [
+            f"{k}-{kind}" for k, _ in extra for kind in ("after", "took")] + (
             ["id-before", "id-after", "id-took"] if use_identity else [])
         row["strip_panels"] = names
         for f in frames:
             panels = [base_r.before(f), afters["baseline"][f], tooks["baseline"][f][0],
                       afters[fs][f], tooks[fs][f][0]]
+            for _, key in extra:
+                panels += [afters[key][f], tooks[key][f][0]]
             if use_identity:
                 panels += [id_r.before(f), afters["identity@0.5"][f],
                            tooks["identity@0.5"][f][0]]
@@ -438,7 +455,8 @@ def main() -> int:
 
     fs = f"flashsplat@{args.slackness[0]:g}"
     cols = [("old vote", "baseline")] + (
-        [("identity", "identity@0.5")] if args.identity_sub.lower() != "none" else []) + [(fs, fs)]
+        [("identity", "identity@0.5")] if args.identity_sub.lower() != "none" else []) + [
+        (fs, fs), (fs + "+filter", fs + "+filter")]
     print(f"{'run':<22} {'obj':>3} {'label':<11}  " + "  ".join(
         f"{name + ' took/alone-P/vis-P/intact':>34}" for name, _ in cols))
     for run in args.run_dirs:

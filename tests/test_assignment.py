@@ -140,3 +140,25 @@ def test_a_background_splat_grazing_an_entity_goes_to_background() -> None:
     counts = evidence_matrix(scene, r, [(_cam(), 0, id_map)], num_classes=2)
     assert float(counts[1, 1]) > 0                  # it really does touch the entity
     assert _rows(assign(counts)) == [[1], [0], []]
+
+
+def test_filter_drops_an_isolated_speck_and_an_oversized_splat() -> None:
+    """A tight cluster of small Gaussians is the object; one far-off speck and one huge splat
+    inside the cluster are the floaters the filter exists for."""
+    from types import SimpleNamespace
+
+    from reifyscene.graph.assignment import filter_members
+
+    rng = np.random.default_rng(0)
+    means = np.concatenate([rng.normal(0, 0.05, (40, 3)), [[3.0, 3.0, 3.0]], [[0.0, 0.0, 0.0]]])
+    scales = np.full((42, 3), 0.01)
+    scales[41] = 0.5                                      # the oversized splat
+    field = SimpleNamespace(
+        means=torch.as_tensor(means, dtype=torch.float32),
+        get_scales=lambda: torch.as_tensor(scales, dtype=torch.float32),
+    )
+    scene = SimpleNamespace(fg=field, bg=None)
+    fg, bg, stats = filter_members(scene, np.arange(42), np.array([], dtype=int))
+    assert 40 not in fg and 41 not in fg                  # speck and splat gone
+    assert set(range(40)) <= set(fg.tolist())            # the object kept
+    assert stats == {"outlier": 1, "oversized": 1} and bg.size == 0

@@ -104,3 +104,55 @@ def id_map_views(
         for f, (cam, t) in sorted(cams_by_frame.items())
         if f in id_maps
     ]
+
+
+def filter_members(
+    scene,
+    fg_idx: np.ndarray,
+    bg_idx: np.ndarray,
+    *,
+    sor_k: int = 8,
+    sor_std: float = 2.0,
+    size_factor: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Drop the floaters from a selection: isolated Gaussians, and oversized ones.
+
+    The junk left in an evidence-majority selection on sharp scenes is needle-shaped and
+    oversized Gaussians straddling the object's edge, and isolated specks. Two standard
+    point-cloud clean-ups, applied per field in that field's own space (the foreground in its
+    canonical pose, the background in the world -- they are never each other's neighbours):
+
+    - **outlier** (statistical outlier removal): a Gaussian whose mean distance to its
+      ``sor_k`` nearest selected neighbours exceeds the selection's mean by ``sor_std``
+      standard deviations;
+    - **oversized**: a Gaussian whose largest axis exceeds ``size_factor`` times the
+      selection's median largest axis.
+
+    Returns the kept ``(fg_idx, bg_idx)`` and how many each rule dropped.
+    """
+    from scipy.spatial import cKDTree
+
+    stats = {"outlier": 0, "oversized": 0}
+    kept = []
+    fields = [(scene.fg, np.asarray(fg_idx, dtype=int))]
+    fields.append((scene.bg, np.asarray(bg_idx, dtype=int)) if scene.bg is not None
+                  else (None, np.asarray(bg_idx, dtype=int)))
+    for field, idx in fields:
+        if field is None or idx.size == 0:
+            kept.append(idx)
+            continue
+        with torch.no_grad():
+            pts = field.means.detach()[torch.as_tensor(idx)].cpu().numpy()
+            size = field.get_scales().detach()[torch.as_tensor(idx)].amax(-1).cpu().numpy()
+        keep = np.ones(idx.size, dtype=bool)
+        big = size > size_factor * np.median(size)
+        keep &= ~big
+        stats["oversized"] += int(big.sum())
+        if idx.size > sor_k:
+            d, _ = cKDTree(pts).query(pts, k=sor_k + 1)
+            mean_d = d[:, 1:].mean(1)
+            far = mean_d > mean_d.mean() + sor_std * mean_d.std()
+            stats["outlier"] += int((far & keep).sum())
+            keep &= ~far
+        kept.append(idx[keep])
+    return kept[0], kept[1], stats
