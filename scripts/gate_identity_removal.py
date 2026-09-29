@@ -38,9 +38,14 @@ Per object, method and tau, two questions answered separately:
   not change; *halo* counts those that did. *entity removed* (changed pixels inside the mask)
   is kept for comparison with the first gate, which reported it.
 
-Writes ``<run>/<identity-sub>/gate/index.json`` and, at tau=0.5, per object-frame one strip
-``obj<id>_<frame>_strip.jpg`` (before | baseline after | identity after | baseline took |
-identity took) and ``obj<id>_<frame>_gt.png``, the GT outline on transparency.
+A third method, *flashsplat@s*, needs no training: FlashSplat's evidence-majority assignment
+(:mod:`reifyscene.graph.assignment`) on the pipeline's own ``render/`` checkpoint, from every
+training frame's id map, at each ``--slackness``.
+
+Writes ``<run>/<identity-sub>/gate/index.json`` and, per object-frame, one strip
+``obj<id>_<frame>_strip.jpg`` (identity-scene before | old after | identity after | old took
+| identity took | original-scene before | flashsplat after | flashsplat took; identity at
+tau=0.5, flashsplat at the first slackness) and ``obj<id>_<frame>_gt.png``, the GT outline.
 
 Needs CUDA (gsplat). Renders only; a few minutes for all ten loop runs.
 """
@@ -102,14 +107,27 @@ def match_objects(gt_by_frame, node_by_frame, *, match_iou: float):
     return out, {gid: (b[2], round(float(b[0]), 4)) for gid, b in best.items()}, area_gt
 
 
-def _score(changed: np.ndarray, mask: np.ndarray) -> dict:
+def _score(changed: np.ndarray, mask: np.ndarray, others: np.ndarray | None = None) -> dict:
+    """What changed inside the object, outside it, and on the other annotated objects.
+
+    ``rest_intact`` divides by the whole frame outside the object, so tearing a few thousand
+    pixels off a neighbour still reads ~97%. ``halo_ratio`` (changed pixels outside, per pixel
+    of the object) and ``others_damaged`` (share of the *other annotated objects'* pixels that
+    changed) are the measures that cannot hide that.
+    """
     inside = int((changed & mask).sum())
     outside = int((changed & ~mask).sum())
-    return {
+    out = {
         "entity_removed": round(inside / max(1, int(mask.sum())), 4),
         "rest_intact": round(1.0 - outside / max(1, int((~mask).sum())), 6),
         "halo_px": outside,
+        "halo_ratio": round(outside / max(1, int(mask.sum())), 4),
     }
+    if others is not None:
+        o = others & ~mask
+        hit = int((changed & o).sum())
+        out["others_damaged"] = round(hit / int(o.sum()), 4) if o.any() else None
+    return out
 
 
 def _fit(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -230,7 +248,7 @@ def _outline(mask: np.ndarray, width: int = 2) -> np.ndarray:
 
 
 def _mean(rows: list[dict], ref: str, key: str) -> float | None:
-    vals = [r[ref][key] for r in rows if r[ref][key] is not None]
+    vals = [r[ref][key] for r in rows if r[ref].get(key) is not None]
     return round(float(np.mean(vals)), 4) if vals else None
 
 
@@ -240,6 +258,32 @@ def _taken_score(alpha: np.ndarray, gt: np.ndarray, prefix: str = "taken") -> di
     return {f"{prefix}_recall": round(hit / max(1, int(gt.sum())), 4),
             f"{prefix}_precision": round(hit / int(took.sum()), 4) if took.any() else None,
             f"{prefix}_px": int(took.sum())}
+
+
+def _flashsplat_handles(run: Path, rend: _Renderer, slackness: list[float], device: str):
+    """``{slackness: {node: (fg, bg)}}`` from evidence over every training frame's id map."""
+    from reifyscene.graph.assignment import (
+        assign,
+        assignment_handles,
+        evidence_matrix,
+        id_map_views,
+    )
+    from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+
+    if not (run / "identity" / "manifest.json").is_file():
+        export_id_maps(run)
+    manifest, maps = load_id_maps(run / "identity")
+    shape = (rend.size[1], rend.size[0])
+    if next(iter(maps.values())).shape != shape:
+        raise ValueError(f"{run.name}: id maps are {next(iter(maps.values())).shape}, "
+                         f"renders are {shape}")
+    node_ids = [c["node_id"] for c in sorted(manifest["classes"], key=lambda c: c["index"])]
+    cams = {f: (rend.cams[t].render_camera(*rend.size), t) for f, t in rend.time_of.items()}
+    counts = evidence_matrix(rend.scene, rend.rasterizer, id_map_views(maps, cams, device),
+                             len(node_ids))
+    n_fg = rend.scene.fg.num_gaussians
+    return {s: assignment_handles(assign(counts, slackness=s), n_fg, node_ids)
+            for s in slackness}
 
 
 def gate_run(run: Path, args) -> dict:
@@ -266,6 +310,7 @@ def gate_run(run: Path, args) -> dict:
     base_r, id_r = _Renderer(base_bundle, args.device), _Renderer(id_bundle, args.device)
     base_handles = compute_renderable_handles(run, device="cpu").entities
     id_handles = {tau: identity_handles(id_bundle, threshold=tau) for tau in args.tau}
+    fs_handles = _flashsplat_handles(run, base_r, args.slackness, args.device)
     out_dir = run / args.identity_sub / "gate"
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("obj*"):
@@ -296,6 +341,10 @@ def gate_run(run: Path, args) -> dict:
             fg_i, bg_i = id_handles[tau].get(node, (none, none))
             methods[f"identity@{tau:g}"] = (
                 drop_gaussians(id_bundle, fg_i, bg_indices=bg_i), id_r, fg_i, bg_i)
+        for s in args.slackness:
+            fg_i, bg_i = fs_handles[s].get(node, (none, none))
+            methods[f"flashsplat@{s:g}"] = (
+                drop_gaussians(base_bundle, fg_i, bg_indices=bg_i), base_r, fg_i, bg_i)
 
         row["methods"] = {}
         changed_maps: dict[str, dict[int, np.ndarray]] = {}
@@ -310,15 +359,19 @@ def gate_run(run: Path, args) -> dict:
                 ch = _changed(rend.before(f), after[f], args.changed_threshold)
                 changed_maps[name][f] = ch
                 gt = _fit(gt_by_frame[f][gid], ch.shape)
+                others = np.zeros_like(gt)
+                for og, om in gt_by_frame[f].items():
+                    if og != gid:
+                        others |= _fit(om, ch.shape)
                 ours = _fit(placed.by_frame.get(f, {}).get(node, np.zeros_like(gt)), ch.shape)
                 alpha, alone = share[f], took[f][1]
                 per_frame.append({"frame": f,
-                                  "vs_gt": {**_score(ch, gt), **_taken_score(alpha, gt),
+                                  "vs_gt": {**_score(ch, gt, others), **_taken_score(alpha, gt),
                                             **_taken_score(alone, gt, prefix="alone")},
                                   "vs_ours": {**_score(ch, ours), **_taken_score(alpha, ours),
                                               **_taken_score(alone, ours, prefix="alone")}})
-            keys = ("entity_removed", "rest_intact", "halo_px", "taken_recall", "taken_precision",
-                    "alone_recall", "alone_precision")
+            keys = ("entity_removed", "rest_intact", "halo_px", "halo_ratio", "others_damaged",
+                    "taken_recall", "taken_precision", "alone_recall", "alone_precision")
             agg = {ref: {k: _mean(per_frame, ref, k) for k in keys}
                    for ref in ("vs_gt", "vs_ours")} if per_frame else {}
             row["methods"][name] = {"removed_fg": len(fg_i), "removed_bg": len(bg_i),
@@ -326,15 +379,18 @@ def gate_run(run: Path, args) -> dict:
         from PIL import Image
 
         for f in frames:
+            fs = f"flashsplat@{args.slackness[0]:g}"
             strip = np.concatenate([id_r.before(f), afters["baseline"][f],
                                     afters["identity@0.5"][f], tooks["baseline"][f][0],
-                                    tooks["identity@0.5"][f][0]], axis=1)
+                                    tooks["identity@0.5"][f][0], base_r.before(f),
+                                    afters[fs][f], tooks[fs][f][0]], axis=1)
             Image.fromarray(strip).save(out_dir / f"obj{gid}_{f:05d}_strip.jpg", quality=90)
             gt = _fit(gt_by_frame[f][gid], changed_maps["baseline"][f].shape)
             Image.fromarray(_outline(gt), "RGBA").save(out_dir / f"obj{gid}_{f:05d}_gt.png")
         objects.append(row)
 
     result = {"run": run.name, "identity_sub": args.identity_sub, "tau": args.tau,
+              "slackness": args.slackness,
               "match_iou": args.match_iou, "changed_threshold": args.changed_threshold,
               "objects": objects}
     (out_dir / "index.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -347,6 +403,8 @@ def main() -> int:
     ap.add_argument("run_dirs", type=Path, nargs="+")
     ap.add_argument("--identity-sub", default="render_identity_3d")
     ap.add_argument("--tau", type=float, nargs="+", default=[0.3, 0.5, 0.7])
+    ap.add_argument("--slackness", type=float, nargs="+", default=[0.0, -0.8, 0.4],
+                    help="FlashSplat slackness values; the first fills the image strips")
     ap.add_argument("--frames", type=int, default=3)
     ap.add_argument("--match-iou", type=float, default=0.25,
                     help="pooled-over-clip IoU a node needs to count as the object")
@@ -358,25 +416,27 @@ def main() -> int:
     if 0.5 not in args.tau:
         args.tau = sorted(set(args.tau) | {0.5})
 
-    print(f"{'run':<22} {'obj':>3} {'label':<11} {'iou':>5}  "
-          f"{'baseline took rec/prec  intact':>31}  {'identity took rec/prec  intact':>31}  fg+bg")
+    fs = f"flashsplat@{args.slackness[0]:g}"
+    cols = [("old vote", "baseline"), ("identity", "identity@0.5"), (fs, fs)]
+    print(f"{'run':<22} {'obj':>3} {'label':<11}  " + "  ".join(
+        f"{name + ' took/alone-P/vis-P/intact':>34}" for name, _ in cols))
     for run in args.run_dirs:
         res = gate_run(run.resolve(), args)
         for o in res["objects"]:
             if o["status"] != "matched":
-                print(f"{res['run']:<22} {o['gt_id']:>3} {'-':<11} {o['best_iou']:>5.2f}  "
-                      f"not proposed (best node {o['best_node']})")
+                print(f"{res['run']:<22} {o['gt_id']:>3} {'-':<11}  not proposed "
+                      f"(best node {o['best_node']}, IoU {o['best_iou']:.2f})")
                 continue
-            b, i = o["methods"]["baseline"]["vs_gt"], o["methods"]["identity@0.5"]["vs_gt"]
-            n = o["methods"]["identity@0.5"]
 
             def p(v):
-                return "   -  " if v is None else f"{v:6.1%}"
+                return "  -  " if v is None else f"{100 * v:5.1f}"
 
-            print(f"{res['run']:<22} {o['gt_id']:>3} {o['label'][:11]:<11} {o['match_iou']:>5.2f}  "
-                  f"{p(b['taken_recall'])} / {p(b['taken_precision'])}  {b['rest_intact']:>8.2%}   "
-                  f"{p(i['taken_recall'])} / {p(i['taken_precision'])}  {i['rest_intact']:>8.2%}  "
-                  f"{n['removed_fg']}+{n['removed_bg']}")
+            cells = []
+            for _, key in cols:
+                m = o["methods"][key]["vs_gt"]
+                cells.append(f"{p(m['taken_recall'])} / {p(m['alone_precision'])} / "
+                             f"{p(m['taken_precision'])} / {p(m['rest_intact'])}")
+            print(f"{res['run']:<22} {o['gt_id']:>3} {o['label'][:11]:<11}  " + "    ".join(cells))
     return 0
 
 

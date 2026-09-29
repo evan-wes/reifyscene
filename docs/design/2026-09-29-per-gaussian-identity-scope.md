@@ -392,6 +392,39 @@ evidence is mostly *elsewhere*. FlashSplat's assignment (majority of rendered ev
 a background bias) is that rule; it is the next step. `identity_reset_every` stays in the
 trainer, off by default, so the null result is on file.
 
+### 4.7 Evidence-majority assignment (FlashSplat) — the removal path, pending sharper scenes
+
+FlashSplat (ECCV 2024) reads labels off a trained scene instead of learning them: each
+Gaussian accumulates its blending weight per id-map class over every view, and belongs to a
+class when that evidence outweighs all its other evidence (plus a *slackness* bias).
+`reifyscene/graph/assignment.py` implements it on our gsplat wrapper -- the evidence is the
+gradient of a C-channel feature render, one backward per frame, each at its own time -- from the
+paper and a reading of their code, whose rasterizer is Inria-licensed and not used.
+
+Gate on all ten, 31 matched DAVIS objects, medians, scored against ground truth. *Halo* is
+changed pixels outside the object per pixel of object; *neighbours* is the share of the other
+annotated objects' pixels changed -- added because "rest intact" divides by the whole frame and
+read ~97% for removals that visibly tore neighbours:
+
+| method | took | precision visible / alone | halo | neighbours |
+|---|---|---|---|---|
+| old projection vote | 0.21 | 0.59 / 0.29 | 0.77× | 3.6% |
+| learned identity (I2 + I3) | 0.53 | 0.88 / 0.24 | 1.40× | 11.2% |
+| FlashSplat, slackness 0 | 0.47 | 0.89 / 0.33 | 0.57× | 3.6% |
+| FlashSplat, −0.8 (take more) | 0.84 | 0.61 / 0.19 | 1.96× | 16.1% |
+| FlashSplat, +0.4 (be surer) | 0.34 | 0.96 / 0.40 | 0.22× | 1.3% |
+
+FlashSplat matches or beats learned identity everywhere but "took", needs no training, and its
+slackness is a per-edit dial (their own scripts use −0.8 to −0.98 for removal). Alone precision
+tops out near 0.4 for every method: on `lab-coat` Gaussians that render as a neighbour's face
+contribute mostly to the target's pixels in the training views -- the reconstruction entangles
+them, which no assignment rule undoes.
+
+Visual review was inconclusive for a reason that blocks the gate itself: at 5k steps the scenes
+are too soft to tell a removal defect from detail that was never modelled. Training quality
+comes next (position LR decay, the opacity-reset momentum bug, views per step, a Gaussian cap);
+the gate is re-judged on sharper scenes.
+
 ---
 
 ## 5. The measurement, as a deliverable
