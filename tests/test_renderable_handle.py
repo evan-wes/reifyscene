@@ -103,3 +103,72 @@ def test_positions_are_per_frame_not_canonical() -> None:
     positions, *_ = trained_fg_positions(b, device="cpu")
     moved = positions[:, 0, 0]
     assert np.allclose(np.diff(moved), 1.0, atol=1e-3), moved
+
+
+# -- background removal and identity handles (I4) ---------------------------------------------
+
+def test_drop_can_remove_background_gaussians_too() -> None:
+    """A standing person the motion split put in the static cloud lives in bg_*; a remove
+    that could only touch fg_* would leave them standing."""
+    b = _bundle()
+    out = drop_gaussians(b, [0], bg_indices=[1, 3])
+    assert out["fg_means"].shape == (G - 1, 3)
+    assert out["bg_means"].shape == (3, 3)
+    assert np.array_equal(out["bg_means"], b["bg_means"][[0, 2, 4]])
+    assert np.array_equal(out["bg_opacities"], b["bg_opacities"][[0, 2, 4]])
+    assert np.array_equal(out["motion_rots"], b["motion_rots"])
+
+
+def test_background_removal_does_not_touch_the_foreground() -> None:
+    b = _bundle()
+    out = drop_gaussians(b, [], bg_indices=[0])
+    assert np.array_equal(out["fg_means"], b["fg_means"])
+    assert out["bg_means"].shape == (4, 3)
+
+
+def test_identity_rows_are_dropped_with_their_gaussians() -> None:
+    b = _bundle()
+    b["fg_identity"] = np.arange(G * 2, dtype=np.float32).reshape(G, 2)
+    b["bg_identity"] = np.arange(5 * 2, dtype=np.float32).reshape(5, 2)
+    out = drop_gaussians(b, [2], bg_indices=[4])
+    assert np.array_equal(out["fg_identity"], b["fg_identity"][[i for i in range(G) if i != 2]])
+    assert np.array_equal(out["bg_identity"], b["bg_identity"][:4])
+
+
+def _identity_bundle() -> dict[str, np.ndarray]:
+    b = _bundle()
+    # Two dims, three classes: dim 0 -> class 1, dim 1 -> class 2, neither -> background.
+    b["identity_classifier_w"] = np.array([[0, 0], [10, 0], [0, 10]], np.float32)
+    b["identity_classifier_b"] = np.array([5, 0, 0], np.float32)
+    fg = np.zeros((G, 2), np.float32)
+    fg[[0, 1], 0] = 1.0            # class 1, confident
+    fg[2] = [0.52, 0.0]            # class 1, ~55%: in at 0.5, out at 0.7
+    fg[3, 1] = 1.0                 # class 2
+    b["fg_identity"] = fg
+    bg = np.zeros((5, 2), np.float32)
+    bg[4, 0] = 1.0                 # class 1 lives in the static cloud too
+    b["bg_identity"] = bg
+    b["identity_node_ids"] = np.array(
+        ["", "object:cam_00:sam2:cam_00:0", "human:cam_00:sam2:cam_00:1"]
+    )
+    return b
+
+
+def test_identity_handles_threshold_both_fields() -> None:
+    from reifyscene.graph.renderable_handle import identity_handles
+
+    h = identity_handles(_identity_bundle(), threshold=0.5)
+    assert set(h) == {"object:cam_00:sam2:cam_00:0", "human:cam_00:sam2:cam_00:1"}
+    fg1, bg1 = h["object:cam_00:sam2:cam_00:0"]
+    assert fg1.tolist() == [0, 1, 2] and bg1.tolist() == [4]
+    fg2, bg2 = h["human:cam_00:sam2:cam_00:1"]
+    assert fg2.tolist() == [3] and bg2.tolist() == []
+    strict = identity_handles(_identity_bundle(), threshold=0.7)
+    assert strict["object:cam_00:sam2:cam_00:0"][0].tolist() == [0, 1]
+
+
+def test_identity_handles_refuse_a_checkpoint_without_identity() -> None:
+    from reifyscene.graph.renderable_handle import identity_handles
+
+    with pytest.raises(ValueError, match="identity"):
+        identity_handles(_bundle())

@@ -266,32 +266,83 @@ def compute_renderable_handles(
     return handles
 
 
-def drop_gaussians(bundle: Mapping[str, Any], indices: list[int] | np.ndarray) -> dict[str, Any]:
-    """A copy of ``bundle`` with those foreground Gaussians removed.
+def drop_gaussians(
+    bundle: Mapping[str, Any],
+    indices: list[int] | np.ndarray,
+    *,
+    bg_indices: list[int] | np.ndarray = (),
+) -> dict[str, Any]:
+    """A copy of ``bundle`` with those foreground (and background) Gaussians removed.
 
     This is how ``remove(entity)`` is executed: the edit is a checkpoint transform, so the
     render path needs no exclusion parameter threaded through it and what renders afterwards is
-    a real scene rather than a masked one. Every per-Gaussian foreground array is filtered
-    together; the motion bases are shared and untouched, as is the background.
+    a real scene rather than a masked one. Every per-Gaussian array of a field is filtered
+    together; the motion bases are shared and untouched. ``bg_indices`` exists because an
+    entity the motion split put in the static cloud -- a standing person -- lives there, and
+    removing only its foreground Gaussians would leave it standing.
     """
-    keep = np.ones(int(np.asarray(bundle["fg_means"]).shape[0]), dtype=bool)
-    idx = np.asarray(list(indices), dtype=int)
-    if idx.size:
-        if idx.min() < 0 or idx.max() >= keep.size:
-            raise IndexError(
-                f"gaussian index out of range for a cloud of {keep.size}: "
-                f"[{idx.min()}, {idx.max()}]"
-            )
-        keep[idx] = False
-    out: dict[str, Any] = {}
-    for key, value in bundle.items():
-        arr = np.asarray(value)
-        # Per-Gaussian foreground arrays are exactly those whose first axis is the cloud.
-        if key.startswith("fg_") and arr.ndim >= 1 and arr.shape[0] == keep.size:
-            out[key] = arr[keep]
-        else:
-            out[key] = arr
-    return out
+    out: dict[str, Any] = dict(bundle)
+    for prefix, idx_in in (("fg_", indices), ("bg_", bg_indices)):
+        if f"{prefix}means" not in bundle:
+            if len(idx_in):
+                raise KeyError(f"bundle has no {prefix}means to remove from")
+            continue
+        keep = np.ones(int(np.asarray(bundle[f"{prefix}means"]).shape[0]), dtype=bool)
+        idx = np.asarray(list(idx_in), dtype=int)
+        if idx.size:
+            if idx.min() < 0 or idx.max() >= keep.size:
+                raise IndexError(
+                    f"gaussian index out of range for a cloud of {keep.size}: "
+                    f"[{idx.min()}, {idx.max()}]"
+                )
+            keep[idx] = False
+        for key, value in bundle.items():
+            arr = np.asarray(value)
+            # A field's per-Gaussian arrays are exactly those whose first axis is its cloud.
+            if key.startswith(prefix) and arr.ndim >= 1 and arr.shape[0] == keep.size:
+                out[key] = arr[keep]
+    return {k: np.asarray(v) for k, v in out.items()}
+
+
+def identity_probs(bundle: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, list[str | None]]:
+    """``(fg_probs (Nf, C), bg_probs (Nb, C), class node ids)`` from a checkpoint's identity.
+
+    Each Gaussian's own identity vector through the trained classifier -- the learned
+    assignment (I2/I3 of the identity scope), as opposed to the projection vote.
+    """
+    if "identity_classifier_w" not in bundle:
+        raise ValueError("checkpoint was not trained with identity")
+    w = np.asarray(bundle["identity_classifier_w"], dtype=np.float64)
+    b = np.asarray(bundle["identity_classifier_b"], dtype=np.float64)
+
+    def softmax(x: np.ndarray) -> np.ndarray:
+        z = x @ w.T + b
+        z -= z.max(axis=1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=1, keepdims=True)
+
+    fg = softmax(np.asarray(bundle["fg_identity"], dtype=np.float64))
+    bg = (softmax(np.asarray(bundle["bg_identity"], dtype=np.float64))
+          if "bg_identity" in bundle else np.zeros((0, w.shape[0])))
+    nodes = [str(x) or None for x in np.asarray(bundle["identity_node_ids"])]
+    return fg, bg, nodes
+
+
+def identity_handles(
+    bundle: Mapping[str, Any], *, threshold: float = 0.5
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """``{node_id: (fg_indices, bg_indices)}``: Gaussians whose probability for it >= threshold.
+
+    Removal by probability threshold, no convex hull (§3.2 of the identity scope). A
+    threshold at or above 0.5 makes the handles disjoint; below it they may overlap, which
+    is reported rather than resolved -- a Gaussian two entities both claim is ambiguous.
+    """
+    fg, bg, nodes = identity_probs(bundle)
+    return {
+        node: (np.flatnonzero(fg[:, k] >= threshold), np.flatnonzero(bg[:, k] >= threshold))
+        for k, node in enumerate(nodes)
+        if node is not None
+    }
 
 
 def _read_json(path: Path) -> dict[str, Any]:
