@@ -20,38 +20,36 @@
 </header>
 
 <main class="layout">
-  <section class="panel graph-panel" aria-label="scene graph">
+  <section class="panel scene-panel" aria-label="the scene at one frame">
     <div class="panel-head">
-      <h2>Scene graph</h2>
-      <span class="meta" id="graph-note"></span>
-    </div>
-    <div class="edge-controls">
-      <div class="seg" id="edge-scope" role="group" aria-label="which relations">
+      <h2>Scene · frame <span id="frame-label">–</span></h2>
+      <div class="seg" id="view-seg" role="group" aria-label="image"></div>
+      <div class="seg" id="edge-scope" role="group" aria-label="graph shows">
         <button type="button" data-scope="frame" aria-pressed="true">this frame</button>
         <button type="button" data-scope="clip" aria-pressed="false">whole clip</button>
       </div>
-      <div class="pred-chips" id="pred-chips" aria-label="predicates"></div>
-    </div>
-    <div id="cy" role="img" aria-label="entities in the scene"></div>
-    <div class="legend" id="legend"></div>
-  </section>
-
-  <section class="panel frame-panel" aria-label="frame view">
-    <div class="panel-head">
-      <h2>Frame <span id="frame-label">–</span></h2>
-      <div class="seg" id="view-seg" role="group" aria-label="view"></div>
       <span class="spacer"></span>
       <button type="button" class="ghost" id="prev" aria-label="previous frame">◀</button>
       <button type="button" class="ghost" id="play" aria-label="play">▶ play</button>
       <button type="button" class="ghost" id="next" aria-label="next frame">▶</button>
     </div>
-    <div class="stage" id="stage" tabindex="0" role="img" aria-label="frame">
-      <img id="frame-img" alt="">
-      <img id="outline-img" alt="">
-      <span class="tag" id="stage-tag"></span>
-      <span class="spinner" id="stage-spinner" hidden>rendering…</span>
+    <div class="scene-views">
+      <div class="stage" id="stage" tabindex="0" role="img" aria-label="frame">
+        <img id="frame-img" alt="">
+        <img id="outline-img" alt="">
+        <span class="tag" id="stage-tag"></span>
+        <span class="spinner" id="stage-spinner" hidden>rendering…</span>
+      </div>
+      <div class="graph-box">
+        <div id="cy" role="img" aria-label="entities and relations at this frame"></div>
+        <span class="tag graph-tag" id="graph-note"></span>
+      </div>
     </div>
     <input type="range" id="frame-slider" min="0" max="0" value="0" aria-label="frame">
+    <div class="under-row">
+      <div class="legend" id="legend" aria-label="categories"></div>
+      <div class="pred-chips" id="pred-chips" aria-label="relations shown"></div>
+    </div>
     <div class="timeline" id="timeline" aria-label="presence timeline"></div>
     <div class="rel-timeline" id="rel-timeline" aria-label="relations of the selected entity"></div>
   </section>

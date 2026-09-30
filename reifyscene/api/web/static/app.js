@@ -54,8 +54,7 @@ async function loadRun(name) {
   S.colorOf = Object.fromEntries(cats.map((c, i) => [c, PALETTE[i % PALETTE.length]]));
   $("run-meta").textContent = `${S.graph.entities.length} entities · ${S.frames.length} frames · scene: ${S.graph.checkpoint}`;
   const rm = S.graph.relations_meta;
-  $("graph-note").textContent = S.graph.relations_available
-    ? `${S.graph.edges.length} relations` : (rm ? "no relations found" : "relations not computed for this run");
+  S.present = Object.fromEntries(S.graph.entities.map((e) => [e.node_id, new Set(e.observed)]));
   $("rel-meta").textContent = rm ? `Relations: ${rm.source}, scale from ${rm.metric_scale?.source?.replace("_", " ") || "–"}` +
     (rm.gravity_aligned ? "" : " · no gravity: vertical relations not computed") : "";
   const slider = $("frame-slider");
@@ -96,6 +95,9 @@ function drawGraph() {
       { selector: "edge.off", style: { display: "none" } },
       { selector: "node.sel", style: { "border-width": 3, "border-color": ink } },
       { selector: ".faded", style: { opacity: 0.18 } },
+      // not observed on this frame: a ghost, not gone -- an occlusion gap does not end an entity
+      { selector: "node.ghost", style: { opacity: 0.25, "border-width": 1.5, "border-style": "dashed",
+        "border-color": ink, "background-opacity": 0.35 } },
     ],
     layout: { name: "preset" },
   });
@@ -107,7 +109,7 @@ function drawGraph() {
   (S.cy.edges().length
     ? S.cy.nodes().layout({ name: "circle", sort: byCategory, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
     : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byCategory })).run();
-  S.cy.fit(undefined, 20);
+  S.cy.fit(undefined, 40);
   updateEdges();
   S.cy.on("tap", (ev) => { if (ev.target === S.cy) { S.highlight = null; applyHighlight(); } });
 }
@@ -115,11 +117,18 @@ function edgeActive(ivs, f) { return ivs.some(([a, b]) => a <= f && f <= b); }
 function updateEdges() {
   if (!S.cy) return;
   const f = S.frames[S.fi];
+  const perFrame = S.edgeScope === "frame";
+  S.cy.nodes().forEach((n) => n.toggleClass("ghost", perFrame && !S.present[n.id()]?.has(f)));
   S.cy.edges().forEach((ed) => {
     const on = S.preds.has(ed.data("pred")) && (S.edgeScope === "clip" || edgeActive(ed.data("ivs"), f));
     ed.toggleClass("off", !on);
     ed.toggleClass("lab", !!S.selected && (ed.data("source") === S.selected || ed.data("target") === S.selected));
   });
+  const shown = S.cy.edges().filter((ed) => !ed.hasClass("off")).length;
+  const seen = S.cy.nodes().filter((n) => !n.hasClass("ghost")).length;
+  $("graph-note").textContent = !S.graph.relations_available
+    ? (S.graph.relations_meta ? "no relations found" : "relations not computed for this run")
+    : perFrame ? `frame ${f} · ${seen} seen · ${shown} relations` : `whole clip · ${shown} relations`;
 }
 function drawPredChips() {
   const box = $("pred-chips"); box.innerHTML = "";
@@ -140,10 +149,15 @@ document.querySelectorAll("#edge-scope button").forEach((b) => b.addEventListene
   updateEdges();
 }));
 const nameOf = (id) => { const e = entity(id); return e ? `${e.category} ${short(id)}` : short(id); };
-function sentence(e) {
+// Phrased from the selected entity's side, as the query does: each vertical fact is stored once
+// ("B above A"), so with A selected it reads "A below B"; near is symmetric.
+function sentence(e, from) {
   const also = e.attrs?.and;
   if (e.type === "between") return `${nameOf(e.src)} between ${nameOf(e.dst)} & ${nameOf(also)}`;
   if (e.type === "closest" || e.type === "farthest") return `${nameOf(e.src)} ${e.type} ${entity(e.src)?.category || ""} to ${nameOf(e.dst)}`;
+  if (from === e.dst && (e.type === "above" || e.type === "below"))
+    return `${nameOf(e.dst)} ${e.type === "above" ? "below" : "above"} ${nameOf(e.src)}`;
+  if (from === e.dst && e.type === "near") return `${nameOf(e.dst)} near ${nameOf(e.src)}`;
   return `${nameOf(e.src)} ${e.type} ${nameOf(e.dst)}`;
 }
 function drawRelTimeline() {
@@ -161,7 +175,7 @@ function drawRelTimeline() {
       d.style.left = `${(100 * (a - f0)) / span}%`; d.style.width = `${(100 * (b - a + 1)) / span}%`;
       d.style.background = PRED_COLORS[e.type]; track.append(d); }
     const row = el("div", { class: `rel-row${edgeActive(ivs, f) ? " active" : ""}`, title: `${e.type} · intervals ${ivs.map(([a, b]) => `${a}–${b}`).join(", ")}` },
-      el("span", { class: "sent", text: sentence(e) }), track);
+      el("span", { class: "sent", text: sentence(e, S.selected) }), track);
     box.append(row);
   }
 }
@@ -423,5 +437,5 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "ArrowRight") setFrame(S.fi + 1);
   else if (ev.key === " ") { ev.preventDefault(); S.flipped = !S.flipped; paint(); }
 });
-window.addEventListener("resize", placeCursor);
+window.addEventListener("resize", () => { placeCursor(); if (S.cy) { S.cy.resize(); S.cy.fit(undefined, 40); } });
 init().catch((err) => { $("run-meta").textContent = `Could not load: ${err.message}`; });
