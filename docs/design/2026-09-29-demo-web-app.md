@@ -1,7 +1,7 @@
 # A local web app for querying, browsing and editing a reconstructed scene
 
-**Status:** PHASE A BUILT (2026-09-29) — the app runs on all ten loop runs over the graph as it
-stands; relations (VLA-3D, the old W0) come next and appear in the graph panel when they land
+**Status:** BUILT (2026-09-29) — the app runs on all ten loop runs with VLA-3D relations over
+time, relation selection and a free-viewpoint 3D view; the five-beat demo is §1 "As built"
 **Date:** 2026-09-29
 **Serves:** the thin loop of `docs/design/2026-07-09-queryable-graph-definition-spike-plan.md`
 (step 3: select → edit → render) and G1/G2 of
@@ -36,6 +36,41 @@ separate mode (§7).
    click to flip. The "took" view shows exactly which Gaussians the removal selected.
 5. `count person` now answers from the graph as it was; the edit is a view on the scene, not a
    change to the pipeline's artifacts.
+
+### As built: the demo in five beats (`lab-coat`)
+
+Run `reifyscene serve ../runs`, open http://127.0.0.1:8765, pick **lab-coat**. Each beat is
+one claim of *interpret, query, edit, re-render*, shown and not told.
+
+1. **The scene is a graph over time.** Frame 0: the photo beside the graph, three people joined
+   by `near`. Press **play**. The graph follows the frame: edges come and go, entities not seen at
+   that moment fade. *Claim: the graph is per moment, not one summary of the clip.*
+2. **An entity is a thing in the video.** Click **person 2** in the graph. Its outline follows it
+   through the clip; its presence bar and its relations appear under the timeline. *Claim: a
+   graph node is grounded in pixels at every frame.*
+3. **A relation has a lifetime.** Click the row **person 2 is near person 3**. Both are
+   outlined (red, amber), and the interval 0–29 is marked. Play loops just those frames. Step to
+   30: both are still in view, but the edge is gone. They stepped apart, and the graph says so.
+   *Claim: relations are facts with time intervals (VLA-3D's predicates, computed per frame), not
+   labels on a clip.*
+4. **Ask it.** In Query: `relate` person 3, then tick *at the current frame* and ask again at
+   frame 10 and at frame 35. `when` 2 gives the presence span. *Claim: the answers come from
+   the graph, with no language model in the loop.*
+5. **Edit and re-render.** Select person 2, **Remove**. In about a second, **after** shows the
+   clip without them; **took** shows the Gaussians the removal selected. Switch to **3D**, drag
+   a few degrees, then click to flip between the edited and original scene from the new viewpoint.
+   *Claim: the edit is on the 3D scene, not on the pixels of one frame.*
+
+**Keep off-camera (known and tracked, not hidden if asked):**
+- Past ~15° of orbit the view smears: one moving camera never saw that side. The tag says so.
+- The removal leaves a hole and some residue where the person stood; inpainting is §7.
+- `lab-coat` also carries spurious proposals (cup 0, bird 4, handbag 6: pieces of the fence and
+  trees). Selecting them is an honest demo of G3's open problem, not of the loop.
+- The moving people are softer than the background: that is the motion model, a separate track.
+
+**Backup runs.** `miami-surf` (two people and `near` over 60+ frames) and `crossing` (`on`
+relations among street objects) are the next cleanest. Avoid `blackswan`, `gold-fish` and
+`motocross-bumps` for relations: they have no person, so metric scale falls back to a guess.
 
 ---
 
