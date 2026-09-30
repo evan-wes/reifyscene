@@ -125,6 +125,8 @@ def test_frames_renders_and_outlines_are_served(client) -> None:
     r = client.get(f"/api/runs/loop_demo/outline/2.png?node={PERSON}")
     assert r.status_code == 200 and r.headers["content-type"] == "image/png"
     assert client.get("/api/runs/loop_demo/outline/2.png?node=nobody").status_code == 404
+    two = client.get(f"/api/runs/loop_demo/outline/2.png?node={PERSON}&node={CUP}")
+    assert two.status_code == 200      # a relation: both entities, one image
 
 
 def test_an_edit_queues_runs_and_exposes_its_images(client) -> None:

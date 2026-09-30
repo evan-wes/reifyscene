@@ -21,12 +21,15 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
+from fastapi import Query
 from pydantic import BaseModel
 
 STATIC = Path(__file__).parent / "static"
+# relation roles on the frame: subject, object, between's third
+OUTLINE_COLORS = ((255, 64, 64), (240, 170, 30), (170, 110, 240))
 POWER_CAP_W = 400.0
 
 
@@ -258,14 +261,24 @@ def create_app(
         return FileResponse(cache)
 
     @app.get("/api/runs/{name}/outline/{frame}.png")
-    def entity_outline(name: str, frame: int, node: str):
+    def entity_outline(name: str, frame: int, node: Annotated[list[str], Query()]):
+        """Outlines of one or more entities on a frame, each in its own colour, in order:
+        red, amber, violet -- the subject of a relation, its object, and between's third."""
         r = get_run(name)
         manifest, maps = r.id_maps()
-        idx = next((c["index"] for c in manifest["classes"] if c["node_id"] == node), None)
-        if idx is None or frame not in maps:
+        if frame not in maps:
+            raise HTTPException(404, "no masks for that frame")
+        index = {c["node_id"]: c["index"] for c in manifest["classes"] if c["node_id"]}
+        if not any(n in index for n in node):
             raise HTTPException(404, "no mask for that entity and frame")
+        m = maps[frame]
+        layer = np.zeros((*m.shape, 4), np.uint8)
+        for i, n in enumerate(node):
+            if n in index:
+                o = outline(m == index[n], width=3 if i else 2, color=OUTLINE_COLORS[i % 3])
+                layer = np.where(o[..., 3:] > 0, o, layer)
         buf = io.BytesIO()
-        Image.fromarray(outline(maps[frame] == idx), "RGBA").save(buf, format="PNG")
+        Image.fromarray(layer, "RGBA").save(buf, format="PNG")
         return Response(buf.getvalue(), media_type="image/png",
                         headers={"Cache-Control": "max-age=3600"})
 

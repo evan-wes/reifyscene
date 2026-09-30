@@ -138,3 +138,7 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
 .rel-row .track { position: relative; height: 10px; background: var(--raised); }
 .rel-row .iv { position: absolute; top: 2px; bottom: 2px; }
 .rel-row.active .sent { color: var(--ink); }
+.rel-row { cursor: pointer; }
+.rel-row:hover .sent { color: var(--ink); }
+.rel-row.chosen { outline: 1px solid var(--accent); outline-offset: 2px; }
+.rel-row.chosen .sent { color: var(--accent); font-weight: 600; }

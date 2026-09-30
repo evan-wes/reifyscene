@@ -27,6 +27,7 @@ const S = {
   view: "photo", flipped: false, selected: null, highlight: null,
   edits: {}, activeEdit: null, colorOf: {}, cy: null, playing: null,
   edgeScope: "frame", preds: new Set(["near", "above", "below", "on", "in", "between"]),
+  selRel: null,   // index into S.graph.edges of the selected relation
 };
 
 // -- runs ------------------------------------------------------------------------------------
@@ -45,7 +46,7 @@ async function init() {
 }
 
 async function loadRun(name) {
-  S.run = name; S.selected = null; S.highlight = null; S.activeEdit = null; S.view = "photo"; S.flipped = false;
+  S.run = name; S.selected = null; S.selRel = null; S.highlight = null; S.activeEdit = null; S.view = "photo"; S.flipped = false;
   S.graph = await api(`/api/runs/${name}/graph`);
   S.frames = S.graph.frames.length ? S.graph.frames
     : [...new Set(S.graph.entities.flatMap((e) => e.observed))].sort((a, b) => a - b);
@@ -96,12 +97,19 @@ function drawGraph() {
       { selector: "node.sel", style: { "border-width": 3, "border-color": ink } },
       { selector: ".faded", style: { opacity: 0.18 } },
       // not observed on this frame: a ghost, not gone -- an occlusion gap does not end an entity
+      { selector: "edge.relsel", style: { width: 4, opacity: 1, label: "data(label)", "font-size": 10,
+        "z-index": 10 } },
+      { selector: "edge.reldim", style: { opacity: 0.12 } },
+      { selector: "node.relsub", style: { "border-width": 4, "border-color": "#ff4040" } },
+      { selector: "node.relobj", style: { "border-width": 4, "border-color": "#f0aa1e" } },
+      { selector: "node.relthird", style: { "border-width": 4, "border-color": "#aa6ef0" } },
       { selector: "node.ghost", style: { opacity: 0.25, "border-width": 1.5, "border-style": "dashed",
         "border-color": ink, "background-opacity": 0.35 } },
     ],
     layout: { name: "preset" },
   });
   S.cy.on("tap", "node", (ev) => select(ev.target.id()));
+  S.cy.on("tap", "edge", (ev) => selectRelation(+ev.target.id().slice(1)));
   // Entities on a circle, grouped by category: `near` holds between most pairs in these scenes,
   // and a force layout packs a dense graph into overlapping nodes. On a circle every entity
   // keeps its own place and relations read as chords. Without relations, a grid.
@@ -123,6 +131,16 @@ function updateEdges() {
     const on = S.preds.has(ed.data("pred")) && (S.edgeScope === "clip" || edgeActive(ed.data("ivs"), f));
     ed.toggleClass("off", !on);
     ed.toggleClass("lab", !!S.selected && (ed.data("source") === S.selected || ed.data("target") === S.selected));
+    const chosen = S.selRel !== null && ed.id() === `e${S.selRel}`;
+    ed.toggleClass("relsel", chosen);
+    ed.toggleClass("reldim", S.selRel !== null && !chosen);
+    if (chosen) ed.removeClass("off");              // the chosen relation stays visible
+  });
+  const rel = S.selRel !== null ? S.graph.edges[S.selRel] : null;
+  S.cy.nodes().forEach((n) => {
+    n.toggleClass("relsub", !!rel && n.id() === rel.src);
+    n.toggleClass("relobj", !!rel && n.id() === rel.dst);
+    n.toggleClass("relthird", !!rel && n.id() === rel.attrs?.and);
   });
   const shown = S.cy.edges().filter((ed) => !ed.hasClass("off")).length;
   const seen = S.cy.nodes().filter((n) => !n.hasClass("ghost")).length;
@@ -160,22 +178,44 @@ function sentence(e, from) {
   if (from === e.dst && e.type === "near") return `${nameOf(e.dst)} near ${nameOf(e.src)}`;
   return `${nameOf(e.src)} ${e.type} ${nameOf(e.dst)}`;
 }
+// -- relation selection: its entities outlined in role colours through the clip -----------------
+function selectRelation(i) {
+  const e = S.graph.edges[i];
+  if (!e) return;
+  S.selRel = i;
+  S.highlight = [e.src, e.dst, e.attrs?.and].filter(Boolean);
+  const ivs = e.attrs?.intervals || [];
+  const f = S.frames[S.fi];
+  if (ivs.length && !edgeActive(ivs, f)) {     // jump to the nearest interval's start
+    const starts = ivs.map(([a]) => a);
+    const near = starts.reduce((b, a) => (Math.abs(a - f) < Math.abs(b - f) ? a : b), starts[0]);
+    S.fi = nearestIndex(near);
+  }
+  applyHighlight(); drawSelection(); drawRelTimeline(); paint();
+}
+function clearRelation() { S.selRel = null; S.highlight = null; applyHighlight(); drawSelection(); drawRelTimeline(); paint(); }
+function relFrames(e) { return new Set((e.attrs?.intervals || []).flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, k) => a + k))); }
+
 function drawRelTimeline() {
   const box = $("rel-timeline"); box.innerHTML = "";
-  if (!S.selected || !S.frames.length) return;
-  const rels = S.graph.edges.filter((e) => S.preds.has(e.type) &&
-    [e.src, e.dst, e.attrs?.and].includes(S.selected));
-  box.append(el("h3", { text: rels.length ? `Relations of ${nameOf(S.selected)} (${rels.length})`
-    : S.graph.relations_available ? `No shown relations for ${nameOf(S.selected)}` : "" }));
+  if (!S.frames.length) return;
+  const focus = S.selected || (S.selRel !== null ? S.graph.edges[S.selRel].src : null);
+  if (!focus) return;
+  const rels = S.graph.edges.map((e, i) => [e, i]).filter(([e, i]) => (S.preds.has(e.type) || i === S.selRel) &&
+    [e.src, e.dst, e.attrs?.and].includes(focus));
+  box.append(el("h3", { text: rels.length ? `Relations of ${nameOf(focus)} (${rels.length}) · click one to follow it`
+    : S.graph.relations_available ? `No shown relations for ${nameOf(focus)}` : "" }));
   const f0 = S.frames[0], span = S.frames[S.frames.length - 1] - f0 + 1, f = S.frames[S.fi];
-  for (const e of rels.slice(0, 40)) {
+  for (const [e, idx] of rels.slice(0, 40)) {
     const ivs = e.attrs?.intervals || [];
     const track = el("div", { class: "track" });
     for (const [a, b] of ivs) { const d = el("div", { class: "iv" });
       d.style.left = `${(100 * (a - f0)) / span}%`; d.style.width = `${(100 * (b - a + 1)) / span}%`;
       d.style.background = PRED_COLORS[e.type]; track.append(d); }
-    const row = el("div", { class: `rel-row${edgeActive(ivs, f) ? " active" : ""}`, title: `${e.type} · intervals ${ivs.map(([a, b]) => `${a}–${b}`).join(", ")}` },
-      el("span", { class: "sent", text: sentence(e, S.selected) }), track);
+    const row = el("div", { class: `rel-row${edgeActive(ivs, f) ? " active" : ""}${idx === S.selRel ? " chosen" : ""}`,
+      title: `${e.type} · intervals ${ivs.map(([a, b]) => `${a}–${b}`).join(", ")}`, role: "button", tabindex: "0",
+      onclick: () => selectRelation(idx) },
+      el("span", { class: "sent", text: sentence(e, focus) }), track);
     box.append(row);
   }
 }
@@ -199,6 +239,7 @@ function applyHighlight() {
 // -- selection --------------------------------------------------------------------------------
 function select(id) {
   S.selected = id;
+  S.selRel = null;
   updateEdges();
   $("e-remove").disabled = !id;
   applyHighlight(); drawSelection(); drawRelTimeline(); paint();
@@ -206,6 +247,18 @@ function select(id) {
 function entity(id) { return S.graph.entities.find((e) => e.node_id === id); }
 function drawSelection() {
   const box = $("selection"); box.innerHTML = "";
+  if (S.selRel !== null) {
+    const r = S.graph.edges[S.selRel];
+    const dl = el("dl");
+    const key = (c, t) => { const i = el("i"); i.style.cssText = `display:inline-block;width:10px;height:10px;border:2px solid ${c};margin-right:5px`; return el("span", {}, i, t); };
+    for (const [k, v] of [["relation", sentence(r)], ["frames", (r.attrs?.intervals || []).map(([a, b]) => `${a}–${b}`).join(", ")],
+      ["holds", `${r.attrs?.num_frames ?? "–"} of ${r.attrs?.frames_both_present ?? "–"} frames both are seen`]]) dl.append(el("dt", { text: k }), el("dd", { text: v }));
+    const keys = el("dd", {}, key("#ff4040", nameOf(r.src)), " ", key("#f0aa1e", nameOf(r.dst)));
+    if (r.attrs?.and) keys.append(" ", key("#aa6ef0", nameOf(r.attrs.and)));
+    dl.append(el("dt", { text: "outlined" }), keys);
+    box.append(dl, el("button", { type: "button", class: "ghost", text: "clear relation (Esc)", onclick: clearRelation }));
+    return;
+  }
   const e = S.selected && entity(S.selected);
   if (!e) { box.append(el("p", { class: "meta", text: "Click an entity in the graph or the timeline." })); return; }
   const gaps = e.gaps.length ? e.gaps.map((g) => `${g.start}–${g.end}${g.kind === "dropout" ? " (dropout)" : ""}`).join(", ") : "none";
@@ -300,13 +353,16 @@ function paint() {
     img.src = url;
   }
   const out = $("outline-img");
-  if (S.selected) { out.hidden = false; out.onerror = () => { out.hidden = true; };
-    out.src = `/api/runs/${S.run}/outline/${f}.png?node=${encodeURIComponent(S.selected)}`; }
+  const rel = S.selRel !== null ? S.graph.edges[S.selRel] : null;
+  const nodes = rel ? [rel.src, rel.dst, rel.attrs?.and].filter(Boolean) : S.selected ? [S.selected] : [];
+  if (nodes.length) { out.hidden = false; out.onerror = () => { out.hidden = true; };
+    out.src = `/api/runs/${S.run}/outline/${f}.png?` + nodes.map((n) => `node=${encodeURIComponent(n)}`).join("&"); }
   else out.hidden = true;
-  const sel = S.selected ? ` · ${entity(S.selected)?.category} ${short(S.selected)} outlined` : "";
+  let sel = S.selected ? ` · ${entity(S.selected)?.category} ${short(S.selected)} outlined` : "";
+  if (rel) sel = ` · ${sentence(rel)}${edgeActive(rel.attrs?.intervals || [], f) ? "" : " (not at this frame)"}`;
   $("stage-tag").textContent = `${view}${sel}`;
   drawViews(); placeCursor(); updateEdges();
-  if (S.selected) drawRelTimeline();
+  if (S.selected || S.selRel !== null) drawRelTimeline();
 }
 function setFrame(i) { S.fi = Math.max(0, Math.min(S.frames.length - 1, i)); paint(); }
 
@@ -428,14 +484,24 @@ $("next").addEventListener("click", () => setFrame(S.fi + 1));
 $("play").addEventListener("click", () => {
   if (S.playing) { clearInterval(S.playing); S.playing = null; $("play").textContent = "▶ play"; return; }
   $("play").textContent = "❚❚ pause";
-  S.playing = setInterval(() => setFrame(S.fi + 1 >= S.frames.length ? 0 : S.fi + 1), 160);
+  S.playing = setInterval(() => {
+    if (S.selRel !== null) {                     // loop the relation's own frames
+      const fs = relFrames(S.graph.edges[S.selRel]);
+      for (let k = 1; k <= S.frames.length; k++) {
+        const i = (S.fi + k) % S.frames.length;
+        if (fs.has(S.frames[i])) { setFrame(i); return; }
+      }
+    }
+    setFrame(S.fi + 1 >= S.frames.length ? 0 : S.fi + 1);
+  }, 160);
 });
 $("stage").addEventListener("click", () => { S.flipped = !S.flipped; paint(); });
 document.addEventListener("keydown", (ev) => {
-  if (ev.target.closest("input, select, textarea")) return;
+  if (ev.target.closest?.("input, select, textarea")) return;
   if (ev.key === "ArrowLeft") setFrame(S.fi - 1);
   else if (ev.key === "ArrowRight") setFrame(S.fi + 1);
   else if (ev.key === " ") { ev.preventDefault(); S.flipped = !S.flipped; paint(); }
+  else if (ev.key === "Escape" && S.selRel !== null) clearRelation();
 });
 window.addEventListener("resize", () => { placeCursor(); if (S.cy) { S.cy.resize(); S.cy.fit(undefined, 40); } });
 init().catch((err) => { $("run-meta").textContent = `Could not load: ${err.message}`; });

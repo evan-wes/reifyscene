@@ -102,8 +102,9 @@ class CheckpointRenderer:
         return sorted(self.time_of)
 
 
-def outline(mask: np.ndarray, width: int = 2) -> np.ndarray:
-    """RGBA image: the mask's boundary in red, transparent elsewhere."""
+def outline(mask: np.ndarray, width: int = 2,
+            color: tuple[int, int, int] = (255, 64, 64)) -> np.ndarray:
+    """RGBA image: the mask's boundary in ``color`` (red by default), transparent elsewhere."""
     inner = mask.copy()
     for _ in range(width):
         e = inner.copy()
@@ -114,5 +115,5 @@ def outline(mask: np.ndarray, width: int = 2) -> np.ndarray:
         inner = e
     edge = mask & ~inner
     rgba = np.zeros((*mask.shape, 4), np.uint8)
-    rgba[edge] = (255, 64, 64, 255)
+    rgba[edge] = (*color, 255)
     return rgba
