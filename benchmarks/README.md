@@ -27,6 +27,47 @@ unannotated; a node matching no ground truth may be a real thing nobody labelled
 reported because it says something about how the proposer behaves, not because it is
 wrong.
 
+**Not re-run after G2 (2026-09-30), deliberately.** G4 of the graph plan asked for this
+benchmark to be re-scored once edits worked. The inventory runs stop at the graph stage
+(`--stop-stage graph`), and G2 changed nothing about which entities the graph holds: it added
+the post-render `handles` stage and its `gaussians` layer, and the graph stage's only change
+(contract v5) is its `renderable` grade reading `pending: gaussians layer`. A rebuild would be
+~5 GPU-hours for the same rows. Whether an edit damages the rest of the scene is measured by
+`davis_edit_damage.json` instead. Re-run this when anything upstream of the graph changes.
+
+## `davis_edit_damage.json`
+
+Does removing an entity take the entity, and leave the rest of the scene alone? Scored on the
+ten `loop_*` runs against DAVIS ground truth: each annotated object is matched to a graph node
+and removed with the selection the graph's `gaussians` layer holds (FlashSplat + floater
+filter), on the checkpoint the app serves.
+
+    python scripts/benchmark_edit_damage.py      # GPU, ~20 s for the ten runs
+
+Metrics per object (`reifyscene/eval/benchmarks/edit_damage/score.py`): *taken recall /
+precision* (pixels where the removed Gaussians carry over half the weight, against the GT
+mask), *alone precision* (the removed Gaussians rendered by themselves), *halo ratio*,
+*others damaged*, and *rest PSNR* (before vs after beyond 8 px of the object; 60 dB = untouched).
+
+**Finding (2026-09-30), 31 of 39 objects scored, 8 never proposed:**
+
+- **The rest of the scene is left alone.** Median rest PSNR 50.5 dB; other annotated objects
+  lose a median 3% of their pixels. The exceptions are entanglement, not stray edits:
+  motocross (the rider shares the motorcycle's node: 40% of the rider changes) and dogs-scale
+  (29–41 dB; people and dogs overlap all clip).
+- **What is taken is the object, where it is visible.** Median taken precision 0.93.
+- **But removal is incomplete: median taken recall 0.39.** Under half of an object's pixels are
+  dominated by its own Gaussians. Worst on small, fast movers (the crossing pedestrians: 0.02,
+  ~600-900 Gaussians each) -- the motion model renders them with Gaussians that belong to
+  nothing or to the background, the same softness the identity scope's §8 records.
+- **Most of what a removal takes is hidden: median alone precision 0.38.** Rendered by
+  themselves, the removed Gaussians land on the object only 38% of the time; the rest sits
+  behind or around it, invisible from the training cameras. This is the "shadow" the 3D took
+  view shows behind the lab-coat people, measured.
+
+These are training views: the fitted views, which never see behind anything. The held-out
+measure is DyCheck (G4 part 3).
+
 ## `amg_keyframe_cache.json`
 
 Every mask SAM 2's automatic generator proposes on each sequence's first frame, reduced to

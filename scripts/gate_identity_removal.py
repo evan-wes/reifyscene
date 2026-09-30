@@ -68,87 +68,32 @@ sys.path.insert(0, str(REPO))
 
 from reifyscene.edit.renderer import CheckpointRenderer as _Renderer  # noqa: E402
 from reifyscene.edit.renderer import outline as _outline  # noqa: E402
+from reifyscene.eval.benchmarks.edit_damage.score import (  # noqa: E402
+    change_score as _score,
+)
+from reifyscene.eval.benchmarks.edit_damage.score import (  # noqa: E402
+    changed as _changed,
+)
+from reifyscene.eval.benchmarks.edit_damage.score import fit as _fit  # noqa: E402
+from reifyscene.eval.benchmarks.edit_damage.score import (  # noqa: E402
+    gt_masks as _gt_masks,
+)
+from reifyscene.eval.benchmarks.edit_damage.score import match_objects  # noqa: E402
+from reifyscene.eval.benchmarks.edit_damage.score import (  # noqa: E402
+    taken_score as _taken_score,
+)
 
 DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 
 
-def _gt_masks(ann_dir: Path, frame: int, transform) -> dict[int, np.ndarray]:
-    from PIL import Image
-
-    path = ann_dir / f"{frame:05d}.png"
-    if not path.is_file():
-        return {}
-    arr = np.asarray(Image.open(path))
-    return {int(i): transform.apply_to_image((arr == i).astype(np.uint8), kind="mask") > 0
-            for i in np.unique(arr) if int(i) != 0}
 
 
-def match_objects(gt_by_frame, node_by_frame, *, match_iou: float):
-    """Greedy one-to-one GT object -> node on IoU pooled over frames."""
-    inter: dict[tuple[int, str], int] = {}
-    area_gt: dict[int, int] = {}
-    area_node: dict[str, int] = {}
-    for f, gts in gt_by_frame.items():
-        nodes = node_by_frame.get(f, {})
-        for gid, g in gts.items():
-            area_gt[gid] = area_gt.get(gid, 0) + int(g.sum())
-            for nid, m in nodes.items():
-                inter[(gid, nid)] = inter.get((gid, nid), 0) + int((g & m).sum())
-    for nodes in node_by_frame.values():
-        for nid, m in nodes.items():
-            area_node[nid] = area_node.get(nid, 0) + int(m.sum())
-    pairs = []
-    for (gid, nid), i in inter.items():
-        union = area_gt[gid] + area_node[nid] - i
-        if union:
-            pairs.append((i / union, gid, nid))
-    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
-    taken_g, taken_n, out = set(), set(), {}
-    for iou, gid, nid in pairs:
-        if iou < match_iou or gid in taken_g or nid in taken_n:
-            continue
-        taken_g.add(gid)
-        taken_n.add(nid)
-        out[gid] = (nid, round(float(iou), 4))
-    best = {gid: max((p for p in pairs if p[1] == gid), default=(0.0, gid, None))
-            for gid in area_gt}
-    return out, {gid: (b[2], round(float(b[0]), 4)) for gid, b in best.items()}, area_gt
 
 
-def _score(changed: np.ndarray, mask: np.ndarray, others: np.ndarray | None = None) -> dict:
-    """What changed inside the object, outside it, and on the other annotated objects.
-
-    ``rest_intact`` divides by the whole frame outside the object, so tearing a few thousand
-    pixels off a neighbour still reads ~97%. ``halo_ratio`` (changed pixels outside, per pixel
-    of the object) and ``others_damaged`` (share of the *other annotated objects'* pixels that
-    changed) are the measures that cannot hide that.
-    """
-    inside = int((changed & mask).sum())
-    outside = int((changed & ~mask).sum())
-    out = {
-        "entity_removed": round(inside / max(1, int(mask.sum())), 4),
-        "rest_intact": round(1.0 - outside / max(1, int((~mask).sum())), 6),
-        "halo_px": outside,
-        "halo_ratio": round(outside / max(1, int(mask.sum())), 4),
-    }
-    if others is not None:
-        o = others & ~mask
-        hit = int((changed & o).sum())
-        out["others_damaged"] = round(hit / int(o.sum()), 4) if o.any() else None
-    return out
 
 
-def _fit(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    from PIL import Image
-
-    if mask.shape == shape:
-        return mask
-    return np.asarray(Image.fromarray(mask.astype(np.uint8) * 255)
-                      .resize((shape[1], shape[0]), Image.Resampling.NEAREST)) > 127
 
 
-def _changed(a: np.ndarray, b: np.ndarray, thr: int) -> np.ndarray:
-    return np.abs(a.astype(np.int16) - b.astype(np.int16)).sum(-1) > thr
 
 
 def _mean(rows: list[dict], ref: str, key: str) -> float | None:
@@ -156,12 +101,6 @@ def _mean(rows: list[dict], ref: str, key: str) -> float | None:
     return round(float(np.mean(vals)), 4) if vals else None
 
 
-def _taken_score(alpha: np.ndarray, gt: np.ndarray, prefix: str = "taken") -> dict:
-    took = alpha > 0.5
-    hit = int((took & gt).sum())
-    return {f"{prefix}_recall": round(hit / max(1, int(gt.sum())), 4),
-            f"{prefix}_precision": round(hit / int(took.sum()), 4) if took.any() else None,
-            f"{prefix}_px": int(took.sum())}
 
 
 def filter_members(scene, fg_idx, bg_idx):
