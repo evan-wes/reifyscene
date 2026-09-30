@@ -3,6 +3,9 @@
 
 const PALETTE = ["#0e7c8b", "#c2573a", "#6b5ca5", "#3f8f4f", "#b58a1b", "#2f6fb0",
                  "#a8487a", "#5f7d1e", "#8a6245", "#4a8a8a", "#9a3f3f", "#556070"];
+const PRED_COLORS = { near: "#7a8a8f", above: "#2f6fb0", below: "#6b5ca5", on: "#c2573a", in: "#b58a1b",
+                      between: "#3f8f4f", closest: "#a8487a", farthest: "#8a6245" };
+const PREDS = Object.keys(PRED_COLORS);
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
@@ -23,6 +26,7 @@ const S = {
   runs: [], run: null, graph: null, frames: [], fi: 0,
   view: "photo", flipped: false, selected: null, highlight: null,
   edits: {}, activeEdit: null, colorOf: {}, cy: null, playing: null,
+  edgeScope: "frame", preds: new Set(["near", "above", "below", "on", "in", "between"]),
 };
 
 // -- runs ------------------------------------------------------------------------------------
@@ -49,10 +53,14 @@ async function loadRun(name) {
   const cats = Object.keys(S.graph.categories);
   S.colorOf = Object.fromEntries(cats.map((c, i) => [c, PALETTE[i % PALETTE.length]]));
   $("run-meta").textContent = `${S.graph.entities.length} entities · ${S.frames.length} frames · scene: ${S.graph.checkpoint}`;
-  $("graph-note").textContent = S.graph.relations_available ? "" : "relations not computed yet";
+  const rm = S.graph.relations_meta;
+  $("graph-note").textContent = S.graph.relations_available
+    ? `${S.graph.edges.length} relations` : (rm ? "no relations found" : "relations not computed for this run");
+  $("rel-meta").textContent = rm ? `Relations: ${rm.source}, scale from ${rm.metric_scale?.source?.replace("_", " ") || "–"}` +
+    (rm.gravity_aligned ? "" : " · no gravity: vertical relations not computed") : "";
   const slider = $("frame-slider");
   slider.max = Math.max(0, S.frames.length - 1); slider.value = 0;
-  fillQueryOptions(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); paint();
+  fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); paint();
 }
 
 // -- graph -----------------------------------------------------------------------------------
@@ -60,9 +68,16 @@ const short = (id) => id.split(":").pop();
 function drawGraph() {
   const els = S.graph.entities.map((e) => ({
     data: { id: e.node_id, label: `${e.category} ${short(e.node_id)}`, color: S.colorOf[e.category],
-            size: 18 + 22 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
+            size: 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
   }));
-  for (const e of S.graph.edges) els.push({ data: { id: `${e.src}->${e.dst}:${e.type}`, source: e.src, target: e.dst, label: e.type } });
+  const known = new Set(S.graph.entities.map((e) => e.node_id));
+  S.graph.edges.forEach((e, i) => {
+    if (!known.has(e.src) || !known.has(e.dst)) return;
+    const also = e.attrs?.and;
+    els.push({ data: { id: `e${i}`, source: e.src, target: e.dst, pred: e.type, color: PRED_COLORS[e.type] || "#888",
+      label: e.type === "between" && also ? `between (& ${short(also)})` : e.type,
+      directed: e.type !== "near" ? 1 : 0, ivs: e.attrs?.intervals || [] } });
+  });
   if (S.cy) S.cy.destroy();
   const ink = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
   const line = getComputedStyle(document.documentElement).getPropertyValue("--line").trim();
@@ -72,21 +87,85 @@ function drawGraph() {
       { selector: "node", style: { "background-color": "data(color)", width: "data(size)", height: "data(size)",
         label: "data(label)", color: ink, "font-family": "IBM Plex Mono, monospace", "font-size": 10,
         "text-valign": "bottom", "text-margin-y": 4 } },
-      { selector: "edge", style: { width: 1.5, "line-color": line, "curve-style": "bezier", label: "data(label)",
-        "font-size": 8, color: ink } },
+      { selector: "edge", style: { width: 1.5, "line-color": "data(color)", "curve-style": "bezier", opacity: 0.55,
+        "font-size": 8, color: ink, "text-rotation": "autorotate", "target-arrow-shape": "none" } },
+      // labels only on the selected entity's edges: on every edge they bury the graph
+      { selector: "edge.lab", style: { label: "data(label)", width: 2.5, opacity: 1 } },
+      { selector: "edge[directed = 1]", style: { "target-arrow-shape": "triangle", "target-arrow-color": "data(color)",
+        "arrow-scale": 0.8 } },
+      { selector: "edge.off", style: { display: "none" } },
       { selector: "node.sel", style: { "border-width": 3, "border-color": ink } },
       { selector: ".faded", style: { opacity: 0.18 } },
     ],
-    // Without relation edges a force layout has nothing to arrange by and collapses into a
-    // line; group by category on a grid until relations exist.
-    layout: S.graph.edges.length
-      ? { name: "cose", animate: false, nodeRepulsion: 9000, idealEdgeLength: 60, padding: 20 }
-      : { name: "grid", padding: 24, avoidOverlapPadding: 18,
-          sort: (a, b) => a.data("label").localeCompare(b.data("label")) },
+    layout: { name: "preset" },
   });
   S.cy.on("tap", "node", (ev) => select(ev.target.id()));
+  // Entities on a circle, grouped by category: `near` holds between most pairs in these scenes,
+  // and a force layout packs a dense graph into overlapping nodes. On a circle every entity
+  // keeps its own place and relations read as chords. Without relations, a grid.
+  const byCategory = (a, b) => a.data("label").localeCompare(b.data("label"), undefined, { numeric: true });
+  (S.cy.edges().length
+    ? S.cy.nodes().layout({ name: "circle", sort: byCategory, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
+    : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byCategory })).run();
+  S.cy.fit(undefined, 20);
+  updateEdges();
   S.cy.on("tap", (ev) => { if (ev.target === S.cy) { S.highlight = null; applyHighlight(); } });
 }
+function edgeActive(ivs, f) { return ivs.some(([a, b]) => a <= f && f <= b); }
+function updateEdges() {
+  if (!S.cy) return;
+  const f = S.frames[S.fi];
+  S.cy.edges().forEach((ed) => {
+    const on = S.preds.has(ed.data("pred")) && (S.edgeScope === "clip" || edgeActive(ed.data("ivs"), f));
+    ed.toggleClass("off", !on);
+    ed.toggleClass("lab", !!S.selected && (ed.data("source") === S.selected || ed.data("target") === S.selected));
+  });
+}
+function drawPredChips() {
+  const box = $("pred-chips"); box.innerHTML = "";
+  const present = new Set(S.graph.edges.map((e) => e.type));
+  for (const p of PREDS) {
+    if (!present.has(p)) continue;
+    const n = S.graph.edges.filter((e) => e.type === p).length;
+    const i = el("i"); i.style.background = PRED_COLORS[p];
+    const b = el("button", { type: "button", "aria-pressed": String(S.preds.has(p)), title: `show ${p} relations` }, i, `${p} ${n}`);
+    b.addEventListener("click", () => { S.preds.has(p) ? S.preds.delete(p) : S.preds.add(p);
+      b.setAttribute("aria-pressed", String(S.preds.has(p))); updateEdges(); drawRelTimeline(); });
+    box.append(b);
+  }
+}
+document.querySelectorAll("#edge-scope button").forEach((b) => b.addEventListener("click", () => {
+  S.edgeScope = b.dataset.scope;
+  document.querySelectorAll("#edge-scope button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  updateEdges();
+}));
+const nameOf = (id) => { const e = entity(id); return e ? `${e.category} ${short(id)}` : short(id); };
+function sentence(e) {
+  const also = e.attrs?.and;
+  if (e.type === "between") return `${nameOf(e.src)} between ${nameOf(e.dst)} & ${nameOf(also)}`;
+  if (e.type === "closest" || e.type === "farthest") return `${nameOf(e.src)} ${e.type} ${entity(e.src)?.category || ""} to ${nameOf(e.dst)}`;
+  return `${nameOf(e.src)} ${e.type} ${nameOf(e.dst)}`;
+}
+function drawRelTimeline() {
+  const box = $("rel-timeline"); box.innerHTML = "";
+  if (!S.selected || !S.frames.length) return;
+  const rels = S.graph.edges.filter((e) => S.preds.has(e.type) &&
+    [e.src, e.dst, e.attrs?.and].includes(S.selected));
+  box.append(el("h3", { text: rels.length ? `Relations of ${nameOf(S.selected)} (${rels.length})`
+    : S.graph.relations_available ? `No shown relations for ${nameOf(S.selected)}` : "" }));
+  const f0 = S.frames[0], span = S.frames[S.frames.length - 1] - f0 + 1, f = S.frames[S.fi];
+  for (const e of rels.slice(0, 40)) {
+    const ivs = e.attrs?.intervals || [];
+    const track = el("div", { class: "track" });
+    for (const [a, b] of ivs) { const d = el("div", { class: "iv" });
+      d.style.left = `${(100 * (a - f0)) / span}%`; d.style.width = `${(100 * (b - a + 1)) / span}%`;
+      d.style.background = PRED_COLORS[e.type]; track.append(d); }
+    const row = el("div", { class: `rel-row${edgeActive(ivs, f) ? " active" : ""}`, title: `${e.type} · intervals ${ivs.map(([a, b]) => `${a}–${b}`).join(", ")}` },
+      el("span", { class: "sent", text: sentence(e) }), track);
+    box.append(row);
+  }
+}
+
 function drawLegend() {
   const lg = $("legend"); lg.innerHTML = "";
   for (const [c, n] of Object.entries(S.graph.categories)) {
@@ -106,8 +185,9 @@ function applyHighlight() {
 // -- selection --------------------------------------------------------------------------------
 function select(id) {
   S.selected = id;
+  updateEdges();
   $("e-remove").disabled = !id;
-  applyHighlight(); drawSelection(); paint();
+  applyHighlight(); drawSelection(); drawRelTimeline(); paint();
 }
 function entity(id) { return S.graph.entities.find((e) => e.node_id === id); }
 function drawSelection() {
@@ -211,7 +291,8 @@ function paint() {
   else out.hidden = true;
   const sel = S.selected ? ` · ${entity(S.selected)?.category} ${short(S.selected)} outlined` : "";
   $("stage-tag").textContent = `${view}${sel}`;
-  drawViews(); placeCursor();
+  drawViews(); placeCursor(); updateEdges();
+  if (S.selected) drawRelTimeline();
 }
 function setFrame(i) { S.fi = Math.max(0, Math.min(S.frames.length - 1, i)); paint(); }
 
@@ -237,7 +318,10 @@ async function runQuery(template, args) {
       body: JSON.stringify({ template, args }) });
     ans.textContent = describe(res);
     if (res.entities) { S.highlight = res.entities.map((e) => e.node_id); applyHighlight(); }
-    if (res.entity) { S.highlight = [res.entity]; select(res.entity); }
+    if (res.entity) {
+      const partners = (res.relations || []).flatMap((r) => [r.src, r.dst, r.and]).filter(Boolean);
+      S.highlight = [res.entity, ...partners]; select(res.entity);
+    }
   } catch (err) { ans.textContent = `Could not answer: ${err.message}`; }
 }
 function describe(res) {
@@ -249,7 +333,12 @@ function describe(res) {
   if (res.template === "when") { const p = res.presence;
     return `${res.entity}\npresent frames ${p.first}–${p.last}, ${p.num_observed} observed\n` +
       (p.gaps.length ? p.gaps.map((g) => `  gap ${g.start}–${g.end}: ${g.kind}`).join("\n") : "  no gaps"); }
-  if (res.template === "relate") return res.available === false ? `Not available: ${res.reason}` : JSON.stringify(res, null, 2);
+  if (res.template === "relate") {
+    if (res.available === false) return `Not available: ${res.reason}`;
+    if (!res.count) return `No ${a.predicate && a.predicate !== "any" ? a.predicate + " " : ""}relations for ${nameOf(res.entity)}${at}`;
+    return `${res.count} relation${res.count > 1 ? "s" : ""}${at}\n` +
+      res.relations.map((r) => `  ${r.sentence}   frames ${r.intervals.map(([x, y]) => `${x}–${y}`).join(", ")}`).join("\n");
+  }
   return JSON.stringify(res, null, 2);
 }
 $("q-template").addEventListener("change", syncQueryInputs);
@@ -260,7 +349,7 @@ $("query-form").addEventListener("submit", (ev) => {
   if (["select", "count"].includes(t)) args.category = $("q-category").value;
   if (["when", "relate"].includes(t)) args.entity = $("q-entity").value;
   if (t === "relate") args.predicate = $("q-predicate").value;
-  if ($("q-at-frame").checked && ["select", "count"].includes(t)) args.frame = S.frames[S.fi];
+  if ($("q-at-frame").checked && ["select", "count", "relate"].includes(t)) args.frame = S.frames[S.fi];
   runQuery(t, args);
 });
 

@@ -115,3 +115,18 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
   cursor: pointer; }
 .edit-list li.active { border-color: var(--accent); color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.edge-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pred-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.pred-chips button { font-family: var(--mono); font-size: .68rem; padding: 2px 7px; cursor: pointer;
+  background: none; border: 1px solid var(--line); color: var(--muted); display: inline-flex; gap: 5px;
+  align-items: center; }
+.pred-chips button[aria-pressed="true"] { color: var(--ink); border-color: currentColor; }
+.pred-chips i { width: 12px; height: 3px; display: inline-block; }
+.rel-timeline { display: grid; grid-template-columns: 1fr; gap: 3px; font-family: var(--mono); font-size: .7rem; }
+.rel-timeline h3 { font-size: .74rem; margin: 6px 0 2px; font-weight: 600; }
+.rel-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 8px; align-items: center; }
+.rel-row .sent { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rel-row .track { position: relative; height: 10px; background: var(--raised); }
+.rel-row .iv { position: absolute; top: 2px; bottom: 2px; }
+.rel-row.active .sent { color: var(--ink); }

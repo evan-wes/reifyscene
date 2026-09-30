@@ -25,6 +25,13 @@
       <h2>Scene graph</h2>
       <span class="meta" id="graph-note"></span>
     </div>
+    <div class="edge-controls">
+      <div class="seg" id="edge-scope" role="group" aria-label="which relations">
+        <button type="button" data-scope="frame" aria-pressed="true">this frame</button>
+        <button type="button" data-scope="clip" aria-pressed="false">whole clip</button>
+      </div>
+      <div class="pred-chips" id="pred-chips" aria-label="predicates"></div>
+    </div>
     <div id="cy" role="img" aria-label="entities in the scene"></div>
     <div class="legend" id="legend"></div>
   </section>
@@ -46,6 +53,7 @@
     </div>
     <input type="range" id="frame-slider" min="0" max="0" value="0" aria-label="frame">
     <div class="timeline" id="timeline" aria-label="presence timeline"></div>
+    <div class="rel-timeline" id="rel-timeline" aria-label="relations of the selected entity"></div>
   </section>
 
   <section class="panel side-panel" aria-label="query and edit">
@@ -61,11 +69,13 @@
         <select id="q-category" aria-label="category"></select>
         <select id="q-entity" aria-label="entity" hidden></select>
         <select id="q-predicate" aria-label="predicate" hidden>
+          <option value="any">any relation</option>
           <option>near</option><option>above</option><option>below</option><option>on</option>
           <option>in</option><option>between</option><option>closest</option><option>farthest</option>
         </select>
       </div>
       <label class="check"><input type="checkbox" id="q-at-frame"> at the current frame</label>
+      <p class="meta" id="rel-meta"></p>
       <button type="submit" class="primary">Run query</button>
     </form>
     <pre class="answer" id="q-answer" aria-live="polite">Ask something about the scene.</pre>

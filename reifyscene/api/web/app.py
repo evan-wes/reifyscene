@@ -225,7 +225,8 @@ def create_app(
                 "entities": [e.summary() | {"observed": e.presence.observed}
                              for e in sorted(q.entities.values(), key=lambda e: e.node_id)],
                 "edges": edges,
-                "relations_available": bool(edges)}
+                "relations_available": bool(edges),
+                "relations_meta": (q.graph.metadata or {}).get("relations")}
 
     @app.post("/api/runs/{name}/query")
     def run_query(name: str, body: QueryIn) -> dict[str, Any]:
