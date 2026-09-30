@@ -357,12 +357,15 @@ def create_app(
                   px: Annotated[float, Query(ge=-5, le=5)] = 0.0,
                   py: Annotated[float, Query(ge=-5, le=5)] = 0.0,
                   width: Annotated[int | None, Query(ge=64, le=4096)] = None,
-                  edit: str | None = None):
+                  edit: str | None = None,
+                  show: Annotated[str, Query(pattern="^(scene|edited|took)$")] = "scene"):
         """The frame's moment from an orbited camera -- the 3D view. Never cached (every camera
         differs); refuses rather than queues while an edit holds the GPU."""
         r = get_run(name)
         edit_dir = None
-        if edit is not None:
+        if show != "scene" and edit is None:
+            raise HTTPException(400, f"show={show} needs an edit")
+        if edit is not None and show != "scene":
             job = jobs.get(edit)
             if job is None or job.run != name or job.status != "done" or job.out_dir is None:
                 raise HTTPException(404, f"no finished edit {edit!r} of {name}")
@@ -373,8 +376,8 @@ def create_app(
             ed = editor(r)
             if frame not in ed.renderer.time_of:
                 raise HTTPException(404, f"no training camera for frame {frame}")
-            arr = ed.render_view(frame, edit_dir=edit_dir, yaw=yaw, pitch=pitch, zoom=zoom,
-                                 pan_x=px, pan_y=py, width=width)
+            arr = ed.render_view(frame, edit_dir=edit_dir, show=show, yaw=yaw, pitch=pitch,
+                                 zoom=zoom, pan_x=px, pan_y=py, width=width)
         finally:
             gpu.release()
         return jpeg(arr)

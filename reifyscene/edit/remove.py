@@ -51,7 +51,7 @@ class RemoveEditor:
         self.renderer = CheckpointRenderer(self.bundle, device)
         self._counts = None
         self._node_ids: list[str | None] = []
-        self._edited: tuple[str, Any] | None = None
+        self._edited: dict[tuple[str, str], Any] = {}   # (edit dir, show) -> scene; last two
 
     # -- evidence -----------------------------------------------------------------------------
 
@@ -174,26 +174,47 @@ class RemoveEditor:
                             bg=np.asarray(bg, np.int64))
         return result
 
-    def edited_scene(self, edit_dir: Path):
-        """The scene with an earlier removal applied, from the indices it saved (last one kept)."""
+    def edited_scene(self, edit_dir: Path, *, took: bool = False):
+        """An earlier removal, from the indices it saved: the scene without them, or (``took``)
+        only them -- what the removal took. None when it took nothing."""
         from reifyscene.graph.renderable_handle import drop_gaussians
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-        key = str(edit_dir)
-        if self._edited is None or self._edited[0] != key:
+        key = (str(edit_dir), "took" if took else "edited")
+        if key not in self._edited:
             with np.load(Path(edit_dir) / REMOVED_FILE) as z:
                 fg, bg = z["fg"], z["bg"]
+            if took:
+                if len(fg) + len(bg) == 0:
+                    return None
+                n_fg = int(np.asarray(self.bundle["fg_means"]).shape[0])
+                n_bg = (int(np.asarray(self.bundle["bg_means"]).shape[0])
+                        if "bg_means" in self.bundle else 0)
+                fg, bg = np.setdiff1d(np.arange(n_fg), fg), np.setdiff1d(np.arange(n_bg), bg)
             scene, _ = bundle_to_scene(drop_gaussians(self.bundle, fg, bg_indices=bg),
                                        device=self.device)
-            self._edited = (key, scene)
-        return self._edited[1]
+            if len(self._edited) >= 2:                  # two scenes: an edit's after and took
+                self._edited.pop(next(iter(self._edited)))
+            self._edited[key] = scene
+        return self._edited[key]
 
-    def render_view(self, frame: int, *, edit_dir: Path | None = None, **camera) -> np.ndarray:
-        """``frame``'s moment from an orbited camera (see ``CheckpointRenderer.orbit_camera``),
-        with a saved removal applied when ``edit_dir`` is given."""
+    def render_view(self, frame: int, *, edit_dir: Path | None = None, show: str = "scene",
+                    **camera) -> np.ndarray:
+        """``frame``'s moment from an orbited camera (see ``CheckpointRenderer.orbit_camera``).
+
+        ``show``: ``scene`` (unedited), ``edited`` (the removal in ``edit_dir`` applied) or
+        ``took`` (only what it removed, on black).
+        """
         r = self.renderer
-        scene = r.scene if edit_dir is None else self.edited_scene(edit_dir)
-        return r.render_view(scene, frame, r.orbit_camera(frame, **camera))
+        cam = r.orbit_camera(frame, **camera)
+        if show == "scene":
+            return r.render_view(r.scene, frame, cam)
+        if edit_dir is None:
+            raise ValueError(f"show={show!r} needs an edit")
+        scene = self.edited_scene(edit_dir, took=show == "took")
+        if scene is None:
+            return np.zeros((cam.height, cam.width, 3), np.uint8)
+        return r.render_view(scene, frame, cam)
 
     def render_before(self, frame: int) -> np.ndarray:
         return self.renderer.before(frame)

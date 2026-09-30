@@ -30,6 +30,7 @@ const S = {
   selRel: null,   // index into S.graph.edges of the selected relation
   cam: { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 },   // the 3D view, relative to the frame's camera
   moving: false,  // a drag is under way: preview renders are smaller
+  free3d: false,  // the 3D camera, over whichever Gaussian view is showing
 };
 const HOME = { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 };
 
@@ -328,7 +329,11 @@ function placeCursor() {
 const nearestIndex = (f) => S.frames.reduce((best, v, i) => (Math.abs(v - f) < Math.abs(S.frames[best] - f) ? i : best), 0);
 
 // -- frame view -------------------------------------------------------------------------------
-const VIEWS = [["photo", "photo"], ["render", "render"], ["3d", "3D"], ["before", "before"], ["after", "after"], ["took", "took"]];
+const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"], ["took", "took"]];
+// what each Gaussian view shows from the 3D camera; a photo has no 3D
+const SHOW_3D = { render: "scene", before: "scene", after: "edited", took: "took" };
+const shown = () => (S.flipped ? flipTarget(S.view) : S.view);
+const in3d = (view = shown()) => S.free3d && view in SHOW_3D;
 function drawViews() {
   const seg = $("view-seg"); seg.innerHTML = "";
   const edit = S.activeEdit && S.edits[S.run]?.find((x) => x.id === S.activeEdit);
@@ -339,29 +344,35 @@ function drawViews() {
     if (needsEdit && !(edit && edit.status === "done")) b.disabled = true;
     seg.append(b);
   }
+  const t = $("free3d");
+  t.setAttribute("aria-pressed", String(S.free3d));
+  t.disabled = S.view === "photo";
+  t.title = S.view === "photo" ? "a photo has no 3D: pick render or an edit view" : "orbit this view in 3D";
 }
 function frameUrl(view, f) {
-  if (view === "3d") {
+  if (in3d(view)) {
     const c = S.cam, q = new URLSearchParams({ yaw: c.yaw.toFixed(1), pitch: c.pitch.toFixed(1),
-      zoom: c.zoom.toFixed(3), px: c.px.toFixed(3), py: c.py.toFixed(3) });
+      zoom: c.zoom.toFixed(3), px: c.px.toFixed(3), py: c.py.toFixed(3), show: SHOW_3D[view] });
     if (S.moving) q.set("width", "480");
-    if (S.activeEdit && !S.flipped) q.set("edit", S.activeEdit);   // flip shows the scene unedited
+    if (SHOW_3D[view] !== "scene") q.set("edit", S.activeEdit);
     return `/api/runs/${S.run}/view/${f}.jpg?${q}`;
   }
   if (["before", "after", "took"].includes(view)) return `/api/edits/${S.activeEdit}/${view}/${f}.jpg`;
   if (view === "render") return `/api/runs/${S.run}/render/${f}.jpg`;
   return `/api/runs/${S.run}/frames/${f}.jpg`;
 }
-function flipTarget(view) { return { "3d": "3d", after: "before", took: "before", before: "after", render: "photo", photo: "render" }[view]; }
+function flipTarget(view) { return { after: "before", took: "before", before: "after", render: "photo", photo: "render" }[view]; }
 function paint() {
   if (!S.frames.length) return;
   const f = S.frames[S.fi];
-  const view = S.flipped ? flipTarget(S.view) : S.view;
+  // in 3D a render flips to nothing: there is no photo from a moved camera
+  if (S.free3d && S.flipped && S.view === "render") S.flipped = false;
+  const view = shown(), is3d = in3d(view);
   $("frame-label").textContent = f;
   $("frame-slider").value = S.fi;
   const img = $("frame-img"), sp = $("stage-spinner");
   const url = frameUrl(view, f);
-  if (view === "3d") load3d(url);
+  if (is3d) load3d(url);
   else if (img.dataset.src !== url) {
     S.loading3d = null; S.pending3d = null;
     sp.hidden = view === "photo"; img.dataset.src = url;
@@ -371,22 +382,23 @@ function paint() {
   const out = $("outline-img");
   const rel = S.selRel !== null ? S.graph.edges[S.selRel] : null;
   // outlines come from the training camera's id maps: they do not follow a moved 3D camera
-  const nodes = view === "3d" ? [] : rel ? [rel.src, rel.dst, rel.attrs?.and].filter(Boolean) : S.selected ? [S.selected] : [];
+  const nodes = is3d ? [] : rel ? [rel.src, rel.dst, rel.attrs?.and].filter(Boolean) : S.selected ? [S.selected] : [];
   if (nodes.length) { out.hidden = false; out.onerror = () => { out.hidden = true; };
     out.src = `/api/runs/${S.run}/outline/${f}.png?` + nodes.map((n) => `node=${encodeURIComponent(n)}`).join("&"); }
   else out.hidden = true;
   let sel = S.selected ? ` · ${entity(S.selected)?.category} ${short(S.selected)} outlined` : "";
   if (rel) sel = ` · ${sentence(rel)}${edgeActive(rel.attrs?.intervals || [], f) ? "" : " (not at this frame)"}`;
-  if (view === "3d") {
-    const edited = S.activeEdit && !S.flipped;
+  if (is3d) {
     // one moving camera saw this scene: far off its path the reconstruction is guesswork
     const far = Math.abs(S.cam.yaw) > 15 || Math.abs(S.cam.pitch) > 10;
-    sel = `${edited ? " · edit applied (click: original)" : S.activeEdit ? " · original (click: edited)" : ""}` +
+    const flip = view === "render" ? " · (no photo from a moved camera)"
+      : ` · click: ${S.flipped ? S.view : flipTarget(S.view)}`;
+    sel = flip +
       (far ? ` · ${Math.round(S.cam.yaw)}°/${Math.round(S.cam.pitch)}° off the recorded view: unseen, expect smears` : "") +
       " · drag orbit · shift-drag pan · wheel zoom · double-click reset";
   }
-  $("stage-tag").textContent = `${view === "3d" ? "3D" : view}${sel}`;
-  $("stage").classList.toggle("free", view === "3d");
+  $("stage-tag").textContent = `${is3d ? `3D ${view}` : view}${sel}`;
+  $("stage").classList.toggle("free", is3d);
   drawViews(); placeCursor(); updateEdges();
   if (S.selected || S.selRel !== null) drawRelTimeline();
 }
@@ -402,7 +414,7 @@ function load3d(url) {
   probe.onerror = () => {                          // 503 while an edit holds the GPU: try again shortly
     if (S.loading3d !== url) return;
     S.loading3d = null; sp.hidden = true;
-    setTimeout(() => { if (S.view === "3d") paint(); }, 600);
+    setTimeout(() => { if (in3d()) paint(); }, 600);
   };
   probe.src = url;
 }
@@ -410,7 +422,7 @@ function initFreeView() {
   const st = $("stage");
   let drag = null;
   st.addEventListener("pointerdown", (ev) => {
-    if (S.view !== "3d") return;
+    if (!in3d()) return;
     drag = { x: ev.clientX, y: ev.clientY, cam: { ...S.cam }, pan: ev.shiftKey || ev.button === 2, moved: false };
     st.setPointerCapture(ev.pointerId);
   });
@@ -430,15 +442,16 @@ function initFreeView() {
   const end = () => { if (!drag) return; const moved = drag.moved; drag = null;
     if (moved) { S.moving = false; S.swallowClick = true; paint(); } };
   st.addEventListener("pointerup", end); st.addEventListener("pointercancel", end);
-  st.addEventListener("contextmenu", (ev) => { if (S.view === "3d") ev.preventDefault(); });
+  st.addEventListener("contextmenu", (ev) => { if (in3d()) ev.preventDefault(); });
   st.addEventListener("wheel", (ev) => {
-    if (S.view !== "3d") return;
+    if (!in3d()) return;
     ev.preventDefault();
     S.cam.zoom = Math.max(0.1, Math.min(10, S.cam.zoom * Math.exp(ev.deltaY * 0.0015)));
     S.moving = true; paint();
     clearTimeout(S.wheelEnd); S.wheelEnd = setTimeout(() => { S.moving = false; paint(); }, 250);
   }, { passive: false });
-  st.addEventListener("dblclick", () => { if (S.view === "3d") { S.cam = { ...HOME }; paint(); } });
+  st.addEventListener("dblclick", () => { if (in3d()) { S.cam = { ...HOME }; paint(); } });
+  $("free3d").addEventListener("click", () => { S.free3d = !S.free3d; paint(); });
 }
 
 function setFrame(i) { S.fi = Math.max(0, Math.min(S.frames.length - 1, i)); paint(); }

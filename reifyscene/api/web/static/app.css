@@ -147,3 +147,5 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
 .stage.free img { -webkit-user-drag: none; pointer-events: none; }
 .timeline .name.nogs { font-style: italic; opacity: 0.75; }
 .edit .note { margin: 0; }
+.toggle[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.toggle:disabled { opacity: .45; cursor: not-allowed; }
