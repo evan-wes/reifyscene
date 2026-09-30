@@ -26,15 +26,15 @@ from reifyscene.eval.reference.conceptgraphs.export import REFERENCE_DIAGONAL_M
 
 REPO = Path(__file__).resolve().parents[1]
 RUNS = REPO.parent / "runs"
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True, help="directory to write sequences into")
     ap.add_argument("--runs", type=Path, default=RUNS)
-    ap.add_argument("--davis", type=Path, default=DAVIS)
-    ap.add_argument("--sequences", nargs="*", help="DAVIS names; default every inv_* run")
+    ap.add_argument("--sequences", nargs="*",
+                    help="DAVIS sequence names; default every run under --runs whose input is "
+                         "a DAVIS sequence (recognised from what ingest recorded)")
     ap.add_argument("--stage", default="geometry",
                     help="geometry (default) or pose_refine. pose_refine copies geometry's "
                          "pointmaps but replaces its poses, so the two disagree -- its "
@@ -43,24 +43,29 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="stop after N sequences (a smoke test)")
     args = ap.parse_args()
 
-    if args.sequences:
-        runs = [args.runs / f"inv_{s}" for s in args.sequences]
-    else:
-        runs = sorted(p for p in args.runs.glob("inv_*") if (p / args.stage).is_dir())
+    from reifyscene.ingest.streams import RunStreams, StreamError
+
+    def davis_sequence(run: Path) -> str | None:
+        try:
+            src = RunStreams.from_run(run).only().source
+        except (FileNotFoundError, StreamError, KeyError):
+            return None
+        return src.sequence if src.kind == "davis" else None
+
+    found = {p: davis_sequence(p) for p in sorted(args.runs.iterdir())
+             if p.is_dir() and (p / args.stage).is_dir()}
+    runs = [p for p, seq in found.items()
+            if seq is not None and (not args.sequences or seq in args.sequences)]
     if args.limit:
         runs = runs[: args.limit]
 
     args.out.mkdir(parents=True, exist_ok=True)
     rows, failed = [], []
     for run in runs:
-        sequence = run.name.removeprefix("inv_")
-        frames_dir = args.davis / "JPEGImages" / "480p" / sequence
-        if not frames_dir.is_dir():
-            failed.append({"sequence": sequence, "error": f"no frames at {frames_dir}"})
-            continue
+        sequence = found[run]
         try:
             result = export_run(
-                run, frames_dir, args.out / sequence,
+                run, args.out / sequence,
                 stage=args.stage, reference_diagonal_m=args.reference_diagonal_m,
             )
         except Exception as exc:  # one bad run must not lose the other eighty-nine

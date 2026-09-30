@@ -83,18 +83,6 @@ from reifyscene.eval.benchmarks.edit_damage.score import (  # noqa: E402
     taken_score as _taken_score,
 )
 
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
-
-
-
-
-
-
-
-
-
-
-
 
 def _mean(rows: list[dict], ref: str, key: str) -> float | None:
     vals = [r[ref][key] for r in rows if r[ref].get(key) is not None]
@@ -142,13 +130,11 @@ def gate_run(run: Path, args) -> dict:
         identity_handles,
         render_pixel_masks,
     )
+    from reifyscene.ingest.streams import RunStreams
 
-    seq = run.name.removeprefix("loop_")
-    ann_dir = args.davis / "Annotations" / "480p" / seq
-    placed = render_pixel_masks(run)
-    ingest = json.loads((run / "ingest" / "artifact.json").read_text())
-    n_frames = int(next(s.get("value", s) for s in ingest["streams"])["num_frames"])
-    gt_by_frame = {f: _gt_masks(ann_dir, f, placed.transform) for f in range(n_frames)}
+    stream = RunStreams.from_run(run).only()
+    placed = render_pixel_masks(run, stream_id=stream.id)
+    gt_by_frame = _gt_masks(stream)
     matched, best, _ = match_objects(gt_by_frame, placed.by_frame, match_iou=args.match_iou)
 
     def load(sub: str) -> dict:
@@ -157,9 +143,10 @@ def gate_run(run: Path, args) -> dict:
 
     use_identity = args.identity_sub.lower() != "none"
     base_bundle = load(args.base_sub)
-    base_r = _Renderer(base_bundle, args.device)
+    base_r = _Renderer.for_run(base_bundle, args.device, run, stream_id=stream.id)
     id_bundle = load(args.identity_sub) if use_identity else None
-    id_r = _Renderer(id_bundle, args.device) if use_identity else base_r
+    id_r = (_Renderer.for_run(id_bundle, args.device, run, stream_id=stream.id)
+            if use_identity else base_r)
     # compute_renderable_handles resolves its checkpoint under <run>/render/
     ckpt = "trained_dynamic.npz" if args.base_sub == "render" else \
         f"../{args.base_sub}/trained_dynamic.npz"
@@ -182,7 +169,7 @@ def gate_run(run: Path, args) -> dict:
         node, iou = matched[gid]
         row.update(status="matched", node_id=node, label=placed.labels.get(node, ""),
                    match_iou=iou)
-        present = [f for f in range(n_frames) if gid in gt_by_frame[f]
+        present = [f for f in stream.frames if gid in gt_by_frame.get(f, {})
                    and f in base_r.time_of and f in id_r.time_of]
         step = max(1, len(present) // max(1, args.frames))
         frames = present[::step][: args.frames]
@@ -286,7 +273,6 @@ def main() -> int:
                     help="pooled-over-clip IoU a node needs to count as the object")
     ap.add_argument("--changed-threshold", type=int, default=12,
                     help="per-pixel L1 over 0-255 channels above which a pixel counts as changed")
-    ap.add_argument("--davis", type=Path, default=DAVIS)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     if 0.5 not in args.tau:

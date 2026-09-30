@@ -35,7 +35,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dirs", type=Path, nargs="+")
-    ap.add_argument("--stream", default="cam_00")
+    ap.add_argument("--stream", default=None, help="stream id (default: the run's only one)")
     args = ap.parse_args()
 
     header = (f"{'run':<22} {'frames':>6} {'classes':>7} {'entity%':>8} {'overlap%':>9} "

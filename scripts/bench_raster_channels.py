@@ -59,7 +59,7 @@ def _synthetic(n: int, width: int, height: int):
 def _from_checkpoint(path: Path):
     import torch
 
-    from reifyscene.render.eval.checkpoint_views import replay_size
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import RenderCamera
 
@@ -68,7 +68,7 @@ def _from_checkpoint(path: Path):
     scene, _ = bundle_to_scene(data, device="cuda")
     i = len(data["train_time_ids"]) // 2
     K = np.asarray(data["train_Ks"][i], np.float32)
-    w, h = replay_size(K)
+    w, h = RunStreams.from_run(Path(path).parent.parent).only().render_raster  # <run>/<sub>/
     cam = RenderCamera(viewmat=np.asarray(data["train_w2cs"][i], np.float32), K=K,
                        width=w, height=h)
     with torch.no_grad():

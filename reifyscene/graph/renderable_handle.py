@@ -86,14 +86,26 @@ class RenderableHandles:
         }
 
 
-def _node_track_id(node_id: str, stream_id: str) -> str | None:
-    """``object:cam_00:sam2:cam_00:3`` -> ``sam2:cam_00:3``; None for non-entity nodes."""
-    prefix = f"{stream_id}:"
-    for kind in ("human", "object"):
-        head = f"{kind}:{prefix}"
-        if node_id.startswith(head):
-            return node_id[len(head):]
-    return None
+def _node_track_id(node: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(stream id, canonical track id)`` of an entity node; None for any other node.
+
+    The track id is read from ``attrs["track_id"]`` when the graph recorded it; otherwise it is
+    the tail of the id the graph builder composes (``<kind>:<stream>:<track>``), with the stream
+    taken from the node's own ``attrs["stream_id"]`` -- the graph's format, read by the graph's
+    code, not a caller's guess at the stream.
+    """
+    kind = str(node.get("node_type", ""))
+    if kind not in ("human", "object"):
+        return None
+    attrs = node.get("attrs") or {}
+    stream = attrs.get("stream_id")
+    if stream is None:
+        return None
+    if attrs.get("track_id"):
+        return str(stream), str(attrs["track_id"])
+    head = f"{kind}:{stream}:"
+    node_id = str(node.get("node_id", ""))
+    return (str(stream), node_id[len(head):]) if node_id.startswith(head) else None
 
 
 def trained_fg_positions(
@@ -118,12 +130,14 @@ def trained_fg_positions(
     positions = means_t.detach().cpu().numpy().transpose(1, 0, 2)  # (G, T, 3) -> (T, G, 3)
     w2c = np.asarray(bundle["train_w2cs"], dtype=np.float64)
     intrinsics = np.asarray(bundle["train_Ks"], dtype=np.float64)
-    frames = [int(str(n).rsplit(":", 1)[-1]) for n in np.asarray(bundle["train_frame_names"])]
+    from reifyscene.ingest.streams import parse_key
+
+    frames = [parse_key(str(n))[1] for n in np.asarray(bundle["train_frame_names"])]
     return positions, w2c, intrinsics, frames
 
 
 def entity_masks_in_render_pixels(
-    run_dir: Path, *, stream_id: str = "cam_00"
+    run_dir: Path, *, stream_id: str | None = None
 ) -> tuple[dict[int, dict[str, np.ndarray]], dict[str, str], list[str]]:
     """``({frame: {node_id: mask}}, {node_id: label}, notes)`` in the geometry's raster.
 
@@ -151,30 +165,29 @@ class RenderPixelMasks:
     transform: Any                      # ImageTransform; Any keeps the import lazy
 
 
-def render_pixel_masks(run_dir: Path, *, stream_id: str = "cam_00") -> RenderPixelMasks:
-    """:func:`entity_masks_in_render_pixels`, plus the unmapped tracklets and the transform."""
-    from reifyscene.geometry.image_transform import ImageTransform
+def render_pixel_masks(run_dir: Path, *, stream_id: str | None = None) -> RenderPixelMasks:
+    """:func:`entity_masks_in_render_pixels`, plus the unmapped tracklets and the transform.
+
+    ``stream_id`` defaults to the run's only stream
+    (:class:`~reifyscene.ingest.streams.RunStreams`).
+    """
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.perception.instance.instance_artifact import InstanceArtifact
 
     notes: list[str] = []
-    geometry = _read_json(run_dir / "geometry" / "artifact.json")
-    raw = ((geometry.get("metadata") or {}).get("image_transforms") or {}).get(stream_id)
-    if raw is None:
-        raise ValueError(
-            f"{run_dir.name}: geometry recorded no image transform for {stream_id!r}; masks "
-            "cannot be put into the render's pixels without guessing it"
-        )
-    transform = ImageTransform.from_dict(raw)
+    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream_id = stream.id
+    transform = stream.transform          # raises when the geometry recorded none
 
     graph = _read_json(run_dir / "graph" / "artifact.json")
     canonical_to_node: dict[str, str] = {}
     labels: dict[str, str] = {}
     for raw_node in graph.get("nodes") or []:
         node = raw_node.get("value", raw_node)
-        track = _node_track_id(str(node.get("node_id", "")), stream_id)
-        if track is None:
+        found = _node_track_id(node)
+        if found is None or found[0] != stream_id:
             continue
-        canonical_to_node[track] = str(node["node_id"])
+        canonical_to_node[found[1]] = str(node["node_id"])
         labels[str(node["node_id"])] = str(node.get("label", ""))
 
     merge_map: dict[str, str] = {}
@@ -220,7 +233,7 @@ def render_pixel_masks(run_dir: Path, *, stream_id: str = "cam_00") -> RenderPix
 def compute_renderable_handles(
     run_dir: Path,
     *,
-    stream_id: str = "cam_00",
+    stream_id: str | None = None,
     min_ratio: float = DEFAULT_MIN_RATIO,
     min_frames: int = DEFAULT_MIN_FRAMES,
     min_gaussians: int = 1,

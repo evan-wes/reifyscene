@@ -52,7 +52,8 @@ def main() -> None:
         drop_gaussians,
         entity_masks_in_render_pixels,
     )
-    from reifyscene.render.eval.checkpoint_views import _render, _to_u8, replay_size
+    from reifyscene.ingest.streams import RunStreams, parse_key
+    from reifyscene.render.eval.checkpoint_views import _render, _to_u8
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 
@@ -83,7 +84,8 @@ def main() -> None:
     masks, _labels, _notes = entity_masks_in_render_pixels(run_dir)
     frame_names = [str(n) for n in np.asarray(bundle["train_frame_names"])]
     time_ids = [int(t) for t in np.asarray(bundle["train_time_ids"])]
-    source = [int(n.rsplit(":", 1)[-1]) for n in frame_names]
+    stream = RunStreams.from_run(run_dir).only()
+    source = [parse_key(n)[1] for n in frame_names]
     # Render frames where the entity actually has a mask -- elsewhere there is nothing to see.
     candidates = [i for i, f in enumerate(source) if pick.node_id in masks.get(f, {})]
     if not candidates:
@@ -96,7 +98,7 @@ def main() -> None:
     rasterizer = build_rasterizer({"device": args.device})
     train = sorted(cams.get("train") or [], key=lambda c: c.time_id)
     by_time = {int(c.time_id): c for c in train}
-    width, height = replay_size(np.asarray(bundle["train_Ks"])[0])
+    width, height = stream.render_raster
 
     rows = []
     for i in chosen:
@@ -110,11 +112,8 @@ def main() -> None:
         diff = np.abs(before.astype(np.int16) - after.astype(np.int16)).sum(-1)
         changed = diff > int(args.changed_threshold)
         mask = masks[source[i]][pick.node_id]
-        if mask.shape != changed.shape:  # the raster the intrinsics imply vs the mask's
-            mask = np.asarray(
-                Image.fromarray(mask.astype(np.uint8) * 255)
-                .resize((changed.shape[1], changed.shape[0]), Image.Resampling.NEAREST)
-            ) > 127
+        if mask.shape != changed.shape:   # both are the recorded raster; a mismatch is a bug
+            raise SystemExit(f"mask {mask.shape} and render {changed.shape} rasters differ")
         inter = int((changed & mask).sum())
         union = int((changed | mask).sum())
         outside = int((changed & ~mask).sum())

@@ -29,7 +29,6 @@ from reifyscene.eval.benchmarks.inventory.score import score_masks_by_frame
 from reifyscene.eval.reference.conceptgraphs import masks_by_frame
 
 REPO = Path(__file__).resolve().parents[1]
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 RUNS = REPO.parent / "runs"
 
 
@@ -41,9 +40,8 @@ def _objects_file(sequence_dir: Path) -> Path | None:
     return (post or candidates or [None])[0]
 
 
-def _gt_motion(
-    annotation_dir: Path, run_dir: Path, frames: list[int], stream_id: str = "cam_00"
-) -> dict[int, float]:
+def _gt_motion(run_dir: Path, frames: list[int], stream_id: str | None = None
+               ) -> dict[int, float]:
     """Per ground-truth id, how far it travels **in the world**, in its own 3D extents.
 
     Image-space centroid travel cannot answer this: a camera that tracks a walking subject
@@ -56,37 +54,34 @@ def _gt_motion(
     whose world position cannot be recovered are absent from the result rather than assumed
     static.
     """
-    from PIL import Image
-
-    from reifyscene.geometry.image_transform import ImageTransform
+    from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
+    from reifyscene.ingest.streams import RunStreams, parse_key
     from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
     geometry = run_dir / "geometry"
     try:
+        stream = RunStreams.from_run(run_dir).resolve(stream_id)
+        transform = stream.transform
         art = json.loads((geometry / "artifact.json").read_text())
-        transform = ImageTransform.from_dict(
-            art["metadata"]["image_transforms"][stream_id]
-        )
     except Exception:
         return {}
+    # the pointmap files are the ones geometry's own index names
+    pointmap_of = {parse_key(k)[1]: v for k, v in (art.get("point_index") or {}).items()
+                   if parse_key(k)[0] == stream.id}
 
     def pointmap_for_frame(frame_idx: int):
-        path = geometry / "pointmaps" / f"{stream_id}__{int(frame_idx)}.npz"
-        if not path.exists():
+        name = pointmap_of.get(int(frame_idx))
+        path = geometry / "pointmaps" / name if name else None
+        if path is None or not path.exists():
             return None
         payload = np.load(path)
         return np.asarray(payload["points"]), payload.get("confidence")
 
+    ground_truth = stream_ground_truth(stream)
     masks_by_frame: dict[int, dict[str, np.ndarray]] = {}
     for frame in frames:
-        path = annotation_dir / f"{frame:05d}.png"
-        if not path.exists():
-            continue
-        arr = np.asarray(Image.open(path))
-        for gid in np.unique(arr):
-            if int(gid) == 0:
-                continue
-            masks_by_frame.setdefault(frame, {})[str(int(gid))] = arr == gid
+        for gid, mask in ground_truth(frame).items():
+            masks_by_frame.setdefault(frame, {})[str(gid)] = mask
     if not masks_by_frame:
         return {}
 
@@ -110,17 +105,38 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--export", type=Path, required=True, help="the export_for_conceptgraphs dir")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--davis", type=Path, default=DAVIS)
     ap.add_argument("--match-iou", type=float, default=0.5)
     ap.add_argument("--min-detections", type=int, default=3,
                     help="ConceptGraphs' own obj_min_detections default")
     ap.add_argument("--split-by-motion", action="store_true", default=True)
     ap.add_argument("--runs", type=Path, default=RUNS,
-                    help="the inv_* runs, for the world geometry the motion split needs")
+                    help="where the exported runs live: each export's sequence is matched to "
+                         "the run whose input is that DAVIS sequence, for its ground truth and "
+                         "world geometry")
     ap.add_argument("--motion-threshold", type=float, default=1.0,
                     help="world travel, in the object's own 3D extents, above which it is "
                          "'moving'. One extent means it moved its own length.")
     args = ap.parse_args()
+
+    from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
+    from reifyscene.ingest.streams import RunStreams, StreamError
+
+    candidates: dict[str, list[Path]] = {}   # DAVIS sequence -> runs built from it
+    for r in sorted(args.runs.iterdir()):
+        try:
+            src = RunStreams.from_run(r).only().source
+        except (FileNotFoundError, NotADirectoryError, StreamError, KeyError):
+            continue
+        if src.kind == "davis" and (r / "geometry").is_dir():
+            candidates.setdefault(src.sequence, []).append(r)
+
+    def run_for(manifest: dict[str, Any], sequence: str) -> Path | None:
+        """The run an export came from: as its manifest records, else the one run built from
+        that sequence -- never a pick among several."""
+        if manifest.get("run_dir"):
+            return Path(manifest["run_dir"])
+        found = candidates.get(sequence, [])
+        return found[0] if len(found) == 1 else None
 
     rows: list[dict[str, Any]] = []
     for manifest_path in sorted(args.export.glob("*/manifest.json")):
@@ -134,14 +150,23 @@ def main() -> None:
         by_frame, info = masks_by_frame(
             objects_path, manifest_path, min_detections=args.min_detections
         )
-        annotation_dir = args.davis / "Annotations" / "480p" / sequence
+        run = run_for(json.loads(manifest_path.read_text()), sequence)
+        if run is None:
+            n = len(candidates.get(sequence, []))
+            why = ("no run whose input is this sequence" if not n else
+                   f"{n} runs were built from this sequence and the export does not record "
+                   "which it came from (re-export it)")
+            rows.append({"sequence": sequence, "notes": [why]})
+            print(f"  {sequence:24s} -- {why}")
+            continue
         score = score_masks_by_frame(
-            by_frame, annotation_dir, sequence=sequence, match_iou=args.match_iou
+            by_frame, stream_ground_truth(RunStreams.from_run(run).only()), sequence=sequence,
+            match_iou=args.match_iou,
         )
         row = score.to_dict()
         row["conceptgraphs"] = info
         if args.split_by_motion:
-            motion = _gt_motion(annotation_dir, args.runs / f"inv_{sequence}", sorted(by_frame))
+            motion = _gt_motion(run, sorted(by_frame))
             matched = {m["gt_id"] for m in score.matches}
             moving = {g for g, t in motion.items() if t >= args.motion_threshold}
             row["motion"] = {

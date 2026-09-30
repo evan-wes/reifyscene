@@ -103,13 +103,21 @@ class Run:
         return self._query
 
     def photos(self) -> dict[int, Path]:
+        """The scene's training photos (already in render pixels), by frame, for the run's
+        one stream. The app has no stream picker yet, so a multi-stream run is refused rather
+        than having one camera's frame 12 silently replace another's."""
+        from reifyscene.ingest.streams import RunStreams, parse_key
+
         if self._photos is None:
+            stream = RunStreams.from_run(self.path).only().id
             raw = json.loads((self.path / "scene" / "artifact.json").read_text())
             self._photos = {}
             for v in raw.get("train_views", []):
                 key, f = v.get("frame_key"), v.get("image_file")
                 if key and f:
-                    self._photos[int(str(key).rsplit(":", 1)[-1])] = self.path / "scene" / f
+                    sid, frame = parse_key(key)
+                    if sid == stream:
+                        self._photos[frame] = self.path / "scene" / f
         return self._photos
 
     def id_maps(self) -> tuple[dict, dict[int, np.ndarray]]:
@@ -138,7 +146,8 @@ class Job:
 def discover_runs(root: Path, checkpoint_subs: Sequence[str],
                   only: Sequence[str] | None = None) -> dict[str, Run]:
     runs: dict[str, Run] = {}
-    names = only or sorted(p.name for p in Path(root).glob("loop_*") if p.is_dir())
+    # a run is whatever folder holds a graph and a trained checkpoint -- not a naming pattern
+    names = only or sorted(p.name for p in Path(root).iterdir() if p.is_dir())
     for name in names:
         path = Path(root) / name
         if not (path / "graph" / "artifact.json").is_file():

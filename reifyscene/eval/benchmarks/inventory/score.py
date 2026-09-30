@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,25 +76,33 @@ def score_sequence_masks(
     return matches, [int(m) for m in missed], int(spurious)
 
 
-def _gt_masks(annotation_dir: Path, frame_idx: int) -> dict[int, np.ndarray]:
-    from PIL import Image
+GroundTruth = Callable[[int], dict[int, np.ndarray]]
 
-    path = annotation_dir / f"{frame_idx:05d}.png"
-    if not path.exists():
-        return {}
-    arr = np.asarray(Image.open(path))
-    return {int(i): (arr == i) for i in np.unique(arr) if int(i) != 0}
+
+def stream_ground_truth(stream) -> GroundTruth:
+    """``frame -> {object id: mask}`` from a stream's source annotations (source pixels, the
+    same raster segment masks are in); an unannotated frame gives ``{}``."""
+    frames = set(stream.frames)
+
+    def gt(frame_idx: int) -> dict[int, np.ndarray]:
+        if int(frame_idx) not in frames:
+            return {}
+        arr = stream.annotation(int(frame_idx))
+        if arr is None:
+            return {}
+        return {int(i): (arr == i) for i in np.unique(arr) if int(i) != 0}
+
+    return gt
 
 
 def score_run(
     run_dir: Path,
-    annotation_dir: Path,
     *,
     frames: Sequence[int] | None = None,
     match_iou: float = 0.5,
-    stream_id: str = "cam_00",
+    stream_id: str | None = None,
 ) -> SequenceScore:
-    """Score one run against one DAVIS sequence's annotations.
+    """Score one run against its input's own annotations (the stream's source: DAVIS).
 
     Scoring uses the instance masks, not the graph nodes, because a node's identity is a
     tracklet while a ground-truth object is a mask: comparing masks keeps the question
@@ -102,9 +110,13 @@ def score_run(
     sampled rather than exhaustive -- an object either tracks or it does not, and three
     frames spread through the clip separate those cases at a fraction of the cost.
     """
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.perception.instance.instance_artifact import InstanceArtifact
 
-    score = SequenceScore(sequence=run_dir.name)
+    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream_id = stream.id
+    sequence = stream.source.sequence or run_dir.name
+    score = SequenceScore(sequence=sequence)
     try:
         inst = InstanceArtifact.load(run_dir / "segment")
     except Exception as exc:  # a run that did not reach segment still gets a row
@@ -123,14 +135,14 @@ def score_run(
         return score
 
     return score_masks_by_frame(
-        by_frame, annotation_dir, sequence=run_dir.name, frames=frames,
+        by_frame, stream_ground_truth(stream), sequence=sequence, frames=frames,
         match_iou=match_iou, notes=score.notes,
     )
 
 
 def score_masks_by_frame(
     by_frame: Mapping[int, Mapping[str, np.ndarray]],
-    annotation_dir: Path,
+    ground_truth: GroundTruth,
     *,
     sequence: str,
     frames: Sequence[int] | None = None,
@@ -171,7 +183,7 @@ def score_masks_by_frame(
     matched: dict[int, dict[str, Any]] = {}
     entities: set[str] = set()
     for frame_idx in frames:
-        gt = _gt_masks(annotation_dir, frame_idx)
+        gt = ground_truth(frame_idx)
         if not gt:
             continue
         score.frames_scored += 1

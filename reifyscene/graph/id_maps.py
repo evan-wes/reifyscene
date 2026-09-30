@@ -83,29 +83,24 @@ def _frame_file(frame: int) -> str:
     return f"frame_{frame:05d}.png"
 
 
-def _stream_num_frames(run_dir: Path, stream_id: str) -> int:
-    ingest = json.loads((run_dir / "ingest" / "artifact.json").read_text())
-    for raw in ingest.get("streams") or []:
-        stream = raw.get("value", raw)
-        if stream.get("stream_id") == stream_id:
-            return int(stream["num_frames"])
-    raise ValueError(f"{run_dir.name}: ingest has no stream {stream_id!r}")
-
-
 def export_id_maps(
-    run_dir: Path, *, stream_id: str = "cam_00", out_dir: Path | None = None
+    run_dir: Path, *, stream_id: str | None = None, out_dir: Path | None = None
 ) -> dict[str, Any]:
     """Write ``run_dir/identity/frame_NNNNN.png`` + ``manifest.json``; return the manifest.
 
-    Every ingest frame gets a map, including frames with no segment at all (all background):
+    Every frame the stream has gets a map -- its real frame numbers, which a folder of frames
+    may start above 0 or skip -- including frames with no segment at all (all background):
     whichever frames training samples, there is a target for it.
     """
     from PIL import Image
 
     from reifyscene.graph.renderable_handle import render_pixel_masks
+    from reifyscene.ingest.streams import RunStreams
 
     run_dir = Path(run_dir)
     out_dir = Path(out_dir) if out_dir is not None else run_dir / "identity"
+    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream_id = stream.id
     placed = render_pixel_masks(run_dir, stream_id=stream_id)
     transform = placed.transform
     width, height = transform.output_size
@@ -118,14 +113,13 @@ def export_id_maps(
         raise ValueError(f"{run_dir.name}: {len(node_ids)} entities do not fit in uint16")
     class_of = {nid: i + 1 for i, nid in enumerate(node_ids)}
 
-    num_frames = _stream_num_frames(run_dir, stream_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     per_class: dict[str, dict[str, Any]] = {
         nid: {"frames": [], "pixels": 0} for nid in node_ids
     }
     totals = {"overlap": 0, "unmapped": 0, "padding": 0, "background": 0, "entity": 0}
     frames_out: list[dict[str, Any]] = []
-    for frame in range(num_frames):
+    for frame in stream.frames:
         masks = placed.by_frame.get(frame, {})
         id_map, counts = compose_id_map(
             masks, class_of, shape=shape, unmapped=placed.unmapped.get(frame), valid=valid
@@ -142,7 +136,7 @@ def export_id_maps(
         totals["entity"] += int(((id_map != BACKGROUND) & (id_map != IGNORE)).sum())
         frames_out.append({"frame_idx": frame, "file": _frame_file(frame)})
 
-    total_px = num_frames * shape[0] * shape[1]
+    total_px = len(stream.frames) * shape[0] * shape[1]
     classes = [{"index": BACKGROUND, "node_id": None, "label": "background"}]
     for nid in node_ids:
         fr = per_class[nid]["frames"]

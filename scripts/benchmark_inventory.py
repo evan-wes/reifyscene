@@ -2,8 +2,10 @@
 
     python scripts/benchmark_inventory.py --out benchmarks/davis_inventory.json
 
-Reads the runs ``scan_clips_inventory.sh`` builds at ``../runs/inv_<sequence>/`` and
-writes one row per sequence: how many annotated objects there are, how many the inventory
+Reads the runs ``scan_clips_inventory.sh`` builds: the run folders given, or by default every
+run under ``--runs`` whose input is a DAVIS sequence (recognised from what ingest recorded, not
+the folder name) and whose manifest records it stopped at ``graph``, as that script's runs do.
+Writes one row per sequence: how many annotated objects there are, how many the inventory
 recovered, what it missed, and how many nodes matched nothing. Covariates come along --
 frame count, annotated-object count, and each stage's capability manifest -- so a change
 in the numbers can be attributed rather than just observed.
@@ -27,7 +29,6 @@ from reifyscene.eval.benchmarks.inventory import score_run
 
 REPO = Path(__file__).resolve().parents[1]
 RUNS = REPO.parent / "runs"
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 
 
 def _capabilities(run_dir: Path) -> dict[str, Any]:
@@ -62,24 +63,33 @@ def _git_head() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--runs", type=Path, default=RUNS, help="where inv_<sequence>/ live")
-    ap.add_argument("--davis", type=Path, default=DAVIS, help="DAVIS root")
+    ap.add_argument("run_dirs", type=Path, nargs="*", help="runs to score (default: see above)")
+    ap.add_argument("--runs", type=Path, default=RUNS, help="where the inventory runs live")
     ap.add_argument("--out", type=Path, default=REPO / "benchmarks/davis_inventory.json")
     ap.add_argument("--match-iou", type=float, default=0.5)
     args = ap.parse_args()
 
-    annotations = args.davis / "Annotations/480p"
-    images = args.davis / "JPEGImages/480p"
+    from reifyscene.ingest.streams import RunStreams, StreamError
+
     rows: list[dict[str, Any]] = []
-    for run_dir in sorted(args.runs.glob("inv_*")):
-        sequence = run_dir.name[len("inv_"):]
-        ann = annotations / sequence
-        if not ann.is_dir():
+    def stopped_at(run: Path) -> str | None:
+        manifest = run / "run_manifest.json"
+        return json.loads(manifest.read_text()).get("stop_stage") if manifest.is_file() else None
+
+    for run_dir in args.run_dirs or sorted(p for p in args.runs.iterdir() if p.is_dir()):
+        try:
+            stream = RunStreams.from_run(run_dir).only()
+            if stream.source.kind != "davis":
+                continue
+        except (FileNotFoundError, StreamError, KeyError):
             continue
-        score = score_run(run_dir, ann, match_iou=args.match_iou)
+        if not args.run_dirs and stopped_at(run_dir) != "graph":
+            continue
+        score = score_run(run_dir, match_iou=args.match_iou)
         row = score.to_dict()
-        row["sequence"] = sequence
-        row["num_frames"] = len(list((images / sequence).glob("*.jpg")))
+        row["run"] = run_dir.name
+        row["sequence"] = stream.source.sequence
+        row["num_frames"] = stream.num_frames
         row["capabilities"] = _capabilities(run_dir)
         rows.append(row)
 

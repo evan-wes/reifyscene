@@ -10,10 +10,17 @@ import numpy as np
 
 
 class CheckpointRenderer:
-    """Renders a bundle (and edits of it) at training cameras, caching the unedited view."""
+    """Renders a bundle (and edits of it) at training cameras, caching the unedited view.
 
-    def __init__(self, bundle: dict, device: str) -> None:
-        from reifyscene.render.eval.checkpoint_views import replay_size
+    ``raster`` is the (width, height) the scene was trained at and ``stream_id`` the stream its
+    cameras belong to -- both from the run's :class:`~reifyscene.ingest.streams.FrameStream`
+    (:meth:`for_run`). Neither is inferred from the intrinsics: a phone camera's principal point
+    is not at the image centre, so "twice the principal point" is a few pixels off.
+    """
+
+    def __init__(self, bundle: dict, device: str, *, raster: tuple[int, int],
+                 stream_id: str) -> None:
+        from reifyscene.ingest.streams import parse_key
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
         from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 
@@ -21,12 +28,27 @@ class CheckpointRenderer:
         self.rasterizer = build_rasterizer({"device": device})
         self.scene, cams = bundle_to_scene(bundle, device=device)
         self.cams = {int(c.time_id): c for c in cams.get("train") or []}
-        self.size = replay_size(np.asarray(bundle["train_Ks"])[0])
+        self.size = (int(raster[0]), int(raster[1]))
+        self.stream_id = str(stream_id)
         names = [str(n) for n in np.asarray(bundle["train_frame_names"])]
-        self.time_of = {int(n.rsplit(":", 1)[-1]): int(t)
-                        for n, t in zip(names, np.asarray(bundle["train_time_ids"]), strict=True)}
+        self.time_of: dict[int, int] = {}
+        for n, t in zip(names, np.asarray(bundle["train_time_ids"]), strict=True):
+            sid, frame = parse_key(n)
+            if sid == self.stream_id:
+                self.time_of[frame] = int(t)
+        if not self.time_of:
+            raise ValueError(f"the checkpoint has no training camera of stream {stream_id!r}")
         self._before: dict[int, np.ndarray] = {}
         self._pivot: dict[int, float] = {}
+
+    @classmethod
+    def for_run(cls, bundle: dict, device: str, run_dir, *, stream_id: str | None = None
+                ) -> CheckpointRenderer:
+        """The renderer for a run's checkpoint, raster and stream from the run itself."""
+        from reifyscene.ingest.streams import RunStreams
+
+        stream = RunStreams.from_run(run_dir).resolve(stream_id)
+        return cls(bundle, device, raster=stream.render_raster, stream_id=stream.id)
 
     def _render(self, scene, frame: int) -> np.ndarray:
         import torch

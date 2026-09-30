@@ -72,6 +72,7 @@ class ExportedSequence:
     sequence: str
     out_dir: str
     stage: str
+    run_dir: str = ""                     # the run it was exported from: its ground truth
     num_frames: int = 0
     scale_factor: float = 1.0
     scene_diagonal_units: float = 0.0
@@ -133,26 +134,29 @@ def _pinhole_residual_pct(cam: np.ndarray, intr: dict[str, float]) -> float:
 
 def export_run(
     run_dir: Path,
-    frames_dir: Path,
     out_dir: Path,
     *,
     stage: str = "geometry",
-    stream_id: str = "cam_00",
+    stream_id: str | None = None,
     reference_diagonal_m: float = REFERENCE_DIAGONAL_M,
     frames: Sequence[int] | None = None,
 ) -> ExportedSequence:
     """Write one run as a ConceptGraphs-readable posed RGB-D sequence.
 
-    ``frames_dir`` is the source frames (DAVIS ``JPEGImages/480p/<sequence>``); they are
-    mapped into the geometry's pixels with the transform the geometry stage recorded, so
-    colour and depth describe the same raster and the stored intrinsics apply unchanged.
-    Guessing that mapping from image sizes is what ``ImageTransform`` exists to prevent.
+    Colour comes from the run's own stream (:class:`~reifyscene.ingest.streams.FrameStream`),
+    mapped into the geometry's pixels with the transform the stage recorded, so colour and
+    depth describe the same raster and the stored intrinsics apply unchanged. Each frame's
+    pointmap file is the one the stage's ``point_index`` names, and its pose is the camera
+    state the stage recorded at that frame's time -- matched exactly, never by list position.
     """
     from PIL import Image
 
     from reifyscene.geometry.image_transform import ImageTransform
+    from reifyscene.ingest.streams import RunStreams, parse_key
 
-    run_dir, frames_dir, out_dir = Path(run_dir), Path(frames_dir), Path(out_dir)
+    run_dir, out_dir = Path(run_dir), Path(out_dir)
+    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream_id = stream.id
     art = read_json(run_dir / stage / "artifact.json")
     intr = dict(art["intrinsics_by_stream"][stream_id])
     states = art["camera_states_by_stream"][stream_id]
@@ -164,10 +168,28 @@ def export_run(
         )
     transform = ImageTransform.from_dict(raw_transform)
 
-    indexed = sorted(int(k.split(":", 1)[1]) for k in art.get("point_index", {}))
+    pointmap_of: dict[int, str] = {}
+    for key, name in (art.get("point_index") or {}).items():
+        sid, frame = parse_key(key)
+        if sid == stream_id:
+            pointmap_of[frame] = str(name)
+    time_of = {int(fr["frame_idx"]): float(fr["timestamp_sec"])
+               for fr in (x.get("value", x) for x in art.get("selected_frames") or [])
+               if str(fr["stream_id"]) == stream_id}
+    state_at = {float(s["time_sec"]): s for s in states}
+
+    def pose_for(frame: int) -> np.ndarray:
+        state = state_at.get(time_of[frame]) if frame in time_of else None
+        if state is None:
+            raise ValueError(f"{run_dir.name}/{stage} recorded no camera state for frame "
+                             f"{frame} of stream {stream_id!r}")
+        return np.asarray(state["pose"], dtype=np.float64)
+
+    indexed = sorted(pointmap_of)
     frame_list = list(indexed if frames is None else [f for f in frames if f in set(indexed)])
     result = ExportedSequence(
-        sequence=run_dir.name, out_dir=str(out_dir), stage=stage,
+        sequence=stream.source.sequence or run_dir.name, out_dir=str(out_dir), stage=stage,
+        run_dir=str(run_dir.resolve()),
         num_frames=len(frame_list), intrinsics=dict(intr),
     )
     if not frame_list:
@@ -186,7 +208,7 @@ def export_run(
     # per-frame scale would make its geometry inconsistent across time.
     sample = [frame_list[0], frame_list[len(frame_list) // 2], frame_list[-1]]
     cloud = np.concatenate([
-        np.load(run_dir / stage / "pointmaps" / f"{stream_id}__{f}.npz")["points"].reshape(-1, 3)
+        np.load(run_dir / stage / "pointmaps" / pointmap_of[f])["points"].reshape(-1, 3)
         for f in sample
     ])
     scale, diagonal = scale_to_reference(cloud, reference_diagonal_m=reference_diagonal_m)
@@ -197,13 +219,12 @@ def export_run(
     poses: list[np.ndarray] = []
     residuals: list[float] = []
     clipped = behind = total = 0
-    source_frames = sorted(frames_dir.glob("*.jpg")) or sorted(frames_dir.glob("*.png"))
 
     for out_idx, frame_idx in enumerate(frame_list):
         points = np.load(
-            run_dir / stage / "pointmaps" / f"{stream_id}__{frame_idx}.npz"
+            run_dir / stage / "pointmaps" / pointmap_of[frame_idx]
         )["points"].astype(np.float64)
-        pose = np.asarray(states[frame_idx]["pose"], dtype=np.float64)
+        pose = pose_for(frame_idx)
         cam, z = _camera_frame_depth(points, pose)
         residuals.append(_pinhole_residual_pct(cam, intr))
 
@@ -219,7 +240,7 @@ def export_run(
         depth_png = np.where(valid, np.clip(scaled, 0, _UINT16_MAX), 0).astype(np.uint16)
         Image.fromarray(depth_png).save(results_dir / f"depth{out_idx:05d}.png")
 
-        rgb = transform.apply_to_image(Image.open(source_frames[frame_idx]), kind="rgb")
+        rgb = transform.apply_to_image(stream.frame(frame_idx), kind="rgb")
         if rgb.shape[:2] != depth_png.shape[:2]:
             raise ValueError(
                 f"{run_dir.name} frame {frame_idx}: colour is {rgb.shape[:2]} after the "

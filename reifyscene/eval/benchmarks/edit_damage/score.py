@@ -34,16 +34,23 @@ import numpy as np
 PSNR_CAP = 60.0
 
 
-def gt_masks(ann_dir: Path, frame: int, transform) -> dict[int, np.ndarray]:
-    """``{object id: bool mask}`` of one DAVIS annotation frame, placed in the render raster."""
-    from PIL import Image
+def gt_masks(stream) -> dict[int, dict[int, np.ndarray]]:
+    """``{frame: {object id: bool mask}}`` for every frame of ``stream`` its source annotates,
+    placed in the render raster with the stream's recorded transform.
 
-    path = ann_dir / f"{frame:05d}.png"
-    if not path.is_file():
-        return {}
-    arr = np.asarray(Image.open(path))
-    return {int(i): transform.apply_to_image((arr == i).astype(np.uint8), kind="mask") > 0
-            for i in np.unique(arr) if int(i) != 0}
+    The annotations come from the stream's source (:class:`~reifyscene.ingest.sources.DavisSource`),
+    found through each frame's own file -- not from a sequence name taken from the run folder.
+    """
+    if not stream.source.has_ground_truth:
+        raise ValueError(f"stream {stream.id!r} is a {stream.source.kind} source: it has no "
+                         "ground truth to score against")
+    out: dict[int, dict[int, np.ndarray]] = {}
+    for f in stream.frames:
+        arr = stream.annotation(f)
+        if arr is None:
+            continue
+        out[f] = {int(i): stream.mask_in_render(arr == i) for i in np.unique(arr) if int(i) != 0}
+    return out
 
 
 def match_objects(gt_by_frame, node_by_frame, *, match_iou: float):
@@ -88,12 +95,11 @@ def changed(a: np.ndarray, b: np.ndarray, thr: int) -> np.ndarray:
 
 
 def fit(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    from PIL import Image
-
-    if mask.shape == shape:
-        return mask
-    return np.asarray(Image.fromarray(mask.astype(np.uint8) * 255)
-                      .resize((shape[1], shape[0]), Image.Resampling.NEAREST)) > 127
+    """``mask``, checked to be in the ``shape`` raster. Masks and renders are both placed in the
+    recorded raster, so a difference is a bug upstream -- never resized to fit."""
+    if mask.shape != tuple(shape):
+        raise ValueError(f"mask raster {mask.shape} is not the render raster {tuple(shape)}")
+    return mask
 
 
 def dilate(mask: np.ndarray, px: int) -> np.ndarray:
@@ -162,20 +168,19 @@ METRICS = ("taken_recall", "taken_precision", "alone_precision", "halo_ratio",
            "others_damaged", "rest_psnr_db")
 
 
-def score_run(run: Path, *, checkpoint_sub: str, davis: Path, frames: int = 4,
+def score_run(run: Path, *, checkpoint_sub: str, frames: int = 4,
               match_iou: float = 0.25, changed_threshold: int = 12, ring: int = 8,
               device: str = "cuda") -> dict[str, Any]:
     """Every annotated object of one DAVIS run: matched, removed via the layer, scored."""
     from reifyscene.edit.remove import RemoveEditor
     from reifyscene.graph.renderable_handle import drop_gaussians, render_pixel_masks
+    from reifyscene.ingest.streams import RunStreams
 
     run = Path(run)
-    seq = run.name.split("_", 1)[-1]
-    ann_dir = davis / "Annotations" / "480p" / seq
-    placed = render_pixel_masks(run)
-    ingest = json.loads((run / "ingest" / "artifact.json").read_text())
-    n_frames = int(next(s.get("value", s) for s in ingest["streams"])["num_frames"])
-    gt_by_frame = {f: gt_masks(ann_dir, f, placed.transform) for f in range(n_frames)}
+    stream = RunStreams.from_run(run).only()
+    seq = stream.source.sequence
+    placed = render_pixel_masks(run, stream_id=stream.id)
+    gt_by_frame = gt_masks(stream)
     matched, best, _ = match_objects(gt_by_frame, placed.by_frame, match_iou=match_iou)
 
     ed = RemoveEditor(run, checkpoint_sub=checkpoint_sub, device=device)
@@ -201,7 +206,8 @@ def score_run(run: Path, *, checkpoint_sub: str, davis: Path, frames: int = 4,
             row["layer_status"] = layer_status.get(node)
             continue
         row["status"] = "scored"
-        present = [f for f in range(n_frames) if gid in gt_by_frame[f] and f in r.time_of]
+        present = [f for f in stream.frames
+                   if gid in gt_by_frame.get(f, {}) and f in r.time_of]
         step = max(1, len(present) // max(1, frames))
         use = present[::step][:frames]
         after = r.after(drop_gaussians(ed.bundle, fg, bg_indices=bg), use)

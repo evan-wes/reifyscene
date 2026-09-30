@@ -23,7 +23,6 @@ from reifyscene.render.eval.checkpoint_views import (
     export_replay,
     export_static_heldout_views,
     pick_evenly,
-    replay_size,
 )
 from reifyscene.render.eval.masked_nvs_benchmark import (
     AlignmentFailed,
@@ -389,9 +388,6 @@ def test_pick_evenly_spreads_and_keeps_the_ends():
     assert pick_evenly(0, 5) == [] and pick_evenly(5, 0) == []
 
 
-def test_replay_size_is_twice_the_principal_point_and_even():
-    assert replay_size(np.array([[714.7, 0, 259.0], [0, 710.4, 259.0], [0, 0, 1]])) == (518, 518)
-    assert replay_size(np.array([[359.6, 0, 179.4], [0, 359.6, 241.6], [0, 0, 1]])) == (358, 484)
 
 
 def test_export_heldout_views_writes_images_and_scores(tmp_path: Path):
@@ -436,12 +432,14 @@ def test_export_replay_renders_each_training_camera_in_time_order(tmp_path: Path
     K = np.array([[100.0, 0, 20.0], [0, 100.0, 15.0], [0, 0, 1]], np.float32)
     train = [BorrowedCamera(f"0:{t}", t, np.eye(4, dtype=np.float32), K) for t in (2, 0, 1)]
     scene, rasterizer = _Scene(), _Rasterizer()
+    # the raster is the one given (the run's recorded one), not 2x the principal point (40x30)
     meta = export_replay(
-        scene, {"train": train}, tmp_path / "replay.mp4", rasterizer=rasterizer, fps=10
+        scene, {"train": train}, tmp_path / "replay.mp4", rasterizer=rasterizer,
+        raster=(42, 30), fps=10,
     )
     assert meta["time_ids"] == [0, 1, 2] and scene.times == [0, 1, 2]
-    assert (meta["width"], meta["height"]) == (40, 30)
-    assert all((c.width, c.height) == (40, 30) for c in rasterizer.cameras)
+    assert (meta["width"], meta["height"]) == (42, 30)
+    assert all((c.width, c.height) == (42, 30) for c in rasterizer.cameras)
     assert (tmp_path / "replay.mp4").stat().st_size > 0
     assert json.loads((tmp_path / "replay.json").read_text())["fps"] == 10
 

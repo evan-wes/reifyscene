@@ -48,7 +48,7 @@ class RemoveEditor:
         self.use_layer = True     # the handles stage turns this off: it is what writes the layer
         with np.load(path, allow_pickle=True) as z:
             self.bundle = {k: z[k] for k in z.files}
-        self.renderer = CheckpointRenderer(self.bundle, device)
+        self.renderer = CheckpointRenderer.for_run(self.bundle, device, self.run)
         self._counts = None
         self._node_ids: list[str | None] = []
         self._edited: dict[tuple[str, str], Any] = {}   # (edit dir, show) -> scene; last two

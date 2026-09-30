@@ -163,7 +163,7 @@ def test_an_empty_cloud_with_features_returns_blank_features() -> None:
 @pytest.mark.skipif(not BLACKSWAN.is_file(), reason="needs the loop_blackswan trained run")
 def test_rgb_is_unchanged_for_an_existing_checkpoint() -> None:
     """The done-when for I1: a real trained scene renders identically with a feature attached."""
-    from reifyscene.render.eval.checkpoint_views import replay_size
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
     with np.load(BLACKSWAN, allow_pickle=True) as z:
@@ -172,7 +172,7 @@ def test_rgb_is_unchanged_for_an_existing_checkpoint() -> None:
     r = GsplatRasterizer("cuda")
     for i in (0, len(data["train_time_ids"]) // 2):
         K = np.asarray(data["train_Ks"][i], np.float32)
-        w, h = replay_size(K)
+        w, h = RunStreams.from_run(BLACKSWAN.parent.parent).only().render_raster
         cam = RenderCamera(viewmat=np.asarray(data["train_w2cs"][i], np.float32), K=K,
                            width=w, height=h)
         with torch.no_grad():

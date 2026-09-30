@@ -52,13 +52,23 @@ def _make_run(tmp_path: Path, frames: list[int], *, source_size=(W, H)) -> tuple
     run = tmp_path / "inv_synthetic"
     (run / "geometry" / "pointmaps").mkdir(parents=True)
     (run / "geometry" / "depthmaps").mkdir(parents=True)
-    states, point_index = [], {}
+    src = tmp_path / "frames"
+    src.mkdir()
+    n = max(frames) + 1
+    (run / "ingest").mkdir()        # which streams the run has, and where their frames are
+    (run / "ingest" / "artifact.json").write_text(json.dumps({"streams": [{"value": {
+        "stream_id": "cam_00", "video_path": str(src), "num_frames": n,
+        "width": source_size[0], "height": source_size[1],
+        "metadata": {"source": "frames",
+                     "frame_index": {str(i): str(src / f"{i:05d}.jpg") for i in range(n)}}}}]}))
+    states, point_index, selected = [], {}, []
     rng = np.random.default_rng(0)
     for i in range(max(frames) + 1):
         depth = 2.0 + rng.uniform(0, 1.0, size=(H, W))
         T = _pose(tz=0.05 * i)
         world = _camera_points(depth) @ T[:3, :3].T + T[:3, 3]
         states.append({"stream_id": "cam_00", "time_sec": i / 30, "pose": T.tolist()})
+        selected.append({"stream_id": "cam_00", "frame_idx": i, "timestamp_sec": i / 30})
         if i in frames:
             np.savez(run / "geometry" / "pointmaps" / f"cam_00__{i}.npz",
                      points=world.astype(np.float32))
@@ -66,6 +76,7 @@ def _make_run(tmp_path: Path, frames: list[int], *, source_size=(W, H)) -> tuple
     (run / "geometry" / "artifact.json").write_text(json.dumps({
         "intrinsics_by_stream": {"cam_00": INTR},
         "camera_states_by_stream": {"cam_00": states},
+        "selected_frames": selected,
         "point_index": point_index,
         "metadata": {"image_transforms": {"cam_00": {
             "source_size": list(source_size),
@@ -73,9 +84,7 @@ def _make_run(tmp_path: Path, frames: list[int], *, source_size=(W, H)) -> tuple
             "output_size": [W, H],
         }}},
     }))
-    src = tmp_path / "frames"
-    src.mkdir()
-    for i in range(max(frames) + 1):
+    for i in range(n):
         Image.fromarray(
             rng.integers(0, 255, (source_size[1], source_size[0], 3), dtype=np.uint8)
         ).save(src / f"{i:05d}.jpg")
@@ -110,7 +119,7 @@ def test_exported_depth_and_pose_reconstruct_the_world_pointmap(tmp_path: Path) 
     """The whole contract: unprojecting what we wrote must land where our points are."""
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    result = export_run(run, src, out, reference_diagonal_m=6.0)
+    result = export_run(run, out, reference_diagonal_m=6.0)
 
     manifest = json.loads((out / "manifest.json").read_text())
     scale = manifest["scale_factor"]
@@ -132,7 +141,7 @@ def test_translation_is_scaled_with_depth_and_rotation_is_not(tmp_path: Path) ->
     """Scaling depth but not translation would shear the whole trajectory."""
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    result = export_run(run, src, out, reference_diagonal_m=6.0)
+    result = export_run(run, out, reference_diagonal_m=6.0)
     traj = np.loadtxt(out / "traj.txt").reshape(-1, 4, 4)
     original = np.asarray(json.loads((run / "geometry" / "artifact.json").read_text())
                           ["camera_states_by_stream"]["cam_00"][1]["pose"])
@@ -152,7 +161,7 @@ def test_non_positive_depth_is_written_as_no_measurement(tmp_path: Path) -> None
     np.savez(run / "geometry" / "pointmaps" / "cam_00__0.npz", points=world.astype(np.float32))
 
     out = tmp_path / "export"
-    result = export_run(run, src, out)
+    result = export_run(run, out)
     depth = np.asarray(Image.open(out / "results" / "depth00000.png"))
     assert depth[0, 0] == 0
     assert result.behind_camera_pct > 0
@@ -164,7 +173,7 @@ def test_a_sparse_frame_subset_keeps_its_source_numbering(tmp_path: Path) -> Non
     """The bug this prevents: index 1 of the export is DAVIS frame 5, not frame 1."""
     run, src = _make_run(tmp_path, [0, 5, 9])
     out = tmp_path / "export"
-    export_run(run, src, out)
+    export_run(run, out)
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["source_frame_for_index"] == [0, 5, 9]
 
@@ -181,7 +190,7 @@ def test_masks_come_back_in_source_pixels(tmp_path: Path) -> None:
     """Masks are produced in the geometry's raster; ground truth is in the source's."""
     run, src = _make_run(tmp_path, [0], source_size=(W * 2, H * 2))
     out = tmp_path / "export"
-    export_run(run, src, out)
+    export_run(run, out)
     objects = [{"image_idx": [0], "mask": [np.ones((H, W), bool)], "class_name": ["thing"]}]
     path = tmp_path / "objects.pkl.gz"
     with gzip.open(path, "wb") as fh:
@@ -193,7 +202,7 @@ def test_masks_come_back_in_source_pixels(tmp_path: Path) -> None:
 def test_objects_below_the_detection_floor_are_dropped(tmp_path: Path) -> None:
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    export_run(run, src, out)
+    export_run(run, out)
     objects = [
         {"image_idx": [0, 1, 2], "mask": [np.ones((H, W), bool)] * 3, "class_name": ["a"] * 3},
         {"image_idx": [0], "mask": [np.ones((H, W), bool)], "class_name": ["b"]},
@@ -213,10 +222,21 @@ def test_a_missing_image_transform_is_refused_not_guessed(tmp_path: Path) -> Non
     art["metadata"] = {}
     (run / "geometry" / "artifact.json").write_text(json.dumps(art))
     with pytest.raises(ValueError, match="no image transform"):
-        export_run(run, src, tmp_path / "export")
+        export_run(run, tmp_path / "export")
 
 
 # --- both systems reach the scorer the same way ------------------------------
+
+def _gt_from(ann: Path):
+    """The scorer's ground-truth lookup over this test's own annotation files."""
+    def gt(frame: int) -> dict[int, np.ndarray]:
+        path = ann / f"{frame:05d}.png"
+        if not path.is_file():
+            return {}
+        arr = np.asarray(Image.open(path))
+        return {int(i): arr == i for i in np.unique(arr) if int(i) != 0}
+    return gt
+
 
 def test_reference_masks_score_through_the_same_function(tmp_path: Path) -> None:
     """A comparison in which each side has its own scorer is not a comparison."""
@@ -227,7 +247,7 @@ def test_reference_masks_score_through_the_same_function(tmp_path: Path) -> None
     Image.fromarray(gt).save(ann / "00000.png")
 
     ours = {0: {"node-1": gt.astype(bool)}}
-    score = score_masks_by_frame(ours, ann, sequence="synthetic", frames=[0])
+    score = score_masks_by_frame(ours, _gt_from(ann), sequence="synthetic", frames=[0])
     assert score.recovered == 1 and score.num_gt == 1 and score.spurious == 0
 
 
@@ -264,8 +284,8 @@ def test_two_systems_peaking_on_different_frames_share_a_denominator(tmp_path: P
     a = {0: {"a1": _box(2, 8, 2, 8)}, 5: {"a1": _box(2, 8, 2, 8)}}
     b = {0: {"b1": _box(2, 8, 2, 8), "b2": _box(10, 16, 10, 16)}, 5: {}}
 
-    sa = score_masks_by_frame(a, ann, sequence="s", frames=[0, 5])
-    sb = score_masks_by_frame(b, ann, sequence="s", frames=[0, 5])
+    sa = score_masks_by_frame(a, _gt_from(ann), sequence="s", frames=[0, 5])
+    sb = score_masks_by_frame(b, _gt_from(ann), sequence="s", frames=[0, 5])
     assert sa.num_gt == sb.num_gt == 2, (
         "the denominator must be the frame set's objects, not a system's"
     )
@@ -276,7 +296,7 @@ def test_a_frame_the_system_missed_entirely_still_counts_against_it(tmp_path: Pa
     """Producing no masks on a frame must not excuse its objects from the denominator."""
     ann = _ann(tmp_path, {0: [(1, (2, 8, 2, 8))], 5: [(2, (10, 16, 10, 16))]})
     silent = {0: {"n1": _box(2, 8, 2, 8)}}          # nothing at all on frame 5
-    score = score_masks_by_frame(silent, ann, sequence="s", frames=[0, 5])
+    score = score_masks_by_frame(silent, _gt_from(ann), sequence="s", frames=[0, 5])
     assert score.num_gt == 2 and score.recovered == 1 and score.missed_ids == [2]
 
 
@@ -284,6 +304,6 @@ def test_an_object_found_on_any_sampled_frame_counts_as_recovered(tmp_path: Path
     """One frame of occlusion is not a miss; a miss on every sampled frame is."""
     ann = _ann(tmp_path, {0: [(1, (2, 8, 2, 8))], 5: [(1, (2, 8, 2, 8))]})
     occluded_once = {0: {"n1": _box(2, 8, 2, 8)}, 5: {"n1": _box(18, 19, 28, 29)}}
-    score = score_masks_by_frame(occluded_once, ann, sequence="s", frames=[0, 5])
+    score = score_masks_by_frame(occluded_once, _gt_from(ann), sequence="s", frames=[0, 5])
     assert score.recovered == 1 and score.num_gt == 1
     assert score.matches[0]["frame_idx"] == 0, "the reported match names the frame it came from"
