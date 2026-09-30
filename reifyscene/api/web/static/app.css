@@ -142,3 +142,6 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
 .rel-row:hover .sent { color: var(--ink); }
 .rel-row.chosen { outline: 1px solid var(--accent); outline-offset: 2px; }
 .rel-row.chosen .sent { color: var(--accent); font-weight: 600; }
+.stage.free { cursor: grab; touch-action: none; user-select: none; }
+.stage.free:active { cursor: grabbing; }
+.stage.free img { -webkit-user-drag: none; pointer-events: none; }

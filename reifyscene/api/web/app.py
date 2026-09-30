@@ -322,6 +322,36 @@ def create_app(
             raise HTTPException(404, "no such edit image")
         return FileResponse(p)
 
+    @app.get("/api/runs/{name}/view/{frame}.jpg")
+    def free_view(name: str, frame: int,
+                  yaw: Annotated[float, Query(ge=-180, le=180)] = 0.0,
+                  pitch: Annotated[float, Query(ge=-85, le=85)] = 0.0,
+                  zoom: Annotated[float, Query(ge=0.1, le=10)] = 1.0,
+                  px: Annotated[float, Query(ge=-5, le=5)] = 0.0,
+                  py: Annotated[float, Query(ge=-5, le=5)] = 0.0,
+                  width: Annotated[int | None, Query(ge=64, le=4096)] = None,
+                  edit: str | None = None):
+        """The frame's moment from an orbited camera -- the 3D view. Never cached (every camera
+        differs); refuses rather than queues while an edit holds the GPU."""
+        r = get_run(name)
+        edit_dir = None
+        if edit is not None:
+            job = jobs.get(edit)
+            if job is None or job.run != name or job.status != "done" or job.out_dir is None:
+                raise HTTPException(404, f"no finished edit {edit!r} of {name}")
+            edit_dir = job.out_dir
+        if not gpu.acquire(timeout=0.25):
+            raise HTTPException(503, "the GPU is busy with an edit")
+        try:
+            ed = editor(r)
+            if frame not in ed.renderer.time_of:
+                raise HTTPException(404, f"no training camera for frame {frame}")
+            arr = ed.render_view(frame, edit_dir=edit_dir, yaw=yaw, pitch=pitch, zoom=zoom,
+                                 pan_x=px, pan_y=py, width=width)
+        finally:
+            gpu.release()
+        return jpeg(arr)
+
     @app.get("/api/queue")
     def queue_state() -> dict[str, Any]:
         return {"queued": [j.id for j in jobs.values() if j.status == "queued"],

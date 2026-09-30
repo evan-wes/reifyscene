@@ -26,6 +26,7 @@ class CheckpointRenderer:
         self.time_of = {int(n.rsplit(":", 1)[-1]): int(t)
                         for n, t in zip(names, np.asarray(bundle["train_time_ids"]), strict=True)}
         self._before: dict[int, np.ndarray] = {}
+        self._pivot: dict[int, float] = {}
 
     def _render(self, scene, frame: int) -> np.ndarray:
         import torch
@@ -96,10 +97,78 @@ class CheckpointRenderer:
         scene, _ = bundle_to_scene(edited, device=self.device)
         return {f: self._render(scene, f) for f in frames}
 
+    # -- free viewpoint -------------------------------------------------------------------------
+
+    def pivot_depth(self, frame: int) -> float:
+        """Median depth, in front of the frame's camera, of the scene at that moment: the orbit
+        pivot sits this far along the camera's axis, so orbiting turns around what it looks at."""
+        if frame not in self._pivot:
+            import torch
+
+            t = self.time_of[frame]
+            w2c = torch.as_tensor(np.asarray(self.cams[t].w2c, np.float32), device=self.device)
+            with torch.no_grad():
+                means = self.scene.cloud_at(t).means
+                z = means @ w2c[2, :3] + w2c[2, 3]
+                z = z[z > 0]
+                self._pivot[frame] = float(z.median()) if z.numel() else 1.0
+        return self._pivot[frame]
+
+    def orbit_camera(self, frame: int, *, yaw: float = 0.0, pitch: float = 0.0,
+                     zoom: float = 1.0, pan_x: float = 0.0, pan_y: float = 0.0,
+                     width: int | None = None):
+        """The frame's training camera, orbited about its pivot: see :func:`orbit_w2c`."""
+        from reifyscene.render.gaussian4d.rasterizer import RenderCamera
+
+        t = self.time_of[frame]
+        cam = self.cams[t]
+        w2c = orbit_w2c(np.asarray(cam.w2c, np.float64), self.pivot_depth(frame),
+                        yaw=yaw, pitch=pitch, zoom=zoom, pan_x=pan_x, pan_y=pan_y)
+        w, h = self.size
+        K = np.asarray(cam.K, np.float32).copy()
+        if width and width < w:                      # a smaller preview while the view moves
+            s = width / w
+            K[:2] *= s
+            w, h = int(round(w * s)), int(round(h * s))
+        return RenderCamera(viewmat=w2c.astype(np.float32), K=K, width=int(w), height=int(h))
+
+    def render_view(self, scene, frame: int, camera) -> np.ndarray:
+        """``scene`` at ``frame``'s moment, seen from any camera."""
+        import torch
+
+        from reifyscene.render.eval.checkpoint_views import _to_u8
+
+        t = self.time_of[frame]
+        with torch.no_grad():
+            c = scene.cloud_at(t)
+            out = self.rasterizer.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors,
+                                            camera)
+        return _to_u8(out.rgb.clamp(0, 1))
+
     @property
     def frames(self) -> list[int]:
         """Source frame indices this checkpoint has a training camera for."""
         return sorted(self.time_of)
+
+
+def orbit_w2c(w2c: np.ndarray, depth: float, *, yaw: float = 0.0, pitch: float = 0.0,
+              zoom: float = 1.0, pan_x: float = 0.0, pan_y: float = 0.0) -> np.ndarray:
+    """World-to-camera of a camera orbited about a pivot ``depth`` in front of ``w2c``.
+
+    Everything is in the original camera's frame (OpenCV: +x right, +y down, +z forward):
+    ``yaw`` turns about its vertical axis and ``pitch`` about its horizontal one (degrees);
+    ``zoom`` scales the distance to the pivot; ``pan_x``/``pan_y`` shift the pivot sideways
+    and up/down in the orbited view, in units of ``depth``. All zero (zoom 1) is ``w2c``.
+    """
+    a, b = np.radians(yaw), np.radians(pitch)
+    ry = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+    rx = np.array([[1, 0, 0], [0, np.cos(b), -np.sin(b)], [0, np.sin(b), np.cos(b)]])
+    rot = ry @ rx
+    target = np.array([0.0, 0.0, depth]) + rot @ np.array([pan_x * depth, pan_y * depth, 0.0])
+    eye = target - rot @ np.array([0.0, 0.0, depth * zoom])
+    local = np.eye(4)                               # orbited camera -> original camera
+    local[:3, :3], local[:3, 3] = rot, eye
+    return np.linalg.inv(np.linalg.inv(w2c) @ local)
 
 
 def outline(mask: np.ndarray, width: int = 2,

@@ -74,6 +74,10 @@ class FakeEditor:
     def render_before(self, frame: int) -> np.ndarray:
         return np.full((H, W, 3), 99, np.uint8)
 
+    def render_view(self, frame: int, *, edit_dir=None, **camera) -> np.ndarray:
+        self.last_view = (frame, edit_dir, camera)
+        return np.full((H, W, 3), 7, np.uint8)
+
     def remove(self, node_id, *, slackness, filtered, out_dir):
         out_dir.mkdir(parents=True, exist_ok=True)
         for kind in ("before", "after", "took"):
@@ -142,6 +146,19 @@ def test_an_edit_queues_runs_and_exposes_its_images(client) -> None:
     assert st["result"]["node_id"] == PERSON and st["params"]["slackness"] == 0.4
     assert client.get(f"/api/edits/{jid}/after/1.jpg").status_code == 200
     assert client.get(f"/api/edits/{jid}/after/9.jpg").status_code == 404
+
+
+def test_the_3d_view_passes_the_camera_and_the_edit_through(client) -> None:
+    r = client.get("/api/runs/loop_demo/view/2.jpg?yaw=30&pitch=-10&zoom=0.5&px=0.1&width=320")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert client.get("/api/runs/loop_demo/view/2.jpg?pitch=120").status_code == 422
+    assert client.get("/api/runs/loop_demo/view/2.jpg?edit=nope").status_code == 404
+    jid = client.post("/api/runs/loop_demo/edits", json={"entity": "2"}).json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/edits/{jid}").json()["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert client.get(f"/api/runs/loop_demo/view/2.jpg?edit={jid}&yaw=90").status_code == 200
 
 
 def test_edits_refuse_unknown_ops_and_entities(client) -> None:

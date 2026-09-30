@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 
 EDITS_DIR = "edits"
+REMOVED_FILE = "removed.npz"     # the removed Gaussians, so the edit can be re-rendered
 
 
 def edit_id(op: str, node_id: str) -> str:
@@ -48,6 +49,7 @@ class RemoveEditor:
         self.renderer = CheckpointRenderer(self.bundle, device)
         self._counts = None
         self._node_ids: list[str | None] = []
+        self._edited: tuple[str, Any] | None = None
 
     # -- evidence -----------------------------------------------------------------------------
 
@@ -146,7 +148,30 @@ class RemoveEditor:
             "frames": frames, "seconds": round(time.time() - t0, 2), **stats,
         }
         (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        np.savez_compressed(out / REMOVED_FILE, fg=np.asarray(fg, np.int64),
+                            bg=np.asarray(bg, np.int64))
         return result
+
+    def edited_scene(self, edit_dir: Path):
+        """The scene with an earlier removal applied, from the indices it saved (last one kept)."""
+        from reifyscene.graph.renderable_handle import drop_gaussians
+        from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
+
+        key = str(edit_dir)
+        if self._edited is None or self._edited[0] != key:
+            with np.load(Path(edit_dir) / REMOVED_FILE) as z:
+                fg, bg = z["fg"], z["bg"]
+            scene, _ = bundle_to_scene(drop_gaussians(self.bundle, fg, bg_indices=bg),
+                                       device=self.device)
+            self._edited = (key, scene)
+        return self._edited[1]
+
+    def render_view(self, frame: int, *, edit_dir: Path | None = None, **camera) -> np.ndarray:
+        """``frame``'s moment from an orbited camera (see ``CheckpointRenderer.orbit_camera``),
+        with a saved removal applied when ``edit_dir`` is given."""
+        r = self.renderer
+        scene = r.scene if edit_dir is None else self.edited_scene(edit_dir)
+        return r.render_view(scene, frame, r.orbit_camera(frame, **camera))
 
     def render_before(self, frame: int) -> np.ndarray:
         return self.renderer.before(frame)

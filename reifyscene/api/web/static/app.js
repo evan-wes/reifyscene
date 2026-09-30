@@ -28,7 +28,10 @@ const S = {
   edits: {}, activeEdit: null, colorOf: {}, cy: null, playing: null,
   edgeScope: "frame", preds: new Set(["near", "above", "below", "on", "in", "between"]),
   selRel: null,   // index into S.graph.edges of the selected relation
+  cam: { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 },   // the 3D view, relative to the frame's camera
+  moving: false,  // a drag is under way: preview renders are smaller
 };
+const HOME = { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 };
 
 // -- runs ------------------------------------------------------------------------------------
 async function init() {
@@ -46,7 +49,7 @@ async function init() {
 }
 
 async function loadRun(name) {
-  S.run = name; S.selected = null; S.selRel = null; S.highlight = null; S.activeEdit = null; S.view = "photo"; S.flipped = false;
+  S.run = name; S.selected = null; S.selRel = null; S.highlight = null; S.activeEdit = null; S.view = "photo"; S.flipped = false; S.cam = { ...HOME };
   S.graph = await api(`/api/runs/${name}/graph`);
   S.frames = S.graph.frames.length ? S.graph.frames
     : [...new Set(S.graph.entities.flatMap((e) => e.observed))].sort((a, b) => a - b);
@@ -321,7 +324,7 @@ function placeCursor() {
 const nearestIndex = (f) => S.frames.reduce((best, v, i) => (Math.abs(v - f) < Math.abs(S.frames[best] - f) ? i : best), 0);
 
 // -- frame view -------------------------------------------------------------------------------
-const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"], ["took", "took"]];
+const VIEWS = [["photo", "photo"], ["render", "render"], ["3d", "3D"], ["before", "before"], ["after", "after"], ["took", "took"]];
 function drawViews() {
   const seg = $("view-seg"); seg.innerHTML = "";
   const edit = S.activeEdit && S.edits[S.run]?.find((x) => x.id === S.activeEdit);
@@ -334,11 +337,18 @@ function drawViews() {
   }
 }
 function frameUrl(view, f) {
+  if (view === "3d") {
+    const c = S.cam, q = new URLSearchParams({ yaw: c.yaw.toFixed(1), pitch: c.pitch.toFixed(1),
+      zoom: c.zoom.toFixed(3), px: c.px.toFixed(3), py: c.py.toFixed(3) });
+    if (S.moving) q.set("width", "480");
+    if (S.activeEdit && !S.flipped) q.set("edit", S.activeEdit);   // flip shows the scene unedited
+    return `/api/runs/${S.run}/view/${f}.jpg?${q}`;
+  }
   if (["before", "after", "took"].includes(view)) return `/api/edits/${S.activeEdit}/${view}/${f}.jpg`;
   if (view === "render") return `/api/runs/${S.run}/render/${f}.jpg`;
   return `/api/runs/${S.run}/frames/${f}.jpg`;
 }
-function flipTarget(view) { return { after: "before", took: "before", before: "after", render: "photo", photo: "render" }[view]; }
+function flipTarget(view) { return { "3d": "3d", after: "before", took: "before", before: "after", render: "photo", photo: "render" }[view]; }
 function paint() {
   if (!S.frames.length) return;
   const f = S.frames[S.fi];
@@ -347,23 +357,86 @@ function paint() {
   $("frame-slider").value = S.fi;
   const img = $("frame-img"), sp = $("stage-spinner");
   const url = frameUrl(view, f);
-  if (img.dataset.src !== url) {
+  if (view === "3d") load3d(url);
+  else if (img.dataset.src !== url) {
+    S.loading3d = null; S.pending3d = null;
     sp.hidden = view === "photo"; img.dataset.src = url;
     img.onload = () => { sp.hidden = true; }; img.onerror = () => { sp.hidden = true; };
     img.src = url;
   }
   const out = $("outline-img");
   const rel = S.selRel !== null ? S.graph.edges[S.selRel] : null;
-  const nodes = rel ? [rel.src, rel.dst, rel.attrs?.and].filter(Boolean) : S.selected ? [S.selected] : [];
+  // outlines come from the training camera's id maps: they do not follow a moved 3D camera
+  const nodes = view === "3d" ? [] : rel ? [rel.src, rel.dst, rel.attrs?.and].filter(Boolean) : S.selected ? [S.selected] : [];
   if (nodes.length) { out.hidden = false; out.onerror = () => { out.hidden = true; };
     out.src = `/api/runs/${S.run}/outline/${f}.png?` + nodes.map((n) => `node=${encodeURIComponent(n)}`).join("&"); }
   else out.hidden = true;
   let sel = S.selected ? ` · ${entity(S.selected)?.category} ${short(S.selected)} outlined` : "";
   if (rel) sel = ` · ${sentence(rel)}${edgeActive(rel.attrs?.intervals || [], f) ? "" : " (not at this frame)"}`;
-  $("stage-tag").textContent = `${view}${sel}`;
+  if (view === "3d") {
+    const edited = S.activeEdit && !S.flipped;
+    // one moving camera saw this scene: far off its path the reconstruction is guesswork
+    const far = Math.abs(S.cam.yaw) > 15 || Math.abs(S.cam.pitch) > 10;
+    sel = `${edited ? " · edit applied (click: original)" : S.activeEdit ? " · original (click: edited)" : ""}` +
+      (far ? ` · ${Math.round(S.cam.yaw)}°/${Math.round(S.cam.pitch)}° off the recorded view: unseen, expect smears` : "") +
+      " · drag orbit · shift-drag pan · wheel zoom · double-click reset";
+  }
+  $("stage-tag").textContent = `${view === "3d" ? "3D" : view}${sel}`;
+  $("stage").classList.toggle("free", view === "3d");
   drawViews(); placeCursor(); updateEdges();
   if (S.selected || S.selRel !== null) drawRelTimeline();
 }
+// -- the 3D view: one render in flight, the newest camera wins -----------------------------------
+function load3d(url) {
+  const img = $("frame-img"), sp = $("stage-spinner");
+  if (img.dataset.src === url || S.loading3d === url) { S.pending3d = null; return; }
+  if (S.loading3d) { S.pending3d = url; return; }
+  S.loading3d = url; sp.hidden = S.moving;
+  const probe = new Image();
+  const next = () => { S.loading3d = null; const p = S.pending3d; S.pending3d = null; if (p) load3d(p); else sp.hidden = true; };
+  probe.onload = () => { if (S.loading3d !== url) return; img.src = url; img.dataset.src = url; next(); };
+  probe.onerror = () => {                          // 503 while an edit holds the GPU: try again shortly
+    if (S.loading3d !== url) return;
+    S.loading3d = null; sp.hidden = true;
+    setTimeout(() => { if (S.view === "3d") paint(); }, 600);
+  };
+  probe.src = url;
+}
+function initFreeView() {
+  const st = $("stage");
+  let drag = null;
+  st.addEventListener("pointerdown", (ev) => {
+    if (S.view !== "3d") return;
+    drag = { x: ev.clientX, y: ev.clientY, cam: { ...S.cam }, pan: ev.shiftKey || ev.button === 2, moved: false };
+    st.setPointerCapture(ev.pointerId);
+  });
+  st.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const w = st.clientWidth || 1, dx = (ev.clientX - drag.x) / w, dy = (ev.clientY - drag.y) / w;
+    if (!drag.moved && Math.hypot(dx, dy) * w < 3) return;
+    drag.moved = true; S.moving = true;
+    if (drag.pan) {                                  // the scene follows the pointer
+      S.cam.px = drag.cam.px - dx * 1.2 * drag.cam.zoom; S.cam.py = drag.cam.py - dy * 1.2 * drag.cam.zoom;
+    } else {                                         // the scene turns with the pointer
+      S.cam.yaw = Math.max(-180, Math.min(180, drag.cam.yaw + dx * 60));
+      S.cam.pitch = Math.max(-85, Math.min(85, drag.cam.pitch - dy * 60));
+    }
+    paint();
+  });
+  const end = () => { if (!drag) return; const moved = drag.moved; drag = null;
+    if (moved) { S.moving = false; S.swallowClick = true; paint(); } };
+  st.addEventListener("pointerup", end); st.addEventListener("pointercancel", end);
+  st.addEventListener("contextmenu", (ev) => { if (S.view === "3d") ev.preventDefault(); });
+  st.addEventListener("wheel", (ev) => {
+    if (S.view !== "3d") return;
+    ev.preventDefault();
+    S.cam.zoom = Math.max(0.1, Math.min(10, S.cam.zoom * Math.exp(ev.deltaY * 0.0015)));
+    S.moving = true; paint();
+    clearTimeout(S.wheelEnd); S.wheelEnd = setTimeout(() => { S.moving = false; paint(); }, 250);
+  }, { passive: false });
+  st.addEventListener("dblclick", () => { if (S.view === "3d") { S.cam = { ...HOME }; paint(); } });
+}
+
 function setFrame(i) { S.fi = Math.max(0, Math.min(S.frames.length - 1, i)); paint(); }
 
 // -- query ------------------------------------------------------------------------------------
@@ -495,7 +568,11 @@ $("play").addEventListener("click", () => {
     setFrame(S.fi + 1 >= S.frames.length ? 0 : S.fi + 1);
   }, 160);
 });
-$("stage").addEventListener("click", () => { S.flipped = !S.flipped; paint(); });
+$("stage").addEventListener("click", () => {
+  if (S.swallowClick) { S.swallowClick = false; return; }      // the end of a 3D drag is not a flip
+  S.flipped = !S.flipped; paint();
+});
+initFreeView();
 document.addEventListener("keydown", (ev) => {
   if (ev.target.closest?.("input, select, textarea")) return;
   if (ev.key === "ArrowLeft") setFrame(S.fi - 1);
