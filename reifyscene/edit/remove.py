@@ -44,6 +44,8 @@ class RemoveEditor:
         path = self.run / checkpoint_sub / "trained_dynamic.npz"
         if not path.is_file():
             raise FileNotFoundError(f"{self.run.name} has no trained checkpoint at {path}")
+        self.checkpoint_path = path
+        self.use_layer = True     # the handles stage turns this off: it is what writes the layer
         with np.load(path, allow_pickle=True) as z:
             self.bundle = {k: z[k] for k in z.files}
         self.renderer = CheckpointRenderer(self.bundle, device)
@@ -57,23 +59,27 @@ class RemoveEditor:
     def cache_dir(self) -> Path:
         return self.run / EDITS_DIR / "cache" / self.checkpoint_sub
 
-    def evidence(self):
-        """(N, C) per-Gaussian blending weight per id-map class, cached per checkpoint."""
+    def evidence(self, *, refresh: bool = False):
+        """(N, C) per-Gaussian blending weight per id-map class, cached per checkpoint.
+
+        ``refresh`` re-exports the id maps from the graph and recomputes, ignoring both caches
+        (the pipeline's ``handles`` stage: the graph may have changed since the cache).
+        """
         import torch
 
         from reifyscene.graph.assignment import evidence_matrix, id_map_views
         from reifyscene.graph.id_maps import export_id_maps, load_id_maps
 
-        if self._counts is not None:
+        if self._counts is not None and not refresh:
             return self._counts
         cpath, npath = self.cache_dir / "evidence.npy", self.cache_dir / "classes.json"
-        if cpath.is_file() and npath.is_file():
+        if cpath.is_file() and npath.is_file() and not refresh:
             counts = np.load(cpath)
             if counts.shape[0] == self.renderer.scene.num_gaussians:
                 self._counts = torch.as_tensor(counts, device=self.device)
                 self._node_ids = json.loads(npath.read_text())
                 return self._counts
-        if not (self.run / "identity" / "manifest.json").is_file():
+        if refresh or not (self.run / "identity" / "manifest.json").is_file():
             export_id_maps(self.run)
         manifest, maps = load_id_maps(self.run / "identity")
         self._node_ids = [c["node_id"]
@@ -92,8 +98,23 @@ class RemoveEditor:
     def select(
         self, node_id: str, *, slackness: float = 0.0, filtered: bool = True
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        """``(fg_idx, bg_idx, stats)`` for one entity."""
+        """``(fg_idx, bg_idx, stats)`` for one entity.
+
+        The default selection (slackness 0, filter on) comes from the graph's ``gaussians``
+        layer when that was computed against this checkpoint; otherwise, and for any other
+        parameters, it is computed here. ``stats["source"]`` says which.
+        """
         from reifyscene.graph.assignment import assign, assignment_handles, filter_members
+        from reifyscene.graph.handles import StaleHandles, load_handles
+
+        if slackness == 0.0 and filtered and self.use_layer:
+            try:
+                fg, bg = load_handles(self.run / "graph", node_id,
+                                      checkpoint_path=self.checkpoint_path)
+                return fg, bg, {"selected_fg": int(len(fg)), "selected_bg": int(len(bg)),
+                                "source": "graph layer"}
+            except (KeyError, StaleHandles, FileNotFoundError):
+                pass
 
         counts = self.evidence()
         if node_id not in self._node_ids:
@@ -101,7 +122,8 @@ class RemoveEditor:
         n_fg = self.renderer.scene.fg.num_gaussians
         handles = assignment_handles(assign(counts, slackness=slackness), n_fg, self._node_ids)
         fg, bg = handles.get(node_id, (np.array([], int), np.array([], int)))
-        stats: dict[str, Any] = {"selected_fg": int(len(fg)), "selected_bg": int(len(bg))}
+        stats: dict[str, Any] = {"selected_fg": int(len(fg)), "selected_bg": int(len(bg)),
+                                 "source": "computed"}
         if filtered and len(fg) + len(bg):
             fg, bg, dropped = filter_members(self.renderer.scene, fg, bg)
             stats["filter_dropped"] = dropped

@@ -494,7 +494,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "graph",
-            version=4,
+            version=5,
             changes={
                 2: "entities carry the point tracks that are evidence for them (the graph held "
                 "a node per track); the tracks inside no entity are the background's",
@@ -507,6 +507,8 @@ CONTRACTS: dict[str, StageContract] = {
                 "alternatives, abstention and embedding -- and the graph records whether its "
                 "positions are gravity-aligned (a human node was hardcoded 'human' with no "
                 "category, and nothing said whether above/below were computable)",
+                5: "the renderable grade reads 'pending: gaussians layer' (it read 'absent'): "
+                "the handles stage now binds entities to Gaussians as a layer on the graph",
             },
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
@@ -552,6 +554,14 @@ CONTRACTS: dict[str, StageContract] = {
             ),
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),
+        ),
+        StageContract(
+            # FlashSplat assignment over the render's checkpoint, written onto the graph. Cheap
+            # (seconds of GPU), a pure function of graph + checkpoint: rebuilt when stale.
+            "handles",
+            settings={"handles": {}},
+            upstream=("graph", "render"),
+            rebuildable=True,
         ),
     )
 }

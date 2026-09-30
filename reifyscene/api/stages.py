@@ -10,6 +10,7 @@ from reifyscene.common.io import write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.graph.graph_artifact import GraphArtifact
+from reifyscene.graph.handles import HandlesArtifact
 from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.optimize.optimization_artifact import OptimizationArtifact
@@ -61,6 +62,9 @@ STAGE_ORDER: tuple[str, ...] = (
     'optimization',
     'scene',
     'render',
+    # After render: binds each entity to its Gaussians, as a layer on the graph
+    # (docs/design/2026-09-30-graph-layers.md). The graph cannot know this when it is built.
+    'handles',
 )
 
 
@@ -171,6 +175,13 @@ def build_stage_registry() -> dict[str, StageSpec]:
             artifact_cls=RenderArtifact,
             run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene'], optimization_artifact=outputs['optimization'], geometry_artifact=outputs['pose_refine'], track_artifact=outputs['tracking'], human_artifact=outputs['humans']),
             load_fn=RenderArtifact.load,
+        ),
+        'handles': StageSpec(
+            name='handles',
+            dependencies=('graph', 'render'),
+            artifact_cls=HandlesArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.bind_gaussians(outputs['graph'], outputs['render']),
+            load_fn=HandlesArtifact.load,
         ),
     }
 

@@ -129,7 +129,7 @@ def test_every_declared_dependency_is_actually_passed() -> None:
 
 
 def test_stage_registry_dependencies() -> None:
-    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'tracking', 'reid', 'semantics', 'objects', 'humans', 'graph', 'optimization', 'scene', 'render')
+    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'tracking', 'reid', 'semantics', 'objects', 'humans', 'graph', 'optimization', 'scene', 'render', 'handles')
     registry = build_stage_registry()
     assert registry['dyn_mask'].dependencies == ('ingest', 'sync')
     assert registry['geometry'].dependencies == ('ingest', 'sync', 'dyn_mask')
@@ -394,7 +394,7 @@ def test_checking_every_stage_reports_the_latest_start(prior, tmp_path) -> None:
     assert 'no humans stage' in plan.verdicts['humans'].problems[0]
     assert plan.latest_start() == 'humans'
     full = _check(run_dir, tmp_path / 'new', 'segment', copy.deepcopy(cfg), [video], stages=every)
-    assert full.latest_start() == 'render'
+    assert full.latest_start() == 'handles'
 
 
 def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> None:

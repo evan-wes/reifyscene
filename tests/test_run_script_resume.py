@@ -61,5 +61,5 @@ def test_the_run_script_resumes_rebuilds_rejects_and_reports(tmp_path, monkeypat
                             '--start-stage', 'tracking', '--check-resume'])
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
-    assert 'resumable at tracking' in out and 'as late as render' in out
+    assert 'resumable at tracking' in out and 'as late as handles' in out
     assert not c.exists()

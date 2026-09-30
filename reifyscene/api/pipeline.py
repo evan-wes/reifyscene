@@ -1267,7 +1267,9 @@ class ReifyScenePipeline:
                 # VLA-3D's predicates per frame, with validity intervals. Degraded without
                 # gravity (the vertical four are not computed); absent when VLA-3D is missing.
                 'relations': relations,
-                'renderable': 'absent',  # landed as a library, wired to nothing
+                # Known only after render: the handles stage provides it as the graph's
+                # `gaussians` layer (docs/design/2026-09-30-graph-layers.md, rule 6).
+                'renderable': 'pending: gaussians layer',
             },
         ))
         artifact.save_dir = self._stage_dir('graph')
@@ -1368,6 +1370,27 @@ class ReifyScenePipeline:
         return artifact
 
 
+    def bind_gaussians(self, graph_artifact, render_artifact):
+        """The handles stage: each entity's Gaussians, as the `gaussians` layer on the graph.
+
+        Runs FlashSplat evidence-majority assignment (+ floater filter) over the render's
+        checkpoint and writes the layer onto the graph in place -- the graph's own facts are
+        untouched. Its own artifact records the grade and the checkpoint it describes.
+        """
+        from reifyscene.graph.handles import HandlesArtifact, run_handles
+
+        hcfg = dict(self.cfg.get('handles', {}) or {})
+        device = str(self.cfg.get('render', {}).get('device', 'cuda'))
+        result = run_handles(graph_artifact, render_artifact, run_dir=self.run_dir, device=device,
+                             slackness=float(hcfg.get('slackness', 0.0)),
+                             filtered=bool(hcfg.get('filtered', True)))
+        out_dir = self._stage_dir('handles')
+        artifact = HandlesArtifact(run_id=graph_artifact.run_id, stage_name='handles',
+                                   save_dir=out_dir, result=result)
+        self._stamp_stage_metadata(artifact, 'handles', video_paths=self._video_paths_for_stage())
+        artifact.save()
+        return artifact
+
     def release_stage_resources(self, stage_name: str) -> None:
         """Release heavy backend state after a stage completes."""
         stage_name = str(stage_name)
@@ -1417,6 +1440,7 @@ class ReifyScenePipeline:
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
         scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
         render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
+        handles_artifact = self.bind_gaussians(graph_artifact, render_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
@@ -1432,4 +1456,5 @@ class ReifyScenePipeline:
             'optimization': optimization_artifact,
             'scene': scene_artifact,
             'render': render_artifact,
+            'handles': handles_artifact,
         }
