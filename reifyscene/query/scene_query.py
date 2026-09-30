@@ -163,16 +163,33 @@ class SceneQuery:
             also = (r.attrs or {}).get("and")
             if e.node_id not in (r.src, r.dst, also):
                 continue
-            if predicate and str(r.edge_type) != predicate:
+            pred, src, dst = self._from_side_of(e.node_id, str(r.edge_type), r.src, r.dst)
+            if predicate and pred != predicate:
                 continue
             iv = (r.attrs or {}).get("intervals") or []
             if frame is not None and not any(a <= frame <= b for a, b in iv):
                 continue
-            out.append({"predicate": str(r.edge_type), "src": r.src, "dst": r.dst, "and": also,
+            out.append({"predicate": pred, "src": src, "dst": dst, "and": also,
+                        "stored_as": [str(r.edge_type), r.src, r.dst],
                         "intervals": iv, "confidence": r.confidence,
-                        "sentence": self._sentence(str(r.edge_type), r.src, r.dst, also)})
+                        "sentence": self._sentence(pred, src, dst, also)})
         out.sort(key=lambda x: (x["predicate"], -x["confidence"]))
         return {"available": True, "entity": e.node_id, "relations": out, "count": len(out)}
+
+    @staticmethod
+    def _from_side_of(node: str, pred: str, src: str, dst: str) -> tuple[str, str, str]:
+        """Phrase a relation with ``node`` as its subject where that is a true rephrasing.
+
+        Each vertical fact is stored once (``B above A``; the mirrored ``A below B`` is dropped
+        when the graph is built), so asking about A reads it backwards: "A is below B". ``near``
+        is symmetric. ``on``, ``in``, ``between`` and the rankings keep their stored subject --
+        their converses ("has X on it") are not predicates of the graph.
+        """
+        if node == dst and pred in ("above", "below"):
+            return ("below" if pred == "above" else "above"), dst, src
+        if node == dst and pred == "near":
+            return pred, dst, src
+        return pred, src, dst
 
     def _name(self, node_id: str) -> str:
         e = self.entities.get(node_id)

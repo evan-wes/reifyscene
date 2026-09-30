@@ -206,6 +206,50 @@ def relations_on_frame(g, objects: list[dict[str, Any]], *, vertical: bool,
     return sorted(set(out), key=lambda r: (r[0], r[1], r[2], r[3] or ""))
 
 
+def dedupe_vertical(held: dict[Relation, list[int]]) -> tuple[int, list[dict[str, Any]]]:
+    """Store each vertical fact once per frame; report any pair both above and below itself.
+
+    VLA-3D computes ``above`` and ``below`` separately, and they are mostly mirror images: on a
+    frame where B is above A, it usually also reports A below B -- one observation, twice. For
+    every ``below(A, B)`` the frames it shares with ``above(B, A)`` are removed; the rest of it
+    survives, because a pair's relation can change over the clip (A below B early, above it
+    later) and because their ``below`` has rules ``above`` lacks (objects under a table). The
+    query reads ``above`` backwards to answer "is A below B".
+
+    A frame on which A is both above and below B -- ``above(A, B)`` with ``below(A, B)``, or
+    with ``above(B, A)``, or ``below`` both ways -- is a contradiction: a bug in the adapter,
+    never a fact. Those are returned for reporting.
+    Modifies ``held`` in place; returns (frames dropped as mirrors, contradictions).
+    """
+    dropped = 0
+    for key in [k for k in held if k[0] == "below"]:
+        _p, a, b, _x = key
+        mirror = set(held.get(("above", b, a, None), ()))
+        if mirror:
+            keep = [f for f in held[key] if f not in mirror]
+            dropped += len(held[key]) - len(keep)
+            if keep:
+                held[key] = keep
+            else:
+                del held[key]
+    contradictions = []
+    for pred in ("above", "below"):
+        for (p, a, b, _x), fs in held.items():
+            if p != pred or a >= b:
+                continue
+            both = sorted(set(fs) & set(held.get((pred, b, a, None), ())))
+            if both:
+                contradictions.append({"kind": f"{pred} both ways", "a": a, "b": b,
+                                       "frames": both})
+    for (p, a, b, _x), fs in held.items():
+        if p == "above":
+            both = sorted(set(fs) & set(held.get(("below", a, b, None), ())))
+            if both:
+                contradictions.append({"kind": "above and below", "a": a, "b": b,
+                                       "frames": both})
+    return dropped, contradictions
+
+
 def _intervals(frames: list[int], present_both: list[int], min_frames: int) -> list[list[int]]:
     """Runs of consecutive both-present frames where the relation held."""
     held = set(frames)
@@ -253,6 +297,7 @@ def compute_relations(graph, *, min_frames: int = 2) -> tuple[list, dict[str, An
             for rel in relations_on_frame(g, objs, vertical=vertical):
                 held[rel].append(f)
 
+    mirrored, contradictions = dedupe_vertical(held)
     present = {t.node_id: set(t.boxes) for t in tracks}
     edges, counts = [], defaultdict(int)
     for (pred, src, dst, also), fs in sorted(held.items(), key=lambda kv: kv[0][:3]):
@@ -269,6 +314,10 @@ def compute_relations(graph, *, min_frames: int = 2) -> tuple[list, dict[str, An
         edges.append(GraphEdge(src=src, dst=dst, edge_type=pred,
                                confidence=round(n_held / max(len(both), 1), 4), attrs=attrs))
         counts[pred] += 1
+    meta.update(mirrored_below_frames_dropped=mirrored, contradictions=contradictions)
+    if contradictions:
+        warnings.warn(f"{len(contradictions)} contradictory vertical relation(s): "
+                      f"{contradictions[:3]}", stacklevel=2)
     meta.update(counts=dict(sorted(counts.items())), metric_scale=scale_meta | {
         "units_per_metre": round(units_per_m, 6)}, class_ids={c: class_id[c] for c in cats
                                                                if c.lower() in NYU_OF})

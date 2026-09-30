@@ -83,11 +83,26 @@ def test_relate_reads_edges_both_ways_and_filters_by_frame() -> None:
     g.metadata = {"relations": {"counts": {"near": 1, "on": 1}}}
     q = SceneQuery(g)
     ans = q.run("relate", {"entity": "3"})
-    assert [r["sentence"] for r in ans["relations"]] == ["person 2 is near person 3"]
+    assert [r["sentence"] for r in ans["relations"]] == ["person 3 is near person 2"]
     assert q.run("relate", {"entity": "2", "predicate": "on"})["relations"][0]["sentence"] \
         == "cup 5 is on person 2"
     assert q.run("relate", {"entity": "2", "frame": 4})["count"] == 1      # only the cup then
     assert q.run("relate", {"entity": "2", "frame": 5, "predicate": "near"})["count"] == 0
+
+
+def test_below_is_answered_from_the_stored_above_both_ways() -> None:
+    g = _graph()
+    p2, cup = "human:cam_00:sam2:cam_00:2", "object:cam_00:sam2:cam_00:5"
+    g.edges.append(GraphEdge(src=cup, dst=p2, edge_type="above", confidence=1.0,
+                             attrs={"intervals": [[4, 5]]}))
+    g.metadata = {"relations": {"counts": {"above": 1}}}
+    q = SceneQuery(g)
+    below = q.run("relate", {"entity": "2", "predicate": "below"})["relations"]
+    assert [r["sentence"] for r in below] == ["person 2 is below cup 5"]
+    assert below[0]["stored_as"] == ["above", cup, p2]
+    assert q.run("relate", {"entity": "5", "predicate": "above"})["relations"][0]["sentence"] \
+        == "cup 5 is above person 2"
+    assert q.run("relate", {"entity": "2", "predicate": "above"})["count"] == 0
 
 
 def test_bad_queries_fail_loudly() -> None:

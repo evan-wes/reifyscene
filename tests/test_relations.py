@@ -83,7 +83,9 @@ def test_touching_is_on_and_clearance_is_above() -> None:
                                             _node("3", "cup", CUP), _node("4", "lamp", LAMP)]))
     rel = {(str(e.edge_type), e.src.rsplit(":", 1)[-1], e.dst.rsplit(":", 1)[-1]) for e in edges}
     assert ("on", "3", "2") in rel and ("above", "3", "2") not in rel
-    assert ("above", "4", "2") in rel and ("below", "3", "4") in rel
+    assert ("above", "4", "2") in rel and ("above", "4", "3") in rel
+    # "cup below lamp" is the same fact as "lamp above cup": stored once, as the above
+    assert ("below", "3", "4") not in rel
     # their rule: supporting furniture (a table) is never reported as below something
     assert ("below", "2", "4") not in rel
     assert meta["metric_scale"]["source"] == "person_height"
@@ -121,3 +123,36 @@ def test_near_is_one_edge_per_pair_and_add_relations_replaces_not_duplicates() -
     near = [(e.src, e.dst) for e in g.edges if str(e.edge_type) == "near"]
     assert len(near) == len({tuple(sorted(p)) for p in near})
     assert g.metadata["relations"]["source"].startswith("VLA-3D")
+
+
+def test_a_mirrored_below_is_dropped_only_on_the_frames_it_mirrors() -> None:
+    """A below B on frames 0-5 mirrors B above A there; later (8-9) A is below B while
+    nothing says B is above A -- that part of the below survives."""
+    from reifyscene.graph.relations import dedupe_vertical
+
+    held = {("above", "B", "A", None): [0, 1, 2, 3, 4, 5],
+            ("below", "A", "B", None): [0, 1, 2, 3, 4, 5, 8, 9],
+            ("below", "C", "D", None): [0, 1]}               # no mirror at all
+    dropped, contradictions = dedupe_vertical(held)
+    assert dropped == 6 and contradictions == []
+    assert held[("below", "A", "B", None)] == [8, 9]
+    assert held[("below", "C", "D", None)] == [0, 1]
+    assert held[("above", "B", "A", None)] == [0, 1, 2, 3, 4, 5]
+
+
+def test_a_relation_that_flips_over_time_is_two_edges_not_a_contradiction() -> None:
+    from reifyscene.graph.relations import dedupe_vertical
+
+    held = {("above", "A", "B", None): [0, 1, 2], ("above", "B", "A", None): [7, 8, 9]}
+    _, contradictions = dedupe_vertical(held)
+    assert contradictions == []
+
+
+def test_above_and_below_on_the_same_frame_is_reported() -> None:
+    from reifyscene.graph.relations import dedupe_vertical
+
+    held = {("above", "A", "B", None): [0, 1, 2], ("above", "B", "A", None): [2, 3],
+            ("below", "A", "B", None): [1]}
+    _, contradictions = dedupe_vertical(held)
+    kinds = sorted((c["kind"], tuple(c["frames"])) for c in contradictions)
+    assert kinds == [("above and below", (1,)), ("above both ways", (2,))]
