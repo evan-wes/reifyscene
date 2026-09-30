@@ -71,6 +71,28 @@ class Run:
     _editor: Any = None
     _maps: tuple | None = None
     _photos: dict[int, Path] | None = None
+    _digest: str | None = None
+
+    def checkpoint_digest(self) -> str:
+        from reifyscene.graph.handles import checkpoint_digest
+
+        if self._digest is None:
+            self._digest = checkpoint_digest(self.path / self.checkpoint_sub
+                                             / "trained_dynamic.npz")
+        return self._digest
+
+    def gaussians_layer(self) -> dict[str, Any] | None:
+        """The graph's ``gaussians`` layer as the app can use it: whether it describes the
+        checkpoint this app renders and edits (``current``), or another one."""
+        from reifyscene.graph.handles import layer_info
+
+        info = layer_info(self.query.graph)
+        if info is None:
+            return None
+        return {"checkpoint": info["checkpoint"]["path"],
+                "current": info["checkpoint"]["digest"] == self.checkpoint_digest(),
+                "renderable": info["provides"]["renderable"], "counts": info["counts"],
+                "method": info["method"]}
 
     @property
     def query(self):
@@ -223,10 +245,15 @@ def create_app(
         q = r.query
         edges = [{"src": e.src, "dst": e.dst, "type": str(e.edge_type), "attrs": e.attrs}
                  for e in q.graph.edges if str(e.edge_type) != "observed_by"]
+        layer = r.gaussians_layer()
+        # an entity's Gaussians only mean something for the checkpoint they were computed on
+        use = bool(layer and layer["current"])
         return {"run": name, "checkpoint": r.checkpoint_sub, "frames": sorted(r.photos()),
                 "categories": q.categories(),
-                "entities": [e.summary() | {"observed": e.presence.observed}
+                "entities": [e.summary() | {"observed": e.presence.observed,
+                                            "gaussians": e.attrs.get("gaussians") if use else None}
                              for e in sorted(q.entities.values(), key=lambda e: e.node_id)],
+                "gaussians_layer": layer,
                 "edges": edges,
                 "relations_available": bool(edges),
                 "relations_meta": (q.graph.metadata or {}).get("relations")}

@@ -106,7 +106,31 @@ def test_graph_carries_presence_and_admits_no_relations(client) -> None:
     person = next(e for e in g["entities"] if e["node_id"] == PERSON)
     assert person["gaps"] == [{"start": 3, "end": 4, "kind": "dropout"}]
     assert g["relations_available"] is False and g["edges"] == []
+    assert g["gaussians_layer"] is None and person["gaussians"] is None
     assert g["frames"] == [0, 1, 2, 3, 4, 5]
+
+
+def test_the_gaussians_layer_is_shown_only_for_the_checkpoint_it_describes(tmp_path) -> None:
+    from reifyscene.graph.handles import write_layer
+
+    run = _fixture_run(tmp_path)
+    graph = GraphArtifact.load(run / "graph")
+    handles = {PERSON: (np.array([1, 2]), np.array([0]), {}),
+               CUP: (np.array([], np.int64), np.array([], np.int64), {})}
+    write_layer(graph, handles, checkpoint_path=run / "render" / "trained_dynamic.npz",
+                num_gaussians=10, slackness=0.0, filtered=True)
+    g = TestClient(create_app(tmp_path, editor_factory=FakeEditor)).get(
+        "/api/runs/loop_demo/graph").json()
+    assert g["gaussians_layer"]["current"] is True and g["gaussians_layer"]["renderable"] == \
+        "degraded"
+    by = {e["node_id"]: e["gaussians"] for e in g["entities"]}
+    assert by[PERSON]["status"] == "grounded" and by[CUP]["status"] == "unassignable"
+    # retrained: the same layer now describes another scene, and the app will not use it
+    (run / "render" / "trained_dynamic.npz").write_bytes(b"a retrained scene")
+    g = TestClient(create_app(tmp_path, editor_factory=FakeEditor)).get(
+        "/api/runs/loop_demo/graph").json()
+    assert g["gaussians_layer"]["current"] is False
+    assert all(e["gaussians"] is None for e in g["entities"])
 
 
 def test_queries_go_through_scene_query_and_bad_ones_are_400(client) -> None:

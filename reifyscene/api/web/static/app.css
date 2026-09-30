@@ -115,7 +115,7 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
   font-family: var(--mono); font-size: .74rem; white-space: pre-wrap; max-height: 220px; overflow: auto; }
 .selection dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; font-size: .8rem; }
 .selection dt { color: var(--muted); }
-.selection dd { margin: 0; font-family: var(--mono); font-size: .76rem; word-break: break-all; }
+.selection dd { margin: 0; font-family: var(--mono); font-size: .76rem; overflow-wrap: anywhere;  /* long ids still wrap; words do not split */ }
 .edit { display: flex; flex-direction: column; gap: 8px; }
 .edit-status { font-family: var(--mono); font-size: .74rem; min-height: 1.2em; }
 .edit-status.fail { color: var(--fail); }
@@ -145,3 +145,5 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
 .stage.free { cursor: grab; touch-action: none; user-select: none; }
 .stage.free:active { cursor: grabbing; }
 .stage.free img { -webkit-user-drag: none; pointer-events: none; }
+.timeline .name.nogs { font-style: italic; opacity: 0.75; }
+.edit .note { margin: 0; }

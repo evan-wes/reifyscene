@@ -63,14 +63,17 @@ async function loadRun(name) {
     (rm.gravity_aligned ? "" : " · no gravity: vertical relations not computed") : "";
   const slider = $("frame-slider");
   slider.max = Math.max(0, S.frames.length - 1); slider.value = 0;
-  fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); paint();
+  fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); updateRemove(); paint();
 }
 
 // -- graph -----------------------------------------------------------------------------------
 const short = (id) => id.split(":").pop();
+// no Gaussian is mostly this entity (the graph's gaussians layer, for this checkpoint)
+const noGaussians = (e) => e?.gaussians?.status === "unassignable";
+const entLabel = (e) => `${e.category} ${short(e.node_id)}${noGaussians(e) ? " ∅" : ""}`;
 function drawGraph() {
   const els = S.graph.entities.map((e) => ({
-    data: { id: e.node_id, label: `${e.category} ${short(e.node_id)}`, color: S.colorOf[e.category],
+    data: { id: e.node_id, label: entLabel(e), color: S.colorOf[e.category],
             size: 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
   }));
   const known = new Set(S.graph.entities.map((e) => e.node_id));
@@ -244,7 +247,7 @@ function select(id) {
   S.selected = id;
   S.selRel = null;
   updateEdges();
-  $("e-remove").disabled = !id;
+  updateRemove();
   applyHighlight(); drawSelection(); drawRelTimeline(); paint();
 }
 function entity(id) { return S.graph.entities.find((e) => e.node_id === id); }
@@ -268,7 +271,7 @@ function drawSelection() {
   const dl = el("dl");
   for (const [k, v] of [["entity", e.node_id], ["category", e.category + (e.abstained ? " (abstained)" : "")],
     ["caption", e.caption || "–"], ["present", `frames ${e.first}–${e.last} · ${e.num_observed} observed`],
-    ["gaps", gaps]]) dl.append(el("dt", { text: k }), el("dd", { text: v }));
+    ["gaps", gaps], ["in the scene", sceneText(e)]]) dl.append(el("dt", { text: k }), el("dd", { text: v }));
   box.append(dl);
 }
 
@@ -280,7 +283,8 @@ function drawTimeline() {
   const x = (f) => `${(100 * (f - f0)) / span}%`, w = (n) => `${(100 * n) / span}%`;
   const ents = [...S.graph.entities].sort((a, b) => a.category.localeCompare(b.category) || a.node_id.localeCompare(b.node_id));
   for (const e of ents) {
-    const name = el("div", { class: "name", "data-node": e.node_id, title: e.node_id, text: `${e.category} ${short(e.node_id)}`,
+    const name = el("div", { class: `name${noGaussians(e) ? " nogs" : ""}`, "data-node": e.node_id,
+      title: noGaussians(e) ? `${e.node_id} · no Gaussians in the scene` : e.node_id, text: entLabel(e),
       onclick: () => select(e.node_id) });
     const track = el("div", { class: "track", "data-node": e.node_id });
     let run = null;
@@ -497,6 +501,28 @@ $("query-form").addEventListener("submit", (ev) => {
 });
 
 // -- edits ------------------------------------------------------------------------------------
+function sceneText(e) {
+  const g = e.gaussians, layer = S.graph.gaussians_layer;
+  if (!layer) return "not bound yet (the graph has no gaussians layer)";
+  if (!layer.current) return `bound to another checkpoint (${layer.checkpoint}), not this one`;
+  if (!g) return "–";
+  if (g.status === "unassignable")
+    return "no Gaussians: none has most of its evidence in this entity" + (g.reason ? ` (${g.reason})` : "");
+  const pct = (100 * g.assigned_fraction).toFixed(g.assigned_fraction < 0.001 ? 3 : 1);
+  return `${(g.fg + g.bg).toLocaleString()} Gaussians (${g.fg.toLocaleString()} moving, ${g.bg.toLocaleString()} static) · ${pct}% of the scene`;
+}
+// At the default slackness an entity with no Gaussians has nothing to remove; "take more"
+// admits Gaussians only partly its own, so it may still find some.
+function updateRemove() {
+  const e = S.selected && entity(S.selected), btn = $("e-remove"), note = $("e-note");
+  const stuck = noGaussians(e) && parseFloat($("e-slack").value) >= 0;
+  btn.disabled = !e || stuck;
+  note.hidden = !noGaussians(e);
+  note.textContent = !noGaussians(e) ? "" : stuck
+    ? "Nothing to remove at this setting: no Gaussian is mostly this entity. \"−0.8 · take more\" admits partial ones."
+    : "No Gaussian is mostly this entity; \"take more\" will remove the ones partly in it.";
+}
+$("e-slack").addEventListener("change", updateRemove);
 $("e-remove").addEventListener("click", async () => {
   if (!S.selected) return;
   const st = $("e-status"); st.className = "edit-status";
