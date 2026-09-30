@@ -10,8 +10,9 @@ Templates:
 - ``select(category, frame=None)`` -- entities of a category (observed on that frame, if given)
 - ``count(category, frame=None)`` -- how many
 - ``when(entity)`` -- presence span, observed frames and gaps
-- ``relate(entity, predicate)`` -- the graph has no relation edges yet; this says so rather than
-  inventing an answer (relations are adopted from VLA-3D next)
+- ``relate(entity, predicate=None, frame=None)`` -- the entity's relation edges (VLA-3D's
+  predicates, reifyscene/graph/relations.py) in either direction, each with its validity
+  intervals; at a frame, only those holding then. A graph built without relations says so.
 
 A category matches the entity's semantic ``category`` or its label (not its top-k alternatives,
 which are runners-up).
@@ -143,14 +144,49 @@ class SceneQuery:
     def when(self, ref: str) -> Presence:
         return self.entity(ref).presence
 
-    def relate(self, ref: str, predicate: str) -> dict[str, Any]:
-        self.entity(ref)
-        rel = [e for e in self.graph.edges if str(e.edge_type) not in ("observed_by",)]
-        if not rel:
+    def relations(self) -> list:
+        from reifyscene.graph.relations import PREDICATES
+
+        return [e for e in self.graph.edges if str(e.edge_type) in PREDICATES]
+
+    def relate(self, ref: str, predicate: str | None = None,
+               frame: int | None = None) -> dict[str, Any]:
+        """Relations involving an entity, as sentences with their intervals."""
+        e = self.entity(ref)
+        rels = self.relations()
+        if not rels and not (self.graph.metadata or {}).get("relations"):
             return {"available": False,
-                    "reason": "the graph has no relation edges yet; relations (VLA-3D's "
-                              "predicates) are the next piece of the graph to build"}
-        raise QueryError("relation edges exist but relate() does not read them yet")
+                    "reason": "this run's graph was built without relations; run "
+                              "scripts/add_graph_relations.py on it"}
+        out = []
+        for r in rels:
+            also = (r.attrs or {}).get("and")
+            if e.node_id not in (r.src, r.dst, also):
+                continue
+            if predicate and str(r.edge_type) != predicate:
+                continue
+            iv = (r.attrs or {}).get("intervals") or []
+            if frame is not None and not any(a <= frame <= b for a, b in iv):
+                continue
+            out.append({"predicate": str(r.edge_type), "src": r.src, "dst": r.dst, "and": also,
+                        "intervals": iv, "confidence": r.confidence,
+                        "sentence": self._sentence(str(r.edge_type), r.src, r.dst, also)})
+        out.sort(key=lambda x: (x["predicate"], -x["confidence"]))
+        return {"available": True, "entity": e.node_id, "relations": out, "count": len(out)}
+
+    def _name(self, node_id: str) -> str:
+        e = self.entities.get(node_id)
+        return f"{e.category} {node_id.rsplit(':', 1)[-1]}" if e else node_id
+
+    def _sentence(self, pred: str, src: str, dst: str, also: str | None) -> str:
+        if pred == "between":
+            return f"{self._name(src)} is between {self._name(dst)} and {self._name(also or '')}"
+        if pred in ("closest", "farthest"):
+            cat = self.entities[src].category if src in self.entities else "entity"
+            return f"{self._name(src)} is the {pred} {cat} to {self._name(dst)}"
+        verb = {"near": "is near", "above": "is above", "below": "is below", "on": "is on",
+                "in": "is in"}.get(pred, pred)
+        return f"{self._name(src)} {verb} {self._name(dst)}"
 
     # -- one entry point for CLI and web ------------------------------------------------------
 
@@ -170,6 +206,8 @@ class SceneQuery:
             return {"template": t, "args": args, "entity": e.node_id,
                     "presence": e.presence.to_dict()}
         if t == "relate":
+            pred = str(args.get("predicate") or "") or None
             return {"template": t, "args": args,
-                    **self.relate(str(args["entity"]), str(args.get("predicate", "")))}
+                    **self.relate(str(args["entity"]), None if pred in (None, "any") else pred,
+                                  frame)}
         raise QueryError(f"unknown template {template!r}; have {', '.join(TEMPLATES)}")

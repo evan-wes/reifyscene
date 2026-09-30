@@ -68,7 +68,26 @@ def test_when_reports_the_gap_and_entities_resolve_by_tracklet_number() -> None:
 
 def test_relate_says_relations_are_missing_rather_than_answering() -> None:
     ans = SceneQuery(_graph()).run("relate", {"entity": "2", "predicate": "near"})
-    assert ans["available"] is False and "relation" in ans["reason"]
+    assert ans["available"] is False and "relations" in ans["reason"]
+
+
+def test_relate_reads_edges_both_ways_and_filters_by_frame() -> None:
+    g = _graph()
+    p2, p3, cup = ("human:cam_00:sam2:cam_00:2", "human:cam_00:sam2:cam_00:3",
+                   "object:cam_00:sam2:cam_00:5")
+    g.edges += [
+        GraphEdge(src=p2, dst=p3, edge_type="near", confidence=0.5,
+                  attrs={"intervals": [[0, 2], [7, 9]]}),
+        GraphEdge(src=cup, dst=p2, edge_type="on", confidence=1.0, attrs={"intervals": [[4, 5]]}),
+    ]
+    g.metadata = {"relations": {"counts": {"near": 1, "on": 1}}}
+    q = SceneQuery(g)
+    ans = q.run("relate", {"entity": "3"})
+    assert [r["sentence"] for r in ans["relations"]] == ["person 2 is near person 3"]
+    assert q.run("relate", {"entity": "2", "predicate": "on"})["relations"][0]["sentence"] \
+        == "cup 5 is on person 2"
+    assert q.run("relate", {"entity": "2", "frame": 4})["count"] == 1      # only the cup then
+    assert q.run("relate", {"entity": "2", "frame": 5, "predicate": "near"})["count"] == 0
 
 
 def test_bad_queries_fail_loudly() -> None:

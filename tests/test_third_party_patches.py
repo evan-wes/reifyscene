@@ -26,6 +26,7 @@ CHECKOUTS = {
     "hloc": "Hierarchical-Localization",
     "vggt-long": "VGGT-Long",
     "concept-graphs": "concept-graphs",
+    "vla-3d": "VLA-3D",
 }
 
 

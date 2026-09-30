@@ -1245,6 +1245,7 @@ class ReifyScenePipeline:
         entities = [n for n in artifact.nodes if n.node_type in ('human', 'object')]
         placed = [n for n in entities if (n.attrs or {}).get('position_source') == 'pointmap']
         gravity = bool((artifact.metadata.get('world_frame') or {}).get('gravity_aligned'))
+        relations = self._add_relations(artifact)
 
         def grade(hit: int, total: int) -> str:
             if not total or not hit:
@@ -1263,6 +1264,9 @@ class ReifyScenePipeline:
                 # Vertical relations are defined against gravity; without a canonicalized
                 # world the graph cannot claim them at all.
                 'vertical_relations': 'grounded' if gravity else 'absent',
+                # VLA-3D's predicates per frame, with validity intervals. Degraded without
+                # gravity (the vertical four are not computed); absent when VLA-3D is missing.
+                'relations': relations,
                 'renderable': 'absent',  # landed as a library, wired to nothing
             },
         ))
@@ -1270,6 +1274,18 @@ class ReifyScenePipeline:
         self._stamp_stage_metadata(artifact, 'graph', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
+
+    @staticmethod
+    def _add_relations(artifact) -> str:
+        """Relation edges onto the graph; the manifest grade for them."""
+        from reifyscene.graph.relations import RelationsUnavailable, add_relations
+
+        try:
+            meta = add_relations(artifact)
+        except RelationsUnavailable as exc:
+            artifact.notes.append(f"relations not computed: {exc}")
+            return 'absent'
+        return 'grounded' if meta.get('gravity_aligned') else 'degraded'
 
     def optimize(self, sync_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, graph_artifact=None):
         """Run staged joint optimization."""

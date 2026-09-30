@@ -1,0 +1,28 @@
+Make the colour-naming import optional.
+
+Upstream pin: VLA-3D @ a0c023c9662bd875f0b3aeff4ff60adc1991e449
+
+generate_scene_info.py imports colors.py at module scope, and colors.py imports a private module
+of the webcolors package (webcolors._definitions) to name object colours for the language
+generator. Nothing on the relation path uses it: the relate_* functions take boxes and classes.
+This lets the module import without webcolors rather than adding a dependency, pinned to a
+private module path, for code we never call.
+
+Without it: importing the relation functions fails with ModuleNotFoundError: webcolors.
+
+diff --git a/scene_graph/generate_scene_info.py b/scene_graph/generate_scene_info.py
+index 39284ef..fa468b2 100644
+--- a/scene_graph/generate_scene_info.py
++++ b/scene_graph/generate_scene_info.py
+@@ -14,7 +14,10 @@ import os
+ import pandas as pd
+ from shapely.geometry import Polygon
+ from bbox_utils import *
+-from colors import *
++try:
++    from colors import *
++except ImportError:  # colors needs webcolors, used only to name object colours
++    pass
+ from special_relation_classes import *
+ from tqdm import tqdm
+ from time import perf_counter

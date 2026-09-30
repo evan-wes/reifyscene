@@ -101,6 +101,11 @@ MOGE_COMMIT="07444410f1e33f402353b99d6ccd26bd31e469e8"
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
+# VLA-3D's scene-graph relation functions (MIT): the graph stage's relation computer calls them
+# (reifyscene/graph/relations.py). Two patches in third_party_patches/vla-3d/.
+VLA3D_REPO="https://github.com/HaochenZ11/VLA-3D.git"
+VLA3D_COMMIT="a0c023c9662bd875f0b3aeff4ff60adc1991e449"
+
 HLOC_REPO="https://github.com/cvg/Hierarchical-Localization.git"
 HLOC_TAG="v1.4"
 COLMAP_UPSTREAM_TAG="3.13.0"
@@ -155,6 +160,7 @@ INSTALL_SIGLIP2=0
 INSTALL_SAPIENS=0
 INSTALL_MOGE=0
 INSTALL_VGGT_LONG=0
+INSTALL_VLA3D=1
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
 INSTALL_VISION=1
@@ -177,6 +183,7 @@ SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
 MOGE_DIR="${THIRD_PARTY_DIR}/MoGe"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
+VLA3D_DIR="${THIRD_PARTY_DIR}/VLA-3D"
 VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
 VGGT_LONG_WEIGHTS_STAMP="${VGGT_LONG_WEIGHTS_DIR}/.reifyscene_download_complete"
 VGGT_LONG_WEIGHTS_MIN_MB="${VGGT_LONG_WEIGHTS_MIN_MB:-8000}"
@@ -211,6 +218,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_MOGE=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
+    --no-vla3d)
+      INSTALL_VLA3D=0; shift ;;
     --with-gsplat)
       INSTALL_GSPLAT=1; shift ;;
     --no-gsplat)
@@ -270,6 +279,7 @@ Install options:
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the reifyscene renderer requires it)
+  --no-vla3d              Skip VLA-3D (scene-graph relations; on by default)
   --no-gsplat             Skip the gsplat source build
   --force-vggt-long-weights
                           Re-download VGGT-Long weights even if already present
@@ -1306,6 +1316,15 @@ if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
   # Patch hloc for pycolmap >= 3.10 API drift; see the patch header for the three call sites.
   echo "Patching hloc for pycolmap >= 3.10 API drift..."
   apply_patch_series "${HLOC_DIR}" "${ROOT_DIR}/third_party_patches/hloc" "hloc"
+fi
+
+if [[ $INSTALL_VLA3D -eq 1 ]]; then
+  # Relations for the scene graph. Their code is imported from the checkout, not pip-installed;
+  # shapely and numba are what it needs (the `relations` extra in pyproject.toml).
+  clone_or_update_checkout "${VLA3D_REPO}" "${VLA3D_DIR}" "${VLA3D_COMMIT}"
+  python -m pip install "shapely>=2.0" "numba>=0.60"
+  echo "Applying VLA-3D patches..."
+  apply_patch_series "${VLA3D_DIR}" "${ROOT_DIR}/third_party_patches/vla-3d" "VLA-3D"
 fi
 
 if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then

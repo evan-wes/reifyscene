@@ -29,6 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Scene-graph relations: VLA-3D's relation functions, cloned by the setup script, need these.
+relations = [
+  "shapely>=2.0",
+  "numba>=0.60",
+]
 # The local demo app (`reifyscene serve`): docs/design/2026-09-29-demo-web-app.md
 web = [
   "fastapi>=0.142",

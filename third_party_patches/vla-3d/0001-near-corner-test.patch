@@ -1,0 +1,26 @@
+Make relate_near's corner-distance test do what its comment says.
+
+Upstream pin: VLA-3D @ a0c023c9662bd875f0b3aeff4ff60adc1991e449
+
+relate_near first tests centre distance, then falls back to "object near if at least two points
+close to each other" over the box corners. The fallback is written np.any(dists < thr) > 1:
+np.any returns a bool, and a bool is never > 1, so the fallback never fires and near is centre
+distance alone -- two long objects touching end to end are never near. This counts the close
+corner pairs instead, as the comment describes.
+
+Without it: near silently ignores box extent, which matters for us because our boxes are
+anisotropic (thin in depth; see reifyscene/graph/relations.py).
+
+diff --git a/scene_graph/generate_scene_info.py b/scene_graph/generate_scene_info.py
+index 39284ef..04e17c8 100644
+--- a/scene_graph/generate_scene_info.py
++++ b/scene_graph/generate_scene_info.py
+@@ -470,7 +470,7 @@ def relate_near(near_thres, anchor_idx, objects, region_bbox):
+ 
+             #print("dists", dists)
+             # object near if at least two points close to each other
+-            if np.any(dists < near_thres * region_size) > 1:
++            if np.sum(np.asarray(dists) < near_thres * region_size) > 1:
+                 near_objs.append(i)
+ 
+     near_obj_ids = [objects[ind]["object_id"] for ind in near_objs]

@@ -23,3 +23,12 @@ class EdgeType(str, Enum):
     INSIDE = "inside"
     ATTACHED_TO = "attached_to"
     OCCLUDES = "occludes"
+    # VLA-3D's view-independent predicates (reifyscene/graph/relations.py)
+    ABOVE = "above"
+    BELOW = "below"
+    ON = "on"
+    IN = "in"
+    NEAR = "near"
+    BETWEEN = "between"
+    CLOSEST = "closest"
+    FARTHEST = "farthest"
