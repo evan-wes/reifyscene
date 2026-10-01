@@ -229,11 +229,12 @@ def _write_dataset(root: Path, size=(8, 6)) -> None:
     np.save(root / "depth" / "2x" / "0_00000.npy", np.full((h, w), 2.0, np.float32))
     Image.fromarray(np.zeros((h, w, 3), np.uint8)).save(root / "rgb" / "2x" / "0_00000.png")
     (root / "splits" / "train.json").write_text(json.dumps({"camera_ids": ["0"], "time_ids": [0]}))
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0, "factor": 2}))  # as DyCheck ships
 
 
 def test_dataset_backend_records_its_factor_resize(tmp_path: Path) -> None:
     _write_dataset(tmp_path, size=(8, 6))
-    stream = type("S", (), {"stream_id": "0", "width": 16, "height": 12})()
+    stream = type("S", (), {"stream_id": "0", "width": 16, "height": 12, "fps": 30.0})()
     ingest = type("I", (), {"streams": [stream], "keyframes": [FrameRef("0", 0, 0.0)]})()
     art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 2}).initialize(
         ingest_artifact=ingest

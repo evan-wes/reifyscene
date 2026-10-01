@@ -18,8 +18,6 @@ frame (a wrong rate would scale every velocity by its error, every acceleration 
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -71,6 +69,12 @@ class DyCheckSource(DataSource):
     def has_ground_truth(self) -> bool:
         return True
 
+    @property
+    def dycheck(self):
+        from reifyscene.ingest.datasets import DyCheckSequence
+
+        return DyCheckSequence(self.root)
+
 
 @dataclass
 class DavisSource(DataSource):
@@ -85,26 +89,20 @@ class DavisSource(DataSource):
         return True
 
     @property
-    def annotation_dir(self) -> Path:
-        return Path(self.root) / "Annotations" / str(self.resolution) / str(self.sequence)
+    def davis(self):
+        from reifyscene.ingest.datasets import DavisSequence
+
+        return DavisSequence(self.root, str(self.resolution), str(self.sequence))
 
     def annotation_for(self, frame_file: Path) -> np.ndarray | None:
-        """The instance-id annotation of one frame (source pixels), found by the frame file's
-        stem; None when DAVIS annotates no such frame."""
-        from PIL import Image
-
-        path = self.annotation_dir / f"{Path(frame_file).stem}.png"
-        if not path.is_file():
-            return None
-        with Image.open(path) as img:
-            return np.asarray(img)
-
-
-_FACTOR = re.compile(r"^(\d+)x$")
+        """The instance-id annotation of one frame (source pixels); None when DAVIS
+        annotates no such frame."""
+        return self.davis.annotation_for(frame_file)
 
 
 def detect_source(path: Path) -> DataSource:
     """Recognise what ``path`` (a stream's recorded input) is, from what is on disk."""
+    from reifyscene.ingest.datasets import DavisSequence, DyCheckSequence
     from reifyscene.ingest.frame_decoders import video_fps
 
     path = Path(path)
@@ -112,19 +110,15 @@ def detect_source(path: Path) -> DataSource:
         fps = video_fps(path)
         return VideoSource(path=path, fps=fps, fps_source="container" if fps else "unknown",
                            notes=[] if fps else ["the container records no frame rate"])
-    m = _FACTOR.match(path.name)
-    root = path.parent.parent
-    if m and path.parent.name == "rgb" and (root / "extra.json").is_file() \
-            and (root / "camera").is_dir():
-        extra = json.loads((root / "extra.json").read_text())
-        fps = extra.get("fps")
-        fps = float(fps) if fps else None
-        return DyCheckSource(path=path, root=root, factor=int(m.group(1)), sequence=root.name,
+    found = DyCheckSequence.of_frames_dir(path)
+    if found is not None:
+        seq, factor = found
+        fps = seq.fps
+        return DyCheckSource(path=path, root=seq.root, factor=factor, sequence=seq.name,
                              fps=fps, fps_source="dataset record" if fps else "unknown")
-    if path.parent.parent.name == "JPEGImages":
-        root = path.parent.parent.parent
-        res = path.parent.name
-        if (root / "Annotations" / res / path.name).is_dir():
-            return DavisSource(path=path, root=root, resolution=res, sequence=path.name,
-                               notes=["DAVIS publishes frames without a frame rate"])
+    davis = DavisSequence.of_frames_dir(path)
+    if davis is not None:
+        return DavisSource(path=path, root=davis.root, resolution=davis.resolution,
+                           sequence=davis.name,
+                           notes=["DAVIS publishes frames without a frame rate"])
     return FramesSource(path=path, notes=["a folder of frames records no frame rate"])

@@ -33,6 +33,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.ingest.datasets import DyCheckSequence
 from reifyscene.lifting.tracks_3d import StaticPoints3D, Tracks3D
 
 if TYPE_CHECKING:
@@ -179,7 +180,7 @@ def _load_colmap_cameras(
     """
     import pycolmap  # lazy: only the refined path needs it
 
-    sparse = Path(dataset_root) / "flow3d_preprocessed" / "colmap" / "sparse"
+    sparse = DyCheckSequence(dataset_root).colmap_sparse_dir
     rec = pycolmap.Reconstruction(str(sparse))
     by_name = {im.name: im for im in rec.images.values()}
     w2cs, ks = [], []
@@ -229,7 +230,7 @@ def _load_aligned_depth(
     the reciprocal. The borrowed init bundle was lifted from this source (default
     ``depth_anything_colmap``), not the sparse sensor ``depth/`` (``lidar``).
     """
-    path = Path(dataset_root) / "flow3d_preprocessed" / f"aligned_{depth_type}" / f"{factor}x" / f"{frame_name}.npy"
+    path = DyCheckSequence(dataset_root).aligned_depth_path(frame_name, factor, depth_type)
     depth = np.load(path).astype(np.float32)
     depth[depth < 1e-3] = 1e-3
     return 1.0 / depth
@@ -256,7 +257,7 @@ def _load_frame_stack(
             _load_aligned_depth(dataset_root, factor, name, depth_type), dtype=torch.float32, device=device
         ))
         # load_rgb drops alpha; the alpha channel is SoM's valid_mask, so read RGBA here.
-        with Image.open(backend.rgb_dir / f"{name}.png") as img:
+        with Image.open(backend.sequence.rgb_path(name, backend.factor)) as img:
             rgba = np.asarray(img.convert("RGBA"), dtype=np.uint8).copy()
         rgbs.append(torch.as_tensor(rgba[..., :3], dtype=torch.uint8, device=device))
         valid.append(torch.as_tensor(rgba[..., 3], dtype=torch.float32, device=device) / 255.0)
@@ -312,7 +313,7 @@ def apply_scene_norm_stack(stack: FrameStack, norm: SceneNorm) -> None:
 # -- lifting (SoM get_tracks_3d / get_bkgd_points) ------------------------
 
 def _tracks_dir(dataset_root: str | Path, factor: int) -> Path:
-    return Path(dataset_root) / "flow3d_preprocessed" / "2d_tracks" / f"{factor}x"
+    return DyCheckSequence(dataset_root).tracks_dir(factor)
 
 
 def lift_tracks_3d(

@@ -55,10 +55,7 @@ def _box_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / area) if area > 0 else 0.0
 
 
-def _gt_boxes(path: Path) -> dict[str, np.ndarray]:
-    from PIL import Image
-
-    arr = np.asarray(Image.open(path))
+def _gt_boxes(arr: np.ndarray) -> dict[str, np.ndarray]:
     out = {}
     for i in np.unique(arr):
         if int(i) == 0:
@@ -78,13 +75,15 @@ def build(davis: Path, out: Path, threshold: float = 0.25) -> None:
     vocabs = {"coco80": _coco80(), "generic": GENERIC}
 
     payload: dict[str, Any] = {"model": MODEL, "threshold": threshold, "sequences": {}}
-    for seq_dir in sorted((davis / "JPEGImages/480p").iterdir()):
-        img_path = seq_dir / "00000.jpg"
-        ann_path = davis / "Annotations/480p" / seq_dir.name / "00000.png"
-        if not img_path.exists() or not ann_path.exists():
+    from reifyscene.ingest.datasets import DavisSequence
+
+    for seq in DavisSequence.all(davis):
+        files = seq.frame_files()
+        ann = seq.annotation_for(files[0]) if files else None
+        if ann is None:
             continue
-        image = Image.open(img_path).convert("RGB")
-        gt = _gt_boxes(ann_path)
+        image = Image.open(files[0]).convert("RGB")
+        gt = _gt_boxes(ann)
         entry: dict[str, Any] = {"gt": {k: v.tolist() for k, v in gt.items()}, "vocabs": {}}
         for name, words in vocabs.items():
             prompt = ". ".join(words) + "."
@@ -102,8 +101,8 @@ def build(davis: Path, out: Path, threshold: float = 0.25) -> None:
                     "iou": {g: round(_box_iou(box, gb), 4) for g, gb in gt.items()},
                 })
             entry["vocabs"][name] = dets
-        payload["sequences"][seq_dir.name] = entry
-        print(f"  {seq_dir.name:22} gt={len(gt)} "
+        payload["sequences"][seq.name] = entry
+        print(f"  {seq.name:22} gt={len(gt)} "
               + " ".join(f"{k}={len(v)}" for k, v in entry["vocabs"].items()))
 
     out.parent.mkdir(parents=True, exist_ok=True)

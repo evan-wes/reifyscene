@@ -33,6 +33,7 @@ def _write_sequence(root, *, orientation, position, depth_value=2.0, size=10) ->
     (root / "splits" / "train.json").write_text(
         json.dumps({"camera_ids": ["0"], "frame_names": ["0_00000"], "time_ids": [0]})
     )
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
 
 
 def test_load_camera_pose_convention(tmp_path) -> None:
@@ -123,6 +124,7 @@ def _write_frames(root, n: int, size: int = 10) -> None:
     (root / "splits" / "train.json").write_text(
         json.dumps({"camera_ids": ["0"] * n, "frame_names": names, "time_ids": list(range(n))})
     )
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
 
 
 def test_cameras_are_on_the_ingest_clock(tmp_path) -> None:

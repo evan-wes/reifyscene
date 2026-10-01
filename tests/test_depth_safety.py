@@ -52,6 +52,7 @@ def _fake_dataset(root):
     (root / "depth" / "1x").mkdir(parents=True)
     (root / "rgb" / "1x").mkdir(parents=True)
     json.dump({"camera_ids": ["0", "0"], "time_ids": [0, 1]}, open(root / "splits" / "train.json", "w"))
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
     for t in (0, 1):
         name = f"0_{t:05d}"
         json.dump(

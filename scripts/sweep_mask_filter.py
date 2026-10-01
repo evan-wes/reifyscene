@@ -65,15 +65,17 @@ def build_cache(davis: Path, out: Path, frame_idx: int = 0) -> None:
     seg._load_models()
 
     payload: dict[str, Any] = {"frame_idx": frame_idx, "sequences": {}}
-    images = davis / "JPEGImages/480p"
-    annotations = davis / "Annotations/480p"
-    for seq_dir in sorted(images.iterdir()):
-        img = seq_dir / f"{frame_idx:05d}.jpg"
-        ann = annotations / seq_dir.name / f"{frame_idx:05d}.png"
-        if not img.exists() or not ann.exists():
+    from reifyscene.ingest.datasets import DavisSequence
+
+    for seq in DavisSequence.all(davis):
+        files = seq.frame_files()
+        if frame_idx >= len(files):
+            continue
+        img = files[frame_idx]
+        gt_arr = seq.annotation_for(img)
+        if gt_arr is None:
             continue
         frame = np.asarray(Image.open(img).convert("RGB"))
-        gt_arr = np.asarray(Image.open(ann))
         gt = {int(i): (gt_arr == i) for i in np.unique(gt_arr) if int(i) != 0}
         h, w = frame.shape[:2]
 
@@ -90,11 +92,11 @@ def build_cache(davis: Path, out: Path, frame_idx: int = 0) -> None:
                     for gid, g in gt.items() if (m | g).any()
                 },
             })
-        payload["sequences"][seq_dir.name] = {
+        payload["sequences"][seq.name] = {
             "gt": {str(gid): round(float(g.sum()) / (h * w), 6) for gid, g in gt.items()},
             "proposals": proposals,
         }
-        print(f"  {seq_dir.name:22} {len(proposals):3} proposals, {len(gt)} gt")
+        print(f"  {seq.name:22} {len(proposals):3} proposals, {len(gt)} gt")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload) + "\n")
