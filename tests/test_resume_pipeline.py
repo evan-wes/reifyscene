@@ -26,7 +26,7 @@ from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact
 from reifyscene.sync.sync_artifact import SyncArtifact
-from tests.conftest import write_test_video
+from tests.conftest import write_manifest, write_test_video
 
 
 def _touch_video(path: Path) -> Path:
@@ -217,7 +217,8 @@ def _run(root: Path, name: str, videos: list[Path], **overrides) -> tuple[Path, 
     for path, value in overrides.items():
         section, key = path.split('.')
         cfg.setdefault(section, {})[key] = value
-    # Every stage, through the registry, as the run script drives them.
+    # Every stage, through the registry, as the run script drives them (manifest first).
+    write_manifest(root / name, cfg)
     pipeline = ReifyScenePipeline(copy.deepcopy(cfg))
     registry = pipeline.stage_registry()
     outputs: dict = {}

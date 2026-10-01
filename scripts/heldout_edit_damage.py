@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Judge a removal against photos, from the training cameras and from cameras it never saw.
 
-    python scripts/heldout_edit_damage.py ../runs/spin_oracle_g4h2 [--entity 1] [--views 60]
+    python scripts/heldout_edit_damage.py ../runs/slice_spin [--entity 1] [--views 60]
 
 G4 part 3 of docs/design/2026-09-20-conceptgraphs-verdict-and-graph-plan.md. The DAVIS benchmark
 (``benchmarks/davis_edit_damage.json``) scores training views only. A DyCheck run also has
@@ -59,7 +59,8 @@ def main() -> int:
     ap.add_argument("--entity", default=None,
                     help="node id or tracklet number (default: the grounded person with the "
                          "most Gaussians)")
-    ap.add_argument("--checkpoint-sub", default="render")
+    ap.add_argument("--checkpoint", default="render",
+                    help="the checkpoint scored: the render stage's own, or a named retrain")
     ap.add_argument("--views", type=int, default=60, help="held-out views scored (evenly spaced)")
     ap.add_argument("--train-views", type=int, default=20)
     ap.add_argument("--ring", type=int, default=8, help="px of tolerance around the silhouette")
@@ -72,12 +73,12 @@ def main() -> int:
     import torch
     from PIL import Image
 
+    from reifyscene.api.run_outputs import RunOutputs
     from reifyscene.edit.remove import RemoveEditor
     from reifyscene.edit.renderer import outline
     from reifyscene.eval.benchmarks.edit_damage import dilate, rest_psnr
     from reifyscene.eval.benchmarks.edit_damage.silhouettes import PersonSegmenter, pick_entity
     from reifyscene.graph.renderable_handle import drop_gaussians
-    from reifyscene.ingest.streams import RunStreams
     from reifyscene.query.scene_query import SceneQuery
     from reifyscene.render.eval.masked_nvs_benchmark import (
         default_alignment,
@@ -87,18 +88,18 @@ def main() -> int:
     )
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-    run = args.run
-    cfg = json.loads((run / "run_manifest.json").read_text())["config"]
+    run = RunOutputs.open(args.run)
+    cfg = run.config
     eval_cfg = dict((cfg.get("evaluation") or {}).get("masked_nvs") or {})
     if not eval_cfg.get("dataset_root"):
         raise SystemExit(f"{run.name}: no evaluation.masked_nvs.dataset_root -- not a held-out run")
     eval_cfg.setdefault("align", default_alignment(cfg.get("geometry", {}).get("backend_name")))
     eval_split = str(eval_cfg.get("eval_split", "val"))
 
-    graph = json.loads((run / "graph" / "artifact.json").read_text())
-    nodes = [n["value"] for n in graph["nodes"]]
+    nodes = [n["value"] for n in run.record("graph")["nodes"]]
     if args.entity:
-        nid = SceneQuery.from_run(run).entity(str(args.entity)).node_id  # refuses ambiguity
+        # refuses an ambiguous reference
+        nid = SceneQuery(run.artifact("graph")).entity(str(args.entity)).node_id
         node = next(n for n in nodes if n["node_id"] == nid)
     else:
         people = [n for n in nodes if n["node_type"] == "human"
@@ -109,8 +110,8 @@ def main() -> int:
                    + n["attrs"]["gaussians"]["bg"])
     nid = node["node_id"]
 
-    stream = RunStreams.from_run(run).only()
-    ed = RemoveEditor(run, checkpoint_sub=args.checkpoint_sub, device=args.device)
+    stream = run.streams.only()
+    ed = RemoveEditor(run.checkpoint(args.checkpoint), device=args.device)
     fg, bg, stats = ed.select(nid)
     if len(fg) + len(bg) == 0:
         raise SystemExit(f"{nid} has no Gaussians to remove")
@@ -133,7 +134,7 @@ def main() -> int:
                                           features=features)
 
     seg = PersonSegmenter(device=args.device)
-    out_dir = run / "edits" / "heldout_damage"
+    out_dir = run.output_dir("heldout_damage")
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     tag = nid.rsplit(":", 1)[-1]
 
@@ -213,7 +214,7 @@ def main() -> int:
         summary[f"heldout_minus_train_{k}"] = round(a - b, 4) if None not in (a, b) else None
     result = {
         "run": run.name, "entity": nid, "label": node.get("label"),
-        "checkpoint": args.checkpoint_sub, "selection": stats,
+        "checkpoint": args.checkpoint, "selection": stats,
         "removed_fg": int(len(fg)), "removed_bg": int(len(bg)),
         "silhouettes": f"pseudo ground truth: {seg.backend}; masks saved under masks/",
         "alignment": views.alignment, "ring_px": args.ring, "summary": summary,

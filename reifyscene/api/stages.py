@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from reifyscene.common.io import write_json
-from reifyscene.common.paths import ensure_dir
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.graph.handles import HandlesArtifact
@@ -37,7 +35,8 @@ class StageSpec:
 
     @property
     def dir_name(self) -> str:
-        return 'tracking' if self.name == 'tracking' else self.name
+        """The stage's folder inside a run (use ``RunOutputs.stage_dir``)."""
+        return self.name
 
 
 STAGE_ORDER: tuple[str, ...] = (
@@ -188,6 +187,6 @@ def build_stage_registry() -> dict[str, StageSpec]:
 
 def write_run_manifest(run_dir: str | Path, manifest: dict[str, Any]) -> Path:
     """Persist a run-level manifest used for resume/debugging."""
-    out = ensure_dir(run_dir) / 'run_manifest.json'
-    write_json(out, manifest)
-    return out
+    from reifyscene.api.run_outputs import RunOutputs
+
+    return RunOutputs.create(run_dir).write_manifest(manifest)

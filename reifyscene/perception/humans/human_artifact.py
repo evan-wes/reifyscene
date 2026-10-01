@@ -435,7 +435,7 @@ class HumanArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'HumanArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         mask_arrays: dict[str, np.ndarray] = {}
         for det_id in raw['mask_ids']:
             path = require_file(save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz", "humans file")

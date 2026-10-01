@@ -5,10 +5,11 @@ Selection is the removal path the identity scope settled on (§4.7-4.9 of
 assignment against the run's id maps, then the floater filter. The edit is a checkpoint transform
 (the selected Gaussians dropped, the scene rebuilt), so what renders afterwards is a real scene.
 
-An edit is a *view* on a run. Its results go under ``<run>/edits/<edit id>/`` and nothing in the
-pipeline's own stage directories changes. The evidence matrix -- one backward per training frame
--- is computed once per checkpoint and cached under ``<run>/edits/cache/<checkpoint>/``; after
-that an edit is an assignment, a filter and a few renders.
+An edit is a *view* on a run. Its results go to the run's output dir for the edit
+(``RunOutputs.output_dir(<edit id>)``) and nothing in the pipeline's own stage directories
+changes. The evidence matrix -- one backward per training frame -- is computed once per
+checkpoint and cached (``output_dir("cache", <checkpoint>)``); after that an edit is an
+assignment, a filter and a few renders.
 
 What an edit reports, beside the images: how many Gaussians it took from each field, what share
 of the scene that is (the renderable handle's *assigned fraction*), what the floater filter
@@ -20,11 +21,13 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-EDITS_DIR = "edits"
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import Checkpoint
+
 REMOVED_FILE = "removed.npz"     # the removed Gaussians, so the edit can be re-rendered
 
 
@@ -35,19 +38,15 @@ def edit_id(op: str, node_id: str) -> str:
 class RemoveEditor:
     """Holds one run's checkpoint on the GPU and executes removals against it."""
 
-    def __init__(self, run_dir: Path, checkpoint_sub: str = "render", device: str = "cuda") -> None:
+    def __init__(self, checkpoint: Checkpoint, device: str = "cuda") -> None:
+        """``checkpoint``: the run's trained scene to edit (``RunOutputs.checkpoint()``)."""
         from reifyscene.edit.renderer import CheckpointRenderer
 
-        self.run = Path(run_dir)
-        self.checkpoint_sub = checkpoint_sub
+        self.checkpoint = checkpoint
+        self.run = checkpoint.run
         self.device = device
-        path = self.run / checkpoint_sub / "trained_dynamic.npz"
-        if not path.is_file():
-            raise FileNotFoundError(f"{self.run.name} has no trained checkpoint at {path}")
-        self.checkpoint_path = path
         self.use_layer = True     # the handles stage turns this off: it is what writes the layer
-        with np.load(path, allow_pickle=True) as z:
-            self.bundle = {k: z[k] for k in z.files}
+        self.bundle = checkpoint.load()
         self.renderer = CheckpointRenderer.for_run(self.bundle, device, self.run)
         self._counts = None
         self._node_ids: list[str | None] = []
@@ -57,7 +56,7 @@ class RemoveEditor:
 
     @property
     def cache_dir(self) -> Path:
-        return self.run / EDITS_DIR / "cache" / self.checkpoint_sub
+        return self.run.output_dir("cache", self.checkpoint.name)
 
     def evidence(self, *, refresh: bool = False):
         """(N, C) per-Gaussian blending weight per id-map class, cached per checkpoint.
@@ -68,7 +67,7 @@ class RemoveEditor:
         import torch
 
         from reifyscene.graph.assignment import evidence_matrix, id_map_views
-        from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+        from reifyscene.graph.id_maps import export_id_maps, has_id_maps, load_id_maps
 
         if self._counts is not None and not refresh:
             return self._counts
@@ -79,9 +78,9 @@ class RemoveEditor:
                 self._counts = torch.as_tensor(counts, device=self.device)
                 self._node_ids = json.loads(npath.read_text())
                 return self._counts
-        if refresh or not (self.run / "identity" / "manifest.json").is_file():
+        if refresh or not has_id_maps(self.run):
             export_id_maps(self.run)
-        manifest, maps = load_id_maps(self.run / "identity")
+        manifest, maps = load_id_maps(self.run)
         self._node_ids = [c["node_id"]
                           for c in sorted(manifest["classes"], key=lambda c: c["index"])]
         r = self.renderer
@@ -109,8 +108,7 @@ class RemoveEditor:
 
         if slackness == 0.0 and filtered and self.use_layer:
             try:
-                fg, bg = load_handles(self.run / "graph", node_id,
-                                      checkpoint_path=self.checkpoint_path)
+                fg, bg = load_handles(self.run, node_id, checkpoint=self.checkpoint)
                 return fg, bg, {"selected_fg": int(len(fg)), "selected_bg": int(len(bg)),
                                 "source": "graph layer"}
             except (KeyError, StaleHandles, FileNotFoundError):
@@ -148,7 +146,7 @@ class RemoveEditor:
         t0 = time.time()
         fg, bg, stats = self.select(node_id, slackness=slackness, filtered=filtered)
         eid = edit_id("remove", node_id)
-        out = Path(out_dir) if out_dir is not None else self.run / EDITS_DIR / eid
+        out = Path(out_dir) if out_dir is not None else self.run.output_dir(eid)
         out.mkdir(parents=True, exist_ok=True)
         frames = self.renderer.frames if frames is None else [f for f in frames
                                                               if f in self.renderer.time_of]
@@ -163,7 +161,7 @@ class RemoveEditor:
         n_taken = int(len(fg) + len(bg))
         result = {
             "edit_id": eid, "op": "remove", "run": self.run.name, "node_id": node_id,
-            "checkpoint": self.checkpoint_sub, "slackness": slackness, "filtered": filtered,
+            "checkpoint": self.checkpoint.name, "slackness": slackness, "filtered": filtered,
             "removed_fg": int(len(fg)), "removed_bg": int(len(bg)),
             "assigned_fraction": round(n_taken / max(n_total, 1), 6),
             "renderable": "grounded" if n_taken else "unassignable",

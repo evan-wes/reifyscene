@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import RunOutputs
 
 
 @dataclass
@@ -96,7 +98,7 @@ def stream_ground_truth(stream) -> GroundTruth:
 
 
 def score_run(
-    run_dir: Path,
+    run: RunOutputs,
     *,
     frames: Sequence[int] | None = None,
     match_iou: float = 0.5,
@@ -110,18 +112,14 @@ def score_run(
     sampled rather than exhaustive -- an object either tracks or it does not, and three
     frames spread through the clip separate those cases at a fraction of the cost.
     """
-    from reifyscene.ingest.streams import RunStreams
-    from reifyscene.perception.instance.instance_artifact import InstanceArtifact
-
-    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream = run.streams.resolve(stream_id)
     stream_id = stream.id
-    sequence = stream.source.sequence or run_dir.name
+    sequence = stream.source.sequence or run.name
     score = SequenceScore(sequence=sequence)
-    try:
-        inst = InstanceArtifact.load(run_dir / "segment")
-    except Exception as exc:  # a run that did not reach segment still gets a row
-        score.notes.append(f"no segment artifact: {exc}")
+    if not run.has("segment"):          # a run that did not reach segment still gets a row
+        score.notes.append("no segment artifact")
         return score
+    inst = run.artifact("segment")
 
     by_frame: dict[int, dict[str, np.ndarray]] = {}
     for obs in inst.observations:

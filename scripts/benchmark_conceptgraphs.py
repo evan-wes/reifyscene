@@ -40,7 +40,7 @@ def _objects_file(sequence_dir: Path) -> Path | None:
     return (post or candidates or [None])[0]
 
 
-def _gt_motion(run_dir: Path, frames: list[int], stream_id: str | None = None
+def _gt_motion(run, frames: list[int], stream_id: str | None = None
                ) -> dict[int, float]:
     """Per ground-truth id, how far it travels **in the world**, in its own 3D extents.
 
@@ -56,23 +56,22 @@ def _gt_motion(run_dir: Path, frames: list[int], stream_id: str | None = None
     """
     from reifyscene.common.frame_keys import parse_key
     from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
-    from reifyscene.ingest.streams import RunStreams
+    from reifyscene.geometry.geometry_artifact import GeometryArtifact
     from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
-    geometry = run_dir / "geometry"
-    try:
-        stream = RunStreams.from_run(run_dir).resolve(stream_id)
-        transform = stream.transform
-        art = json.loads((geometry / "artifact.json").read_text())
-    except Exception:
+    if not run.has("geometry"):
         return {}
+    stream = run.streams.resolve(stream_id)
+    transform = stream.transform
+    art = run.record("geometry")
+    pointmaps = run.stage_dir("geometry") / GeometryArtifact.POINTMAPS
     # the pointmap files are the ones geometry's own index names
     pointmap_of = {parse_key(k)[1]: v for k, v in (art.get("point_index") or {}).items()
                    if parse_key(k)[0] == stream.id}
 
     def pointmap_for_frame(frame_idx: int):
         name = pointmap_of.get(int(frame_idx))
-        path = geometry / "pointmaps" / name if name else None
+        path = pointmaps / name if name else None
         if path is None or not path.exists():
             return None
         payload = np.load(path)
@@ -119,23 +118,26 @@ def main() -> None:
                          "'moving'. One extent means it moved its own length.")
     args = ap.parse_args()
 
+    from reifyscene.api.run_outputs import RunOutputs
     from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
-    from reifyscene.ingest.streams import RunStreams, StreamError
+    from reifyscene.ingest.streams import StreamError
 
-    candidates: dict[str, list[Path]] = {}   # DAVIS sequence -> runs built from it
-    for r in sorted(args.runs.iterdir()):
-        try:
-            src = RunStreams.from_run(r).only().source
-        except (FileNotFoundError, NotADirectoryError, StreamError, KeyError):
+    candidates: dict[str, list[RunOutputs]] = {}   # DAVIS sequence -> runs built from it
+    for r in RunOutputs.discover(args.runs):
+        if not (r.has("ingest") and r.has("geometry")):
             continue
-        if src.kind == "davis" and (r / "geometry").is_dir():
+        try:
+            src = r.streams.only().source
+        except StreamError:             # several streams: not one DAVIS sequence
+            continue
+        if src.kind == "davis":
             candidates.setdefault(src.sequence, []).append(r)
 
-    def run_for(manifest: dict[str, Any], sequence: str) -> Path | None:
+    def run_for(manifest: dict[str, Any], sequence: str) -> RunOutputs | None:
         """The run an export came from: as its manifest records, else the one run built from
         that sequence -- never a pick among several."""
         if manifest.get("run_dir"):
-            return Path(manifest["run_dir"])
+            return RunOutputs.open(manifest["run_dir"])
         found = candidates.get(sequence, [])
         return found[0] if len(found) == 1 else None
 
@@ -161,7 +163,7 @@ def main() -> None:
             print(f"  {sequence:24s} -- {why}")
             continue
         score = score_masks_by_frame(
-            by_frame, stream_ground_truth(RunStreams.from_run(run).only()), sequence=sequence,
+            by_frame, stream_ground_truth(run.streams.only()), sequence=sequence,
             match_iou=args.match_iou,
         )
         row = score.to_dict()

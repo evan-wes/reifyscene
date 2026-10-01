@@ -212,7 +212,7 @@ class SceneArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "SceneArtifact":
-        raw = read_json(save_dir / "artifact.json")
+        raw = read_json(save_dir / cls.FILE)
         render_seed = cls._load_seed(save_dir, raw["render_seed"])
         train_views = []
         for view in raw["train_views"]:

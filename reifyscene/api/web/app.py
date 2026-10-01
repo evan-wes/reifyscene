@@ -12,7 +12,6 @@ the client polls it. Everything binds to 127.0.0.1; nothing is exposed.
 from __future__ import annotations
 
 import io
-import json
 import queue
 import subprocess
 import threading
@@ -26,6 +25,8 @@ from typing import Annotated, Any
 import numpy as np
 from fastapi import Query
 from pydantic import BaseModel
+
+from reifyscene.api.run_outputs import Checkpoint, RunOutputs
 
 STATIC = Path(__file__).parent / "static"
 # relation roles on the frame: subject, object, between's third
@@ -64,21 +65,23 @@ class EditIn(BaseModel):
 
 @dataclass
 class Run:
-    name: str
-    path: Path
-    checkpoint_sub: str
+    """A run as the app serves it: its outputs and the checkpoint it renders and edits."""
+
+    outputs: RunOutputs
+    checkpoint: Checkpoint
     _query: Any = None
     _editor: Any = None
     _maps: tuple | None = None
     _photos: dict[int, Path] | None = None
     _digest: str | None = None
 
-    def checkpoint_digest(self) -> str:
-        from reifyscene.graph.handles import checkpoint_digest
+    @property
+    def name(self) -> str:
+        return self.outputs.name
 
+    def checkpoint_digest(self) -> str:
         if self._digest is None:
-            self._digest = checkpoint_digest(self.path / self.checkpoint_sub
-                                             / "trained_dynamic.npz")
+            self._digest = self.checkpoint.digest()
         return self._digest
 
     def gaussians_layer(self) -> dict[str, Any] | None:
@@ -99,7 +102,7 @@ class Run:
         from reifyscene.query.scene_query import SceneQuery
 
         if self._query is None:
-            self._query = SceneQuery.from_run(self.path)
+            self._query = SceneQuery(self.outputs.artifact("graph"))
         return self._query
 
     def photos(self) -> dict[int, Path]:
@@ -107,27 +110,24 @@ class Run:
         one stream. The app has no stream picker yet, so a multi-stream run is refused rather
         than having one camera's frame 12 silently replace another's."""
         from reifyscene.common.frame_keys import parse_key
-        from reifyscene.ingest.streams import RunStreams
 
         if self._photos is None:
-            stream = RunStreams.from_run(self.path).only().id
-            raw = json.loads((self.path / "scene" / "artifact.json").read_text())
+            stream = self.outputs.streams.only().id
+            scene_dir = self.outputs.stage_dir("scene")
             self._photos = {}
-            for v in raw.get("train_views", []):
-                key, f = v.get("frame_key"), v.get("image_file")
-                if key and f:
-                    sid, frame = parse_key(key)
-                    if sid == stream:
-                        self._photos[frame] = self.path / "scene" / f
+            for v in self.outputs.record("scene")["train_views"]:
+                sid, frame = parse_key(v["frame_key"])
+                if sid == stream:
+                    self._photos[frame] = scene_dir / v["image_file"]
         return self._photos
 
     def id_maps(self) -> tuple[dict, dict[int, np.ndarray]]:
-        from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+        from reifyscene.graph.id_maps import export_id_maps, has_id_maps, load_id_maps
 
         if self._maps is None:
-            if not (self.path / "identity" / "manifest.json").is_file():
-                export_id_maps(self.path)
-            self._maps = load_id_maps(self.path / "identity")
+            if not has_id_maps(self.outputs):
+                export_id_maps(self.outputs)
+            self._maps = load_id_maps(self.outputs)
         return self._maps
 
 
@@ -144,26 +144,23 @@ class Job:
     out_dir: Path | None = None
 
 
-def discover_runs(root: Path, checkpoint_subs: Sequence[str],
+def discover_runs(root: Path, checkpoint: str = RunOutputs.RENDER,
                   only: Sequence[str] | None = None) -> dict[str, Run]:
+    """Every run under ``root`` the app can serve: a graph, and the named checkpoint."""
     runs: dict[str, Run] = {}
-    # a run is whatever folder holds a graph and a trained checkpoint -- not a naming pattern
-    names = only or sorted(p.name for p in Path(root).iterdir() if p.is_dir())
-    for name in names:
-        path = Path(root) / name
-        if not (path / "graph" / "artifact.json").is_file():
+    for outputs in RunOutputs.discover(root):
+        if only is not None and outputs.name not in only:
             continue
-        sub = next((s for s in checkpoint_subs
-                    if (path / s / "trained_dynamic.npz").is_file()), None)
-        if sub is not None:
-            runs[name] = Run(name=name, path=path, checkpoint_sub=sub)
+        ckpt = outputs.checkpoint(checkpoint)
+        if outputs.has("graph") and ckpt.exists():
+            runs[outputs.name] = Run(outputs=outputs, checkpoint=ckpt)
     return runs
 
 
 def create_app(
     runs_root: Path,
     *,
-    checkpoint_subs: Sequence[str] = ("render",),
+    checkpoint: str = RunOutputs.RENDER,
     only: Sequence[str] | None = None,
     device: str = "cuda",
     editor_factory: Callable[[Run], Any] | None = None,
@@ -177,7 +174,7 @@ def create_app(
     from reifyscene.edit.renderer import outline
     from reifyscene.query.scene_query import QueryError
 
-    runs = discover_runs(runs_root, checkpoint_subs, only)
+    runs = discover_runs(runs_root, checkpoint, only)
     jobs: dict[str, Job] = {}
     work: queue.Queue[str] = queue.Queue()
     gpu = threading.Lock()
@@ -185,7 +182,7 @@ def create_app(
     def make_editor(run: Run):
         from reifyscene.edit.remove import RemoveEditor
 
-        return RemoveEditor(run.path, checkpoint_sub=run.checkpoint_sub, device=device)
+        return RemoveEditor(run.checkpoint, device=device)
 
     factory = editor_factory or make_editor
 
@@ -208,7 +205,7 @@ def create_app(
                 run = runs[job.run]
                 with gpu:
                     ed = editor(run)
-                    job.out_dir = run.path / "edits" / jid
+                    job.out_dir = run.outputs.output_dir(jid)
                     job.result = ed.remove(job.params["node_id"],
                                            slackness=float(job.params.get("slackness", 0.0)),
                                            filtered=bool(job.params.get("filtered", True)),
@@ -244,7 +241,7 @@ def create_app(
         for r in runs.values():
             q = r.query
             frames = sorted({f for e in q.entities.values() for f in e.presence.observed})
-            out.append({"name": r.name, "checkpoint": r.checkpoint_sub,
+            out.append({"name": r.name, "checkpoint": r.checkpoint.name,
                         "entities": len(q.entities), "frames": len(r.photos()) or len(frames),
                         "categories": q.categories()})
         return out
@@ -258,7 +255,7 @@ def create_app(
         layer = r.gaussians_layer()
         # an entity's Gaussians only mean something for the checkpoint they were computed on
         use = bool(layer and layer["current"])
-        return {"run": name, "checkpoint": r.checkpoint_sub, "frames": sorted(r.photos()),
+        return {"run": name, "checkpoint": r.checkpoint.name, "frames": sorted(r.photos()),
                 "categories": q.categories(),
                 "entities": [e.summary() | {"observed": e.presence.observed,
                                             "gaussians": e.attrs.get("gaussians") if use else None}
@@ -285,7 +282,7 @@ def create_app(
     @app.get("/api/runs/{name}/render/{frame}.jpg")
     def render(name: str, frame: int):
         r = get_run(name)
-        cache = r.path / "edits" / "cache" / r.checkpoint_sub / f"render_{frame:05d}.jpg"
+        cache = r.outputs.output_dir("cache", r.checkpoint.name, f"render_{frame:05d}.jpg")
         if cache.is_file():
             return FileResponse(cache)
         with gpu:

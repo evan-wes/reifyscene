@@ -15,9 +15,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reifyscene.api.run_outputs import NotARun, RunOutputs
 from reifyscene.common.frame_keys import parse_key
 from reifyscene.geometry.image_transform import ImageTransform, Resize
 from reifyscene.ingest.streams import RunStreams, StreamError
+from tests.conftest import write_manifest
 
 
 def _run(tmp_path, streams: list[dict], transforms: dict | None = None):
@@ -30,6 +32,7 @@ def _run(tmp_path, streams: list[dict], transforms: dict | None = None):
                               "fps": 30.0, "width": 8, "height": 6, "has_audio": False,
                               "metadata": {}, **{k: v for k, v in s.items() if k != "video_path"}})
             for s in streams]
+    write_manifest(run)
     IngestArtifact(run_id="run", stage_name="ingest", save_dir=run / "ingest", streams=refs).save()
     if transforms is not None:
         (run / "geometry").mkdir()
@@ -98,10 +101,10 @@ def test_render_pixel_masks_finds_a_stream_that_is_not_cam_00(tmp_path) -> None:
     run = _run(tmp_path, [{"stream_id": "0", "num_frames": 2}],
                {"0": ImageTransform.identity((8, 6)).to_dict()})
     try:
-        render_pixel_masks(run)
+        render_pixel_masks(RunOutputs.open(run))
     except StreamError:
         pytest.fail("the run's only stream was not found")
-    except (FileNotFoundError, KeyError, OSError):
+    except NotARun:
         pass            # past the stream: it now wants the graph and segment this fixture lacks
 
 

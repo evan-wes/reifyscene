@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The step-1 gate, re-run with learned identity -- scored against DAVIS ground truth.
 
-    python scripts/gate_identity_removal.py ../runs/loop_*
+    python scripts/gate_identity_removal.py ../runs/slice_lab-coat ../runs/slice_judo
 
 I4 of docs/design/2026-09-29-per-gaussian-identity-scope.md. For every hand-annotated DAVIS
 object in each run:
@@ -97,7 +97,7 @@ def filter_members(scene, fg_idx, bg_idx):
     return _filter(scene, fg_idx, bg_idx)
 
 
-def _flashsplat_handles(run: Path, rend: _Renderer, slackness: list[float], device: str):
+def _flashsplat_handles(run, rend: _Renderer, slackness: list[float], device: str):
     """``{slackness: {node: (fg, bg)}}`` from evidence over every training frame's id map."""
     from reifyscene.graph.assignment import (
         assign,
@@ -105,11 +105,11 @@ def _flashsplat_handles(run: Path, rend: _Renderer, slackness: list[float], devi
         evidence_matrix,
         id_map_views,
     )
-    from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+    from reifyscene.graph.id_maps import export_id_maps, has_id_maps, load_id_maps
 
-    if not (run / "identity" / "manifest.json").is_file():
+    if not has_id_maps(run):
         export_id_maps(run)
-    manifest, maps = load_id_maps(run / "identity")
+    manifest, maps = load_id_maps(run)
     shape = (rend.size[1], rend.size[0])
     if next(iter(maps.values())).shape != shape:
         raise ValueError(f"{run.name}: id maps are {next(iter(maps.values())).shape}, "
@@ -123,38 +123,30 @@ def _flashsplat_handles(run: Path, rend: _Renderer, slackness: list[float], devi
             for s in slackness}
 
 
-def gate_run(run: Path, args) -> dict:
+def gate_run(run, args) -> dict:
     from reifyscene.graph.renderable_handle import (
         compute_renderable_handles,
         drop_gaussians,
         identity_handles,
         render_pixel_masks,
     )
-    from reifyscene.ingest.streams import RunStreams
-
-    stream = RunStreams.from_run(run).only()
+    stream = run.streams.only()
     placed = render_pixel_masks(run, stream_id=stream.id)
     gt_by_frame = _gt_masks(stream)
     matched, best, _ = match_objects(gt_by_frame, placed.by_frame, match_iou=args.match_iou)
 
-    def load(sub: str) -> dict:
-        with np.load(run / sub / "trained_dynamic.npz", allow_pickle=True) as z:
-            return {k: z[k] for k in z.files}
-
     use_identity = args.identity_sub.lower() != "none"
-    base_bundle = load(args.base_sub)
+    base_ckpt = run.checkpoint(args.base_sub)
+    base_bundle = base_ckpt.load()
     base_r = _Renderer.for_run(base_bundle, args.device, run, stream_id=stream.id)
-    id_bundle = load(args.identity_sub) if use_identity else None
+    id_bundle = run.checkpoint(args.identity_sub).load() if use_identity else None
     id_r = (_Renderer.for_run(id_bundle, args.device, run, stream_id=stream.id)
             if use_identity else base_r)
-    # compute_renderable_handles resolves its checkpoint under <run>/render/
-    ckpt = "trained_dynamic.npz" if args.base_sub == "render" else \
-        f"../{args.base_sub}/trained_dynamic.npz"
-    base_handles = compute_renderable_handles(run, device="cpu", checkpoint=ckpt).entities
+    base_handles = compute_renderable_handles(base_ckpt, device="cpu").entities
     id_handles = ({tau: identity_handles(id_bundle, threshold=tau) for tau in args.tau}
                   if use_identity else {})
     fs_handles = _flashsplat_handles(run, base_r, args.slackness, args.device)
-    out_dir = run / (args.identity_sub if use_identity else args.base_sub) / "gate"
+    out_dir = run.checkpoint(args.identity_sub if use_identity else args.base_sub).dir / "gate"
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("obj*"):
         stale.unlink()
@@ -275,6 +267,8 @@ def main() -> int:
                     help="per-pixel L1 over 0-255 channels above which a pixel counts as changed")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
+    from reifyscene.api.run_outputs import RunOutputs
+
     if 0.5 not in args.tau:
         args.tau = sorted(set(args.tau) | {0.5})
 
@@ -285,7 +279,7 @@ def main() -> int:
     print(f"{'run':<22} {'obj':>3} {'label':<11}  " + "  ".join(
         f"{name + ' took/alone-P/vis-P/intact':>34}" for name, _ in cols))
     for run in args.run_dirs:
-        res = gate_run(run.resolve(), args)
+        res = gate_run(RunOutputs.open(run.resolve()), args)
         for o in res["objects"]:
             if o["status"] != "matched":
                 print(f"{res['run']:<22} {o['gt_id']:>3} {'-':<11}  not proposed "

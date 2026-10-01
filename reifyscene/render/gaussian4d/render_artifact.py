@@ -54,7 +54,7 @@ class RenderArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "RenderArtifact":
-        raw = read_json(save_dir / "artifact.json")
+        raw = read_json(save_dir / cls.FILE)
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],

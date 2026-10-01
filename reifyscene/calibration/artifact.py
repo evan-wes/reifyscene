@@ -60,7 +60,7 @@ class CalibrationArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "CalibrationArtifact":
-        raw = read_json(Path(save_dir) / "artifact.json")
+        raw = read_json(Path(save_dir) / cls.FILE)
         npz = np.load(Path(save_dir) / "sparse_points.npz")
         return cls(
             run_id=str(raw["run_id"]),

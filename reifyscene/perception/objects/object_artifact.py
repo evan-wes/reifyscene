@@ -402,7 +402,7 @@ class ObjectArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'ObjectArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         mask_arrays: dict[str, np.ndarray] = {}
         for det_id, filename in raw['mask_index'].items():
             path = require_file(save_dir / 'masks' / filename, "objects file")

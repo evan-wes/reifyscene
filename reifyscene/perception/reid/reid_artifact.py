@@ -92,7 +92,7 @@ class ReidArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'ReidArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         embeddings: dict[str, np.ndarray] = {}
         for track_id, filename in raw['embedding_index'].items():
             path = require_file(save_dir / 'embeddings' / filename, "reid embedding")

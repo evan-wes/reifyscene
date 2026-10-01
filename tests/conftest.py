@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -35,6 +36,28 @@ def write_test_video(
     writer.release()
 
 
+def write_manifest(run_dir: Path, config: dict | None = None) -> Path:
+    """A run manifest, which is what makes a folder a run (a pipeline run writes it first)."""
+    from reifyscene.api.run_outputs import RunOutputs
+
+    return RunOutputs.create(run_dir).write_manifest(
+        {"video_paths": [], "run_dir": str(run_dir), "config": dict(config or {})})
+
+
+def write_checkpoint(run_dir: Path, payload: bytes = b"weights", *, name: str = "render",
+                     kind: str = "dynamic", weights: str = "trained_dynamic.npz"):
+    """A checkpoint folder as the render stage leaves one: its weights, and the render record
+    naming them and their kind. Returns the run's ``Checkpoint``."""
+    from reifyscene.api.run_outputs import RunOutputs
+
+    ckpt_dir = Path(run_dir) / name
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / weights).write_bytes(payload)
+    (ckpt_dir / "artifact.json").write_text(
+        json.dumps({"scene_state": {"kind": kind, "checkpoint": weights}}))
+    return RunOutputs.open(run_dir).checkpoint(name)
+
+
 def write_ingest(run_dir: Path, *, stream_id: str = "cam_00", video_path: Path | None = None,
                  num_frames: int, width: int = 0, height: int = 0,
                  frame_index: dict[str, str] | None = None, fps: float = 30.0) -> Path:
@@ -46,6 +69,8 @@ def write_ingest(run_dir: Path, *, stream_id: str = "cam_00", video_path: Path |
     stream = VideoStreamRef(stream_id=stream_id, video_path=Path(video_path or run_dir / "clip"),
                             fps=fps, num_frames=num_frames, width=width, height=height,
                             has_audio=False, metadata=metadata)
+    if not (Path(run_dir) / "run_manifest.json").is_file():
+        write_manifest(run_dir)
     IngestArtifact(run_id=Path(run_dir).name, stage_name="ingest",
                    save_dir=Path(run_dir) / "ingest", streams=[stream]).save()
     return Path(run_dir) / "ingest"

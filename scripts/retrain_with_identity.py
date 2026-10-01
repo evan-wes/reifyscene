@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Retrain a finished run's render stage with per-Gaussian identity, beside the baseline.
 
-    python scripts/retrain_with_identity.py ../runs/loop_lab-coat
-    python scripts/retrain_with_identity.py ../runs/loop_lab-coat --no-identity   # control
+    python scripts/retrain_with_identity.py ../runs/slice_lab-coat
+    python scripts/retrain_with_identity.py ../runs/slice_lab-coat --no-identity   # control
 
 Runs the render stage's own dynamic fit on the run's persisted scene artifact, with the run's
 own render config plus ``dynamic.identity = {enabled, dim, lambda, lambda_3d}`` (I2 and I3
@@ -73,12 +73,11 @@ def main() -> int:
                     help="let the identity loss move geometry (single pass); default detached")
     args = ap.parse_args()
 
+    from reifyscene.api.run_outputs import RunOutputs
     from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
-    from reifyscene.scene.scene_artifact import SceneArtifact
 
-    run = args.run_dir.resolve()
-    config = json.loads((run / "run_manifest.json").read_text())["config"]
-    cfg = dict(config.get("render") or {})
+    run = RunOutputs.open(args.run_dir.resolve())
+    cfg = dict(run.config.get("render") or {})
     dyn = dict(cfg.get("dynamic", cfg.get("trainer", {})) or {})
     if not args.no_identity:
         dyn["identity"] = {"enabled": True, "dim": args.dim, "lambda": args.lambda_identity,
@@ -101,11 +100,12 @@ def main() -> int:
                else "render_identity" if args.lambda_3d == 0 else "render_identity_3d")
     if args.identity_reset_every and not args.no_identity:
         default += "_reset"
-    out_dir = run / (args.out or default)
+    checkpoint = run.checkpoint(args.out or default)
+    if checkpoint.name == RunOutputs.RENDER:
+        raise SystemExit("a retrain never overwrites the render stage's own checkpoint")
 
     t0 = time.time()
-    scene_art = SceneArtifact.load(run / "scene")
-    art = GaussianRenderBackend(cfg).fit(scene_art, save_dir=out_dir)
+    art = GaussianRenderBackend(cfg).fit(run.artifact("scene"), save_dir=checkpoint.dir, run=run)
     art.save()
     state = art.scene_state
     print(f"{run.name}: {time.time() - t0:.0f}s, psnr {state.get('train_view_psnr'):.2f}, "
@@ -116,13 +116,14 @@ def main() -> int:
 
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-    with np.load(out_dir / state["checkpoint"], allow_pickle=True) as z:
-        scene, _ = bundle_to_scene({k: z[k] for k in z.files}, device="cuda")
+    scene, _ = bundle_to_scene(checkpoint.load(), device="cuda")
     probs = scene.gaussian_identity_probs().cpu()
     n_fg = scene.fg.num_gaussians
     top, arg = probs.max(dim=-1)
     labels = {}
-    manifest = json.loads((run / "identity" / "manifest.json").read_text())
+    from reifyscene.graph.id_maps import load_id_maps
+
+    manifest, _ = load_id_maps(run)
     for c in manifest["classes"]:
         labels[c["index"]] = c["label"]
     rows = []
@@ -142,7 +143,7 @@ def main() -> int:
     summary = {"per_class": rows,
                "mean_normalised_entropy_fg": float(entropy[:n_fg].mean()),
                "mean_normalised_entropy_bg": float(entropy[n_fg:].mean())}
-    (out_dir / "identity_assignment.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (checkpoint.dir / "identity_assignment.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"normalised entropy: fg {summary['mean_normalised_entropy_fg']:.3f}, "
           f"bg {summary['mean_normalised_entropy_bg']:.3f}")
     return 0

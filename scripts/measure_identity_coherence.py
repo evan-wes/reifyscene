@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Measure how coherent trained per-Gaussian identity is in 3D, and how rigid the motion is.
 
-    python scripts/measure_identity_coherence.py ../runs/loop_*
-    python scripts/measure_identity_coherence.py ../runs/loop_lab-coat --sub render_identity
+    python scripts/measure_identity_coherence.py ../runs/slice_lab-coat ../runs/slice_judo
+    python scripts/measure_identity_coherence.py ../runs/slice_lab-coat --sub render_identity
 
 Reads ``<run>/<sub>/trained_dynamic.npz`` (a checkpoint trained with identity, see
 ``scripts/retrain_with_identity.py``) and writes ``<run>/<sub>/identity_coherence.json``.
@@ -65,22 +65,23 @@ def _max_pair_distance(pos: np.ndarray, idx: np.ndarray, nn: np.ndarray,
     return out
 
 
-def _psnr(path: Path) -> float | None:
-    if not path.is_file():
+def _psnr(checkpoint) -> float | None:
+    """The checkpoint's recorded train-view PSNR; None when there is no such checkpoint."""
+    if not checkpoint.exists():
         return None
-    state = json.loads(path.read_text()).get("scene_state") or {}
-    v = state.get("train_view_psnr")
+    v = checkpoint.record()["scene_state"].get("train_view_psnr")
     return None if v is None else float(v)
 
 
-def measure(run: Path, sub: str, *, k: int, traj_frames: int) -> dict:
+def measure(checkpoint, *, k: int, traj_frames: int) -> dict:
+    """``checkpoint``: a ``RunOutputs.checkpoint`` trained with identity."""
     import torch
 
     from reifyscene.graph.renderable_handle import trained_fg_positions
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-    with np.load(run / sub / "trained_dynamic.npz", allow_pickle=True) as z:
-        data = {key: z[key] for key in z.files}
+    run, sub = checkpoint.run, checkpoint.name
+    data = checkpoint.load()
     scene, _ = bundle_to_scene(data, device="cpu")
     if not scene.has_identity:
         raise ValueError(f"{run.name}/{sub}: checkpoint has no identity")
@@ -124,8 +125,8 @@ def measure(run: Path, sub: str, *, k: int, traj_frames: int) -> dict:
     res["fg_agreement_trajectory"] = _agreement(fg_arg, traj_nn)
     res["traj_frames"] = frames.tolist()
 
-    res["psnr"] = _psnr(run / sub / "artifact.json")
-    res["psnr_control"] = _psnr(run / "render_control" / "artifact.json")
+    res["psnr"] = _psnr(checkpoint)
+    res["psnr_control"] = _psnr(run.checkpoint("render_control"))
     return res
 
 
@@ -137,14 +138,16 @@ def main() -> int:
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--traj-frames", type=int, default=8)
     args = ap.parse_args()
+    from reifyscene.api.run_outputs import RunOutputs
 
     head = (f"{'run':<22} {'psnr':>6} {'ctrl':>6} {'fg':>7} {'bg agr':>7} {'fg can':>7} "
             f"{'fg traj':>7} {'stretch':>8} {'opaque':>7} {'<=2x':>6} {'H fg':>5} {'H bg':>5}")
     print(head)
     print("-" * len(head))
     for run in args.run_dirs:
-        r = measure(run.resolve(), args.sub, k=args.k, traj_frames=args.traj_frames)
-        (run / args.sub / "identity_coherence.json").write_text(json.dumps(r, indent=2) + "\n")
+        checkpoint = RunOutputs.open(run.resolve()).checkpoint(args.sub)
+        r = measure(checkpoint, k=args.k, traj_frames=args.traj_frames)
+        (checkpoint.dir / "identity_coherence.json").write_text(json.dumps(r, indent=2) + "\n")
 
         def f(v, fmt):
             return format(v, fmt) if isinstance(v, (int, float)) else "-"

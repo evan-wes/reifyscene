@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.eval.benchmarks.inventory.score import score_masks_by_frame
 from reifyscene.eval.reference.conceptgraphs import export_run, masks_by_frame, scale_to_reference
 from reifyscene.eval.reference.conceptgraphs.export import PNG_DEPTH_SCALE
@@ -118,7 +119,7 @@ def test_exported_depth_and_pose_reconstruct_the_world_pointmap(tmp_path: Path) 
     """The whole contract: unprojecting what we wrote must land where our points are."""
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    result = export_run(run, out, reference_diagonal_m=6.0)
+    result = export_run(RunOutputs.open(run), out, reference_diagonal_m=6.0)
 
     manifest = json.loads((out / "manifest.json").read_text())
     scale = manifest["scale_factor"]
@@ -140,7 +141,7 @@ def test_translation_is_scaled_with_depth_and_rotation_is_not(tmp_path: Path) ->
     """Scaling depth but not translation would shear the whole trajectory."""
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    result = export_run(run, out, reference_diagonal_m=6.0)
+    result = export_run(RunOutputs.open(run), out, reference_diagonal_m=6.0)
     traj = np.loadtxt(out / "traj.txt").reshape(-1, 4, 4)
     original = np.asarray(json.loads((run / "geometry" / "artifact.json").read_text())
                           ["camera_states_by_stream"]["cam_00"][1]["pose"])
@@ -160,7 +161,7 @@ def test_non_positive_depth_is_written_as_no_measurement(tmp_path: Path) -> None
     np.savez(run / "geometry" / "pointmaps" / "cam_00__0.npz", points=world.astype(np.float32))
 
     out = tmp_path / "export"
-    result = export_run(run, out)
+    result = export_run(RunOutputs.open(run), out)
     depth = np.asarray(Image.open(out / "results" / "depth00000.png"))
     assert depth[0, 0] == 0
     assert result.behind_camera_pct > 0
@@ -172,7 +173,7 @@ def test_a_sparse_frame_subset_keeps_its_source_numbering(tmp_path: Path) -> Non
     """The bug this prevents: index 1 of the export is DAVIS frame 5, not frame 1."""
     run, src = _make_run(tmp_path, [0, 5, 9])
     out = tmp_path / "export"
-    export_run(run, out)
+    export_run(RunOutputs.open(run), out)
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["source_frame_for_index"] == [0, 5, 9]
 
@@ -189,7 +190,7 @@ def test_masks_come_back_in_source_pixels(tmp_path: Path) -> None:
     """Masks are produced in the geometry's raster; ground truth is in the source's."""
     run, src = _make_run(tmp_path, [0], source_size=(W * 2, H * 2))
     out = tmp_path / "export"
-    export_run(run, out)
+    export_run(RunOutputs.open(run), out)
     objects = [{"image_idx": [0], "mask": [np.ones((H, W), bool)], "class_name": ["thing"]}]
     path = tmp_path / "objects.pkl.gz"
     with gzip.open(path, "wb") as fh:
@@ -201,7 +202,7 @@ def test_masks_come_back_in_source_pixels(tmp_path: Path) -> None:
 def test_objects_below_the_detection_floor_are_dropped(tmp_path: Path) -> None:
     run, src = _make_run(tmp_path, [0, 1, 2])
     out = tmp_path / "export"
-    export_run(run, out)
+    export_run(RunOutputs.open(run), out)
     objects = [
         {"image_idx": [0, 1, 2], "mask": [np.ones((H, W), bool)] * 3, "class_name": ["a"] * 3},
         {"image_idx": [0], "mask": [np.ones((H, W), bool)], "class_name": ["b"]},
@@ -221,7 +222,7 @@ def test_a_missing_image_transform_is_refused_not_guessed(tmp_path: Path) -> Non
     art["metadata"] = {}
     (run / "geometry" / "artifact.json").write_text(json.dumps(art))
     with pytest.raises(ValueError, match="no image transform"):
-        export_run(run, tmp_path / "export")
+        export_run(RunOutputs.open(run), tmp_path / "export")
 
 
 # --- both systems reach the scorer the same way ------------------------------

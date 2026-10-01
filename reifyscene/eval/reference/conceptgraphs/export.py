@@ -47,12 +47,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from reifyscene.common.io import read_json
 from reifyscene.common.paths import ensure_dir
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import RunOutputs
 
 # A plausible indoor room across its diagonal. The value itself does not matter -- what
 # matters is that every sequence lands at the same scale, so one set of metric thresholds
@@ -133,7 +135,7 @@ def _pinhole_residual_pct(cam: np.ndarray, intr: dict[str, float]) -> float:
 
 
 def export_run(
-    run_dir: Path,
+    run: RunOutputs,
     out_dir: Path,
     *,
     stage: str = "geometry",
@@ -152,19 +154,20 @@ def export_run(
     from PIL import Image
 
     from reifyscene.common.frame_keys import parse_key
+    from reifyscene.geometry.geometry_artifact import GeometryArtifact
     from reifyscene.geometry.image_transform import ImageTransform
-    from reifyscene.ingest.streams import RunStreams
 
-    run_dir, out_dir = Path(run_dir), Path(out_dir)
-    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    out_dir = Path(out_dir)
+    stream = run.streams.resolve(stream_id)
     stream_id = stream.id
-    art = read_json(run_dir / stage / "artifact.json")
+    art = run.record(stage)
+    pointmaps = run.stage_dir(stage) / GeometryArtifact.POINTMAPS
     intr = dict(art["intrinsics_by_stream"][stream_id])
     states = art["camera_states_by_stream"][stream_id]
     raw_transform = ((art.get("metadata") or {}).get("image_transforms") or {}).get(stream_id)
     if raw_transform is None:
         raise ValueError(
-            f"{run_dir.name}/{stage} recorded no image transform for {stream_id!r}; colour "
+            f"{run.name}/{stage} recorded no image transform for {stream_id!r}; colour "
             "cannot be put into the geometry's pixels without guessing it"
         )
     transform = ImageTransform.from_dict(raw_transform)
@@ -179,15 +182,15 @@ def export_run(
     def pose_for(frame: int) -> np.ndarray:
         state = state_at.get(int(frame))
         if state is None:
-            raise ValueError(f"{run_dir.name}/{stage} recorded no camera state for frame "
+            raise ValueError(f"{run.name}/{stage} recorded no camera state for frame "
                              f"{frame} of stream {stream_id!r}")
         return np.asarray(state["pose"], dtype=np.float64)
 
     indexed = sorted(pointmap_of)
     frame_list = list(indexed if frames is None else [f for f in frames if f in set(indexed)])
     result = ExportedSequence(
-        sequence=stream.source.sequence or run_dir.name, out_dir=str(out_dir), stage=stage,
-        run_dir=str(run_dir.resolve()),
+        sequence=stream.source.sequence or run.name, out_dir=str(out_dir), stage=stage,
+        run_dir=str(run.root.resolve()),
         num_frames=len(frame_list), intrinsics=dict(intr),
     )
     if not frame_list:
@@ -206,7 +209,7 @@ def export_run(
     # per-frame scale would make its geometry inconsistent across time.
     sample = [frame_list[0], frame_list[len(frame_list) // 2], frame_list[-1]]
     cloud = np.concatenate([
-        np.load(run_dir / stage / "pointmaps" / pointmap_of[f])["points"].reshape(-1, 3)
+        np.load(pointmaps / pointmap_of[f])["points"].reshape(-1, 3)
         for f in sample
     ])
     scale, diagonal = scale_to_reference(cloud, reference_diagonal_m=reference_diagonal_m)
@@ -220,7 +223,7 @@ def export_run(
 
     for out_idx, frame_idx in enumerate(frame_list):
         points = np.load(
-            run_dir / stage / "pointmaps" / pointmap_of[frame_idx]
+            pointmaps / pointmap_of[frame_idx]
         )["points"].astype(np.float64)
         pose = pose_for(frame_idx)
         cam, z = _camera_frame_depth(points, pose)
@@ -241,7 +244,7 @@ def export_run(
         rgb = transform.apply_to_image(stream.frame(frame_idx), kind="rgb")
         if rgb.shape[:2] != depth_png.shape[:2]:
             raise ValueError(
-                f"{run_dir.name} frame {frame_idx}: colour is {rgb.shape[:2]} after the "
+                f"{run.name} frame {frame_idx}: colour is {rgb.shape[:2]} after the "
                 f"recorded transform but depth is {depth_png.shape[:2]}"
             )
         Image.fromarray(rgb).save(results_dir / f"frame{out_idx:05d}.jpg", quality=95)

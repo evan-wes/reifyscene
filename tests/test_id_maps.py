@@ -12,6 +12,7 @@ import json
 import numpy as np
 import pytest
 
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.geometry.image_transform import ImageTransform, Pad
 from reifyscene.graph import id_maps
 from reifyscene.graph.id_maps import (
@@ -107,16 +108,16 @@ def _fake_run(tmp_path, monkeypatch, *, pad: bool = False):
     )
     import reifyscene.graph.renderable_handle as rh
 
-    monkeypatch.setattr(rh, "render_pixel_masks", lambda run_dir, stream_id="cam_00": placed)
-    return run, placed
+    monkeypatch.setattr(rh, "render_pixel_masks", lambda run, stream_id="cam_00": placed)
+    return RunOutputs.open(run), placed
 
 
 def test_export_writes_a_map_for_every_frame_including_empty_ones(tmp_path, monkeypatch) -> None:
     run, _ = _fake_run(tmp_path, monkeypatch)
     manifest = export_id_maps(run)
-    files = sorted(p.name for p in (run / "identity").glob("frame_*.png"))
+    files = sorted(p.name for p in (run.identity_dir).glob("frame_*.png"))
     assert files == [f"frame_{i:05d}.png" for i in range(NUM_FRAMES)]
-    _, maps = load_id_maps(run / "identity")
+    _, maps = load_id_maps(run)
     assert (maps[2] == BACKGROUND).all()
     assert manifest["raster"] == {"width": W, "height": H}
 
@@ -155,14 +156,14 @@ def test_ignore_reasons_are_accounted_for(tmp_path, monkeypatch) -> None:
 def test_padding_from_the_recorded_transform_is_ignored(tmp_path, monkeypatch) -> None:
     run, _ = _fake_run(tmp_path, monkeypatch, pad=True)
     export_id_maps(run)
-    _, maps = load_id_maps(run / "identity")
+    _, maps = load_id_maps(run)
     assert all((m[:, -1] == IGNORE).all() for m in maps.values())
 
 
 def test_round_trip_reproduces_the_source_masks_off_ignore(tmp_path, monkeypatch) -> None:
     run, placed = _fake_run(tmp_path, monkeypatch)
     export_id_maps(run)
-    manifest, maps = load_id_maps(run / "identity")
+    manifest, maps = load_id_maps(run)
     assert round_trip_mismatches(manifest, maps, placed.by_frame) == {}
     decoded = masks_from_id_maps(manifest, maps)
     assert set(decoded) == {0, 1, 3}
@@ -172,7 +173,7 @@ def test_round_trip_reproduces_the_source_masks_off_ignore(tmp_path, monkeypatch
 def test_round_trip_catches_a_corrupted_map(tmp_path, monkeypatch) -> None:
     run, placed = _fake_run(tmp_path, monkeypatch)
     export_id_maps(run)
-    manifest, maps = load_id_maps(run / "identity")
+    manifest, maps = load_id_maps(run)
     maps[0] = maps[0].copy()
     maps[0][0, 0] = BACKGROUND
     assert round_trip_mismatches(manifest, maps, placed.by_frame) == {A: 1}
@@ -181,9 +182,9 @@ def test_round_trip_catches_a_corrupted_map(tmp_path, monkeypatch) -> None:
 def test_an_unknown_format_version_is_refused(tmp_path, monkeypatch) -> None:
     run, _ = _fake_run(tmp_path, monkeypatch)
     export_id_maps(run)
-    path = run / "identity" / id_maps.MANIFEST
+    path = run.identity_dir / id_maps.MANIFEST
     manifest = json.loads(path.read_text())
     manifest["format_version"] = 99
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="format"):
-        load_id_maps(run / "identity")
+        load_id_maps(run)

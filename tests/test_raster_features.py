@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.render.gaussian4d.rasterizer import (
     GaussianCloud,
     GsplatRasterizer,
@@ -26,7 +27,7 @@ requires_gsplat = pytest.mark.skipif(
 )
 
 REPO = Path(__file__).resolve().parents[1]
-BLACKSWAN = REPO.parent / "runs" / "loop_blackswan" / "render" / "trained_dynamic.npz"
+BLACKSWAN = REPO.parent / "runs" / "slice_blackswan"     # a real trained run, if on disk
 
 
 def _cpu_cloud(n: int, d: int | None) -> GaussianCloud:
@@ -160,19 +161,18 @@ def test_an_empty_cloud_with_features_returns_blank_features() -> None:
 
 
 @requires_gsplat
-@pytest.mark.skipif(not BLACKSWAN.is_file(), reason="needs the loop_blackswan trained run")
+@pytest.mark.skipif(not RunOutputs.is_run(BLACKSWAN), reason="needs the slice_blackswan run")
 def test_rgb_is_unchanged_for_an_existing_checkpoint() -> None:
     """The done-when for I1: a real trained scene renders identically with a feature attached."""
-    from reifyscene.ingest.streams import RunStreams
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-    with np.load(BLACKSWAN, allow_pickle=True) as z:
-        data = {k: z[k] for k in z.files}
+    run = RunOutputs.open(BLACKSWAN)
+    data = run.checkpoint().load()
     scene, _ = bundle_to_scene(data, device="cuda")
     r = GsplatRasterizer("cuda")
     for i in (0, len(data["train_time_ids"]) // 2):
         K = np.asarray(data["train_Ks"][i], np.float32)
-        w, h = RunStreams.from_run(BLACKSWAN.parent.parent).only().render_raster
+        w, h = run.streams.only().render_raster
         cam = RenderCamera(viewmat=np.asarray(data["train_w2cs"][i], np.float32), K=K,
                            width=w, height=h)
         with torch.no_grad():

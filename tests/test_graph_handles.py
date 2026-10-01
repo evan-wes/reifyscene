@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from reifyscene.api.run_outputs import Checkpoint, RunOutputs
 from reifyscene.common.types import GraphEdge, GraphNode
 from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.graph.handles import (
@@ -24,11 +25,13 @@ from reifyscene.graph.handles import (
     run_handles,
     write_layer,
 )
+from tests.conftest import write_checkpoint, write_manifest
 
 P, CUP = "human:cam_00:sam2:cam_00:2", "object:cam_00:sam2:cam_00:5"
 
 
 def _graph(root: Path) -> GraphArtifact:
+    write_manifest(root)
     g = GraphArtifact(run_id="t", stage_name="graph", save_dir=root / "graph", nodes=[
         GraphNode(node_id="cam_00", node_type="camera", label="camera", confidence=1.0),
         GraphNode(node_id=P, node_type="human", label="person", confidence=0.9,
@@ -42,11 +45,8 @@ def _graph(root: Path) -> GraphArtifact:
     return g
 
 
-def _checkpoint(root: Path, payload: bytes = b"scene one") -> Path:
-    p = root / "render" / "trained_dynamic.npz"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(payload)
-    return p
+def _checkpoint(root: Path, payload: bytes = b"scene one", name: str = "render") -> Checkpoint:
+    return write_checkpoint(root, payload, name=name)
 
 
 def _handles(person_fg=(3, 4, 9), cup=()):
@@ -57,7 +57,7 @@ def _handles(person_fg=(3, 4, 9), cup=()):
 def test_the_layer_adds_its_own_key_and_changes_nothing_else(tmp_path) -> None:
     g = _graph(tmp_path)
     before = copy.deepcopy((g.nodes, g.edges, g.metadata))
-    grade = write_layer(g, _handles(), checkpoint_path=_checkpoint(tmp_path), num_gaussians=100,
+    grade = write_layer(g, _handles(), checkpoint=_checkpoint(tmp_path), num_gaussians=100,
                         slackness=0.0, filtered=True)
     assert grade == "degraded"                               # the cup got nothing
     again = GraphArtifact.load(tmp_path / "graph")
@@ -81,28 +81,29 @@ def test_the_layer_adds_its_own_key_and_changes_nothing_else(tmp_path) -> None:
 def test_every_entity_bound_is_grounded_and_a_rewrite_replaces_the_layer(tmp_path) -> None:
     g = _graph(tmp_path)
     ckpt = _checkpoint(tmp_path)
-    write_layer(g, _handles(), checkpoint_path=ckpt, num_gaussians=100, slackness=0, filtered=True)
-    assert write_layer(g, _handles(person_fg=(7,), cup=(2,)), checkpoint_path=ckpt,
+    write_layer(g, _handles(), checkpoint=ckpt, num_gaussians=100, slackness=0, filtered=True)
+    assert write_layer(g, _handles(person_fg=(7,), cup=(2,)), checkpoint=ckpt,
                        num_gaussians=100, slackness=0, filtered=True) == "grounded"
-    fg, bg = load_handles(tmp_path / "graph", P, checkpoint_path=ckpt)
+    fg, bg = load_handles(RunOutputs.open(tmp_path), P, checkpoint=ckpt)
     assert fg.tolist() == [7] and bg.tolist() == [1]
 
 
 def test_indices_are_refused_for_another_checkpoint(tmp_path) -> None:
     g = _graph(tmp_path)
     ckpt = _checkpoint(tmp_path)
-    write_layer(g, _handles(), checkpoint_path=ckpt, num_gaussians=100, slackness=0, filtered=True)
-    retrained = _checkpoint(tmp_path / "other", b"scene two")
+    write_layer(g, _handles(), checkpoint=ckpt, num_gaussians=100, slackness=0, filtered=True)
+    retrained = _checkpoint(tmp_path, b"scene two", name="render_retrained")
+    run = RunOutputs.open(tmp_path)
     with pytest.raises(StaleHandles):
-        load_handles(tmp_path / "graph", P, checkpoint_path=retrained)
+        load_handles(run, P, checkpoint=retrained)
     with pytest.raises(KeyError):
-        load_handles(tmp_path / "graph", "object:cam_00:sam2:cam_00:99", checkpoint_path=ckpt)
+        load_handles(run, "object:cam_00:sam2:cam_00:99", checkpoint=ckpt)
 
 
 def test_no_layer_is_a_key_error_not_empty_indices(tmp_path) -> None:
     _graph(tmp_path)
     with pytest.raises(KeyError):
-        load_handles(tmp_path / "graph", P, checkpoint_path=_checkpoint(tmp_path))
+        load_handles(RunOutputs.open(tmp_path), P, checkpoint=_checkpoint(tmp_path))
 
 
 class _Render:
@@ -112,10 +113,10 @@ class _Render:
 
 def test_the_stage_is_absent_with_a_reason_when_there_is_nothing_to_bind(tmp_path) -> None:
     g = _graph(tmp_path)
-    static = run_handles(g, _Render(tmp_path / "render", kind="static"), run_dir=tmp_path,
-                         device="cpu")
+    run = RunOutputs.open(tmp_path)
+    static = run_handles(g, _Render(tmp_path / "render", kind="static"), run=run, device="cpu")
     assert static["renderable"] == "absent" and "dynamic checkpoint" in static["reason"]
     empty = GraphArtifact(run_id="t", stage_name="graph", save_dir=tmp_path / "g2", nodes=[])
-    out = run_handles(empty, _Render(tmp_path / "render"), run_dir=tmp_path, device="cpu")
+    out = run_handles(empty, _Render(tmp_path / "render"), run=run, device="cpu")
     assert out == {"renderable": "absent", "reason": "the graph has no entities"}
     assert layer_info(g) is None                               # nothing was written

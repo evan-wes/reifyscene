@@ -11,7 +11,7 @@ app = typer.Typer(help="Query the reconstructed scene (structured templates, no 
 
 @app.callback(invoke_without_command=True)
 def main(
-    run_dir: Annotated[Path, typer.Argument(help="a finished run, e.g. ../runs/loop_lab-coat")],
+    run_dir: Annotated[Path, typer.Argument(help="a finished run (a folder with a run manifest)")],
     template: Annotated[str, typer.Argument(help="select | count | when | relate")],
     args: Annotated[list[str] | None,
                     typer.Argument(help="key=value pairs, e.g. category=person frame=12")] = None,

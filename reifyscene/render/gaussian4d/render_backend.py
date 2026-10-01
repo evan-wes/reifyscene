@@ -142,11 +142,13 @@ class GaussianRenderBackend(RenderBackend):
         return path.name
 
     # -- entry point ------------------------------------------------------
-    def fit(self, scene_artifact, *, save_dir=None, **kwargs) -> RenderArtifact:
-        save_dir = Path(save_dir) if save_dir is not None else Path(scene_artifact.save_dir).parent / "render"
-        ensure_dir(save_dir)
+    def fit(self, scene_artifact, *, save_dir, run=None, **kwargs) -> RenderArtifact:
+        """Train on ``scene_artifact`` and write the checkpoint into ``save_dir``. ``run``
+        (the ``RunOutputs`` the scene belongs to) is needed only to train identity, whose
+        targets are the run's id maps."""
+        save_dir = ensure_dir(Path(save_dir))
         if str(getattr(scene_artifact, "kind", "static")) == "dynamic":
-            return self._fit_dynamic(scene_artifact, save_dir)
+            return self._fit_dynamic(scene_artifact, save_dir, run=run)
 
         field = self._build_field(scene_artifact)
         train_views = self._train_views(scene_artifact)
@@ -214,7 +216,7 @@ class GaussianRenderBackend(RenderBackend):
         return out
 
     def _attach_identity(
-        self, scene, train_views: list[tuple], run_dir: Path, ident_cfg: dict[str, Any]
+        self, scene, train_views: list[tuple], run, ident_cfg: dict[str, Any]
     ) -> tuple[list[tuple], dict[str, Any]]:
         """Export fresh id maps for the run, enable identity, and pair each view with its map.
 
@@ -224,8 +226,8 @@ class GaussianRenderBackend(RenderBackend):
         """
         from reifyscene.graph.id_maps import export_id_maps, load_id_maps
 
-        manifest = export_id_maps(run_dir)
-        _, maps = load_id_maps(run_dir / "identity")
+        manifest = export_id_maps(run)
+        _, maps = load_id_maps(run)
         stream = manifest["stream_id"]
         node_ids = [c["node_id"] for c in sorted(manifest["classes"], key=lambda c: c["index"])]
         scene.enable_identity(int(ident_cfg.get("dim", 20)), node_ids,
@@ -234,7 +236,7 @@ class GaussianRenderBackend(RenderBackend):
         for (camera, gt, time_id), key in zip(train_views, self._train_frame_keys, strict=True):
             sid, idx = parse_key(key)
             if sid != stream or idx not in maps:
-                raise ValueError(f"train view {key} has no id map in {run_dir / 'identity'}")
+                raise ValueError(f"train view {key} has no id map in {run.identity_dir}")
             arr = maps[int(idx)]
             if arr.shape != tuple(gt.shape[:2]):
                 raise ValueError(
@@ -289,7 +291,7 @@ class GaussianRenderBackend(RenderBackend):
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
         return path.name
 
-    def _fit_dynamic(self, scene_artifact, save_dir: Path) -> RenderArtifact:
+    def _fit_dynamic(self, scene_artifact, save_dir: Path, *, run=None) -> RenderArtifact:
         from reifyscene.render.gaussian4d.dynamic_trainer import (
             DynamicGaussianTrainer,
             DynamicTrainConfig,
@@ -330,10 +332,9 @@ class GaussianRenderBackend(RenderBackend):
         ident_cfg = dict(dyn_cfg.get("identity") or {})
         identity_summary = None
         if ident_cfg.get("enabled"):
-            # A run's stages are siblings; the render stage's parent is the run.
-            train_views, identity_summary = self._attach_identity(
-                scene, train_views, Path(save_dir).parent, ident_cfg
-            )
+            if run is None:
+                raise ValueError("identity training needs the run whose id maps it learns")
+            train_views, identity_summary = self._attach_identity(scene, train_views, run, ident_cfg)
             if "lambda" in ident_cfg:
                 train_cfg.lambda_identity = float(ident_cfg["lambda"])
             if ident_cfg.get("reset_every"):

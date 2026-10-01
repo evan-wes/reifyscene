@@ -43,17 +43,18 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="stop after N sequences (a smoke test)")
     args = ap.parse_args()
 
-    from reifyscene.ingest.streams import RunStreams, StreamError
+    from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.ingest.streams import StreamError
 
-    def davis_sequence(run: Path) -> str | None:
+    def davis_sequence(run: RunOutputs) -> str | None:
         try:
-            src = RunStreams.from_run(run).only().source
-        except (FileNotFoundError, StreamError, KeyError):
+            src = run.streams.only().source
+        except StreamError:             # several streams: not one DAVIS sequence
             return None
         return src.sequence if src.kind == "davis" else None
 
-    found = {p: davis_sequence(p) for p in sorted(args.runs.iterdir())
-             if p.is_dir() and (p / args.stage).is_dir()}
+    found = {r: davis_sequence(r) for r in RunOutputs.discover(args.runs)
+             if r.has("ingest") and r.has(args.stage)}
     runs = [p for p, seq in found.items()
             if seq is not None and (not args.sequences or seq in args.sequences)]
     if args.limit:

@@ -183,8 +183,9 @@ W0 (relations) follows -- adopted from VLA-3D (MIT; the research verdict in the 
 §3.2), not hand-written rules. Built: presence with labelled gaps, `SceneQuery` (select / count /
 when; `relate` reports that relations are not computed yet), `remove` via FlashSplat + floater
 filter, `reifyscene query` / `edit` / `serve`, the backend and the three-panel front end.
-`serve` prefers each run's 8-views-per-step checkpoint (`render_q3b_batch8_nodecay`) and falls
-back to `render/`. On all ten runs: the graph loads, queries answer, frames render, and a removal
+`serve` serves each run's `render` checkpoint (or one named with `--checkpoint`); the
+8-views-per-step recipe it once preferred as a retrain (`render_q3b_batch8_nodecay`) has been
+the render stage's default since `91e3aaa`. On all ten runs: the graph loads, queries answer, frames render, and a removal
 completes in about a second including the evidence matrix; the server holds all ten scenes in
 ~2.6 GB host / ~1.8 GB GPU memory. Not yet: the pipeline manifest still reports `renderable:
 absent` (the edit's own result reports the assigned fraction); that moves when `remove` is wired

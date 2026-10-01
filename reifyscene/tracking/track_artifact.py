@@ -707,7 +707,7 @@ class TrackArtifact(BaseArtifact):
     @classmethod
     def load(cls, save_dir: Path) -> 'TrackArtifact':
         """Load a tracking artifact and reconstruct observations from saved arrays."""
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         payloads: dict[str, dict[str, Any]] = {}
         observations: dict[str, list[TrackObservation]] = {}
         payload_meta = raw['track_payload_meta']

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """How well does a trained scene reproduce its own footage, and how sharp is it?
 
-    python scripts/eval_train_views.py ../runs/loop_lab-coat --sub render_control
+    python scripts/eval_train_views.py ../runs/slice_lab-coat --sub render_control
 
 Renders every training frame of ``<run>/<sub>/trained_dynamic.npz`` and compares it with the
 photo the scene stage trained on. Reports, averaged over all frames:
@@ -38,7 +38,8 @@ def _laplacian_var(img: np.ndarray) -> float:
     return float(lap.var())
 
 
-def evaluate(run: Path, sub: str, stills: int) -> dict:
+def evaluate(checkpoint, stills: int) -> dict:
+    """``checkpoint``: a ``RunOutputs.checkpoint``; results go into its folder."""
     import torch
     from PIL import Image
 
@@ -46,12 +47,11 @@ def evaluate(run: Path, sub: str, stills: int) -> dict:
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
     from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
-    from reifyscene.scene.scene_artifact import SceneArtifact
 
-    with np.load(run / sub / "trained_dynamic.npz", allow_pickle=True) as z:
-        scene, _ = bundle_to_scene({k: z[k] for k in z.files}, device="cuda")
+    run, sub, out = checkpoint.run, checkpoint.name, checkpoint.dir
+    scene, _ = bundle_to_scene(checkpoint.load(), device="cuda")
     backend = GaussianRenderBackend({"device": "cuda"})
-    views = backend._dynamic_train_views(SceneArtifact.load(run / "scene"))
+    views = backend._dynamic_train_views(run.artifact("scene"))
     keys = backend._train_frame_keys
     rast = build_rasterizer({"device": "cuda"})
     psnrs, ssims, sharp = [], [], []
@@ -69,12 +69,12 @@ def evaluate(run: Path, sub: str, stills: int) -> dict:
         if i in pick:
             frame = parse_key(keys[i])[1]
             Image.fromarray(np.concatenate([g8, r8], axis=0)).save(
-                run / sub / f"train_eval_{int(frame):05d}.png")
+                out / f"train_eval_{int(frame):05d}.png")
     res = {"run": run.name, "sub": sub, "frames": len(views),
            "psnr": round(float(np.mean(psnrs)), 3), "ssim": round(float(np.mean(ssims)), 4),
            "sharpness": round(float(np.mean(sharp)), 4),
            "num_gaussians": int(scene.num_gaussians)}
-    (run / sub / "train_eval.json").write_text(json.dumps(res, indent=2) + "\n")
+    (out / "train_eval.json").write_text(json.dumps(res, indent=2) + "\n")
     return res
 
 
@@ -85,10 +85,12 @@ def main() -> int:
     ap.add_argument("--sub", default="render")
     ap.add_argument("--stills", type=int, default=3)
     args = ap.parse_args()
+    from reifyscene.api.run_outputs import RunOutputs
+
     print(f"{'run':<22} {'sub':<28} {'frames':>6} {'PSNR':>6} {'SSIM':>6} {'sharp':>6} "
           f"{'Gaussians':>10}")
     for run in args.run_dirs:
-        r = evaluate(run.resolve(), args.sub, args.stills)
+        r = evaluate(RunOutputs.open(run.resolve()).checkpoint(args.sub), args.stills)
         print(f"{r['run']:<22} {r['sub']:<28} {r['frames']:>6} {r['psnr']:>6.2f} {r['ssim']:>6.3f} "
               f"{r['sharpness']:>6.3f} {r['num_gaussians']:>10}")
     return 0

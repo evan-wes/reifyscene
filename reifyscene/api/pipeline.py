@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from reifyscene.api.contracts import input_identity, stage_fingerprint
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.api.stages import build_stage_registry
 from reifyscene.calibration.runner import CalibrationRunner
 from reifyscene.common.backend_ladder import (
@@ -143,6 +144,7 @@ class ReifyScenePipeline:
         self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
         self._run_video_paths: list[str] = []
         self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
+        self.outputs = RunOutputs.create(self.run_dir)
         self.decoder = VideoDecoder()
         self.quality = ClipQualityAssessor()
         self.sync_solver = GlobalTimeAlignmentSolver()
@@ -224,7 +226,7 @@ class ReifyScenePipeline:
 
     def _stage_dir(self, stage_name: str) -> Path:
         """Return the canonical save directory for a stage artifact."""
-        return ensure_dir(self.run_dir / stage_name)
+        return ensure_dir(self.outputs.stage_dir(stage_name))
 
     def stage_registry(self):
         """Return the declarative stage registry for this pipeline instance."""
@@ -272,7 +274,7 @@ class ReifyScenePipeline:
         """Run phase-1 static-frame calibration on one or more input videos."""
         artifact = self.calibration_runner.run(
             run_id=self.cfg.get('run_id', 'dev'),
-            save_dir=self._stage_dir('calibration'),
+            save_dir=ensure_dir(self.outputs.calibration_dir),
             video_paths=video_paths,
         )
         self._stamp_stage_metadata(artifact, 'calibration', video_paths=[str(Path(p).expanduser().resolve()) for p in video_paths])
@@ -1350,7 +1352,7 @@ class ReifyScenePipeline:
         train views + render trajectory).
         """
         render_dir = self._stage_dir('render')
-        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
+        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir, run=self.outputs)
         # Masked-NVS scoring against held-out GT runs only on a benchmark dataset
         # (covisibility masks / held-out cameras don't exist for arbitrary video).
         eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
@@ -1395,7 +1397,7 @@ class ReifyScenePipeline:
 
         hcfg = dict(self.cfg.get('handles', {}) or {})
         device = str(self.cfg.get('render', {}).get('device', 'cuda'))
-        result = run_handles(graph_artifact, render_artifact, run_dir=self.run_dir, device=device,
+        result = run_handles(graph_artifact, render_artifact, run=self.outputs, device=device,
                              slackness=float(hcfg.get('slackness', 0.0)),
                              filtered=bool(hcfg.get('filtered', True)))
         out_dir = self._stage_dir('handles')

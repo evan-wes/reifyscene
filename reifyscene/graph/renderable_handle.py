@@ -30,10 +30,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import Checkpoint, RunOutputs
 
 DEFAULT_MIN_RATIO = 0.5
 DEFAULT_MIN_FRAMES = 2
@@ -124,7 +126,7 @@ def trained_fg_positions(
 
 
 def entity_masks_in_render_pixels(
-    run_dir: Path, *, stream_id: str | None = None
+    run: RunOutputs, *, stream_id: str | None = None
 ) -> tuple[dict[int, dict[str, np.ndarray]], dict[str, str], list[str]]:
     """``({frame: {node_id: mask}}, {node_id: label}, notes)`` in the geometry's raster.
 
@@ -132,7 +134,7 @@ def entity_masks_in_render_pixels(
     map folds onto its canonical -- a node is one physical thing, and its members are the
     tracklets that turned out to be it.
     """
-    placed = render_pixel_masks(run_dir, stream_id=stream_id)
+    placed = render_pixel_masks(run, stream_id=stream_id)
     return placed.by_frame, placed.labels, placed.notes
 
 
@@ -152,21 +154,18 @@ class RenderPixelMasks:
     transform: Any                      # ImageTransform; Any keeps the import lazy
 
 
-def render_pixel_masks(run_dir: Path, *, stream_id: str | None = None) -> RenderPixelMasks:
+def render_pixel_masks(run: RunOutputs, *, stream_id: str | None = None) -> RenderPixelMasks:
     """:func:`entity_masks_in_render_pixels`, plus the unmapped tracklets and the transform.
 
     ``stream_id`` defaults to the run's only stream
     (:class:`~reifyscene.ingest.streams.RunStreams`).
     """
-    from reifyscene.ingest.streams import RunStreams
-    from reifyscene.perception.instance.instance_artifact import InstanceArtifact
-
     notes: list[str] = []
-    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    stream = run.streams.resolve(stream_id)
     stream_id = stream.id
     transform = stream.transform          # raises when the geometry recorded none
 
-    graph = _read_json(run_dir / "graph" / "artifact.json")
+    graph = run.record("graph")
     canonical_to_node: dict[str, str] = {}
     labels: dict[str, str] = {}
     for raw_node in graph.get("nodes") or []:
@@ -178,9 +177,8 @@ def render_pixel_masks(run_dir: Path, *, stream_id: str | None = None) -> Render
         labels[str(node["node_id"])] = str(node.get("label", ""))
 
     merge_map: dict[str, str] = {}
-    reid = run_dir / "reid" / "artifact.json"
-    if reid.is_file():
-        merge_map = {str(k): str(v) for k, v in (_read_json(reid).get("merge_map") or {}).items()}
+    if run.has("reid"):
+        merge_map = {str(k): str(v) for k, v in run.record("reid")["merge_map"].items()}
 
     def canonical(track: str) -> str:
         seen: set[str] = set()
@@ -190,7 +188,7 @@ def render_pixel_masks(run_dir: Path, *, stream_id: str | None = None) -> Render
             cur = merge_map[cur]
         return cur
 
-    inst = InstanceArtifact.load(run_dir / "segment")
+    inst = run.artifact("segment")
     by_frame: dict[int, dict[str, np.ndarray]] = {}
     unmapped_masks: dict[int, np.ndarray] = {}
     unmapped: set[str] = set()
@@ -218,25 +216,19 @@ def render_pixel_masks(run_dir: Path, *, stream_id: str | None = None) -> Render
 
 
 def compute_renderable_handles(
-    run_dir: Path,
+    checkpoint: Checkpoint,
     *,
     stream_id: str | None = None,
     min_ratio: float = DEFAULT_MIN_RATIO,
     min_frames: int = DEFAULT_MIN_FRAMES,
     min_gaussians: int = 1,
     device: str = "cpu",
-    checkpoint: str = "trained_dynamic.npz",
 ) -> RenderableHandles:
-    """Assign the trained foreground cloud to entities, and say what nothing claimed."""
-    run_dir = Path(run_dir)
-    path = run_dir / "render" / checkpoint
-    if not path.is_file():
-        raise FileNotFoundError(f"{run_dir.name} has no trained checkpoint at {path}")
-
-    with np.load(path, allow_pickle=True) as bundle:
-        data = {k: bundle[k] for k in bundle.files}
+    """Assign ``checkpoint``'s trained foreground cloud to its run's entities, and say what
+    nothing claimed."""
+    data = checkpoint.load()
     positions, w2c, intrinsics, frames = trained_fg_positions(data, device=device)
-    masks, labels, notes = entity_masks_in_render_pixels(run_dir, stream_id=stream_id)
+    masks, labels, notes = entity_masks_in_render_pixels(checkpoint.run, stream_id=stream_id)
 
     from reifyscene.graph.entity_gaussians import assign_gaussians_to_entities
 
@@ -246,7 +238,7 @@ def compute_renderable_handles(
     )
     num_fg = int(positions.shape[1])
     handles = RenderableHandles(
-        run=run_dir.name, num_foreground=num_fg,
+        run=checkpoint.run.name, num_foreground=num_fg,
         num_background=int(np.asarray(data["bg_means"]).shape[0]) if "bg_means" in data else 0,
         num_frames=len(frames), notes=notes,
     )
@@ -343,9 +335,3 @@ def identity_handles(
         for k, node in enumerate(nodes)
         if node is not None
     }
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    import json
-
-    return json.loads(Path(path).read_text())

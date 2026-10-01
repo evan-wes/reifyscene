@@ -109,9 +109,9 @@ class SceneQuery:
 
     @classmethod
     def from_run(cls, run_dir: Path) -> SceneQuery:
-        from reifyscene.graph.graph_artifact import GraphArtifact
+        from reifyscene.api.run_outputs import RunOutputs
 
-        return cls(GraphArtifact.load(Path(run_dir) / "graph"))
+        return cls(RunOutputs.open(run_dir).artifact("graph"))
 
     # -- lookups ------------------------------------------------------------------------------
 

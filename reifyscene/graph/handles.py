@@ -22,15 +22,17 @@ differs, rather than handing back indices that would remove the wrong parts of t
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from reifyscene.common.types import BaseArtifact
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import Checkpoint, RunOutputs
 
 LAYER = "gaussians"
 LAYER_FILE = Path("layers") / "gaussians.npz"
@@ -53,15 +55,6 @@ class HandlesArtifact(BaseArtifact):
 
 class StaleHandles(RuntimeError):
     """The graph's handles were computed against a different checkpoint."""
-
-
-def checkpoint_digest(path: Path) -> str:
-    """Content digest of a checkpoint file (tens of MB: a fraction of a second)."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()[:16]
 
 
 def _key(node_id: str, part: str) -> str:
@@ -98,7 +91,7 @@ def write_layer(
     graph,
     handles: dict[str, tuple[np.ndarray, np.ndarray, dict[str, Any]]],
     *,
-    checkpoint_path: Path,
+    checkpoint: Checkpoint,
     num_gaussians: int,
     slackness: float,
     filtered: bool,
@@ -132,8 +125,7 @@ def write_layer(
     layers[LAYER] = {
         "stage": stage,
         "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "checkpoint": {"path": str(Path(checkpoint_path).parent.name),
-                       "digest": checkpoint_digest(Path(checkpoint_path))},
+        "checkpoint": {"path": checkpoint.name, "digest": checkpoint.digest()},
         "method": "FlashSplat evidence majority" + (" + floater filter" if filtered else ""),
         "slackness": slackness,
         "file": str(LAYER_FILE),
@@ -149,31 +141,29 @@ def layer_info(graph) -> dict[str, Any] | None:
     return (graph.metadata or {}).get("layers", {}).get(LAYER)
 
 
-def load_handles(graph_dir: Path, node_id: str, *,
-                 checkpoint_path: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_handles(run: RunOutputs, node_id: str, *,
+                 checkpoint: Checkpoint) -> tuple[np.ndarray, np.ndarray]:
     """``(fg_idx, bg_idx)`` of one entity, refused unless computed against this checkpoint.
 
     Raises ``KeyError`` when there is no layer or no such entity in it, ``StaleHandles`` when
     the layer came from another checkpoint.
     """
-    from reifyscene.common.io import read_json
-
-    meta = (read_json(Path(graph_dir) / "artifact.json").get("metadata") or {})
+    meta = run.record("graph")["metadata"]
     info = meta.get("layers", {}).get(LAYER)
     if info is None:
         raise KeyError("the graph has no gaussians layer")
-    want = checkpoint_digest(Path(checkpoint_path))
+    want = checkpoint.digest()
     if info["checkpoint"]["digest"] != want:
         raise StaleHandles(f"handles are for checkpoint {info['checkpoint']['path']} "
                            f"({info['checkpoint']['digest']}), not {want}")
-    with np.load(Path(graph_dir) / info["file"]) as z:
+    with np.load(run.stage_dir("graph") / info["file"]) as z:
         fk, bk = _key(node_id, "fg"), _key(node_id, "bg")
         if fk not in z.files:
             raise KeyError(f"no handles for {node_id}")
         return z[fk], z[bk]
 
 
-def run_handles(graph, render, *, run_dir: Path, device: str, slackness: float = 0.0,
+def run_handles(graph, render, *, run: RunOutputs, device: str, slackness: float = 0.0,
                 filtered: bool = True) -> dict[str, Any]:
     """The ``handles`` stage: bind every entity to its Gaussians and write the layer.
 
@@ -190,13 +180,12 @@ def run_handles(graph, render, *, run_dir: Path, device: str, slackness: float =
                 "reason": f"no trained dynamic checkpoint (render kind {state.get('kind')!r})"}
     from reifyscene.edit.remove import RemoveEditor
 
-    ckpt_path = Path(render.save_dir) / str(ckpt)
-    editor = RemoveEditor(Path(run_dir), checkpoint_sub=Path(render.save_dir).name,
-                          device=device)
+    checkpoint = run.checkpoint(Path(render.save_dir).name)   # the saved render, as recorded
+    editor = RemoveEditor(checkpoint, device=device)
     editor.use_layer = False          # this is what writes the layer: never read it back
     editor.evidence(refresh=True)     # the id maps and evidence of THIS graph and checkpoint
     handles = compute_handles(editor, entities, slackness=slackness, filtered=filtered)
-    grade = write_layer(graph, handles, checkpoint_path=ckpt_path,
+    grade = write_layer(graph, handles, checkpoint=checkpoint,
                         num_gaussians=int(editor.renderer.scene.num_gaussians),
                         slackness=slackness, filtered=filtered)
     info = layer_info(graph)

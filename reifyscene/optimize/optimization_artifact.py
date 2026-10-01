@@ -110,7 +110,7 @@ class OptimizationArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'OptimizationArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         refined_track_payloads_by_stream: dict[str, dict[str, Any]] = {}
         for stream_id, info in raw['track_index'].items():
             npz = np.load(save_dir / 'tracks' / info['file'], allow_pickle=True)

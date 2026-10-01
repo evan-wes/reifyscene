@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -38,6 +38,9 @@ class GeometryArtifact(BaseArtifact):
     - optional debug assets under ``images/``, ``depthmaps_png/``, ``pointclouds/``
       and ``debug_viewer.html``
     """
+
+    DEPTHMAPS: ClassVar[str] = "depthmaps"
+    POINTMAPS: ClassVar[str] = "pointmaps"
 
     backend_name: str = "unknown"
     selected_frames: list[FrameRef] = field(default_factory=list)
@@ -664,8 +667,8 @@ class GeometryArtifact(BaseArtifact):
     def save(self) -> None:
         """Persist geometry metadata and heavy numpy outputs to disk."""
         ensure_dir(self.save_dir)
-        depth_dir = ensure_dir(self.save_dir / 'depthmaps')
-        point_dir = ensure_dir(self.save_dir / 'pointmaps')
+        depth_dir = ensure_dir(self.save_dir / self.DEPTHMAPS)
+        point_dir = ensure_dir(self.save_dir / self.POINTMAPS)
         debug_depth_dir = ensure_dir(self.save_dir / 'depthmaps_png') if self.metadata.get('save_depth_pngs', False) else None
 
         depth_index: dict[str, str] = {}
@@ -718,12 +721,12 @@ class GeometryArtifact(BaseArtifact):
     @classmethod
     def load(cls, save_dir: Path) -> 'GeometryArtifact':
         """Load geometry metadata and associated numpy outputs from disk."""
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         depthmaps_by_frame: dict[str, Any] = {}
         pointmaps_by_frame: dict[str, Any] = {}
 
         for frame_key, filename in raw['depth_index'].items():
-            payload = np.load(save_dir / 'depthmaps' / filename)
+            payload = np.load(save_dir / cls.DEPTHMAPS / filename)
             confidence = payload['confidence']
             depthmaps_by_frame[frame_key] = {
                 'depth': payload['depth'],
@@ -731,7 +734,7 @@ class GeometryArtifact(BaseArtifact):
             }
 
         for frame_key, filename in raw['point_index'].items():
-            payload = np.load(save_dir / 'pointmaps' / filename)
+            payload = np.load(save_dir / cls.POINTMAPS / filename)
             confidence = payload['confidence']
             pointmaps_by_frame[frame_key] = {
                 'points': payload['points'],

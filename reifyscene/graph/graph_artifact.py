@@ -56,7 +56,7 @@ class GraphArtifact(BaseArtifact):
     @classmethod
     def load(cls, save_dir: Path) -> GraphArtifact:
         """Read the graph back, embeddings included."""
-        raw = read_json(Path(save_dir) / 'artifact.json')
+        raw = read_json(Path(save_dir) / cls.FILE)
         index = raw.pop('embedding_index')
         # save() moves the vectors out of the JSON into embedding_index; the field
         # is rebuilt from those files below.

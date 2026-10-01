@@ -41,12 +41,11 @@ class CheckpointRenderer:
         self._pivot: dict[int, float] = {}
 
     @classmethod
-    def for_run(cls, bundle: dict, device: str, run_dir, *, stream_id: str | None = None
+    def for_run(cls, bundle: dict, device: str, run, *, stream_id: str | None = None
                 ) -> CheckpointRenderer:
-        """The renderer for a run's checkpoint, raster and stream from the run itself."""
-        from reifyscene.ingest.streams import RunStreams
-
-        stream = RunStreams.from_run(run_dir).resolve(stream_id)
+        """The renderer for a checkpoint of ``run`` (a ``RunOutputs``), raster and stream from
+        the run itself."""
+        stream = run.streams.resolve(stream_id)
         r = cls(bundle, device, stream_id=stream.id)
         if r.size != stream.render_raster:
             raise ValueError(f"the checkpoint was trained at {r.size}, the stream's recorded "

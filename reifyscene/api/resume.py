@@ -35,8 +35,10 @@ from reifyscene.api.contracts import (
     set_path,
 )
 from reifyscene.api.requirements import REQUIREMENTS, ResumeContext
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.api.stages import STAGE_ORDER, StageSpec
 from reifyscene.common.io import read_json, write_json
+from reifyscene.common.types import BaseArtifact
 
 
 class ResumeRejected(ValueError):
@@ -295,6 +297,7 @@ def check_resume(
     at all (the prior run and the new run are the same folder).
     """
     prior = Path(prior_run_dir).expanduser().resolve()
+    prior_outputs = RunOutputs.open(prior)
     run = Path(run_dir).expanduser().resolve()
     if prior == run:
         raise ResumeRejected(
@@ -314,7 +317,7 @@ def check_resume(
     artifacts: dict[str, Any] = {}
     for stage in stages:
         verdict = verdicts[stage] = StageVerdict(stage)
-        stage_dir = prior / registry[stage].dir_name
+        stage_dir = prior_outputs.stage_dir(stage)
         rebuildable = contract_for(stage).is_rebuildable(cfg)
         if not stage_dir.exists():
             if rebuildable:
@@ -401,7 +404,7 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
 
 def _patch_artifact_json(stage_dir: Path, metadata: dict[str, Any]) -> None:
     """Point a copied artifact at its new folder and record its provenance, in place."""
-    path = stage_dir / "artifact.json"
+    path = stage_dir / BaseArtifact.FILE
     raw = read_json(path)
     saved = raw["save_dir"]  # artifacts write it as a typed path or a plain string
     raw["save_dir"] = ({**saved, "value": str(stage_dir)} if isinstance(saved, dict)
@@ -421,8 +424,8 @@ def materialize_stage(plan: ResumePlan, spec: StageSpec) -> Any:
         raise ResumeRejected(
             f"{spec.name} is not loaded by this resume ({verdict.action})\n" + plan.report()
         )
-    src = plan.prior_run_dir / spec.dir_name
-    dst = plan.run_dir / spec.dir_name
+    src = RunOutputs.open(plan.prior_run_dir).stage_dir(spec.name)
+    dst = RunOutputs.create(plan.run_dir).stage_dir(spec.name)
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)

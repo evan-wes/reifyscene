@@ -25,7 +25,6 @@ heavy backends are optional.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -225,18 +224,17 @@ class RunStreams:
 
     @classmethod
     def from_run(cls, run_dir: Path) -> RunStreams:
-        """Streams from ``<run>/ingest``; their transforms from ``<run>/geometry`` once the
-        run has one (before the geometry stage there is nothing to map into)."""
-        from reifyscene.ingest.ingest_artifact import IngestArtifact
+        """Streams from the run's ingest; their transforms from its geometry once the run has
+        one (before the geometry stage there is nothing to map into)."""
+        from reifyscene.api.run_outputs import RunOutputs
 
-        run_dir = Path(run_dir)
-        refs = IngestArtifact.load(run_dir / "ingest").streams
+        run = RunOutputs.open(run_dir)
+        refs = run.artifact("ingest").streams
         records: dict[str, Any] = {}
-        geometry = run_dir / "geometry" / "artifact.json"
-        if geometry.is_file():
-            meta = json.loads(geometry.read_text())["metadata"]
+        if run.has("geometry"):
+            meta = run.record("geometry")["metadata"]
             if "image_transforms" not in meta:
-                raise StreamError(f"{run_dir.name}: its geometry records no image transforms; "
+                raise StreamError(f"{run.name}: its geometry records no image transforms; "
                                   "its pixels cannot be related to the frames")
             records = meta["image_transforms"]
         return cls([FrameStream(r, records.get(str(r.stream_id))) for r in refs])

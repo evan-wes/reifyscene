@@ -36,9 +36,12 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import RunOutputs
 
 BACKGROUND = 0
 IGNORE = 65535
@@ -84,9 +87,10 @@ def _frame_file(frame: int) -> str:
 
 
 def export_id_maps(
-    run_dir: Path, *, stream_id: str | None = None, out_dir: Path | None = None
+    run: RunOutputs, *, stream_id: str | None = None, out_dir: Path | None = None
 ) -> dict[str, Any]:
-    """Write ``run_dir/identity/frame_NNNNN.png`` + ``manifest.json``; return the manifest.
+    """Write ``frame_NNNNN.png`` + ``manifest.json`` into the run's identity dir (or
+    ``out_dir``); return the manifest.
 
     Every frame the stream has gets a map -- its real frame numbers, which a folder of frames
     may start above 0 or skip -- including frames with no segment at all (all background):
@@ -95,13 +99,11 @@ def export_id_maps(
     from PIL import Image
 
     from reifyscene.graph.renderable_handle import render_pixel_masks
-    from reifyscene.ingest.streams import RunStreams
 
-    run_dir = Path(run_dir)
-    out_dir = Path(out_dir) if out_dir is not None else run_dir / "identity"
-    stream = RunStreams.from_run(run_dir).resolve(stream_id)
+    out_dir = Path(out_dir) if out_dir is not None else run.identity_dir
+    stream = run.streams.resolve(stream_id)
     stream_id = stream.id
-    placed = render_pixel_masks(run_dir, stream_id=stream_id)
+    placed = render_pixel_masks(run, stream_id=stream_id)
     transform = placed.transform
     width, height = transform.output_size
     shape = (int(height), int(width))
@@ -110,7 +112,7 @@ def export_id_maps(
 
     node_ids = sorted(placed.labels)
     if len(node_ids) >= IGNORE:
-        raise ValueError(f"{run_dir.name}: {len(node_ids)} entities do not fit in uint16")
+        raise ValueError(f"{run.name}: {len(node_ids)} entities do not fit in uint16")
     class_of = {nid: i + 1 for i, nid in enumerate(node_ids)}
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +157,7 @@ def export_id_maps(
             notes.append(f"{c['node_id']} has a class but no unambiguous pixel on any frame")
     manifest: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
-        "run": run_dir.name,
+        "run": run.name,
         "stream_id": stream_id,
         "raster": {"width": int(width), "height": int(height)},
         "image_transform": transform.to_dict(),
@@ -176,11 +178,16 @@ def export_id_maps(
     return manifest
 
 
-def load_id_maps(id_dir: Path) -> tuple[dict[str, Any], dict[int, np.ndarray]]:
-    """``(manifest, {frame_idx: (H, W) uint16})`` from a directory :func:`export_id_maps` wrote."""
+def has_id_maps(run: RunOutputs) -> bool:
+    """Whether :func:`export_id_maps` has written the run's maps."""
+    return (run.identity_dir / MANIFEST).is_file()
+
+
+def load_id_maps(run: RunOutputs) -> tuple[dict[str, Any], dict[int, np.ndarray]]:
+    """``(manifest, {frame_idx: (H, W) uint16})``: the maps :func:`export_id_maps` wrote."""
     from PIL import Image
 
-    id_dir = Path(id_dir)
+    id_dir = run.identity_dir
     manifest = json.loads((id_dir / MANIFEST).read_text())
     if manifest.get("format_version") != FORMAT_VERSION:
         raise ValueError(f"{id_dir}: id-map format {manifest.get('format_version')!r} unknown")

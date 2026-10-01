@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from reifyscene.api.web.app import create_app, discover_runs  # noqa: E402
 from reifyscene.common.types import GraphNode  # noqa: E402
 from reifyscene.graph.graph_artifact import GraphArtifact  # noqa: E402
-from tests.conftest import write_ingest
+from tests.conftest import write_checkpoint, write_ingest, write_manifest
 
 H, W = 6, 8
 PERSON = "human:cam_00:sam2:cam_00:2"
@@ -46,8 +46,7 @@ def _fixture_run(root: Path, name: str = "loop_demo") -> Path:
         Image.fromarray(np.full((H, W, 3), 40 * f, np.uint8)).save(run / "scene" / fn)
         views.append({"frame_key": f"cam_00:{f}", "image_file": fn})
     (run / "scene" / "artifact.json").write_text(json.dumps({"train_views": views}))
-    (run / "render").mkdir()
-    (run / "render" / "trained_dynamic.npz").write_bytes(b"not read by the fake editor")
+    write_checkpoint(run, b"not read by the fake editor")
     ident = run / "identity"
     ident.mkdir()
     frames = []
@@ -92,15 +91,17 @@ class FakeEditor:
 @pytest.fixture()
 def client(tmp_path):
     _fixture_run(tmp_path)
-    (tmp_path / "loop_nograph").mkdir()                       # no graph: not a run
+    (tmp_path / "not_a_run" / "graph").mkdir(parents=True)    # no manifest: not a run
+    write_manifest(tmp_path / "no_graph")                       # a run, but nothing to serve
     return TestClient(create_app(tmp_path, editor_factory=FakeEditor))
 
 
 def test_only_runs_with_a_graph_and_a_checkpoint_are_listed(client, tmp_path) -> None:
     runs = client.get("/api/runs").json()
     assert [r["name"] for r in runs] == ["loop_demo"]
-    assert runs[0]["entities"] == 2 and runs[0]["frames"] == 6
-    assert list(discover_runs(tmp_path, ["render_sharp", "render"])) == ["loop_demo"]
+    assert runs[0]["entities"] == 2 and runs[0]["frames"] == 6 and runs[0]["checkpoint"] == "render"
+    assert list(discover_runs(tmp_path)) == ["loop_demo"]
+    assert discover_runs(tmp_path, "render_sharp") == {}       # a named checkpoint it lacks
 
 
 def test_graph_carries_presence_and_admits_no_relations(client) -> None:
@@ -119,7 +120,9 @@ def test_the_gaussians_layer_is_shown_only_for_the_checkpoint_it_describes(tmp_p
     graph = GraphArtifact.load(run / "graph")
     handles = {PERSON: (np.array([1, 2]), np.array([0]), {}),
                CUP: (np.array([], np.int64), np.array([], np.int64), {})}
-    write_layer(graph, handles, checkpoint_path=run / "render" / "trained_dynamic.npz",
+    from reifyscene.api.run_outputs import RunOutputs
+
+    write_layer(graph, handles, checkpoint=RunOutputs.open(run).checkpoint(),
                 num_gaussians=10, slackness=0.0, filtered=True)
     g = TestClient(create_app(tmp_path, editor_factory=FakeEditor)).get(
         "/api/runs/loop_demo/graph").json()

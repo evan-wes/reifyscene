@@ -25,11 +25,12 @@ views (DyCheck), which is why this is the optimistic measure.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from reifyscene.api.run_outputs import Checkpoint
 
 PSNR_CAP = 60.0
 
@@ -168,24 +169,24 @@ METRICS = ("taken_recall", "taken_precision", "alone_precision", "halo_ratio",
            "others_damaged", "rest_psnr_db")
 
 
-def score_run(run: Path, *, checkpoint_sub: str, frames: int = 4,
+def score_run(checkpoint: Checkpoint, *, frames: int = 4,
               match_iou: float = 0.25, changed_threshold: int = 12, ring: int = 8,
               device: str = "cuda") -> dict[str, Any]:
-    """Every annotated object of one DAVIS run: matched, removed via the layer, scored."""
+    """Every annotated object of ``checkpoint``'s DAVIS run: matched, removed via the layer,
+    scored."""
     from reifyscene.edit.remove import RemoveEditor
     from reifyscene.graph.renderable_handle import drop_gaussians, render_pixel_masks
-    from reifyscene.ingest.streams import RunStreams
 
-    run = Path(run)
-    stream = RunStreams.from_run(run).only()
+    run = checkpoint.run
+    stream = run.streams.only()
     seq = stream.source.sequence
     placed = render_pixel_masks(run, stream_id=stream.id)
     gt_by_frame = gt_masks(stream)
     matched, best, _ = match_objects(gt_by_frame, placed.by_frame, match_iou=match_iou)
 
-    ed = RemoveEditor(run, checkpoint_sub=checkpoint_sub, device=device)
+    ed = RemoveEditor(checkpoint, device=device)
     r = ed.renderer
-    graph = json.loads((run / "graph" / "artifact.json").read_text())
+    graph = run.record("graph")
     layer_status = {n["value"]["node_id"]: n["value"]["attrs"].get("gaussians", {}).get("status")
                     for n in graph["nodes"]}
 
@@ -228,7 +229,7 @@ def score_run(run: Path, *, checkpoint_sub: str, frames: int = 4,
                 "rest_psnr_db": rest_psnr(before, after[f], ~dilate(gt, ring))})
         row["frames"] = per_frame
         row.update({k: _mean(per_frame, k) for k in METRICS})
-    return {"run": run.name, "sequence": seq, "checkpoint": checkpoint_sub,
+    return {"run": run.name, "sequence": seq, "checkpoint": checkpoint.name,
             "layer": (graph.get("metadata") or {}).get("layers", {}).get("gaussians"),
             "objects": objects}
 

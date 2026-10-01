@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs
 
 
@@ -77,7 +78,8 @@ def test_render_stage_scores_a_static_scene_through_its_training_views(
     pipeline = SimpleNamespace(
         cfg={"evaluation": {"masked_nvs": {"dataset_root": "spin"}}, "render": {"device": "cpu"}},
         geometry_backend_name="dataset",  # even the oracle's static scene is canonicalized
-        renderer=SimpleNamespace(fit=lambda scene, save_dir: render_artifact),
+        renderer=SimpleNamespace(fit=lambda scene, save_dir, run: render_artifact),
+        outputs=RunOutputs.create(tmp_path),
         _stage_dir=lambda name: tmp_path / name,
         _stamp_stage_metadata=lambda *args, **kwargs: None,
         _video_paths_for_stage=lambda *args: [],

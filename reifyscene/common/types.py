@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Optional, get_args, get_origin, get_type_hints
+from typing import Any, ClassVar, Optional, get_args, get_origin, get_type_hints
 
 import numpy as np
 
@@ -243,6 +243,8 @@ class GraphEdge:
 class BaseArtifact:
     """Base class for stage artifacts saved to disk."""
 
+    FILE: ClassVar[str] = "artifact.json"   # an artifact's record, inside its save_dir
+
     run_id: str
     stage_name: str
     save_dir: Path
@@ -250,7 +252,7 @@ class BaseArtifact:
 
     def artifact_path(self) -> Path:
         """Return the canonical metadata file for the artifact."""
-        return self.save_dir / "artifact.json"
+        return self.save_dir / self.FILE
 
     @staticmethod
     def _is_optional(annotation: Any) -> bool:
@@ -403,7 +405,7 @@ class BaseArtifact:
     @classmethod
     def load(cls, save_dir: Path) -> "BaseArtifact":
         """Load an artifact metadata file from disk."""
-        raw = read_json(save_dir / "artifact.json")
+        raw = read_json(Path(save_dir) / cls.FILE)
         artifact = cls.from_payload(raw)
         artifact.save_dir = Path(save_dir)
         return artifact

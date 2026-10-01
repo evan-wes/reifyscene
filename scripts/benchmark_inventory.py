@@ -31,19 +31,17 @@ REPO = Path(__file__).resolve().parents[1]
 RUNS = REPO.parent / "runs"
 
 
-def _capabilities(run_dir: Path) -> dict[str, Any]:
+def _capabilities(run) -> dict[str, Any]:
     """Each stage's own account of what it produced, carried into the row."""
+    from reifyscene.api.stages import STAGE_ORDER
+
     out: dict[str, Any] = {}
-    for stage_dir in sorted(run_dir.iterdir()):
-        artifact = stage_dir / "artifact.json"
-        if not artifact.is_file():
+    for stage in STAGE_ORDER:
+        if not run.has(stage):
             continue
-        try:
-            cap = (json.loads(artifact.read_text()).get("metadata") or {}).get("capability")
-        except Exception:
-            continue
+        cap = run.record(stage)["metadata"].get("capability")
         if cap:
-            out[stage_dir.name] = {
+            out[stage] = {
                 "backend_used": cap.get("backend_used"),
                 "fidelity": cap.get("fidelity"),
                 "provides": cap.get("provides") or {},
@@ -69,28 +67,29 @@ def main() -> None:
     ap.add_argument("--match-iou", type=float, default=0.5)
     args = ap.parse_args()
 
-    from reifyscene.ingest.streams import RunStreams, StreamError
+    from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.ingest.streams import StreamError
 
     rows: list[dict[str, Any]] = []
-    def stopped_at(run: Path) -> str | None:
-        manifest = run / "run_manifest.json"
-        return json.loads(manifest.read_text()).get("stop_stage") if manifest.is_file() else None
-
-    for run_dir in args.run_dirs or sorted(p for p in args.runs.iterdir() if p.is_dir()):
+    runs = ([RunOutputs.open(r) for r in args.run_dirs] if args.run_dirs
+            else RunOutputs.discover(args.runs))
+    for run in runs:
+        if not run.has("ingest"):
+            continue
         try:
-            stream = RunStreams.from_run(run_dir).only()
-            if stream.source.kind != "davis":
-                continue
-        except (FileNotFoundError, StreamError, KeyError):
+            stream = run.streams.only()
+        except StreamError:             # several streams: not one DAVIS sequence
             continue
-        if not args.run_dirs and stopped_at(run_dir) != "graph":
+        if stream.source.kind != "davis":
             continue
-        score = score_run(run_dir, match_iou=args.match_iou)
+        if not args.run_dirs and run.manifest.get("stop_stage") != "graph":
+            continue
+        score = score_run(run, match_iou=args.match_iou)
         row = score.to_dict()
-        row["run"] = run_dir.name
+        row["run"] = run.name
         row["sequence"] = stream.source.sequence
         row["num_frames"] = stream.num_frames
-        row["capabilities"] = _capabilities(run_dir)
+        row["capabilities"] = _capabilities(run)
         rows.append(row)
 
     scored = [r for r in rows if r["num_gt"]]

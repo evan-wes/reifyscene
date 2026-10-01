@@ -96,7 +96,7 @@ class DynMaskArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "DynMaskArtifact":
-        raw = read_json(save_dir / "artifact.json")
+        raw = read_json(save_dir / cls.FILE)
         masks: dict[str, np.ndarray] = {}
         for frame_key, filename in raw["mask_index"].items():
             path = require_file(save_dir / "masks" / filename, "dyn_mask mask")

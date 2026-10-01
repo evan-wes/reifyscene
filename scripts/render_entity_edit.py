@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Remove an entity from a trained scene and render before/after -- the spike's step-1 gate.
 
-    python scripts/render_entity_edit.py ../runs/loop_blackswan --node auto
+    python scripts/render_entity_edit.py ../runs/slice_blackswan --node auto
 
 The gate the spike sets is *"is the removed region the entity, and is what remains intact?"*
 This answers both, and measures rather than only shows them:
@@ -47,22 +47,23 @@ def main() -> None:
     import torch
     from PIL import Image
 
+    from reifyscene.api.run_outputs import RunOutputs
     from reifyscene.common.frame_keys import parse_key
     from reifyscene.graph.renderable_handle import (
         compute_renderable_handles,
         drop_gaussians,
         entity_masks_in_render_pixels,
     )
-    from reifyscene.ingest.streams import RunStreams
     from reifyscene.render.eval.checkpoint_views import _render, _to_u8
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 
-    run_dir = args.run_dir.resolve()
-    out_dir = args.out or (run_dir / "render" / "entity_edit")
+    run = RunOutputs.open(args.run_dir.resolve())
+    checkpoint = run.checkpoint()
+    out_dir = args.out or run.output_dir("entity_edit")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    handles = compute_renderable_handles(run_dir)
+    handles = compute_renderable_handles(checkpoint)
     if args.node == "auto":
         pick = max(handles.entities.values(), key=lambda e: e.assigned)
     else:
@@ -78,14 +79,13 @@ def main() -> None:
     print(f"removing {pick.node_id} ({pick.label}): {pick.assigned} of "
           f"{handles.num_foreground} foreground Gaussians ({pick.assigned_fraction:.1%})")
 
-    with np.load(run_dir / "render" / "trained_dynamic.npz", allow_pickle=True) as z:
-        bundle = {k: z[k] for k in z.files}
+    bundle = checkpoint.load()
     edited = drop_gaussians(bundle, pick.gaussian_indices)
 
-    masks, _labels, _notes = entity_masks_in_render_pixels(run_dir)
+    masks, _labels, _notes = entity_masks_in_render_pixels(run)
     frame_names = [str(n) for n in np.asarray(bundle["train_frame_names"])]
     time_ids = [int(t) for t in np.asarray(bundle["train_time_ids"])]
-    stream = RunStreams.from_run(run_dir).only()
+    stream = run.streams.only()
     source = [parse_key(n)[1] for n in frame_names]
     # Render frames where the entity actually has a mask -- elsewhere there is nothing to see.
     candidates = [i for i, f in enumerate(source) if pick.node_id in masks.get(f, {})]
@@ -140,7 +140,7 @@ def main() -> None:
               f"halo {rows[-1]['halo_px']:6d}px  (IoU {rows[-1]['changed_vs_mask_iou']:.3f})")
 
     summary = {
-        "run": run_dir.name, "node_id": pick.node_id, "label": pick.label,
+        "run": run.name, "node_id": pick.node_id, "label": pick.label,
         "removed_gaussians": pick.assigned, "foreground_total": handles.num_foreground,
         "removed_fraction": round(pick.assigned_fraction, 4),
         "changed_threshold": int(args.changed_threshold), "frames": rows,

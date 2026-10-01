@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Export per-frame entity id maps for finished runs, and verify each round trip.
 
-    python scripts/export_id_maps.py ../runs/loop_*
+    python scripts/export_id_maps.py ../runs/slice_lab-coat ../runs/slice_judo
 
 Writes ``<run>/identity/frame_NNNNN.png`` (uint16) and ``manifest.json`` -- the targets the
 per-Gaussian identity loss trains against (I0 of the identity scope). See
@@ -23,6 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from reifyscene.api.run_outputs import RunOutputs  # noqa: E402
 from reifyscene.graph.id_maps import (  # noqa: E402
     export_id_maps,
     load_id_maps,
@@ -43,9 +44,10 @@ def main() -> int:
     print(header)
     print("-" * len(header))
     failed = 0
-    for run in args.run_dirs:
+    for run_dir in args.run_dirs:
+        run = RunOutputs.open(run_dir)
         manifest = export_id_maps(run, stream_id=args.stream)
-        loaded, maps = load_id_maps(run / "identity")
+        loaded, maps = load_id_maps(run)
         source = render_pixel_masks(run, stream_id=args.stream).by_frame
         bad = round_trip_mismatches(loaded, maps, source)
         f = manifest["fractions"]

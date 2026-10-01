@@ -17,6 +17,7 @@ import pytest
 import torch
 
 import reifyscene.render.eval.masked_nvs_benchmark as nvs
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.geometry.similarity import apply_similarity_to_c2w
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
@@ -35,6 +36,7 @@ from reifyscene.render.eval.masked_nvs_benchmark import (
 )
 from reifyscene.render.gaussian4d.motion_init import BorrowedCamera
 from scripts import export_checkpoint_views as cli
+from tests.conftest import write_manifest
 
 W, H = 80, 60
 
@@ -459,10 +461,18 @@ def _save_static_checkpoint(path: Path) -> None:
     )
 
 
-def _static_run(tmp_path: Path) -> Path:
+def _render_record(ckpt_dir: Path, kind: str, weights: str) -> None:
+    """The record the render stage saves beside its weights: which file, what kind."""
+    (ckpt_dir / "artifact.json").write_text(
+        json.dumps({"scene_state": {"kind": kind, "checkpoint": weights}}))
+
+
+def _static_run(tmp_path: Path, config: dict | None = None) -> Path:
+    write_manifest(tmp_path, config)
     (tmp_path / "render").mkdir(parents=True)
     (tmp_path / "scene").mkdir()
     _save_static_checkpoint(tmp_path / "render" / "trained_gaussians.npz")
+    _render_record(tmp_path / "render", "static", "trained_gaussians.npz")
     scene = {"kind": "static", "train_views": _static_train_views(range(0, 60, 5))}
     for view in scene["train_views"]:
         view.update(width=W, height=H, intrinsics={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0})
@@ -470,27 +480,31 @@ def _static_run(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_cli_finds_a_static_run_and_aligns_it_without_a_manifest(tmp_path: Path):
-    run = _static_run(tmp_path)
-    path, kind = cli.find_checkpoint(run, None)
-    assert (path.name, kind) == ("trained_gaussians.npz", "static")
-    assert cli.resolve_alignment(run, "auto", kind) == "sim3"  # no run_manifest.json needed
-    assert cli.resolve_alignment(run, "none", kind) == "none"
+def test_cli_finds_a_static_run_and_aligns_it_by_its_kind(tmp_path: Path):
+    run = RunOutputs.open(_static_run(tmp_path))
+    ckpt = cli.find_checkpoint(run, "render")
+    assert (ckpt.weights.name, ckpt.kind) == ("trained_gaussians.npz", "static")
+    assert cli.resolve_alignment(run, "auto", ckpt.kind) == "sim3"  # whatever its geometry
+    assert cli.resolve_alignment(run, "none", ckpt.kind) == "none"
     views = cli.read_train_views(run)
     assert len(views) == 12 and set(views[0]) == {"frame_key", "time_id", "t_world_cam"}
 
 
-def test_cli_checkpoint_kind_comes_from_the_contents(tmp_path: Path):
-    _save_static_checkpoint(tmp_path / "custom.npz")
-    np.savez(tmp_path / "bundle.npz", fg_means=np.ones((1, 3), np.float32))
-    assert cli.find_checkpoint(tmp_path, tmp_path / "custom.npz")[1] == "static"
-    assert cli.find_checkpoint(tmp_path, tmp_path / "bundle.npz")[1] == "dynamic"
+def test_cli_checkpoint_weights_and_kind_come_from_its_render_record(tmp_path: Path):
+    run = RunOutputs.open(_static_run(tmp_path))
+    retrain = tmp_path / "render_retrain"
+    retrain.mkdir()
+    np.savez(retrain / "bundle.npz", fg_means=np.ones((1, 3), np.float32))
+    _render_record(retrain, "dynamic", "bundle.npz")
+    ckpt = cli.find_checkpoint(run, "render_retrain")
+    assert (ckpt.weights.name, ckpt.kind) == ("bundle.npz", "dynamic")
+    with pytest.raises(SystemExit):
+        cli.find_checkpoint(run, "render_missing")
 
 
 def test_cli_dynamic_auto_alignment_reads_the_geometry_backend(tmp_path: Path):
-    manifest = {"config": {"geometry": {"backend_name": "dataset"}}}
-    (tmp_path / "run_manifest.json").write_text(json.dumps(manifest))
-    assert cli.resolve_alignment(tmp_path, "auto", "dynamic") == "none"
+    write_manifest(tmp_path, {"geometry": {"backend_name": "dataset"}})
+    assert cli.resolve_alignment(RunOutputs.open(tmp_path), "auto", "dynamic") == "none"
 
 
 def test_cli_exports_a_static_runs_heldout_views(tmp_path: Path, monkeypatch, capsys):

@@ -13,15 +13,11 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_yaml, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import FrameRef
-from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.optimize.optimization_artifact import OptimizationArtifact
-from reifyscene.perception.humans.human_artifact import HumanArtifact
-from reifyscene.perception.objects.object_artifact import ObjectArtifact
-from reifyscene.tracking.track_artifact import TrackArtifact
 
 
 def load_debug_config(path: str | None) -> dict[str, Any]:
@@ -144,11 +140,11 @@ def materialize_shared_debug_frames(
 def export_debug_artifacts(run_dir: str | Path, debug_cfg: dict[str, Any], shared_image_paths: dict[str, str]) -> None:
     if not debug_cfg.get('enabled', False):
         return
-    run_dir = Path(run_dir)
+    run = RunOutputs.create(run_dir)
 
     geom_cfg = debug_cfg.get('geometry', {})
-    if geom_cfg.get('enabled', True) and (run_dir / 'geometry' / 'artifact.json').exists():
-        artifact = GeometryArtifact.load(run_dir / 'geometry')
+    if geom_cfg.get('enabled', True) and run.has('geometry'):
+        artifact = run.artifact('geometry')
         artifact.metadata.update({
             'save_depth_pngs': bool(geom_cfg.get('depth_pngs', True)),
             'save_debug_assets': bool(geom_cfg.get('debug_assets', True)),
@@ -160,8 +156,8 @@ def export_debug_artifacts(run_dir: str | Path, debug_cfg: dict[str, Any], share
         del artifact
 
     trk_cfg = debug_cfg.get('tracking', {})
-    if trk_cfg.get('enabled', True) and (run_dir / 'tracking' / 'artifact.json').exists():
-        artifact = TrackArtifact.load(run_dir / 'tracking')
+    if trk_cfg.get('enabled', True) and run.has('tracking'):
+        artifact = run.artifact('tracking')
         artifact.metadata.update({
             'save_debug_assets': bool(trk_cfg.get('debug_assets', True)),
             'save_debug_html': bool(trk_cfg.get('viewer', True)),
@@ -174,8 +170,8 @@ def export_debug_artifacts(run_dir: str | Path, debug_cfg: dict[str, Any], share
         del artifact
 
     obj_cfg = debug_cfg.get('objects', {})
-    if obj_cfg.get('enabled', True) and (run_dir / 'objects' / 'artifact.json').exists():
-        artifact = ObjectArtifact.load(run_dir / 'objects')
+    if obj_cfg.get('enabled', True) and run.has('objects'):
+        artifact = run.artifact('objects')
         artifact.metadata.update({
             'save_debug_assets': bool(obj_cfg.get('debug_assets', True)),
             'save_debug_html': bool(obj_cfg.get('viewer', True)),
@@ -185,8 +181,8 @@ def export_debug_artifacts(run_dir: str | Path, debug_cfg: dict[str, Any], share
         del artifact
 
     hum_cfg = debug_cfg.get('humans', {})
-    if hum_cfg.get('enabled', True) and (run_dir / 'humans' / 'artifact.json').exists():
-        artifact = HumanArtifact.load(run_dir / 'humans')
+    if hum_cfg.get('enabled', True) and run.has('humans'):
+        artifact = run.artifact('humans')
         artifact.metadata.update({
             'save_debug_assets': bool(hum_cfg.get('debug_assets', True)),
             'save_debug_html': bool(hum_cfg.get('viewer', True)),
@@ -196,10 +192,10 @@ def export_debug_artifacts(run_dir: str | Path, debug_cfg: dict[str, Any], share
         del artifact
 
     opt_cfg = debug_cfg.get('optimization', {})
-    if opt_cfg.get('enabled', True) and (run_dir / 'optimization' / 'artifact.json').exists():
-        artifact = OptimizationArtifact.load(run_dir / 'optimization')
-        track_artifact = TrackArtifact.load(run_dir / 'tracking') if (run_dir / 'tracking' / 'artifact.json').exists() else None
-        geometry_artifact = GeometryArtifact.load(run_dir / 'geometry') if (run_dir / 'geometry' / 'artifact.json').exists() else None
+    if opt_cfg.get('enabled', True) and run.has('optimization'):
+        artifact = run.artifact('optimization')
+        track_artifact = run.artifact('tracking') if run.has('tracking') else None
+        geometry_artifact = run.artifact('geometry') if run.has('geometry') else None
         if track_artifact is not None:
             track_artifact.metadata['debug_image_paths'] = dict(shared_image_paths)
         if geometry_artifact is not None:
