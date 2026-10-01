@@ -66,3 +66,16 @@ def test_summary_counts_and_medians() -> None:
     s = summarize(rows)
     assert (s["objects"], s["scored"], s["unassignable"], s["not_proposed"]) == (4, 2, 1, 1)
     assert s["median_rest_psnr_db"] == 45.0 and s["median_taken_recall"] == 0.8
+
+
+def test_the_render_picks_among_photo_silhouettes_but_never_shapes_one() -> None:
+    from reifyscene.eval.benchmarks.edit_damage.silhouettes import Silhouette, pick_entity
+
+    left, right = _box(x=(0, 6)), _box(x=(12, 18))
+    people = [Silhouette(left, np.zeros(4), 0.9, "test"),
+              Silhouette(right, np.zeros(4), 0.8, "test")]
+    render = _box(x=(13, 19))                        # the entity renders over the right person
+    chosen, iou = pick_entity(people, render)
+    assert chosen is people[1] and chosen.mask is right   # the photo's mask, untouched
+    assert 0 < iou < 1
+    assert pick_entity([], render) == (None, 0.0)

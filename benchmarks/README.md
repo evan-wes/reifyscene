@@ -66,7 +66,39 @@ mask), *alone precision* (the removed Gaussians rendered by themselves), *halo r
   view shows behind the lab-coat people, measured.
 
 These are training views: the fitted views, which never see behind anything. The held-out
-measure is DyCheck (G4 part 3).
+measure is DyCheck (G4 part 3), below.
+
+## `dycheck_spin_heldout_edit.json`
+
+The same questions from cameras the scene never trained on. DyCheck `spin` has held-out cameras
+at other positions with real photos; the person is removed (graph `gaussians` layer) and judged
+on 60 held-out and 20 training views.
+
+    python scripts/heldout_edit_damage.py ../runs/spin_oracle_g4h2   # GPU, ~20 s
+
+Where the person *is* in each view comes from the photo, not from the removal: SAM 2 prompted
+by the person detector segments every person, and the one overlapping where the entity renders
+is its silhouette (`reifyscene/eval/benchmarks/edit_damage/silhouettes.py`). These are model
+masks -- pseudo ground truth -- saved under the run's `edits/heldout_damage/masks/` to be
+checked. (A first version judged "the rest" by the removal's own footprint, which cannot fail;
+it was replaced before being recorded.)
+
+**Finding (2026-09-30):**
+
+| | held-out (60) | training (20) |
+|---|---|---|
+| taken recall | 0.79 | 0.85 |
+| alone precision | 0.98 | 0.97 |
+| rest damage vs photo | -0.02 dB | +0.01 dB |
+
+- **No shadow when the camera went around.** Rendered by themselves, 98% of the removed
+  Gaussians land on the person even from the held-out cameras. On lab-coat, seen from one side,
+  the same number is 0.44-0.46. What a removal carries along depends on the entity's view
+  coverage -- the removal-quality track's first thing to detect.
+- **The rest of the scene is untouched**, against real photos from unseen viewpoints.
+- **What remains is a ghost:** ~21% of the person's pixels are not mostly drawn by the removed
+  Gaussians -- person Gaussians the assignment missed, over a hole nothing was reconstructed
+  behind. An assignment and inpainting problem, not damage.
 
 ## `amg_keyframe_cache.json`
 
