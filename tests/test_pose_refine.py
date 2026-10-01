@@ -206,7 +206,7 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
 
     work_dirs = []
 
-    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+    def fake_refine(self, geometry, *, ingest_artifact, work_dir=None):
         work_dirs.append(work_dir)
         return {STREAM_ID: fake}
 
@@ -235,7 +235,7 @@ def test_a_refused_refinement_keeps_the_seed_poses_and_says_why(tmp_path: Path, 
     geom = _geometry_artifact(tmp_path)
     ingest = _ingest_artifact(tmp_path)
 
-    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+    def fake_refine(self, geometry, *, ingest_artifact, work_dir=None):
         self.rejected[STREAM_ID] = "final mean reprojection error 6.2e+149 px exceeds 8 px"
         return {}
 

@@ -164,9 +164,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'scene': StageSpec(
             name='scene',
-            dependencies=('pose_refine', 'segment', 'tracking', 'humans', 'objects', 'optimization'),
+            dependencies=('ingest', 'pose_refine', 'segment', 'tracking', 'humans', 'objects', 'optimization'),
             artifact_cls=SceneArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['ingest'], outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment']),
             load_fn=SceneArtifact.load,
         ),
         'render': StageSpec(

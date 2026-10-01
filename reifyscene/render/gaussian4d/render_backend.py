@@ -269,16 +269,19 @@ class GaussianRenderBackend(RenderBackend):
         return {"flythrough": frame_paths}
 
     def _save_dynamic_checkpoint(
-        self, scene, cams, source_bundle: dict, save_dir: Path, name: str = "trained_dynamic.npz"
+        self, scene, cams, source_bundle: dict, save_dir: Path, *, raster: tuple[int, int],
+        name: str = "trained_dynamic.npz",
     ) -> str:
         """Persist the trained DynamicScene as a dump_bundle npz the scorer reloads.
 
         Carries forward the scene-norm (and any held-out val cameras) from the
-        source bundle so masked-NVS can place dataset cameras in the scene frame.
+        source bundle so masked-NVS can place dataset cameras in the scene frame, and
+        records the raster it was trained at (``train_raster_wh``): intrinsics do not say it.
         """
         from reifyscene.render.gaussian4d.motion_init import dump_bundle
 
         ckpt = dump_bundle(scene, cams, factor=1)
+        ckpt["train_raster_wh"] = np.asarray([int(raster[0]), int(raster[1])])
         for key in ("scene_norm_transfm", "scene_norm_scale"):
             if key in (source_bundle or {}):
                 ckpt[key] = np.asarray(source_bundle[key])
@@ -295,6 +298,10 @@ class GaussianRenderBackend(RenderBackend):
 
         bundle = scene_artifact.dynamic_bundle or {}
         train_views = self._dynamic_train_views(scene_artifact)
+        rasters = {(int(v["width"]), int(v["height"])) for v in scene_artifact.train_views}
+        if len(rasters) > 1:
+            raise ValueError(f"training views come in several rasters {sorted(rasters)}")
+        raster = next(iter(rasters), None)
         if not bundle or not train_views:
             return RenderArtifact(
                 run_id=getattr(scene_artifact, "run_id", "dev"),
@@ -358,13 +365,13 @@ class GaussianRenderBackend(RenderBackend):
             trainer.cfg.snapshot_steps = tuple(int(x) for x in ident_cfg["snapshot_steps"])
 
             def on_snapshot(step: int, scene) -> None:
-                self._save_dynamic_checkpoint(scene, cams, bundle, Path(save_dir),
+                self._save_dynamic_checkpoint(scene, cams, bundle, Path(save_dir), raster=raster,
                                               name=f"trained_dynamic_step{step}.npz")
         trained = trainer.fit(train_views, on_log=lambda record: logs.append(record),
                               on_trace=on_trace, on_snapshot=on_snapshot)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
-        checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir)
+        checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir, raster=raster)
         eval_n = min(len(train_views), 8)
         with torch.no_grad():
             psnrs = [

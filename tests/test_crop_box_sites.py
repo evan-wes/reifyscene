@@ -46,7 +46,7 @@ def _frame() -> np.ndarray:
 
 
 def _geometry(
-    tmp_path: Path, *, n: int = 2, record: bool = True, drop_photo: int | None = None
+    tmp_path: Path, *, n: int = 2, record: bool = True
 ) -> GeometryArtifact:
     frames = [FrameRef("cam_00", i, 0.1 * i) for i in range(n)]
     photos, depthmaps = {}, {}
@@ -55,8 +55,7 @@ def _geometry(
         key = f"cam_00:{fr.frame_idx}"
         path = tmp_path / "gt" / f"{fr.frame_idx}.png"
         Image.fromarray(_frame()).save(path)
-        if fr.frame_idx != drop_photo:
-            photos[key] = str(path)
+        photos[key] = str(path)
         depthmaps[key] = {
             "depth": np.full((GH, GW), 2.0, np.float32),
             "confidence": np.full((GH, GW), 2.0, np.float32),
@@ -81,6 +80,19 @@ def _geometry(
     )
 
 
+def _ingest(tmp_path: Path) -> SimpleNamespace:
+    """The ingest stream of the fixture's frames (the photos every stage reads)."""
+    from reifyscene.ingest.decoder import VideoDecoder
+
+    return SimpleNamespace(streams=[VideoDecoder().decode(tmp_path / "gt", stream_id="cam_00")])
+
+
+def _streams(geom: GeometryArtifact, tmp_path: Path):
+    from reifyscene.ingest.streams import RunStreams
+
+    return RunStreams.from_artifacts(_ingest(tmp_path), geom)
+
+
 def _no_bands(img: np.ndarray) -> bool:
     flat = img.reshape(-1, 3)
     return not ((flat == RED).all(1).any() or (flat == BLUE).all(1).any())
@@ -90,7 +102,8 @@ def _no_bands(img: np.ndarray) -> bool:
 def test_static_train_photos_and_seed_are_the_crop(tmp_path: Path) -> None:
     geom = _geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=2).assemble(
-        run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     view = scene.train_views[0]
     assert (view["width"], view["height"]) == (GW, GH)
@@ -106,36 +119,24 @@ def test_static_train_photos_and_seed_are_the_crop(tmp_path: Path) -> None:
     assert np.array_equal(np.asarray(Image.open(loaded.train_views[0]["image_file"])), photo)
 
 
-def test_a_listed_frame_without_its_photo_raises(tmp_path: Path) -> None:
-    geom = _geometry(tmp_path, drop_photo=1)
-    with pytest.raises(FileNotFoundError, match="cam_00:1"):
-        SingleVideoSceneAssembler().assemble(
-            run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom
-        )
-    # a photo file deleted from disk raises too
-    geom = _geometry(tmp_path / "b")
-    Path(geom.metadata["debug_image_paths"]["cam_00:0"]).unlink()
-    with pytest.raises(FileNotFoundError, match="cam_00:0"):
-        SingleVideoSceneAssembler().assemble(
-            run_id="t", save_dir=tmp_path / "scene_b", geometry_artifact=geom
-        )
+def test_a_frame_the_stream_does_not_have_raises(tmp_path: Path) -> None:
+    from reifyscene.ingest.streams import StreamError
 
-
-def test_geometry_without_photos_still_builds_an_empty_scene(tmp_path: Path) -> None:
     geom = _geometry(tmp_path)
-    geom.metadata["debug_image_paths"] = {}  # heuristic geometry carries none, by design
-    scene = SingleVideoSceneAssembler().assemble(
-        run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom
-    )
-    assert scene.train_views == [] and scene.render_seed["num_gaussians"] == 0
-
-
-def test_legacy_geometry_with_mismatched_sizes_is_refused(tmp_path: Path) -> None:
-    geom = _geometry(tmp_path, record=False)  # 20x40 photos vs 20x20 depth, no record
-    with pytest.raises(ValueError, match="no recorded image transform"):
+    streams = _streams(geom, tmp_path)
+    (tmp_path / "gt" / "1.png").unlink()        # the stream recorded it; it is gone
+    with pytest.raises(StreamError, match="frame 1"):
         SingleVideoSceneAssembler().assemble(
-            run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom
-        )
+            run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom, streams=streams)
+
+
+def test_geometry_without_depth_builds_an_empty_scene(tmp_path: Path) -> None:
+    geom = _geometry(tmp_path)
+    geom.depthmaps_by_frame = {}  # heuristic geometry: cameras, no depth
+    scene = SingleVideoSceneAssembler().assemble(
+        run_id="t", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path))
+    assert scene.train_views == [] and scene.render_seed["num_gaussians"] == 0
 
 
 def test_seed_refuses_a_photo_not_in_depth_pixels() -> None:
@@ -168,7 +169,9 @@ def test_dynamic_train_photos_are_the_crop(tmp_path: Path) -> None:
         )
         for i in range(2)
     ]
-    views = SingleVideoSceneAssembler()._dynamic_train_views(cams, GH, GW, geom, tmp_path / "scene")
+    asm = SingleVideoSceneAssembler()
+    asm._streams = _streams(geom, tmp_path)
+    views = asm._dynamic_train_views(cams, GH, GW, geom, tmp_path / "scene")
     assert [
         np.array_equal(np.asarray(Image.open(v["image_path"])), _frame()[10:30]) for v in views
     ] == [True, True]
@@ -179,7 +182,8 @@ def test_provider_crops_rgb_and_foreground(tmp_path: Path) -> None:
     fg = np.zeros((H, W), np.float32)
     fg[:10] = 1.0  # a "foreground" in the band the geometry never saw
     fg[15:18, 5:8] = 1.0  # and one inside it
-    stack = ArtifactGeometryProvider(geom, fg_mask_by_frame={"cam_00:0": fg}).frame_stack("train")
+    stack = ArtifactGeometryProvider(geom, stream=_streams(geom, tmp_path).only(),
+                                     fg_mask_by_frame={"cam_00:0": fg}).frame_stack("train")
     rgb = stack.rgbs.numpy()
     assert rgb.shape == (2, GH, GW, 3) and np.array_equal(rgb[0], _frame()[10:30])
     assert np.array_equal(stack.fg.numpy()[0], fg[10:30])
@@ -187,8 +191,13 @@ def test_provider_crops_rgb_and_foreground(tmp_path: Path) -> None:
 
 
 def test_provider_raises_on_a_missing_photo(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="cam_00:1"):
-        ArtifactGeometryProvider(_geometry(tmp_path, drop_photo=1)).frame_stack("train")
+    from reifyscene.ingest.streams import StreamError
+
+    geom = _geometry(tmp_path)
+    stream = _streams(geom, tmp_path).only()
+    (tmp_path / "gt" / "1.png").unlink()
+    with pytest.raises(StreamError, match="frame 1"):
+        ArtifactGeometryProvider(geom, stream=stream).frame_stack("train")
 
 
 # -- render backend -----------------------------------------------------------------
@@ -219,7 +228,8 @@ def test_load_gt_refuses_to_squash(tmp_path: Path) -> None:
 def test_resaving_a_scene_copies_its_photos_and_writes_relative_paths(tmp_path: Path) -> None:
     geom = _geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=2).assemble(
-        run_id="t", save_dir=tmp_path / "run1" / "scene", geometry_artifact=geom
+        run_id="t", save_dir=tmp_path / "run1" / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     scene.save()
     loaded = SceneArtifact.load(tmp_path / "run1" / "scene")
@@ -314,20 +324,10 @@ def test_pipeline_fills_and_checks_image_transforms(tmp_path: Path) -> None:
         ReifyScenePipeline._finalize_image_transforms(bad, ingest)
 
 
-def test_pose_refine_images_come_from_the_record(tmp_path: Path) -> None:
+def test_pose_refine_images_are_the_stream_frames_in_geometry_pixels(tmp_path: Path) -> None:
     from reifyscene.geometry.pose_refine import PoseRefiner
 
     geom = _geometry(tmp_path)
-    ingest = SimpleNamespace(streams=[SimpleNamespace(stream_id="cam_00", width=W, height=H)])
-    frames = list(geom.selected_frames)
     images = PoseRefiner({})._geometry_space_images(
-        geom, "cam_00", frames, decoder=None, ingest_artifact=ingest
-    )
+        geom, "cam_00", list(geom.selected_frames), ingest_artifact=_ingest(tmp_path))
     assert images.shape == (2, GH, GW, 3) and np.array_equal(images[0], _frame()[10:30])
-    # with the materialized input gone it decodes the ingest frame instead
-    Path(geom.metadata["debug_image_paths"]["cam_00:0"]).unlink()
-    decoder = SimpleNamespace(get_frame=lambda stream, idx: _frame())
-    images = PoseRefiner({})._geometry_space_images(
-        geom, "cam_00", frames, decoder=decoder, ingest_artifact=ingest
-    )
-    assert np.array_equal(images[0], _frame()[10:30])

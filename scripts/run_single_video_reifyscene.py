@@ -10,6 +10,7 @@ This helper exercises the implemented vertical slice:
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 from time import perf_counter
 
@@ -584,6 +585,11 @@ def main() -> None:
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
             'stop_stage': args.stop_stage,
+            # which experiment config built this run: its path and exact content
+            'config_file': None if not args.config else {
+                'path': str(Path(args.config).expanduser().resolve()),
+                'sha256': hashlib.sha256(Path(args.config).expanduser().read_bytes()).hexdigest(),
+            },
             'config': cfg,
             'resume': None if plan is None else {
                 'pinned': plan.pins,

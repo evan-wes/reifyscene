@@ -630,7 +630,7 @@ class ReifyScenePipeline:
             refiner = PoseRefiner(pose_cfg)
             try:
                 refinements = refiner.refine(
-                    geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact, work_dir=save_dir
+                    geometry_artifact, ingest_artifact=ingest_artifact, work_dir=save_dir
                 )
             except PoseRefineUnavailable as exc:
                 extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
@@ -1317,12 +1317,15 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
+    def assemble_scene(self, ingest_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
         """Assemble a lightweight static/dynamic single-video 4D scene.
 
         ``instance_artifact`` (segment stage) supplies the per-frame foreground
-        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from.
+        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from;
+        the training photos are the ingest streams' own frames.
         """
+        from reifyscene.ingest.streams import RunStreams
+
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -1331,6 +1334,7 @@ class ReifyScenePipeline:
             human_artifact=human_artifact,
             object_artifact=object_artifact,
             instance_artifact=instance_artifact,
+            streams=RunStreams.from_artifacts(ingest_artifact, geometry_artifact),
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
@@ -1449,7 +1453,7 @@ class ReifyScenePipeline:
         track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
         graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
+        scene_artifact = self.assemble_scene(ingest_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
         render_artifact = self.fit_renderer(scene_artifact)
         handles_artifact = self.bind_gaussians(graph_artifact, render_artifact)
         return {

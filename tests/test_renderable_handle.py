@@ -49,17 +49,12 @@ def _n(node_id: str, kind: str, **attrs) -> dict:
     return {"node_id": node_id, "node_type": kind, "attrs": attrs}
 
 
-def test_nodes_give_up_their_stream_and_canonical_tracklet() -> None:
-    assert _node_track_id(_n("object:cam_00:sam2:cam_00:3", "object", stream_id="cam_00")) \
-        == ("cam_00", "sam2:cam_00:3")
-    # a DyCheck stream is "0": the stream is the node's own, not an assumed "cam_00"
-    assert _node_track_id(_n("human:0:sam2:0:1", "human", stream_id="0")) == ("0", "sam2:0:1")
-    # a recorded track id is used as recorded
-    assert _node_track_id(_n("object:x:y", "object", stream_id="0", track_id="sam2:0:9")) \
-        == ("0", "sam2:0:9")
-    assert _node_track_id(_n("background:cam_00", "background", stream_id="cam_00")) is None
+def test_an_entity_node_gives_the_stream_and_track_it_records() -> None:
+    node = _n("human:0:sam2:0:1", "human", stream_id="0", track_id="sam2:0:1")
+    assert _node_track_id(node) == ("0", "sam2:0:1")
     assert _node_track_id(_n("cam_00", "camera")) is None
-    assert _node_track_id(_n("object:cam_00:sam2:cam_00:3", "object")) is None  # no stream
+    with pytest.raises(KeyError):                  # an entity without its record is malformed
+        _node_track_id(_n("object:cam_00:sam2:cam_00:3", "object", stream_id="cam_00"))
 
 
 def test_drop_removes_exactly_the_named_gaussians() -> None:

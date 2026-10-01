@@ -361,7 +361,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "pose_refine",
-            version=2,
+            version=3,
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),
@@ -430,7 +430,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "graph",
-            version=5,
+            version=6,
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
@@ -446,14 +446,16 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "scene",
-            version=2,
+            version=3,
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
             # timeline_source is only a metadata label.
             exclude=("scene.timeline_source",),
-            upstream=("pose_refine", "segment"),
+            # its training photos are the ingest streams' own frames
+            upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
             "render",
+            version=2,
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),

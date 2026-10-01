@@ -68,10 +68,22 @@ def _synthetic_geometry(tmp_path: Path) -> GeometryArtifact:
     )
 
 
+def _streams(geom: GeometryArtifact, tmp_path: Path):
+    """The fixture's frames as the run's ingest stream (where training photos come from)."""
+    from types import SimpleNamespace
+
+    from reifyscene.ingest.decoder import VideoDecoder
+    from reifyscene.ingest.streams import RunStreams
+
+    ingest = SimpleNamespace(streams=[VideoDecoder().decode(tmp_path / "gt", stream_id="cam_00")])
+    return RunStreams.from_artifacts(ingest, geom)
+
+
 def test_assembler_builds_self_contained_renderable_scene(tmp_path: Path) -> None:
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=6).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     assert scene.kind == "static"
     # both frames fully valid (depth 2.0 > near), pixel_stride 1 -> H*W per frame
@@ -93,7 +105,8 @@ def test_the_assembler_refuses_a_setting_it_does_not_know() -> None:
 def test_scene_artifact_roundtrip_persists_gt_frames(tmp_path: Path) -> None:
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=4).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     scene.save()
     loaded = SceneArtifact.load(tmp_path / "scene")
@@ -219,7 +232,8 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=3).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     backend = GaussianRenderBackend(
         {"device": "cuda", "iters": 10, "trainer": {"log_every": 5}, "densify": {}}
@@ -239,7 +253,8 @@ def test_render_backend_dynamic_empty_bundle_skips(tmp_path: Path) -> None:
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=2).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     scene.kind = "dynamic"  # static-assembled -> empty dynamic_bundle, dispatch short-circuits
     art = GaussianRenderBackend({"device": "cpu"}).fit(scene, save_dir=tmp_path / "render")

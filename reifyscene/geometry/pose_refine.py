@@ -410,7 +410,7 @@ class PoseRefiner:
 
     # -- public API -------------------------------------------------------- #
     def refine(
-        self, geometry: GeometryArtifact, *, decoder, ingest_artifact, work_dir: str | Path | None = None
+        self, geometry: GeometryArtifact, *, ingest_artifact, work_dir: str | Path | None = None
     ) -> dict[str, StreamRefinement]:
         """Return a per-stream refinement for every stream that refines cleanly.
 
@@ -424,7 +424,7 @@ class PoseRefiner:
         results: dict[str, StreamRefinement] = {}
         for stream_id in geometry.stream_ids():
             refinement = self._refine_stream(
-                geometry, stream_id, decoder=decoder, ingest_artifact=ingest_artifact, work_dir=work_dir
+                geometry, stream_id, ingest_artifact=ingest_artifact, work_dir=work_dir
             )
             if refinement is not None:
                 results[stream_id] = refinement
@@ -460,41 +460,23 @@ class PoseRefiner:
         return sorted(frames, key=lambda fr: int(fr.frame_idx))
 
     def _geometry_space_images(
-        self, geometry, stream_id, frames, *, decoder, ingest_artifact
+        self, geometry, stream_id, frames, *, ingest_artifact
     ) -> np.ndarray:
         """``frames`` as (N, H, W, 3) uint8 in the geometry's own pixel space.
 
         The geometry's recorded image transform says how its backend turned a frame
         into the pixels its K and point maps describe (VGGT: resize + centre crop);
         applying it reproduces those pixels exactly, so BA's tracks share the
-        artifact's coordinates. Prefers the backend's materialized inputs
-        (``metadata.debug_image_paths``, the files it ran on); decodes the ingest
-        frame when those are gone (e.g. resuming from ``--start-stage``).
+        artifact's coordinates. The frames are the ingest stream's own, read through
+        :class:`~reifyscene.ingest.streams.FrameStream`.
         """
-        from PIL import Image
+        from reifyscene.ingest.streams import RunStreams
 
-        from reifyscene.geometry.image_transform import image_transform_for
-
-        stream = {s.stream_id: s for s in ingest_artifact.streams}.get(stream_id)
-        transform = image_transform_for(geometry, stream_id)
-        debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
-        images = []
-        for fr in frames:
-            src = debug_paths.get(frame_key(stream_id, fr.frame_idx))
-            if src and Path(src).exists():
-                with Image.open(src) as img:
-                    images.append(transform.apply_to_image(img.convert("RGB")))
-            else:
-                if stream is None:
-                    raise ValueError(
-                        f"stream {stream_id!r} frame {fr.frame_idx}: no materialized input and "
-                        "no ingest stream to decode"
-                    )
-                images.append(transform.apply_to_image(decoder.get_frame(stream, fr.frame_idx)))
-        return np.stack(images)
+        stream = RunStreams.from_artifacts(ingest_artifact, geometry).get(str(stream_id))
+        return np.stack([stream.frame_in_render(fr.frame_idx) for fr in frames])
 
     def _refine_stream(
-        self, geometry, stream_id, *, decoder, ingest_artifact, work_dir=None
+        self, geometry, stream_id, *, ingest_artifact, work_dir=None
     ) -> StreamRefinement | None:
         import torch
         from vggt.dependency.track_predict import predict_tracks
@@ -548,7 +530,7 @@ class PoseRefiner:
 
         work_dir = Path(work_dir) if work_dir is not None else Path(geometry.save_dir)
         rgb = self._geometry_space_images(
-            geometry, stream_id, frames, decoder=decoder, ingest_artifact=ingest_artifact
+            geometry, stream_id, frames, ingest_artifact=ingest_artifact
         )
         # Same float conversion as VGGT's loader (``ToTensor``: uint8 / 255).
         images = torch.from_numpy(rgb).permute(0, 3, 1, 2).float().div(255.0).to(self.cfg.device)

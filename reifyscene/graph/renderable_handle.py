@@ -87,25 +87,12 @@ class RenderableHandles:
 
 
 def _node_track_id(node: Mapping[str, Any]) -> tuple[str, str] | None:
-    """``(stream id, canonical track id)`` of an entity node; None for any other node.
-
-    The track id is read from ``attrs["track_id"]`` when the graph recorded it; otherwise it is
-    the tail of the id the graph builder composes (``<kind>:<stream>:<track>``), with the stream
-    taken from the node's own ``attrs["stream_id"]`` -- the graph's format, read by the graph's
-    code, not a caller's guess at the stream.
-    """
-    kind = str(node.get("node_type", ""))
-    if kind not in ("human", "object"):
+    """``(stream id, canonical track id)`` of an entity node, as the graph records them; None
+    for any other node."""
+    if str(node.get("node_type", "")) not in ("human", "object"):
         return None
-    attrs = node.get("attrs") or {}
-    stream = attrs.get("stream_id")
-    if stream is None:
-        return None
-    if attrs.get("track_id"):
-        return str(stream), str(attrs["track_id"])
-    head = f"{kind}:{stream}:"
-    node_id = str(node.get("node_id", ""))
-    return (str(stream), node_id[len(head):]) if node_id.startswith(head) else None
+    attrs = node["attrs"]
+    return str(attrs["stream_id"]), str(attrs["track_id"])
 
 
 def trained_fg_positions(

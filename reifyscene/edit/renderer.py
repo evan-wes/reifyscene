@@ -12,14 +12,12 @@ import numpy as np
 class CheckpointRenderer:
     """Renders a bundle (and edits of it) at training cameras, caching the unedited view.
 
-    ``raster`` is the (width, height) the scene was trained at and ``stream_id`` the stream its
-    cameras belong to -- both from the run's :class:`~reifyscene.ingest.streams.FrameStream`
-    (:meth:`for_run`). Neither is inferred from the intrinsics: a phone camera's principal point
-    is not at the image centre, so "twice the principal point" is a few pixels off.
+    The raster is the one the checkpoint records it was trained at (``train_raster_wh``);
+    ``stream_id`` is the stream its cameras belong to (:meth:`for_run`). Neither is inferred
+    from the intrinsics: a phone camera's principal point is not at the image centre.
     """
 
-    def __init__(self, bundle: dict, device: str, *, raster: tuple[int, int],
-                 stream_id: str) -> None:
+    def __init__(self, bundle: dict, device: str, *, stream_id: str) -> None:
         from reifyscene.common.frame_keys import parse_key
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
         from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
@@ -28,7 +26,8 @@ class CheckpointRenderer:
         self.rasterizer = build_rasterizer({"device": device})
         self.scene, cams = bundle_to_scene(bundle, device=device)
         self.cams = {int(c.time_id): c for c in cams.get("train") or []}
-        self.size = (int(raster[0]), int(raster[1]))
+        w, h = (int(v) for v in np.asarray(bundle["train_raster_wh"]))
+        self.size = (w, h)
         self.stream_id = str(stream_id)
         names = [str(n) for n in np.asarray(bundle["train_frame_names"])]
         self.time_of: dict[int, int] = {}
@@ -48,7 +47,11 @@ class CheckpointRenderer:
         from reifyscene.ingest.streams import RunStreams
 
         stream = RunStreams.from_run(run_dir).resolve(stream_id)
-        return cls(bundle, device, raster=stream.render_raster, stream_id=stream.id)
+        r = cls(bundle, device, stream_id=stream.id)
+        if r.size != stream.render_raster:
+            raise ValueError(f"the checkpoint was trained at {r.size}, the stream's recorded "
+                             f"raster is {stream.render_raster}")
+        return r
 
     def _render(self, scene, frame: int) -> np.ndarray:
         import torch

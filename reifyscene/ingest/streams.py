@@ -248,6 +248,15 @@ class RunStreams:
             records = meta["image_transforms"]
         return cls([FrameStream(r, records.get(str(r.stream_id))) for r in refs])
 
+    @classmethod
+    def from_artifacts(cls, ingest_artifact, geometry_artifact=None) -> RunStreams:
+        """The same streams from in-memory stage artifacts (a stage of a running pipeline):
+        ingest's stream records, and the geometry's recorded transforms when given."""
+        records = ({} if geometry_artifact is None
+                   else (geometry_artifact.metadata or {})["image_transforms"])
+        return cls([FrameStream(r, records.get(str(r.stream_id)))
+                    for r in ingest_artifact.streams])
+
     @property
     def ids(self) -> list[str]:
         return list(self._streams)

@@ -183,6 +183,7 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
                 confidence=min(1.0, avg_conf),
                 attrs={
                     "stream_id": stream_id,
+                    "track_id": str(human_id),
                     "num_observations": len(instances),
                     "frame_indices": sorted({int(h.frame_ref.frame_idx) for h in instances}),
                     "avg_confidence": avg_conf,
@@ -217,6 +218,7 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
                 confidence=min(1.0, avg_conf),
                 attrs={
                     "stream_id": stream_id,
+                    "track_id": str(object_id),
                     "category": instances[0].category,
                     "categories": sorted({o.category for o in instances}),
                     "num_observations": len(instances),
@@ -459,7 +461,7 @@ def _apply_identity(attrs: dict[str, Any], entity, semantics_artifact) -> tuple[
     """
     record = None
     if semantics_artifact is not None:
-        record = semantics_artifact.records.get(entity.node_id.split(":", 2)[-1])
+        record = semantics_artifact.records.get(entity.attrs["track_id"])
     if record is None:
         # `objects` already copied a category down; keep it, and say nothing was asked.
         attrs.setdefault("category", None)
@@ -482,7 +484,7 @@ def _apply_identity(attrs: dict[str, Any], entity, semantics_artifact) -> tuple[
     )
     embedding = None
     if semantics_artifact is not None:
-        embedding = semantics_artifact.embeddings.get(entity.node_id.split(":", 2)[-1])
+        embedding = semantics_artifact.embeddings.get(entity.attrs["track_id"])
     label = record.category if record.category and not abstained else entity.label
     return label, embedding
 

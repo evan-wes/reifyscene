@@ -43,7 +43,6 @@ from typing import Any
 
 import numpy as np
 
-from reifyscene.ingest.streams import RunStreams
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
     export_replay,
@@ -188,7 +187,7 @@ def main() -> None:
         cams,
         out / "replay.mp4",
         rasterizer=rasterizer,
-        raster=RunStreams.from_run(a.run_dir).only().render_raster,
+        raster=tuple(int(v) for v in data["train_raster_wh"]),  # what it was trained at
         fps=a.replay_fps,
         stride=a.replay_stride,
     )
