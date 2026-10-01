@@ -58,6 +58,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
 
     if args.max_keyframes is not None:
         cfg["max_keyframes_per_stream"] = args.max_keyframes
+    if args.keyframe_stride is not None:
+        cfg["keyframe_stride"] = args.keyframe_stride
     if args.keyframe_stride_sec is not None:
         cfg["keyframe_stride_sec"] = args.keyframe_stride_sec
 
@@ -158,7 +160,7 @@ def _print_run_header(console: Console, args: argparse.Namespace, geometry_recom
         f"geometry backend: {args.geometry_backend_name}  mode: {args.backend_mode}  frame_source: {args.geometry_frame_source}  device: {args.device or 'auto'}\n"
     )
     body.append(
-        f"max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}  cpu_threads: {args.cpu_threads}\n"
+        f"max_keyframes: {args.max_keyframes}  keyframe_stride: {args.keyframe_stride}  keyframe_stride_sec: {args.keyframe_stride_sec}  cpu_threads: {args.cpu_threads}\n"
     )
     body.append(f"geometry_resize_max_dim: {args.geometry_resize_max_dim}\n")
     if args.geometry_backend_name == "vggt-long":
@@ -228,7 +230,10 @@ def main() -> None:
     parser.add_argument("--geometry-resize-max-dim", type=int, default=None, help="Optionally downscale materialized geometry frames before backend execution.")
 
     parser.add_argument("--max-keyframes", type=int, default=8)
-    parser.add_argument("--keyframe-stride-sec", type=float, default=1.0)
+    parser.add_argument("--keyframe-stride", type=int, default=None,
+                        help="Keyframe spacing in frames (30 when neither stride is given).")
+    parser.add_argument("--keyframe-stride-sec", type=float, default=None,
+                        help="Keyframe spacing in seconds; needs a source that records its fps.")
 
     # VGGT-Long-specific flags
     parser.add_argument("--vggt-long-chunk-size", type=int, default=None)

@@ -175,7 +175,7 @@ class SceneArtifact(BaseArtifact):
             ],
             "dynamic_bundle": self._save_dynamic_bundle(self.save_dir),
             "frame_refs": [
-                {"stream_id": fr.stream_id, "frame_idx": int(fr.frame_idx), "timestamp_sec": float(fr.timestamp_sec)}
+                fr.to_dict()
                 for fr in self.frame_refs
             ],
             "timeline": self.timeline,
@@ -228,7 +228,7 @@ class SceneArtifact(BaseArtifact):
             entry["t_world_cam"] = np.asarray(entry["t_world_cam"], dtype=np.float32)
             render_trajectory.append(entry)
         frame_refs = [
-            FrameRef(stream_id=str(fr["stream_id"]), frame_idx=int(fr["frame_idx"]), timestamp_sec=float(fr["timestamp_sec"]))
+            FrameRef.from_dict(fr)
             for fr in raw["frame_refs"]
         ]
         return cls(

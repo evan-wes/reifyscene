@@ -59,7 +59,6 @@ class OptimizationArtifact(BaseArtifact):
             np.savez_compressed(
                 track_dir / filename,
                 frame_indices=np.asarray(payload.get('frame_indices', []), dtype=np.int32),
-                timestamps_sec=np.asarray(payload.get('timestamps_sec', []), dtype=np.float32),
                 track_ids=np.asarray(payload.get('track_ids', []), dtype=np.int32),
                 points_xy=np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32),
                 visibility=np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool))),
@@ -98,7 +97,7 @@ class OptimizationArtifact(BaseArtifact):
             'tracks_3d': self._to_serializable(self.tracks_3d),
             'track_index': track_index,
             'selected_frames': [
-                {'stream_id': f.stream_id, 'frame_idx': int(f.frame_idx), 'timestamp_sec': float(f.timestamp_sec)}
+                f.to_dict()
                 for f in self.selected_frames
             ],
             'object_trajectories': self._to_serializable(self.object_trajectories),
@@ -117,7 +116,6 @@ class OptimizationArtifact(BaseArtifact):
             npz = np.load(save_dir / 'tracks' / info['file'], allow_pickle=True)
             refined_track_payloads_by_stream[stream_id] = {
                 'frame_indices': np.asarray(npz['frame_indices'], dtype=np.int32),
-                'timestamps_sec': np.asarray(npz['timestamps_sec'], dtype=np.float32),
                 'track_ids': np.asarray(npz['track_ids'], dtype=np.int32),
                 'points_xy': np.asarray(npz['points_xy'], dtype=np.float32),
                 'visibility': np.asarray(npz['visibility']).astype(bool),
@@ -322,11 +320,11 @@ class OptimizationArtifact(BaseArtifact):
             visible = [False] * total_traces
             base = idx * traces_per_frame
             visible[base:base + traces_per_frame] = [True] * traces_per_frame
-            slider_steps.append({'method': 'update', 'label': name, 'args': [{'visible': visible}, {'title': {'text': f"Refinement debug | keyframe {name} | t={fr.timestamp_sec:.3f}s"}}]})
+            slider_steps.append({'method': 'update', 'label': name, 'args': [{'visible': visible}, {'title': {'text': f"Refinement debug | keyframe {fr.describe()}"}}]})
 
         first = frame_specs[0]['frame_ref']
         fig.update_layout(
-            title={'text': f"Refinement debug | keyframe {first.stream_id}:{first.frame_idx} | t={first.timestamp_sec:.3f}s"},
+            title={'text': f"Refinement debug | keyframe {first.describe()}"},
             template='plotly_white',
             width=1850,
             height=1100,

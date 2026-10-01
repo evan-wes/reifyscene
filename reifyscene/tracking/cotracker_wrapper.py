@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-import math
 
 import cv2
 import numpy as np
@@ -52,7 +51,7 @@ class CoTrackerWrapper(PointTracker):
 
     def __init__(self, cfg: dict | None = None) -> None:
         self.cfg = cfg or {}
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
+        self.decoder = VideoDecoder()
         self.backend_mode = str(self.cfg.get('backend_mode', 'auto'))
         self.device = str(self.cfg.get('device', 'cuda'))
         self.model_name = str(self.cfg.get('model_name', 'cotracker3_offline'))
@@ -142,33 +141,23 @@ class CoTrackerWrapper(PointTracker):
 
 
     def _planned_frame_indices(self, stream: VideoStreamRef) -> list[int]:
-        """Return frame indices after applying stride or time-spacing controls."""
-        num_frames = max(int(stream.num_frames), 1)
-        stride = self.frame_stride
-        spacing_sec = self.frame_spacing_sec
-        if spacing_sec is not None:
-            try:
-                spacing_sec = float(spacing_sec)
-            except Exception:
-                spacing_sec = None
-        if spacing_sec is not None and spacing_sec > 0.0:
-            fps = max(float(stream.fps), 1e-6)
-            stride = max(1, int(math.ceil(spacing_sec * fps - 1e-9)))
-        frame_indices: list[int] = list(range(0, num_frames, max(int(stride), 1)))
+        """The stream's own frame numbers, every ``frame_stride``-th -- or spaced by
+        ``frame_spacing_sec`` converted with the recorded fps (refused when there is none)."""
+        if self.frame_spacing_sec is not None:
+            stride = stream.stride_frames(seconds=float(self.frame_spacing_sec),
+                                          setting="tracking.frame_spacing_sec")
+        else:
+            stride = stream.stride_frames(frames=self.frame_stride, setting="tracking.frame_stride")
+        frame_indices = stream.frame_numbers[::stride]
         if self.max_frames is not None:
             frame_indices = frame_indices[: int(self.max_frames)]
         if not frame_indices:
-            frame_indices = [0]
+            raise ValueError(f"stream {stream.stream_id!r} has no frames to track")
         return frame_indices
 
     def plan_frame_refs(self, stream: VideoStreamRef) -> list[FrameRef]:
         """Return the sampled frame refs this tracker would process for a stream."""
-        frame_indices = self._planned_frame_indices(stream)
-        fps = max(float(stream.fps), 1e-6)
-        return [
-            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
-            for frame_idx in frame_indices
-        ]
+        return [stream.frame_ref(i) for i in self._planned_frame_indices(stream)]
 
     def release_resources(self) -> None:
         self._model = None
@@ -200,12 +189,6 @@ class CoTrackerWrapper(PointTracker):
             frame = self.decoder.get_frame(stream, frame_idx)
             resized, _, _ = self._resize_frame(frame, self.resize_max_dim)
             frames.append(resized)
-            model_wh = (resized.shape[1], resized.shape[0])
-        if not frames:
-            frame = self.decoder.get_frame(stream, 0)
-            resized, _, _ = self._resize_frame(frame, self.resize_max_dim)
-            frames = [resized]
-            frame_indices = [0]
             model_wh = (resized.shape[1], resized.shape[0])
         video = np.stack(frames, axis=0)
         if not (stream.width and stream.height):
@@ -609,10 +592,8 @@ class CoTrackerWrapper(PointTracker):
         tracks_xy[..., 0] *= scale_x
         tracks_xy[..., 1] *= scale_y
         track_ids = np.arange(tracks_xy.shape[1], dtype=np.int32)
-        timestamps = frame_indices.astype(np.float32) / max(float(stream.fps), 1e-6)
         payload = {
             'frame_indices': frame_indices,
-            'timestamps_sec': timestamps,
             'track_ids': track_ids,
             'points_xy': tracks_xy,
             'visibility': vis_bool,

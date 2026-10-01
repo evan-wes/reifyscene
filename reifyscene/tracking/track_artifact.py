@@ -568,14 +568,14 @@ class TrackArtifact(BaseArtifact):
                     'label': name,
                     'args': [
                         {'visible': visible},
-                        {'title': {'text': f"Tracking debug | keyframe {name} | t={fr.timestamp_sec:.3f}s"}},
+                        {'title': {'text': f"Tracking debug | keyframe {fr.describe()}"}},
                     ],
                 }
             )
 
         first = frame_specs[0]['frame_ref']
         fig.update_layout(
-            title={'text': f"Tracking debug | keyframe {first.stream_id}:{first.frame_idx} | t={first.timestamp_sec:.3f}s"},
+            title={'text': f"Tracking debug | keyframe {first.describe()}"},
             template='plotly_white',
             width=1750,
             height=1050,
@@ -613,7 +613,6 @@ class TrackArtifact(BaseArtifact):
             np.savez_compressed(
                 track_dir / filename,
                 frame_indices=np.asarray(payload.get('frame_indices', []), dtype=np.int32),
-                timestamps_sec=np.asarray(payload.get('timestamps_sec', []), dtype=np.float32),
                 track_ids=np.asarray(payload.get('track_ids', []), dtype=np.int32),
                 points_xy=np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32),
                 visibility=np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool))),
@@ -717,7 +716,6 @@ class TrackArtifact(BaseArtifact):
             stream_meta = payload_meta[stream_id]
             track_payload = {
                 'frame_indices': payload['frame_indices'],
-                'timestamps_sec': payload['timestamps_sec'],
                 'track_ids': payload['track_ids'],
                 'points_xy': payload['points_xy'],
                 'visibility': payload['visibility'],

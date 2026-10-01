@@ -60,7 +60,7 @@ class ColmapPoseInitializer(GeometryInitializer):
         self.camera_params = self.cfg.get("camera_params")
         self.fix_intrinsics = bool(self.cfg.get("fix_intrinsics", True)) and self.camera_params is not None
         self.retrieval_top_k = int(self.cfg.get("retrieval_top_k", 20))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
         # FP6b step 3: apply the dyn_mask only when the scene is large-dynamic — the spike
         # found masking is a SIZE-GATED robustness help (tightens large-dynamic scenes,
         # neutral/worse on small ones). Gate on the median per-frame dynamic fraction.
@@ -200,14 +200,15 @@ class ColmapPoseInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
-                    time_sec=float(frame.timestamp_sec),
+                    frame_idx=int(frame.frame_idx),
+                    time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics_by_stream[frame.stream_id],
                     pose=CameraPose(T_world_cam=t_world_cam),
                 )
             )
             registered.append(frame)
         for states in camera_states_by_stream.values():
-            states.sort(key=lambda s: (s.time_sec, s.stream_id))
+            states.sort(key=lambda s: s.key)
 
         reg_frac = len(registered) / max(len(selected), 1)
         # COLMAP is up-to-similarity; if intrinsics were free-estimated, note the

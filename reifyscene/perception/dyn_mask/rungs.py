@@ -41,7 +41,7 @@ class DynMaskInitializer:
         self.cfg = cfg or {}
         self.run_id = str(self.cfg.get("run_id", "dyn_mask"))
         self.save_dir = self.cfg.get("dyn_mask_save_dir", "artifacts/dyn_mask")
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
 
     @staticmethod
     def _frame_key(frame: FrameRef) -> str:

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from reifyscene.common.frame_keys import frame_key
+from reifyscene.common.types import camera_state_at
 
 if TYPE_CHECKING:
     from reifyscene.lifting.native_track_lift import CameraRecords, FrameStack
@@ -120,10 +121,7 @@ class ArtifactGeometryProvider(GeometryProvider):
         return frame_key(fr.stream_id, fr.frame_idx)
 
     def _state_for(self, fr):
-        states = list((self.geometry_artifact.camera_states_by_stream or {}).get(fr.stream_id, []))
-        if not states:
-            return None
-        return min(states, key=lambda s: abs(float(s.time_sec) - float(fr.timestamp_sec)))
+        return camera_state_at(self.geometry_artifact.camera_states_by_stream, fr)
 
     def _empty_cameras(self, device: str):
         import torch

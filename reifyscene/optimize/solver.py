@@ -9,7 +9,13 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.frame_keys import frame_key as make_frame_key
-from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.common.types import (
+    CameraIntrinsics,
+    CameraPose,
+    FrameRef,
+    TimedCameraState,
+    camera_state_at,
+)
 from reifyscene.geometry.image_transform import (
     ImageTransform,
     MissingImageTransform,
@@ -63,7 +69,8 @@ class JointSpatiotemporalSolver:
     def _copy_camera_state(cls, state: TimedCameraState) -> TimedCameraState:
         return TimedCameraState(
             stream_id=str(state.stream_id),
-            time_sec=float(state.time_sec),
+            frame_idx=int(state.frame_idx),
+            time_sec=state.time_sec,
             intrinsics=cls._copy_intrinsics(state.intrinsics),
             pose=CameraPose(T_world_cam=np.asarray(state.pose.T_world_cam, dtype=float).copy()),
         )
@@ -158,14 +165,7 @@ class JointSpatiotemporalSolver:
 
     @staticmethod
     def _find_state_for_frame(states: list[TimedCameraState], frame: FrameRef) -> TimedCameraState | None:
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        return camera_state_at(states, frame)
 
     @staticmethod
     def _estimate_rigid_transform(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -401,7 +401,7 @@ class JointSpatiotemporalSolver:
                     accepted = bool(np.isfinite(after_med) and np.isfinite(before_med) and after_med <= before_med * self.static_track_cfg["accept_improvement_ratio"])
                     frame_updates.append({
                         "frame_idx": int(frame.frame_idx),
-                        "timestamp_sec": float(frame.timestamp_sec),
+                        "timestamp_sec": frame.timestamp_sec,
                         "num_static_tracks": int(idxs.size),
                         "median_error_before": before_med,
                         "median_error_after": after_med,

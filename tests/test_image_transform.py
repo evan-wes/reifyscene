@@ -16,7 +16,7 @@ import pytest
 import torch
 from PIL import Image
 
-from reifyscene.common.types import FrameRef
+from reifyscene.common.types import FrameRef, VideoStreamRef
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 from reifyscene.geometry.image_transform import (
     Crop,
@@ -234,7 +234,8 @@ def _write_dataset(root: Path, size=(8, 6)) -> None:
 
 def test_dataset_backend_records_its_factor_resize(tmp_path: Path) -> None:
     _write_dataset(tmp_path, size=(8, 6))
-    stream = type("S", (), {"stream_id": "0", "width": 16, "height": 12, "fps": 30.0})()
+    stream = VideoStreamRef(stream_id="0", video_path=tmp_path, fps=30.0, num_frames=1,
+                            width=16, height=12, has_audio=False)
     ingest = type("I", (), {"streams": [stream], "keyframes": [FrameRef("0", 0, 0.0)]})()
     art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 2}).initialize(
         ingest_artifact=ingest
@@ -265,7 +266,7 @@ def _video(tmp_path: Path, name: str, width=64, height=48, num_frames=3) -> Path
 
 
 def _ingest(tmp_path: Path, video: Path, frames=(0, 1)) -> IngestArtifact:
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="1x",
         stage_name="ingest",
@@ -306,7 +307,7 @@ def test_vggt_long_records_the_loader_it_ran(tmp_path: Path) -> None:
 
     video = tmp_path / "v.mp4"
     _write_test_video(video, width=320, height=240, num_frames=8)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     frames = [FrameRef("cam_00", i, i / 30.0) for i in range(8)]
     ingest = IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path, streams=[stream], keyframes=frames

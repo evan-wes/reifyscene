@@ -147,7 +147,7 @@ def export_run(
     mapped into the geometry's pixels with the transform the stage recorded, so colour and
     depth describe the same raster and the stored intrinsics apply unchanged. Each frame's
     pointmap file is the one the stage's ``point_index`` names, and its pose is the camera
-    state the stage recorded at that frame's time -- matched exactly, never by list position.
+    state the stage recorded for that frame -- matched by frame number, never by list position.
     """
     from PIL import Image
 
@@ -174,13 +174,10 @@ def export_run(
         sid, frame = parse_key(key)
         if sid == stream_id:
             pointmap_of[frame] = str(name)
-    time_of = {int(fr["frame_idx"]): float(fr["timestamp_sec"])
-               for fr in (x.get("value", x) for x in art.get("selected_frames") or [])
-               if str(fr["stream_id"]) == stream_id}
-    state_at = {float(s["time_sec"]): s for s in states}
+    state_at = {int(s["frame_idx"]): s for s in states}
 
     def pose_for(frame: int) -> np.ndarray:
-        state = state_at.get(time_of[frame]) if frame in time_of else None
+        state = state_at.get(int(frame))
         if state is None:
             raise ValueError(f"{run_dir.name}/{stage} recorded no camera state for frame "
                              f"{frame} of stream {stream_id!r}")

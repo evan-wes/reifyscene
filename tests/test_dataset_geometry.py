@@ -131,12 +131,13 @@ def test_cameras_are_on_the_ingest_clock(tmp_path) -> None:
     """Frame 2 of a 30 fps stream is at 2/30 s, as every other stage has it (not at 2 s)."""
     from types import SimpleNamespace
 
-    from reifyscene.common.types import FrameRef
+    from reifyscene.common.types import FrameRef, VideoStreamRef
 
     _write_frames(tmp_path, 3)
     ingest = SimpleNamespace(
         run_id="r", keyframes=[],
-        streams=[SimpleNamespace(stream_id="0", fps=30.0, width=10, height=10, num_frames=3)],
+        streams=[VideoStreamRef(stream_id="0", video_path=tmp_path, fps=30.0, width=10,
+                                height=10, num_frames=3, has_audio=False)],
     )
     frames = [FrameRef("0", i, i / 30.0) for i in range(3)]
     art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 1}).initialize(

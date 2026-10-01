@@ -90,11 +90,11 @@ class HumanArtifact(BaseArtifact):
 
     @staticmethod
     def _frame_ref_to_dict(frame: FrameRef) -> dict[str, Any]:
-        return {'stream_id': frame.stream_id, 'frame_idx': int(frame.frame_idx), 'timestamp_sec': float(frame.timestamp_sec)}
+        return frame.to_dict()
 
     @staticmethod
     def _frame_ref_from_dict(raw: dict[str, Any]) -> FrameRef:
-        return FrameRef(stream_id=str(raw['stream_id']), frame_idx=int(raw['frame_idx']), timestamp_sec=float(raw['timestamp_sec']))
+        return FrameRef.from_dict(raw)
 
     def _human_to_dict(self, h: HumanState) -> dict[str, Any]:
         det_id = h.attributes.get('detection_id', h.human_id)

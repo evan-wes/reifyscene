@@ -52,7 +52,7 @@ def _synthetic_geometry(tmp_path: Path) -> GeometryArtifact:
         depthmaps[key] = {"depth": np.full((H, W), 2.0, dtype=np.float32), "confidence": None}
     intr = CameraIntrinsics(60.0, 60.0, W / 2.0, H / 2.0)
     states = [
-        TimedCameraState("cam_00", float(fr.frame_idx) * 0.1, intr, CameraPose(np.eye(4, dtype=np.float32)))
+        TimedCameraState("cam_00", int(fr.frame_idx), intr, CameraPose(np.eye(4, dtype=np.float32)))
         for fr in frames
     ]
     return GeometryArtifact(

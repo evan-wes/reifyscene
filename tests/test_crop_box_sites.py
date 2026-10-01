@@ -62,7 +62,7 @@ def _geometry(
         }
     intr = CameraIntrinsics(30.0, 30.0, GW / 2.0, GH / 2.0)
     states = [
-        TimedCameraState("cam_00", 0.1 * i, intr, CameraPose(np.eye(4, dtype=np.float32)))
+        TimedCameraState("cam_00", i, intr, CameraPose(np.eye(4, dtype=np.float32)))
         for i in range(n)
     ]
     metadata = {"debug_image_paths": photos}

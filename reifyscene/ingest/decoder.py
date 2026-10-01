@@ -44,16 +44,6 @@ class VideoDecoder:
     4. Add optional frame extraction cache for repeated downstream use.
     """
 
-    def __init__(self, default_fps: float = 30.0) -> None:
-        """Configure the OpenCV-backed decoder.
-
-        Parameters
-        ----------
-        default_fps:
-            Used when container metadata is missing or invalid.
-        """
-        self.default_fps = default_fps
-
     def _probe_capture(self, path: Path) -> dict[str, float | int | bool | str]:
         """Probe a video container with OpenCV.
 
@@ -67,6 +57,8 @@ class VideoDecoder:
         if not path.exists():
             raise FileNotFoundError(f"Video file does not exist: '{path}'.")
 
+        from reifyscene.ingest.frame_decoders import video_fps
+
         capture = cv2.VideoCapture(str(path))
         opened = bool(capture.isOpened())
         if not opened:
@@ -75,13 +67,13 @@ class VideoDecoder:
                 f"Could not open video stream '{path}'. Verify the file exists and OpenCV can decode it."
             )
 
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         num_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         capture.release()
         return {
-            "fps": fps if fps > 0 else self.default_fps,
+            # The same reader the stream's DataSource uses, so the two never disagree.
+            "fps": video_fps(path),
             "num_frames": num_frames,
             "width": width,
             "height": height,
@@ -116,7 +108,7 @@ class VideoDecoder:
         return VideoStreamRef(
             stream_id=stream_id or path.stem,
             video_path=path,
-            fps=float(meta["fps"]),
+            fps=None if meta["fps"] is None else float(meta["fps"]),
             num_frames=int(meta["num_frames"]),
             width=int(meta["width"]),
             height=int(meta["height"]),
@@ -126,6 +118,7 @@ class VideoDecoder:
                 "probed": bool(meta["probed"]),
                 "exists": bool(meta["exists"]),
                 "opened": True,
+                "fps_source": "container" if meta["fps"] else "unknown",
             },
         )
 
@@ -161,16 +154,20 @@ class VideoDecoder:
         if probe is None:
             raise RuntimeError(f"OpenCV could not read frame '{files[0]}'.")
         height, width = probe.shape[:2]
+        from reifyscene.ingest.sources import detect_source
+
+        source = detect_source(path)
         return VideoStreamRef(
             stream_id=str(target),
             video_path=path,
-            fps=self.default_fps,
+            fps=source.fps,
             num_frames=len(frame_index),
             width=int(width),
             height=int(height),
             has_audio=False,
             metadata={"decoder": "frames", "source": "frames", "frame_index": frame_index,
-                      "num_frames": len(frame_index), "opened": True, "exists": True},
+                      "num_frames": len(frame_index), "opened": True, "exists": True,
+                      "fps_source": source.fps_source},
         )
 
     def decode_many(self, video_paths: list[str | Path], *,

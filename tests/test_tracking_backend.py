@@ -65,8 +65,8 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
     ]
     intr = CameraIntrinsics(fx=40.0, fy=40.0, cx=width / 2, cy=height / 2)
     states = [
-        TimedCameraState(stream_id=stream_id, time_sec=0.0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.4, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=4, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
     ]
     yy, xx = np.meshgrid(np.linspace(0.0, 1.0, height), np.linspace(0.0, 1.0, width), indexing='ij')
     points = np.stack([xx, np.zeros_like(xx), yy], axis=-1).astype(np.float32)
@@ -96,7 +96,7 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
 def test_cotracker_real_wrapper_contract(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
@@ -111,7 +111,7 @@ def test_cotracker_real_wrapper_contract(tmp_path: Path) -> None:
 def test_track_lifting_partition_and_debug_export(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
     track_artifact = tracker.track(stream)
@@ -147,7 +147,7 @@ def test_track_lifting_partition_and_debug_export(tmp_path: Path) -> None:
 def test_cotracker_windowed_tracking_contract(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip_windowed.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=8, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({
@@ -175,7 +175,7 @@ def test_cotracker_windowed_tracking_contract(tmp_path: Path) -> None:
 def test_cotracker_windowed_tracking_without_stitching(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip_windowed_no_stitch.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=8, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({
@@ -197,7 +197,7 @@ def test_cotracker_windowed_tracking_without_stitching(tmp_path: Path) -> None:
 def test_track_lifting_preserves_tracking_timeline(tmp_path: Path) -> None:
     video_path = tmp_path / "clip_preserve.mp4"
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
     track_artifact = tracker.track(stream)

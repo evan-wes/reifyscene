@@ -54,7 +54,7 @@ class CalibrationRunner:
                 manifest[str(rel)] = {
                     "stream_id": stream_id,
                     "frame_idx": int(frame_ref.frame_idx),
-                    "timestamp_sec": float(frame_ref.timestamp_sec),
+                    "timestamp_sec": frame_ref.timestamp_sec,
                 }
         text_model_dir = self._copy_text_model(sparse_dir, save_dir)
         model = parse_colmap_text_model(text_model_dir)
@@ -70,7 +70,7 @@ class CalibrationRunner:
             intrinsics_by_stream.setdefault(state.stream_id, intr)
             camera_states_by_stream.setdefault(state.stream_id, []).append(state)
         for states in camera_states_by_stream.values():
-            states.sort(key=lambda s: (s.time_sec, s.stream_id))
+            states.sort(key=lambda s: s.key)
 
         point_ids = sorted(model.point_records.keys())
         if point_ids:

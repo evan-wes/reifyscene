@@ -46,7 +46,7 @@ def _pose(i: int) -> np.ndarray:
 def _geometry_artifact(tmp_path: Path, *, with_pointmaps: bool = True) -> GeometryArtifact:
     frames = [FrameRef(STREAM_ID, i, float(i)) for i in range(3)]
     states = [
-        TimedCameraState(stream_id=STREAM_ID, time_sec=float(i), intrinsics=_intr(), pose=CameraPose(T_world_cam=_pose(i)))
+        TimedCameraState(stream_id=STREAM_ID, frame_idx=i, intrinsics=_intr(), pose=CameraPose(T_world_cam=_pose(i)))
         for i in range(3)
     ]
     pointmaps: dict = {}

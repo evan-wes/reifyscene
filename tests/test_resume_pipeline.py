@@ -161,8 +161,9 @@ def test_settings_cover_other_sections_fill_defaults_and_drop_machine_keys() -> 
     # The solver's section is optimizer, not the debug-only optimization section.
     assert effective_settings('optimization', cfg) == {'optimizer': {'relabel_threshold': 0.1}}
     # An absent key and an explicit default fingerprint the same.
-    assert effective_settings('ingest', {}) == effective_settings('ingest', {'default_fps': 30.0})
-    assert effective_settings('ingest', {'default_fps': 25.0}) != effective_settings('ingest', {})
+    assert (effective_settings('ingest', {})
+            == effective_settings('ingest', {'keyframe_stride': None}))
+    assert effective_settings('ingest', {'keyframe_stride': 15}) != effective_settings('ingest', {})
 
 
 def test_settings_that_cannot_reach_the_output_are_excluded() -> None:

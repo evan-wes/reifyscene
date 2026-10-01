@@ -50,7 +50,7 @@ def assess_pose_health(
     reasons: list[str] = []
     healthy = True
     for stream_id, states in (camera_states_by_stream or {}).items():
-        ordered = sorted(states, key=lambda s: float(s.time_sec))
+        ordered = sorted(states, key=lambda s: int(s.frame_idx))
         if len(ordered) < int(min_frames):
             per_stream[stream_id] = {"n": len(ordered), "flagged": False, "reason": "too-few-frames"}
             continue

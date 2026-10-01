@@ -26,12 +26,14 @@ class CalibrationFrameSampler:
 
     def __init__(self, cfg: dict[str, Any] | None = None, *, decoder: VideoDecoder | None = None) -> None:
         self.cfg = cfg or {}
-        self.decoder = decoder or VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = decoder or VideoDecoder()
 
     def _candidate_indices(self, stream: VideoStreamRef) -> list[int]:
-        spacing_sec = float(self.cfg.get("sample_spacing_sec", 0.75))
-        stride = max(1, int(round(stream.fps * max(spacing_sec, 1e-3))))
-        indices = list(range(0, max(stream.num_frames, 1), stride))
+        # Spacing in frames, or in seconds when the stream records its frame rate.
+        stride = stream.stride_frames(frames=self.cfg.get("sample_spacing"),
+                                      seconds=self.cfg.get("sample_spacing_sec"),
+                                      setting="calibration.sampling.sample_spacing")
+        indices = stream.frame_numbers[::stride]
         max_frames = self.cfg.get("max_frames_per_stream")
         if max_frames is not None and len(indices) > int(max_frames):
             keep = np.linspace(0, len(indices) - 1, int(max_frames), dtype=int)
@@ -55,10 +57,10 @@ class CalibrationFrameSampler:
                 if diff > max_static_diff:
                     prev_gray = gray
                     continue
-            refs.append(FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx / max(stream.fps, 1e-6))))
+            refs.append(stream.frame_ref(frame_idx))
             prev_gray = gray
-        if not refs and stream.num_frames > 0:
-            refs.append(FrameRef(stream_id=stream.stream_id, frame_idx=0, timestamp_sec=0.0))
+        if not refs and stream.frame_numbers:
+            refs.append(stream.frame_ref(stream.frame_numbers[0]))
         return refs
 
     def sample(self, video_paths: list[str | Path]) -> tuple[list[VideoStreamRef], list[FrameRef]]:
@@ -93,7 +95,7 @@ class CalibrationFrameSampler:
             manifest[str(rel.as_posix())] = {
                 "stream_id": frame_ref.stream_id,
                 "frame_idx": int(frame_ref.frame_idx),
-                "timestamp_sec": float(frame_ref.timestamp_sec),
+                "timestamp_sec": frame_ref.timestamp_sec,
             }
         write_json(output_dir / "image_manifest.json", {"images": manifest})
         return image_index

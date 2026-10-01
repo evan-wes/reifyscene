@@ -29,7 +29,7 @@ def test_deferred_geometry_debug_export(tmp_path: Path) -> None:
     art = GeometryArtifact(
         run_id='r', stage_name='geometry', save_dir=save_dir, backend_name='test', selected_frames=[frame],
         intrinsics_by_stream={'cam_00': CameraIntrinsics(1,1,1,1)},
-        camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0.0, CameraIntrinsics(1,1,1,1), CameraPose(np.eye(4)))]},
+        camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0, CameraIntrinsics(1,1,1,1), CameraPose(np.eye(4)))]},
         depthmaps_by_frame={'cam_00:0': {'depth': np.ones((4,4,1), dtype=np.float32), 'confidence': np.ones((4,4), dtype=np.float32)}},
         pointmaps_by_frame={'cam_00:0': {'points': np.zeros((4,4,3), dtype=np.float32), 'confidence': np.ones((4,4), dtype=np.float32)}},
     )

@@ -58,7 +58,7 @@ def build_cache(davis: Path, out: Path, frame_idx: int = 0) -> None:
     from reifyscene.perception.objects.detector import ObjectDetector
 
     seg = SAM2InstanceSegmenter(
-        VideoDecoder(default_fps=30.0),
+        VideoDecoder(),
         ObjectDetector({"backend_mode": "real", "device": "cuda"}),
         {"device": "cuda"},
     )

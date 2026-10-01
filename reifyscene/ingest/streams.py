@@ -35,14 +35,11 @@ import torch
 from torch.utils.data import Dataset
 
 from reifyscene.common.frame_keys import frame_key
+from reifyscene.common.types import UnknownFrameRate  # noqa: F401  (raised by seconds())
 
 
 class StreamError(ValueError):
     """The run has no such stream, or which stream was meant is ambiguous, or it cannot say."""
-
-
-class UnknownFrameRate(StreamError):
-    """A time in seconds was asked of a stream whose frame rate is not recorded anywhere."""
 
 
 class FrameStream(Dataset):
@@ -61,8 +58,7 @@ class FrameStream(Dataset):
             {int(k): v for k, v in meta["frame_index"].items()} if meta.get("frame_index")
             else None)
         # a video's frames are its decode order; a folder's are the numbers in its file names
-        self.frames: list[int] = (sorted(self._index) if self._index is not None
-                                  else list(range(int(ref.num_frames))))
+        self.frames: list[int] = ref.frame_numbers
 
     # -- torch Dataset -------------------------------------------------------------------------
 
@@ -117,16 +113,13 @@ class FrameStream(Dataset):
 
     @property
     def fps(self) -> float | None:
-        """The recorded frame rate, or None. Ingest's own number is not used: it invented 30
-        for every folder of frames."""
-        return self.source.fps
+        """The frame rate the source records (ingest took it from the stream's DataSource),
+        or None."""
+        return self.ref.fps
 
     def seconds(self, frame: int) -> float:
-        if not self.fps:
-            raise UnknownFrameRate(
-                f"stream {self.id!r} ({self.source.kind}) records no frame rate: "
-                "give this in frames, not seconds")
-        return (int(frame) - self.frames[0]) / float(self.fps)
+        """A frame's time in seconds; raises :class:`UnknownFrameRate` when there is no rate."""
+        return self.ref.seconds(frame)
 
     # -- pixels ----------------------------------------------------------------------------------
 
@@ -171,7 +164,7 @@ class FrameStream(Dataset):
 
         if self._index is not None:
             return read_image(self.frame_file(frame))
-        if int(frame) not in range(int(self.ref.num_frames)):
+        if int(frame) not in self.frames:
             raise StreamError(f"stream {self.id!r} has no frame {frame}")
         return read_video_frame(Path(self.ref.video_path), int(frame))
 

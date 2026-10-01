@@ -85,7 +85,7 @@ class DynMaskArtifact(BaseArtifact):
             "metadata": dict(self.metadata),
             "backend_name": self.backend_name,
             "selected_frames": [
-                {"stream_id": f.stream_id, "frame_idx": int(f.frame_idx), "timestamp_sec": float(f.timestamp_sec)}
+                f.to_dict()
                 for f in self.selected_frames
             ],
             "mask_index": mask_index,
@@ -109,7 +109,7 @@ class DynMaskArtifact(BaseArtifact):
             metadata=raw["metadata"],
             backend_name=raw["backend_name"],
             selected_frames=[
-                FrameRef(stream_id=str(f["stream_id"]), frame_idx=int(f["frame_idx"]), timestamp_sec=float(f["timestamp_sec"]))
+                FrameRef.from_dict(f)
                 for f in raw["selected_frames"]
             ],
             masks_by_frame=masks,

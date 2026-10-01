@@ -334,7 +334,7 @@ class GroundPlaneCanonicalizer:
             new_states: list[TimedCameraState] = []
             for state in states:
                 Twc = self._transform_pose(state.pose.T_world_cam, transform)
-                new_states.append(TimedCameraState(stream_id=state.stream_id, time_sec=float(state.time_sec), intrinsics=state.intrinsics, pose=CameraPose(T_world_cam=Twc)))
+                new_states.append(TimedCameraState(stream_id=state.stream_id, frame_idx=int(state.frame_idx), time_sec=state.time_sec, intrinsics=state.intrinsics, pose=CameraPose(T_world_cam=Twc)))
             geometry_artifact.camera_states_by_stream[stream_id] = new_states
         geometry_artifact.metadata["world_frame"] = {"type": "ground_plane_z_up", **estimate.summary()}
         geometry_artifact.notes.append("Canonicalized world frame using a detected ground plane so Z points upward and the floor lies near z=0.")

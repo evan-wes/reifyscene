@@ -31,14 +31,14 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
     ]
     intr = CameraIntrinsics(fx=40.0, fy=40.0, cx=32.0, cy=24.0)
     states = [
-        TimedCameraState(stream_id=stream_id, time_sec=0.0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.1, intrinsics=intr, pose=CameraPose(T_world_cam=np.asarray([
+        TimedCameraState(stream_id=stream_id, frame_idx=0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=1, intrinsics=intr, pose=CameraPose(T_world_cam=np.asarray([
             [1.0, 0.0, 0.0, 0.2],
             [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ], dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.2, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=2, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
     ]
     depthmaps = {}
     pointmaps = {}
@@ -87,7 +87,6 @@ def _make_track_artifact(tmp_path: Path) -> TrackArtifact:
     lifted_valid = np.ones((3, 4), dtype=bool)
     payload = {
         'frame_indices': np.asarray([0, 1, 2], dtype=np.int32),
-        'timestamps_sec': np.asarray([0.0, 0.1, 0.2], dtype=np.float32),
         'track_ids': track_ids,
         'points_xy': np.zeros((3, 4, 2), dtype=np.float32),
         # the frame the track positions are measured in (the tracker always records it);

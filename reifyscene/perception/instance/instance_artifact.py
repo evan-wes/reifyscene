@@ -100,11 +100,7 @@ class InstanceArtifact(BaseArtifact):
         return {
             'instance_id': obs.instance_id,
             'track_id': obs.track_id,
-            'frame_ref': {
-                'stream_id': obs.frame_ref.stream_id,
-                'frame_idx': int(obs.frame_ref.frame_idx),
-                'timestamp_sec': float(obs.frame_ref.timestamp_sec),
-            },
+            'frame_ref': obs.frame_ref.to_dict(),
             'concept': obs.concept,
             'kind': obs.kind,
             'bbox_xyxy': None if obs.bbox_xyxy is None else np.asarray(obs.bbox_xyxy, dtype=np.float32).tolist(),
@@ -119,7 +115,7 @@ class InstanceArtifact(BaseArtifact):
         return InstanceObservation(
             instance_id=str(raw['instance_id']),
             track_id=str(raw['track_id']),
-            frame_ref=FrameRef(stream_id=str(fr['stream_id']), frame_idx=int(fr['frame_idx']), timestamp_sec=float(fr['timestamp_sec'])),
+            frame_ref=FrameRef.from_dict(fr),
             concept=str(raw['concept']),
             kind=str(raw['kind']),
             bbox_xyxy=None if bbox is None else np.asarray(bbox, dtype=np.float32),

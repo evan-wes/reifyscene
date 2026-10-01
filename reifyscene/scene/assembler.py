@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.common.frame_keys import frame_key, parse_key
-from reifyscene.common.types import FrameRef
+from reifyscene.common.types import FrameRef, camera_state_at
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.render.gaussian4d.rasterizer import look_at_viewmat
 from reifyscene.render.gaussian4d.seed import seed_arrays_from_geometry
@@ -113,10 +113,7 @@ class SingleVideoSceneAssembler:
         return self._streams.get(stream_id).frame_in_render(frame)
 
     def _camera_state_for_frame(self, geometry_artifact, frame_ref: FrameRef):
-        states = list((geometry_artifact.camera_states_by_stream or {}).get(frame_ref.stream_id, []))
-        if not states:
-            return None
-        return min(states, key=lambda s: abs(float(s.time_sec) - float(frame_ref.timestamp_sec)))
+        return camera_state_at(geometry_artifact.camera_states_by_stream, frame_ref)
 
     def _build_seed(self, geometry_artifact) -> dict[str, Any]:
         rgb_by_frame: dict[str, np.ndarray] = {}
@@ -423,8 +420,8 @@ class SingleVideoSceneAssembler:
         frame_refs = sorted(list(geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
             "source": "geometry",
-            "time_min_sec": float(min((fr.timestamp_sec for fr in frame_refs), default=0.0)),
-            "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
+            "frame_min": min((int(fr.frame_idx) for fr in frame_refs), default=None),
+            "frame_max": max((int(fr.frame_idx) for fr in frame_refs), default=None),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
         }
         if self.kind == "dynamic":

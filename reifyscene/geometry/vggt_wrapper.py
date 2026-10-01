@@ -89,7 +89,7 @@ class VGGTInitializer(GeometryInitializer):
         self.frame_cache_dir = self.cfg.get("frame_cache_dir")
         self.debug_shapes = bool(self.cfg.get("debug_shapes", False))
         self.save_depth_pngs = bool(self.cfg.get("save_depth_pngs", False))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
         resize_max_dim = self.cfg.get("resize_max_dim")
         self.resize_max_dim = None if resize_max_dim in (None, 0) else int(resize_max_dim)
         self.cpu_threads = self.cfg.get("cpu_threads")
@@ -619,6 +619,7 @@ class VGGTInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
+                    frame_idx=int(frame.frame_idx),
                     time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=self._world_from_cam(frame_extrinsic)),
@@ -710,6 +711,7 @@ class VGGTInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
+                    frame_idx=int(frame.frame_idx),
                     time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=np.eye(4, dtype=float)),

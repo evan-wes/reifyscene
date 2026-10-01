@@ -21,6 +21,7 @@ from reifyscene.common.types import (
     CameraPose,
     FrameRef,
     TimedCameraState,
+    camera_state_at,
 )
 
 
@@ -133,7 +134,8 @@ class GeometryArtifact(BaseArtifact):
     def _camera_state_to_dict(state: TimedCameraState) -> dict[str, Any]:
         return {
             'stream_id': state.stream_id,
-            'time_sec': float(state.time_sec),
+            'frame_idx': int(state.frame_idx),
+            'time_sec': None if state.time_sec is None else float(state.time_sec),
             'intrinsics': GeometryArtifact._intrinsics_to_dict(state.intrinsics),
             'pose': np.asarray(state.pose.T_world_cam, dtype=float).tolist(),
         }
@@ -142,7 +144,8 @@ class GeometryArtifact(BaseArtifact):
     def _camera_state_from_dict(raw: dict[str, Any]) -> TimedCameraState:
         return TimedCameraState(
             stream_id=str(raw['stream_id']),
-            time_sec=float(raw['time_sec']),
+            frame_idx=int(raw['frame_idx']),
+            time_sec=None if raw['time_sec'] is None else float(raw['time_sec']),
             intrinsics=GeometryArtifact._intrinsics_from_dict(raw['intrinsics']),
             pose=CameraPose(T_world_cam=np.asarray(raw['pose'], dtype=float)),
         )
@@ -333,18 +336,8 @@ class GeometryArtifact(BaseArtifact):
         return copied
 
     def _find_state_for_frame(self, frame: FrameRef) -> TimedCameraState | None:
-        """Look up the saved camera state corresponding to a selected frame."""
-        states = self.camera_states_by_stream.get(frame.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        """The saved camera state of exactly this frame, or None."""
+        return camera_state_at(self.camera_states_by_stream, frame)
 
     def _world_frame_overlay_samples(self) -> list[FrameRef]:
         frames = list(self.selected_frames or [])
@@ -575,7 +568,6 @@ class GeometryArtifact(BaseArtifact):
                     'points': pts,
                     'marker': marker,
                     'camera_state': None if state is None else {
-                        'time_sec': state.time_sec,
                         'T_world_cam': self._pose_to_debug_basis_instance(state.pose.T_world_cam).astype(float).tolist(),
                     },
                 }
@@ -627,8 +619,8 @@ class GeometryArtifact(BaseArtifact):
             base = 3 * idx
             visible[base:base+3] = [True, True, True]
             title = (
-                f"Keyframe {name} | t={fr.timestamp_sec:.3f}s"
-                + ('' if spec['camera_state'] is None else f" | camera_t={spec['camera_state']['time_sec']:.3f}s")
+                f"Keyframe {fr.describe()}"
+                + (' | no camera' if spec['camera_state'] is None else '')
             )
             slider_steps.append({
                 'method': 'update',
@@ -641,8 +633,8 @@ class GeometryArtifact(BaseArtifact):
 
         initial = frame_specs[0]
         initial_title = (
-            f"Keyframe {initial['frame_ref'].stream_id}:{initial['frame_ref'].frame_idx} | t={initial['frame_ref'].timestamp_sec:.3f}s"
-            + ('' if initial['camera_state'] is None else f" | camera_t={initial['camera_state']['time_sec']:.3f}s")
+            f"Keyframe {initial['frame_ref'].describe()}"
+            + (' | no camera' if initial['camera_state'] is None else '')
         )
 
         fig.update_layout(

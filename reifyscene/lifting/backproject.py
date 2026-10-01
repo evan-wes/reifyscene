@@ -9,6 +9,7 @@ import numpy as np
 
 from reifyscene.common.depth import valid_depth_mask
 from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.types import camera_state_at
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.lifting.lift import lift_pixels, lift_record
 
@@ -63,17 +64,7 @@ class TrackLifter3D:
 
     @staticmethod
     def _find_camera_state(geometry_artifact, frame) -> Any | None:
-        states = geometry_artifact.camera_states_by_stream.get(frame.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        return camera_state_at(geometry_artifact.camera_states_by_stream, frame)
 
     def lift(self, track_artifact, geometry_artifact) -> Any:
         """Attach lifted 3D point samples to a track artifact.
@@ -92,7 +83,7 @@ class TrackLifter3D:
         if not getattr(track_artifact, 'selected_frames', None):
             track_artifact.selected_frames = list(geometry_selected_frames)
         track_artifact.metadata['geometry_selected_frames'] = [
-            {'stream_id': frame.stream_id, 'frame_idx': int(frame.frame_idx), 'timestamp_sec': float(frame.timestamp_sec)}
+            frame.to_dict()
             for frame in geometry_selected_frames
         ]
         track_artifact.depthmaps_by_frame = dict(geometry_artifact.depthmaps_by_frame)

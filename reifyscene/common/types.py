@@ -12,27 +12,101 @@ from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
 
 
+class UnknownFrameRate(ValueError):
+    """A time in seconds was asked of a stream whose source records no frame rate."""
+
+
 @dataclass
 class VideoStreamRef:
-    """Reference to a single decoded video stream."""
+    """Reference to a single decoded video stream.
+
+    ``fps`` is what the source records (a video container, a dataset's own record) or None;
+    it is never a default. Frames are identified by their number, not by a time: a frame
+    folder's numbers are the ones its file names carry (``metadata["frame_index"]``), a
+    video's are ``0..num_frames-1``.
+    """
 
     stream_id: str
     video_path: Path
-    fps: float
+    fps: float | None
     num_frames: int
     width: int
     height: int
     has_audio: bool
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def frame_numbers(self) -> list[int]:
+        """Every frame this stream has, in order."""
+        index = self.metadata.get("frame_index")
+        if index is not None:
+            return sorted(int(k) for k in index)
+        return list(range(int(self.num_frames)))
+
+    def seconds(self, frame_idx: int) -> float:
+        """Time of a frame from the stream's start; raises when the frame rate is unknown."""
+        if not self.fps:
+            raise UnknownFrameRate(
+                f"stream {self.stream_id!r}: its source records no frame rate, so frame "
+                f"{int(frame_idx)} has no time in seconds")
+        return float(frame_idx) / float(self.fps)
+
+    def frame_ref(self, frame_idx: int) -> FrameRef:
+        """A reference to one of this stream's frames (timed when the frame rate is known)."""
+        return FrameRef(stream_id=str(self.stream_id), frame_idx=int(frame_idx),
+                        timestamp_sec=self.seconds(frame_idx) if self.fps else None)
+
+    def frame_refs(self) -> list[FrameRef]:
+        return [self.frame_ref(i) for i in self.frame_numbers]
+
+    def stride_frames(self, *, frames: int | None = None, seconds: float | None = None,
+                      setting: str = "stride") -> int:
+        """A spacing given in frames, or in seconds converted with the recorded frame rate.
+
+        Seconds on a stream with no frame rate raise rather than assume one; giving both is
+        refused as ambiguous.
+        """
+        if frames is not None and seconds is not None:
+            raise ValueError(f"{setting}: give it in frames or in seconds, not both")
+        if seconds is not None:
+            if not self.fps:
+                raise UnknownFrameRate(
+                    f"{setting} is given in seconds, but stream {self.stream_id!r} records no "
+                    "frame rate: give it in frames")
+            return max(1, int(round(float(seconds) * float(self.fps))))
+        return max(1, int(frames or 1))
+
 
 @dataclass
 class FrameRef:
-    """Reference to a specific frame in a video stream."""
+    """Reference to a specific frame in a video stream.
+
+    ``frame_idx`` is the frame's identity; ``timestamp_sec`` is its time from the stream's
+    start, or None when the source records no frame rate.
+    """
 
     stream_id: str
     frame_idx: int
-    timestamp_sec: float
+    timestamp_sec: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"stream_id": str(self.stream_id), "frame_idx": int(self.frame_idx),
+                "timestamp_sec": None if self.timestamp_sec is None else float(self.timestamp_sec)}
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> FrameRef:
+        t = raw["timestamp_sec"]
+        return cls(stream_id=str(raw["stream_id"]), frame_idx=int(raw["frame_idx"]),
+                   timestamp_sec=None if t is None else float(t))
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return str(self.stream_id), int(self.frame_idx)
+
+    def describe(self) -> str:
+        """``<stream>:<frame>``, with its time when the frame rate is known (for titles)."""
+        t = "" if self.timestamp_sec is None else f" | t={float(self.timestamp_sec):.3f}s"
+        return f"{self.stream_id}:{int(self.frame_idx)}{t}"
 
 
 @dataclass
@@ -56,12 +130,38 @@ class CameraPose:
 
 @dataclass
 class TimedCameraState:
-    """Camera state at a specific time."""
+    """Camera state at one frame of a stream.
+
+    Identified by ``(stream_id, frame_idx)``; ``time_sec`` is that frame's time when the
+    source records a frame rate, else None. Matching a state to a frame is by frame number,
+    never by nearest time.
+    """
 
     stream_id: str
-    time_sec: float
+    frame_idx: int
     intrinsics: CameraIntrinsics
     pose: CameraPose
+    time_sec: float | None = None
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return str(self.stream_id), int(self.frame_idx)
+
+
+def camera_state_at(states: list[TimedCameraState] | dict[str, list[TimedCameraState]],
+                    frame: FrameRef) -> TimedCameraState | None:
+    """The camera state of exactly ``frame`` (its stream, its frame number), or None.
+
+    ``states`` is one stream's list or a ``stream_id -> list`` map. A state of another frame is
+    never substituted: a camera that moved between the two would put the frame in the wrong
+    place.
+    """
+    if isinstance(states, dict):
+        states = states.get(str(frame.stream_id), [])
+    for state in states:
+        if state.key == frame.key:
+            return state
+    return None
 
 
 @dataclass

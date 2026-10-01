@@ -126,7 +126,7 @@ def _folder_run(tmp_path, frame_numbers, *, layout=None, fps_record=None):
         p = d / f"{f:05d}.png"
         Image.fromarray(np.full((6, 8, 3), f, np.uint8)).save(p)
         index[str(f)] = str(p)
-    run = _run(tmp_path, [{"stream_id": "cam_00", "video_path": str(d), "fps": 30.0,
+    run = _run(tmp_path, [{"stream_id": "cam_00", "video_path": str(d), "fps": fps_record,
                            "num_frames": len(index), "width": 8, "height": 6,
                            "metadata": {"source": "frames", "frame_index": index}}],
                {"cam_00": ImageTransform((8, 6), (Resize(size=(4, 3)),)).to_dict()})
@@ -151,14 +151,14 @@ def test_a_stream_is_a_torch_dataset_over_the_frames_that_exist(tmp_path) -> Non
 
 
 def test_a_folder_of_frames_has_no_frame_rate_whatever_ingest_wrote(tmp_path) -> None:
-    from reifyscene.ingest.streams import UnknownFrameRate
+    from reifyscene.common.types import UnknownFrameRate
 
     run, _ = _folder_run(tmp_path, [0, 1])
     s = RunStreams.from_run(run).only()
-    assert s.ref.fps == 30.0 and s.fps is None              # ingest's 30 was invented
+    assert s.fps is None
     assert s.capability()["physical_time"] == "unavailable"
     assert s[0]["seconds"] is None
-    with pytest.raises(UnknownFrameRate, match="in frames"):
+    with pytest.raises(UnknownFrameRate, match="records no frame rate"):
         s.seconds(1)
 
 

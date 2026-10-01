@@ -53,6 +53,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cfg['_resume_video_paths'] = [str(Path(args.video).expanduser().resolve())]
     if args.max_keyframes is not None:
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
+    if args.keyframe_stride is not None:
+        cfg['keyframe_stride'] = int(args.keyframe_stride)
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
     cfg['keyframes_all'] = bool(getattr(args, 'keyframes_all', False))
@@ -417,10 +419,13 @@ def main() -> None:
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
-    parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
+    parser.add_argument('--keyframe-stride', type=int, default=None,
+                        help='Keyframe spacing in frames (30 when neither stride is given).')
+    parser.add_argument('--keyframe-stride-sec', type=float, default=None,
+                        help='Keyframe spacing in seconds; needs a source that records its fps.')
     parser.add_argument('--keyframes-all', action='store_true',
                         help='Use every frame as a keyframe (dense reconstruction / benchmark-protocol '
-                             'parity). Overrides --keyframe-stride-sec and --max-keyframes.')
+                             'parity). Overrides the keyframe stride and --max-keyframes.')
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-camera-params', default=None,
@@ -538,7 +543,7 @@ def main() -> None:
         console.print(f'run_dir: {args.run_dir}')
         console.print(f'geometry: {args.geometry_backend_mode} on {args.geometry_device}')
         console.print(f'tracking: {args.tracking_backend_mode} on {cfg["tracking"]["device"]}')
-        console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}')
+        console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride: {args.keyframe_stride}  keyframe_stride_sec: {args.keyframe_stride_sec}')
         console.print(
             f"tracking_grid_size: {cfg['tracking']['grid_size']}  resize_max_dim: {cfg['tracking']['resize_max_dim']} "
             f"max_frames: {cfg['tracking']['max_frames']}  frame_stride: {cfg['tracking']['frame_stride']}"

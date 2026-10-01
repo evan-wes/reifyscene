@@ -73,15 +73,15 @@ def _frames(n=2, stream="cam_00"):
     return [FrameRef(stream_id=stream, frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(n)]
 
 
-def _pose_state(stream, t, center):
+def _pose_state(stream, frame, center):
     T = np.eye(4, dtype=np.float32)
     T[:3, 3] = np.asarray(center, dtype=np.float32)
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=8.0, cy=8.0)
-    return TimedCameraState(stream_id=stream, time_sec=float(t), intrinsics=intr, pose=CameraPose(T_world_cam=T))
+    return TimedCameraState(stream_id=stream, frame_idx=int(frame), intrinsics=intr, pose=CameraPose(T_world_cam=T))
 
 
 def _pose_artifact(frames, centers, *, model_dir="dummy"):
-    states = [_pose_state(f.stream_id, f.timestamp_sec, c) for f, c in zip(frames, centers)]
+    states = [_pose_state(f.stream_id, f.frame_idx, c) for f, c in zip(frames, centers)]
     art = GeometryArtifact(
         run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="colmap",
         selected_frames=list(frames),
@@ -205,7 +205,7 @@ def _write_video(path, *, width=32, height=24, num_frames=2, fps=5.0):
 def _ingest(tmp_path, num_frames=2):
     video = tmp_path / "in.mp4"
     _write_video(video, num_frames=num_frames)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / "ingest", streams=[stream],
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(num_frames)],

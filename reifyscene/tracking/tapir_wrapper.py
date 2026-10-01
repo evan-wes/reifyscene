@@ -290,21 +290,18 @@ class TAPIRWrapper(PointTracker):
         del seed_points
         from reifyscene.ingest.decoder import VideoDecoder
 
-        decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
-        num_frames = max(int(stream.num_frames), 1)
-        frames = np.stack([decoder.get_frame(stream, i) for i in range(num_frames)], axis=0)
+        decoder = VideoDecoder()
+        numbers = stream.frame_numbers
+        num_frames = len(numbers)
+        frames = np.stack([decoder.get_frame(stream, i) for i in numbers], axis=0)
         masks = self.cfg.get("masks")
         masks = (
             np.ones(frames.shape[:3], dtype=bool) if masks is None else np.asarray(masks)
         )
-        frame_names = [f"{i:05d}" for i in range(num_frames)]
+        frame_names = [f"{i:05d}" for i in numbers]
         ap = self.compute_all_pairs(frames, masks, frame_names, factor=1)
 
-        fps = max(float(stream.fps), 1e-6)
-        selected = frame_refs or [
-            FrameRef(stream_id=stream.stream_id, frame_idx=i, timestamp_sec=i / fps)
-            for i in range(num_frames)
-        ]
+        selected = frame_refs or stream.frame_refs()
         return TrackArtifact(
             run_id="dev",
             stage_name="tracking",

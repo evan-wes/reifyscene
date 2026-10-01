@@ -81,6 +81,9 @@ from reifyscene.scene.assembler import SingleVideoSceneAssembler
 from reifyscene.sync.global_time_solver import GlobalTimeAlignmentSolver
 from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
 
+# Keyframe spacing in frames when the config gives neither a frame nor a seconds stride.
+_DEFAULT_KEYFRAME_STRIDE = 30
+
 # Fidelity tag each geometry backend carries in its CapabilityManifest (design §4A.1).
 # Joint rungs (vggt*/dataset) fill poses+depth; moge is depth-only, colmap pose-only.
 _GEOMETRY_FIDELITY = {
@@ -127,8 +130,6 @@ class ReifyScenePipeline:
         -------------------------
         run_dir:
             Root directory for persisted artifacts.
-        default_fps:
-            Used by the OpenCV decoder when metadata is missing.
         geometry:
             Passed directly to :class:`VGGTInitializer`.
         tracking:
@@ -142,7 +143,7 @@ class ReifyScenePipeline:
         self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
         self._run_video_paths: list[str] = []
         self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
+        self.decoder = VideoDecoder()
         self.quality = ClipQualityAssessor()
         self.sync_solver = GlobalTimeAlignmentSolver()
         geometry_cfg = self.cfg.get('geometry', {})
@@ -290,8 +291,10 @@ class ReifyScenePipeline:
         streams = self.decoder.decode_many(
             video_paths, frames_camera=None if frames_camera is None else str(frames_camera))
         dataset = MultiVideoDataset(streams)
+        stride, stride_sec = self.cfg.get('keyframe_stride'), self.cfg.get('keyframe_stride_sec')
         keyframes = dataset.sample_keyframes(
-            stride_sec=float(self.cfg.get('keyframe_stride_sec', 1.0)),
+            stride=_DEFAULT_KEYFRAME_STRIDE if stride is None and stride_sec is None else stride,
+            stride_sec=stride_sec,
             max_frames_per_stream=self.cfg.get('max_keyframes_per_stream', 8),
             all_frames=bool(self.cfg.get('keyframes_all', False)),
         )
@@ -328,29 +331,26 @@ class ReifyScenePipeline:
         return artifact
 
     @staticmethod
-    def _all_frame_refs_for_stream(stream) -> list[FrameRef]:
-        fps = max(float(stream.fps), 1e-6)
-        num_frames = max(int(stream.num_frames), 1)
-        return [
-            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
-            for frame_idx in range(num_frames)
-        ]
-
-    @staticmethod
-    def _subsample_frame_refs(frames: list[FrameRef], *, frame_stride: int | None = None, frame_spacing_sec: float | None = None) -> list[FrameRef]:
+    def _subsample_frame_refs(frames: list[FrameRef], streams, *, frame_stride: int | None = None, frame_spacing_sec: float | None = None) -> list[FrameRef]:
+        """Every ``frame_stride``-th frame of each stream, or -- with ``frame_spacing_sec`` --
+        frames at least that far apart, converted to frames with the stream's recorded fps
+        (refused when it records none)."""
+        stream_by_id = {str(s.stream_id): s for s in streams}
         by_stream: dict[str, list[FrameRef]] = {}
-        for frame in sorted(frames, key=lambda fr: (fr.stream_id, float(fr.timestamp_sec), int(fr.frame_idx))):
+        for frame in sorted(frames, key=lambda fr: fr.key):
             by_stream.setdefault(str(frame.stream_id), []).append(frame)
 
         selected: list[FrameRef] = []
         for stream_id in sorted(by_stream):
             stream_frames = by_stream[stream_id]
             if frame_spacing_sec is not None and float(frame_spacing_sec) > 0.0:
-                last_time: float | None = None
+                gap = stream_by_id[stream_id].stride_frames(
+                    seconds=frame_spacing_sec, setting="geometry.frame_spacing_sec")
+                last: int | None = None
                 for frame in stream_frames:
-                    if last_time is None or float(frame.timestamp_sec) >= last_time + float(frame_spacing_sec) - 1e-9:
+                    if last is None or int(frame.frame_idx) >= last + gap:
                         selected.append(frame)
-                        last_time = float(frame.timestamp_sec)
+                        last = int(frame.frame_idx)
                 continue
             stride = max(int(frame_stride or 1), 1)
             selected.extend(stream_frames[::stride])
@@ -370,13 +370,14 @@ class ReifyScenePipeline:
         elif frame_source == 'all':
             frames = []
             for stream in ingest_artifact.streams:
-                frames.extend(self._all_frame_refs_for_stream(stream))
+                frames.extend(stream.frame_refs())
         else:
             frame_source = 'keyframes'
             frames = list(ingest_artifact.keyframes)
 
         frames = self._subsample_frame_refs(
             frames,
+            ingest_artifact.streams,
             frame_stride=geometry_cfg.get('frame_stride'),
             frame_spacing_sec=geometry_cfg.get('frame_spacing_sec'),
         )
@@ -658,10 +659,10 @@ class ReifyScenePipeline:
             rebuilt: list[TimedCameraState] = []
             for fr in keyframes:
                 key = frame_key(stream_id, fr.frame_idx)
-                orig = geometry_artifact._find_state_for_frame(fr)
                 rebuilt.append(TimedCameraState(
                     stream_id=stream_id,
-                    time_sec=float(orig.time_sec) if orig is not None else float(fr.timestamp_sec),
+                    frame_idx=int(fr.frame_idx),
+                    time_sec=fr.timestamp_sec,
                     intrinsics=refinement.refined_intrinsics,
                     pose=CameraPose(T_world_cam=np.asarray(refinement.refined_T_world_cam_by_frame_key[key], dtype=float)),
                 ))
@@ -792,9 +793,7 @@ class ReifyScenePipeline:
                     continue
                 unique_indices = np.unique(frame_indices)
                 chosen = unique_indices[::semantic_stride]
-                fps = max(float(stream.fps), 1e-6)
-                for frame_idx in chosen.tolist():
-                    frames.append(FrameRef(stream_id=stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps))
+                frames.extend(stream.frame_ref(int(i)) for i in chosen.tolist())
             if frames:
                 return sorted(frames, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         keyframes = sorted(list(ingest_artifact.keyframes), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))

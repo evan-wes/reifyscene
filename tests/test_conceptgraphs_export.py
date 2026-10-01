@@ -65,7 +65,8 @@ def _make_run(tmp_path: Path, frames: list[int], *, source_size=(W, H)) -> tuple
         depth = 2.0 + rng.uniform(0, 1.0, size=(H, W))
         T = _pose(tz=0.05 * i)
         world = _camera_points(depth) @ T[:3, :3].T + T[:3, 3]
-        states.append({"stream_id": "cam_00", "time_sec": i / 30, "pose": T.tolist()})
+        states.append({"stream_id": "cam_00", "frame_idx": i, "time_sec": i / 30,
+                       "pose": T.tolist()})
         selected.append({"stream_id": "cam_00", "frame_idx": i, "timestamp_sec": i / 30})
         if i in frames:
             np.savez(run / "geometry" / "pointmaps" / f"cam_00__{i}.npz",

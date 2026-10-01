@@ -152,32 +152,27 @@ class DatasetGeometryInitializer(GeometryInitializer):
         depth_sizes: dict[str, tuple[int, int]] = {}
         selected_frames: list[FrameRef] = []
 
-        stream_fps = {
-            str(s.stream_id): float(s.fps)
-            for s in getattr(ingest_artifact, "streams", []) or []
-            if float(getattr(s, "fps", 0) or 0) > 0
-        }
+        ingest_streams = {str(s.stream_id): s
+                          for s in getattr(ingest_artifact, "streams", []) or []}
         for stream_id, frame_idx, time_id in specs:
             stream_id = str(stream_id)
             frame_idx = int(frame_idx)
             name = self.frame_name(stream_id, frame_idx)
             intrinsics, t_world_cam, _wh = self.load_camera(name)
             depth = np.squeeze(np.asarray(self.load_depth(name), dtype=np.float32))
-            if stream_id in stream_fps:
-                time_sec = float(frame_idx) / stream_fps[stream_id]  # the ingest clock
+            if stream_id in ingest_streams:
+                frame_ref = ingest_streams[stream_id].frame_ref(frame_idx)  # the ingest clock
             else:
-                if not self.sequence.fps:
-                    raise ValueError(f"{self.dataset_root}: no ingest clock, and the dataset "
-                                     "records no frame rate")
-                time_sec = float(time_id) / self.sequence.fps
-
-            frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx, timestamp_sec=time_sec)
+                fps = self.sequence.fps
+                frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx,
+                                     timestamp_sec=float(time_id) / fps if fps else None)
             selected_frames.append(frame_ref)
             intrinsics_by_stream[stream_id] = intrinsics
             camera_states_by_stream.setdefault(stream_id, []).append(
                 TimedCameraState(
                     stream_id=stream_id,
-                    time_sec=time_sec,
+                    frame_idx=frame_idx,
+                    time_sec=frame_ref.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=t_world_cam),
                 )

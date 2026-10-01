@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.frame_keys import frame_key
-from reifyscene.common.types import CameraPose, FrameRef, TimedCameraState
+from reifyscene.common.types import CameraPose, FrameRef, TimedCameraState, camera_state_at
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.scale_reconcile import (
     ScaleReconcileResult,
@@ -68,20 +68,13 @@ class GeometryComposer:
     def _pose_by_key(pose_artifact: GeometryArtifact) -> dict[str, TimedCameraState]:
         """Map ``frame_key -> TimedCameraState`` from a pose artifact.
 
-        The pose rung builds one state per registered ``FrameRef`` with
-        ``time_sec = frame.timestamp_sec``; match each selected frame back to its state
-        by (stream, exact time), so the composer can key poses by frame like depth is.
+        The pose rung builds one state per registered ``FrameRef``; match each selected
+        frame to its own state (same stream, same frame number), so the composer can key
+        poses by frame like depth is. A frame the pose rung did not register has none.
         """
         out: dict[str, TimedCameraState] = {}
         for frame in pose_artifact.selected_frames or []:
-            states = pose_artifact.camera_states_by_stream.get(frame.stream_id, [])
-            match = None
-            for state in states:
-                if abs(float(state.time_sec) - float(frame.timestamp_sec)) < 1e-9:
-                    match = state
-                    break
-            if match is None and states:
-                match = min(states, key=lambda s: abs(float(s.time_sec) - float(frame.timestamp_sec)))
+            match = camera_state_at(pose_artifact.camera_states_by_stream, frame)
             if match is not None:
                 out[_frame_key(frame)] = match
         return out
@@ -187,7 +180,8 @@ class GeometryComposer:
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
-                    time_sec=float(frame.timestamp_sec),
+                    frame_idx=int(frame.frame_idx),
+                    time_sec=frame.timestamp_sec,
                     intrinsics=state.intrinsics,  # pose-source (COLMAP) camera model
                     pose=CameraPose(T_world_cam=T_metric),
                 )
@@ -198,7 +192,7 @@ class GeometryComposer:
             world_pts = self._points_cam_to_world(pm["points"], T_metric)
             pointmaps_by_frame[key] = {"points": world_pts, "confidence": pm.get("confidence")}
         for states in camera_states_by_stream.values():
-            states.sort(key=lambda s: (s.time_sec, s.stream_id))
+            states.sort(key=lambda s: s.key)
 
         artifact = GeometryArtifact(
             run_id=run_id, stage_name="geometry", save_dir=save_dir,

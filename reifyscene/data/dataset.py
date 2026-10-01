@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from math import ceil
-
 from reifyscene.common.types import FrameRef, VideoStreamRef
 
 
@@ -21,59 +19,29 @@ class MultiVideoDataset:
 
     def sample_keyframes(
         self,
-        stride_sec: float = 1.0,
+        stride: int | None = None,
+        stride_sec: float | None = None,
         max_frames_per_stream: int | None = 8,
         all_frames: bool = False,
     ) -> list[FrameRef]:
         """Sample coarse keyframes for geometry initialization.
 
-        Notes
-        -----
-        If a stream does not yet expose frame count metadata, a single frame-0
-        reference is emitted so the rest of the pipeline can still run.
-
-        When ``all_frames`` is True, every frame of every stream is emitted as a
-        keyframe and ``stride_sec`` / ``max_frames_per_stream`` are ignored -- the
-        dense path for benchmark-protocol parity (train on the full sequence).
+        Keyframes are every ``stride``-th of a stream's own frames (``stride_sec`` converts
+        with the recorded frame rate, and raises on a stream that records none), capped at
+        ``max_frames_per_stream``. When ``all_frames`` is True, every frame of every stream is
+        a keyframe -- the dense path for benchmark-protocol parity (train on the full
+        sequence). A stream with no frames is refused, not given a frame 0.
         """
         keyframes: list[FrameRef] = []
         for stream in self.streams:
-            if stream.num_frames <= 0:
-                keyframes.append(FrameRef(stream_id=stream.stream_id, frame_idx=0, timestamp_sec=0.0))
-                continue
-
-            stride_frames = 1 if all_frames else max(int(round(stride_sec * stream.fps)), 1)
-            frame_indices = list(range(0, stream.num_frames, stride_frames))
-            if not all_frames and max_frames_per_stream is not None:
-                frame_indices = frame_indices[:max_frames_per_stream]
-            for frame_idx in frame_indices:
-                keyframes.append(
-                    FrameRef(
-                        stream_id=stream.stream_id,
-                        frame_idx=frame_idx,
-                        timestamp_sec=frame_idx / max(stream.fps, 1e-6),
-                    )
-                )
+            numbers = stream.frame_numbers
+            if not numbers:
+                raise ValueError(f"stream {stream.stream_id!r} has no frames to sample")
+            if not all_frames:
+                step = stream.stride_frames(frames=stride, seconds=stride_sec,
+                                            setting="keyframe stride")
+                numbers = numbers[::step]
+                if max_frames_per_stream is not None:
+                    numbers = numbers[:max_frames_per_stream]
+            keyframes.extend(stream.frame_ref(i) for i in numbers)
         return keyframes
-
-    def sample_dense_window(
-        self,
-        start_sec: float,
-        end_sec: float,
-        fps: float | None = None,
-    ) -> list[FrameRef]:
-        """Sample all streams in a dense temporal window."""
-        window_refs: list[FrameRef] = []
-        for stream in self.streams:
-            sample_fps = fps or stream.fps or 1.0
-            frame_start = max(int(start_sec * sample_fps), 0)
-            frame_end = max(int(ceil(end_sec * sample_fps)), frame_start + 1)
-            for frame_idx in range(frame_start, frame_end):
-                window_refs.append(
-                    FrameRef(
-                        stream_id=stream.stream_id,
-                        frame_idx=frame_idx,
-                        timestamp_sec=frame_idx / max(sample_fps, 1e-6),
-                    )
-                )
-        return window_refs

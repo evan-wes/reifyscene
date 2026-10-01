@@ -283,7 +283,8 @@ _VGGT_LONG_ONLY = (
 
 def _ingest_excluded(cfg):
     # With every frame a keyframe the stride and cap select nothing.
-    return ("max_keyframes_per_stream", "keyframe_stride_sec") if cfg.get("keyframes_all") else ()
+    return (("max_keyframes_per_stream", "keyframe_stride", "keyframe_stride_sec")
+            if cfg.get("keyframes_all") else ())
 
 
 def _dyn_mask_excluded(cfg):
@@ -320,11 +321,13 @@ CONTRACTS: dict[str, StageContract] = {
     for c in (
         StageContract(
             "ingest",
+            # 2: a stream's fps is its source's record or None, never a default
+            version=2,
             settings={
                 "max_keyframes_per_stream": 8,
-                "keyframe_stride_sec": 1.0,
+                "keyframe_stride": None,        # frames (30 when neither is given)
+                "keyframe_stride_sec": None,    # or seconds, when the source records an fps
                 "keyframes_all": False,
-                "default_fps": 30.0,
                 "frames_camera": None,
             },
             exclude_when=_ingest_excluded,
@@ -347,6 +350,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "geometry",
+            # 2: camera states are identified by frame number (time only when fps is recorded)
+            version=2,
             settings={"geometry": {}, **_TRACK_PLAN, "env:MOGE_MODEL_ID": None},
             # Where VGGT-Long keeps its scratch files, and whether, change nothing it outputs.
             exclude=(
@@ -361,7 +366,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "pose_refine",
-            version=3,
+            version=4,
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),
@@ -413,7 +418,7 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "tracking",
-            version=3,
+            version=4,
             settings={"tracking": {}, "lifting": {}},
             pinned=(
                 "tracking.frame_stride",
@@ -439,14 +444,14 @@ CONTRACTS: dict[str, StageContract] = {
             # The solver reads the ``optimizer`` section; ``optimization`` holds only
             # debug-viewer switches.
             "optimization",
-            version=2,
+            version=3,
             settings={"optimizer": {}},
             upstream=("sync", "pose_refine", "tracking", "humans", "objects", "graph"),
             rebuildable=True,
         ),
         StageContract(
             "scene",
-            version=3,
+            version=4,
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
             # timeline_source is only a metadata label.
             exclude=("scene.timeline_source",),
