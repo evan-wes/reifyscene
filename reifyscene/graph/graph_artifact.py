@@ -61,8 +61,7 @@ class GraphArtifact(BaseArtifact):
         # save() moves the vectors out of the JSON into embedding_index; the field
         # is rebuilt from those files below.
         raw['embeddings'] = {}
-        artifact = cls.from_payload(raw)
-        artifact.save_dir = Path(save_dir)
+        artifact = cls.from_payload(raw, save_dir)
         for node_id, filename in index.items():
             emb_path = Path(save_dir) / 'embeddings' / filename
             artifact.embeddings[str(node_id)] = np.load(emb_path)['embedding']

@@ -360,23 +360,26 @@ class BaseArtifact:
         return raw
 
     def to_payload(self) -> dict[str, Any]:
-        """Return a JSON-serializable payload for the artifact."""
-        payload = {}
-        for f in fields(self):
-            payload[f.name] = self._serialize_value(getattr(self, f.name))
-        payload['save_dir'] = self._serialize_value(self.save_dir)
-        return payload
+        """Return a JSON-serializable payload for the artifact.
+
+        ``save_dir`` is not written: a record lives in its own folder, so where it is read
+        from is where it is -- and a run can be moved or renamed without rewriting it.
+        """
+        return {f.name: self._serialize_value(getattr(self, f.name))
+                for f in fields(self) if f.name != "save_dir"}
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "BaseArtifact":
-        """Reconstruct an artifact from a serialized payload.
+    def from_payload(cls, payload: dict[str, Any], save_dir: Path) -> "BaseArtifact":
+        """Reconstruct an artifact from a serialized payload read from ``save_dir``.
 
-        ``to_payload`` writes every dataclass field, so a missing field means an old
-        or truncated artifact: it raises instead of being filled with a default.
+        ``to_payload`` writes every dataclass field but ``save_dir``, so a missing field
+        means an old or truncated artifact: it raises instead of being filled with a default.
         """
-        kwargs = {}
+        kwargs: dict[str, Any] = {"save_dir": Path(save_dir)}
         type_hints = get_type_hints(cls)
         for f in fields(cls):
+            if f.name == "save_dir":
+                continue
             if f.name not in payload:
                 raise KeyError(
                     f"{cls.__name__} artifact payload is missing field {f.name!r} "
@@ -384,9 +387,7 @@ class BaseArtifact:
                 )
             annotation = type_hints.get(f.name, f.type)
             kwargs[f.name] = cls._deserialize_value(annotation, payload[f.name])
-        artifact = cls(**kwargs)
-        artifact.save_dir = Path(artifact.save_dir)
-        return artifact
+        return cls(**kwargs)
 
     def attach_manifest(self, manifest: Any) -> None:
         """Record how this stage resolved, so its fidelity is readable downstream.
@@ -405,10 +406,7 @@ class BaseArtifact:
     @classmethod
     def load(cls, save_dir: Path) -> "BaseArtifact":
         """Load an artifact metadata file from disk."""
-        raw = read_json(Path(save_dir) / cls.FILE)
-        artifact = cls.from_payload(raw)
-        artifact.save_dir = Path(save_dir)
-        return artifact
+        return cls.from_payload(read_json(Path(save_dir) / cls.FILE), save_dir)
 
     def summary(self) -> dict[str, Any]:
         """Return a concise in-memory summary."""

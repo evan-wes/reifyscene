@@ -387,7 +387,6 @@ class ObjectArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'objects': [self._object_to_dict(obj) for obj in self.objects],
             'raw_objects': [self._object_to_dict(obj) for obj in self.raw_objects],

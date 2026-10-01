@@ -586,7 +586,7 @@ def main() -> None:
 
     manifest = {
             'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
-            'run_dir': str(Path(args.run_dir).expanduser().resolve()),
+            # no run_dir: where the run is is where its manifest is (runs can be moved)
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
             'stop_stage': args.stop_stage,
@@ -595,7 +595,7 @@ def main() -> None:
                 'path': str(Path(args.config).expanduser().resolve()),
                 'sha256': hashlib.sha256(Path(args.config).expanduser().read_bytes()).hexdigest(),
             },
-            'config': cfg,
+            'config': {k: v for k, v in cfg.items() if k != 'run_dir'},
             'resume': None if plan is None else {
                 'pinned': plan.pins,
                 'stages': {s: {'action': v.action, 'notes': v.notes} for s, v in plan.verdicts.items()},

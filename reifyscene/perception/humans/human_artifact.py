@@ -419,7 +419,6 @@ class HumanArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'humans': [self._human_to_dict(h) for h in self.humans],
             'raw_humans': [self._human_to_dict(h) for h in self.raw_humans],

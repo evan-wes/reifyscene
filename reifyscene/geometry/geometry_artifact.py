@@ -700,7 +700,6 @@ class GeometryArtifact(BaseArtifact):
         serializable = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'backend_name': self.backend_name,
             'selected_frames': [GeometryArtifact._frame_ref_to_dict(frame) for frame in self.selected_frames],

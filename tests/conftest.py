@@ -40,8 +40,9 @@ def write_manifest(run_dir: Path, config: dict | None = None) -> Path:
     """A run manifest, which is what makes a folder a run (a pipeline run writes it first)."""
     from reifyscene.api.run_outputs import RunOutputs
 
-    return RunOutputs.create(run_dir).write_manifest(
-        {"video_paths": [], "run_dir": str(run_dir), "config": dict(config or {})})
+    # as the run script writes it: nothing records where the run itself is
+    config = {k: v for k, v in (config or {}).items() if k != "run_dir"}
+    return RunOutputs.create(run_dir).write_manifest({"video_paths": [], "config": config})
 
 
 def write_checkpoint(run_dir: Path, payload: bytes = b"weights", *, name: str = "render",

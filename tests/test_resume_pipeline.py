@@ -406,7 +406,7 @@ def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> N
     tracking = materialize_stage(plan, registry['tracking'])
     assert tracking.save_dir == new / 'tracking'
     raw = json.loads((new / 'tracking' / 'artifact.json').read_text())
-    assert raw['save_dir'] == str(new / 'tracking')
+    assert 'save_dir' not in raw                   # a record names no folder: it is in one
     assert raw['metadata']['resume']['loaded_from'] == str(run_dir / 'tracking')
     assert raw['metadata']['contract'] == plan.records['tracking']
     # Everything but artifact.json is byte-for-byte the prior's: no save/load round trip.
@@ -417,6 +417,21 @@ def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> N
         if not filecmp.cmp(run_dir / 'tracking' / f, new / 'tracking' / f, shallow=False)
     ]
     assert changed == ['artifact.json']
+
+
+def test_a_run_moved_and_renamed_loads_every_stage_and_names_no_old_path(prior, tmp_path) -> None:
+    """Records name no folder of their own, so a run can be moved or renamed whole."""
+    from reifyscene.api.run_outputs import RunOutputs
+
+    root, run_dir, cfg, video = prior
+    moved = tmp_path / 'elsewhere' / 'renamed'
+    shutil.copytree(run_dir, moved)
+    run = RunOutputs.open(moved)
+    for stage in STAGE_ORDER:
+        if run.has(stage):
+            assert run.artifact(stage).save_dir == moved / stage
+    for record in moved.rglob('*.json'):
+        assert str(run_dir) not in record.read_text(), record
 
 
 # ------------------------------------------------------------------ legacy prior runs

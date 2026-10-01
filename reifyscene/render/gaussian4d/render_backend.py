@@ -131,7 +131,7 @@ class GaussianRenderBackend(RenderBackend):
             rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
             path = frames_dir / f"frame_{i:04d}.png"
             Image.fromarray(rgb).save(path)
-            frame_paths.append(str(path))
+            frame_paths.append(str(path.relative_to(save_dir)))   # the run can move
             frames.append(rgb)
         try:
             write_video(frames, save_dir / "flythrough.mp4", fps=self.fps)
@@ -275,7 +275,7 @@ class GaussianRenderBackend(RenderBackend):
             rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
             path = frames_dir / f"frame_{i:04d}.png"
             Image.fromarray(rgb).save(path)
-            frame_paths.append(str(path))
+            frame_paths.append(str(path.relative_to(save_dir)))   # the run can move
             frames.append(rgb)
         try:
             write_video(frames, save_dir / "flythrough.mp4", fps=self.fps)

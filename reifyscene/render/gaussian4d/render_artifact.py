@@ -17,7 +17,7 @@ class RenderArtifact(BaseArtifact):
 
     scene_state: dict[str, Any] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
-    path_index: dict[str, list[str]] = field(default_factory=dict)
+    path_index: dict[str, list[str]] = field(default_factory=dict)   # frames, relative to save_dir
     layer_path_index: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     player_html: str | None = None
     debug_player_html: str | None = None
@@ -42,7 +42,6 @@ class RenderArtifact(BaseArtifact):
         write_json(self.artifact_path(), {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "metadata": self.metadata,
             "scene_state": self.scene_state,
             "coverage": self.coverage,

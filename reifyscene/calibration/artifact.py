@@ -42,7 +42,6 @@ class CalibrationArtifact(BaseArtifact):
         payload = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "streams": [self._serialize_value(stream) for stream in self.streams],
             "sampled_frames": [GeometryArtifact._frame_ref_to_dict(fr) for fr in self.sampled_frames],
             "sampled_image_index": dict(self.sampled_image_index),

@@ -120,7 +120,7 @@ def materialize_shared_debug_frames(
     if not frame_refs:
         return {}
 
-    root = ensure_dir(Path(pipeline.cfg['run_dir']) / str(shared_cfg.get('dir_name', 'debug_rgb_frames')))
+    root = ensure_dir(pipeline.outputs.root / str(shared_cfg.get('dir_name', 'debug_rgb_frames')))
     stream_lookup = {stream.stream_id: stream for stream in ingest_artifact.streams}
     index: dict[str, str] = {}
     for fr in frame_refs:

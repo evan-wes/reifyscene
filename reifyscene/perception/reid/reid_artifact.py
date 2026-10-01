@@ -82,7 +82,6 @@ class ReidArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'merge_map': dict(self.merge_map),
             'embedding_index': emb_index,

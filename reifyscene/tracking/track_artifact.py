@@ -687,7 +687,6 @@ class TrackArtifact(BaseArtifact):
         serializable = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'seed_points_by_stream': self.seed_points_by_stream,
             'merged_track_groups': self.merged_track_groups,

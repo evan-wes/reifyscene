@@ -158,7 +158,6 @@ class SceneArtifact(BaseArtifact):
         serializable = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "metadata": self.metadata,
             "kind": self.kind,
             "render_seed": seed_meta,

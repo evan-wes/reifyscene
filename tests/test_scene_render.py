@@ -246,7 +246,8 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
     recipe = art.scene_state["recipe"]
     assert recipe["identity"] is None and "iters" in recipe["trainer"]
     flythrough = art.path_index.get("flythrough", [])
-    assert len(flythrough) == 3 and Path(flythrough[0]).exists()
+    assert len(flythrough) == 3 and not Path(flythrough[0]).is_absolute()
+    assert (Path(art.save_dir) / flythrough[0]).exists()       # relative to the checkpoint
 
 
 def test_render_backend_dynamic_empty_bundle_skips(tmp_path: Path) -> None:

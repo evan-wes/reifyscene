@@ -403,12 +403,9 @@ def _check_loaded(stage, verdict, records, artifacts, digests, cfg, current_inpu
 # ------------------------------------------------------------------ loading
 
 def _patch_artifact_json(stage_dir: Path, metadata: dict[str, Any]) -> None:
-    """Point a copied artifact at its new folder and record its provenance, in place."""
+    """Record a copied artifact's provenance, in place (it names no folder of its own)."""
     path = stage_dir / BaseArtifact.FILE
     raw = read_json(path)
-    saved = raw["save_dir"]  # artifacts write it as a typed path or a plain string
-    raw["save_dir"] = ({**saved, "value": str(stage_dir)} if isinstance(saved, dict)
-                       else str(stage_dir))
     raw["metadata"] = {**raw["metadata"], **metadata}
     write_json(path, raw)
 
@@ -416,8 +413,8 @@ def _patch_artifact_json(stage_dir: Path, metadata: dict[str, Any]) -> None:
 def materialize_stage(plan: ResumePlan, spec: StageSpec) -> Any:
     """Copy one checked prior stage into the run folder and return its artifact.
 
-    The copy is exact; only ``artifact.json`` is patched -- the new folder, the fingerprint
-    record and ``metadata["resume"]`` (where it was loaded from).
+    The copy is exact; only ``artifact.json`` is patched -- the fingerprint record and
+    ``metadata["resume"]`` (where it was loaded from).
     """
     verdict = plan.verdicts[spec.name]
     if verdict.action != "load":

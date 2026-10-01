@@ -135,7 +135,6 @@ class InstanceArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'observations': [self._obs_to_dict(o) for o in self.observations],
             'frame_index': self.frame_index or self._build_frame_index(self.observations),

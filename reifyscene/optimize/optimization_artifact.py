@@ -87,7 +87,6 @@ class OptimizationArtifact(BaseArtifact):
         raw = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'refined_cameras': {
                 stream_id: [GeometryArtifact._camera_state_to_dict(state) for state in states]
