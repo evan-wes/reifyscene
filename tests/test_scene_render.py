@@ -243,6 +243,8 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
     assert art.scene_state["num_train_views"] == 2
     assert art.scene_state["train_view_psnr"] > 0.0
     assert (Path(art.save_dir) / art.scene_state["checkpoint"]).exists()
+    recipe = art.scene_state["recipe"]
+    assert recipe["identity"] is None and "iters" in recipe["trainer"]
     flythrough = art.path_index.get("flythrough", [])
     assert len(flythrough) == 3 and Path(flythrough[0]).exists()
 
@@ -318,3 +320,8 @@ def test_render_backend_dynamic_trains_and_checkpoints(tmp_path: Path) -> None:
     assert out.scene_state["kind"] == "dynamic"
     assert out.scene_state["num_train_views"] == t and out.scene_state["num_fg"] == n_fg
     assert (Path(out.save_dir) / out.scene_state["checkpoint"]).exists()
+    # the recipe is what dynamic_recipe() says, so a record can be rebuilt from the config
+    recipe = out.scene_state["recipe"]
+    assert recipe == backend.dynamic_recipe(out.scene_state["num_frames"], art)
+    assert recipe["trainer"]["iters"] == 3 and recipe["densify"]["enabled"] is False
+    assert recipe["identity"] is None

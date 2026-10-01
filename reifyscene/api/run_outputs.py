@@ -59,6 +59,15 @@ class Checkpoint:
         return str(self.state["kind"])
 
     @property
+    def recipe(self) -> dict[str, Any]:
+        """How it was trained: trainer and densifier settings with defaults resolved, identity
+        settings (None when off), and the scene artifact's digest. Equal recipes mean trained
+        the same way -- not equal weights (training is not bit-deterministic)."""
+        if "recipe" not in self.state:
+            raise NotARun(f"{self.run.name}: checkpoint {self.name!r} records no recipe")
+        return self.state["recipe"]
+
+    @property
     def weights(self) -> Path:
         """The weights file the render recorded writing."""
         return self.dir / str(self.state["checkpoint"])

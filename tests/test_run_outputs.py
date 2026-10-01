@@ -59,6 +59,16 @@ def test_a_checkpoint_is_what_its_render_record_says(tmp_path) -> None:
     assert run.checkpoint("render_retrain").digest() != ckpt.digest()
 
 
+def test_a_checkpoint_says_how_it_was_trained_or_refuses(tmp_path) -> None:
+    run = RunOutputs.open(_run(tmp_path))
+    recipe = {"trainer": {"views_per_step": 8}, "densify": {}, "identity": None, "scene": "ab12"}
+    write_checkpoint(run.root, recipe=recipe)
+    write_checkpoint(run.root, name="render_unrecorded")
+    assert run.checkpoint().recipe == recipe
+    with pytest.raises(NotARun, match="records no recipe"):
+        _ = run.checkpoint("render_unrecorded").recipe
+
+
 def test_what_accumulates_beside_the_stages_has_its_place(tmp_path) -> None:
     run = RunOutputs.open(_run(tmp_path))
     assert run.output_dir("heldout_damage", "masks") == run.root / "edits/heldout_damage/masks"

@@ -45,7 +45,8 @@ def write_manifest(run_dir: Path, config: dict | None = None) -> Path:
 
 
 def write_checkpoint(run_dir: Path, payload: bytes = b"weights", *, name: str = "render",
-                     kind: str = "dynamic", weights: str = "trained_dynamic.npz"):
+                     kind: str = "dynamic", weights: str = "trained_dynamic.npz",
+                     recipe: dict | None = None):
     """A checkpoint folder as the render stage leaves one: its weights, and the render record
     naming them and their kind. Returns the run's ``Checkpoint``."""
     from reifyscene.api.run_outputs import RunOutputs
@@ -54,7 +55,8 @@ def write_checkpoint(run_dir: Path, payload: bytes = b"weights", *, name: str = 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     (ckpt_dir / weights).write_bytes(payload)
     (ckpt_dir / "artifact.json").write_text(
-        json.dumps({"scene_state": {"kind": kind, "checkpoint": weights}}))
+        json.dumps({"scene_state": {"kind": kind, "checkpoint": weights,
+                                    **({"recipe": recipe} if recipe is not None else {})}}))
     return RunOutputs.open(run_dir).checkpoint(name)
 
 

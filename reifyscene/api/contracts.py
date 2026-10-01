@@ -460,7 +460,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "render",
-            version=2,
+            # 3: the render record keeps its checkpoint's recipe
+            version=3,
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),

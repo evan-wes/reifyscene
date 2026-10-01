@@ -32,6 +32,17 @@ from reifyscene.render.gaussian4d.rasterizer import GaussianCloud, RenderCamera,
 from reifyscene.render.gaussian4d.render_artifact import RenderArtifact
 
 
+def _recipe(train_cfg, densify_cfg, identity: dict | None, scene_artifact) -> dict[str, Any]:
+    """A checkpoint's recipe as its render record keeps it (JSON: tuples become lists)."""
+    import json
+    from dataclasses import asdict
+
+    contract = (getattr(scene_artifact, "metadata", None) or {}).get("contract") or {}
+    recipe = {"trainer": asdict(train_cfg), "densify": asdict(densify_cfg),
+              "identity": identity, "scene": contract.get("digest")}
+    return json.loads(json.dumps(recipe, default=list))
+
+
 def _intrinsics_obj(intr: dict[str, Any]) -> CameraIntrinsics:
     return CameraIntrinsics(fx=float(intr["fx"]), fy=float(intr["fy"]), cx=float(intr["cx"]), cy=float(intr["cy"]))
 
@@ -177,6 +188,7 @@ class GaussianRenderBackend(RenderBackend):
         if "iters" in self.cfg:
             trainer_cfg["iters"] = int(self.cfg["iters"])
         train_cfg = TrainConfig.from_cfg(trainer_cfg)
+        recipe = _recipe(train_cfg, densify_cfg, None, scene_artifact)
         trainer = StaticGaussianTrainer(field, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []
@@ -200,6 +212,7 @@ class GaussianRenderBackend(RenderBackend):
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
+                "recipe": recipe,
             },
             path_index=path_index,
         )
@@ -291,10 +304,47 @@ class GaussianRenderBackend(RenderBackend):
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
         return path.name
 
+    def _dynamic_configs(self, num_frames: int):
+        """``(DynamicTrainConfig, DensifyConfig, identity cfg)`` this backend's config gives a
+        scene of ``num_frames`` frames: every default resolved, every identity override applied."""
+        from reifyscene.render.gaussian4d.densify import DensifyConfig
+        from reifyscene.render.gaussian4d.dynamic_trainer import DynamicTrainConfig
+
+        dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
+        iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
+        train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
+        # A per-field cap, so a schedule can never run away again (a 40k-step run grew the
+        # background to 2.8M Gaussians and collapsed). 1M is above every loop scene at 8 views
+        # per step but two, which reach it; an explicit densify.max_gaussians wins.
+        densify_raw = {"max_gaussians": 1_000_000, **(self.cfg.get("densify") or {})}
+        densify_cfg = DensifyConfig.from_cfg(densify_raw, max_iters=iters, num_frames=num_frames)
+        ident_cfg = dict(dyn_cfg.get("identity") or {})
+        if ident_cfg.get("enabled"):
+            if "lambda" in ident_cfg:
+                train_cfg.lambda_identity = float(ident_cfg["lambda"])
+            if ident_cfg.get("reset_every"):
+                train_cfg.identity_reset_every = int(ident_cfg["reset_every"])
+                if ident_cfg.get("reset_until") is not None:
+                    train_cfg.identity_reset_until = int(ident_cfg["reset_until"])
+            if "lambda_3d" in ident_cfg:
+                train_cfg.lambda_identity_3d = float(ident_cfg["lambda_3d"])
+            if "detach_geometry" in ident_cfg:
+                train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
+        return train_cfg, densify_cfg, ident_cfg
+
+    def dynamic_recipe(self, num_frames: int, scene_artifact) -> dict[str, Any]:
+        """How a dynamic checkpoint is trained, as its render record keeps it: the trainer's and
+        densifier's settings with every default resolved, the identity settings (None when
+        identity is off), and the scene artifact it was trained from (its contract digest).
+        Two checkpoints with equal recipes were trained the same way; training itself is not
+        bit-deterministic (gsplat accumulates with atomics), so their weights still differ."""
+        train_cfg, densify_cfg, ident_cfg = self._dynamic_configs(num_frames)
+        return _recipe(train_cfg, densify_cfg, ident_cfg if ident_cfg.get("enabled") else None,
+                       scene_artifact)
+
     def _fit_dynamic(self, scene_artifact, save_dir: Path, *, run=None) -> RenderArtifact:
         from reifyscene.render.gaussian4d.dynamic_trainer import (
             DynamicGaussianTrainer,
-            DynamicTrainConfig,
         )
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
@@ -320,31 +370,15 @@ class GaussianRenderBackend(RenderBackend):
 
         scene, cams = bundle_to_scene(bundle, device=self.device)
 
-        dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
-        iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
-        train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
-        # A per-field cap, so a schedule can never run away again (a 40k-step run grew the
-        # background to 2.8M Gaussians and collapsed). 1M is above every loop scene at 8 views
-        # per step but two, which reach it; an explicit densify.max_gaussians wins.
-        densify_raw = {"max_gaussians": 1_000_000, **(self.cfg.get("densify") or {})}
-        densify_cfg = DensifyConfig.from_cfg(densify_raw, max_iters=iters, num_frames=scene.num_frames)
+        train_cfg, densify_cfg, ident_cfg = self._dynamic_configs(scene.num_frames)
+        recipe = self.dynamic_recipe(scene.num_frames, scene_artifact)
         rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
-        ident_cfg = dict(dyn_cfg.get("identity") or {})
         identity_summary = None
         if ident_cfg.get("enabled"):
             if run is None:
                 raise ValueError("identity training needs the run whose id maps it learns")
-            train_views, identity_summary = self._attach_identity(scene, train_views, run, ident_cfg)
-            if "lambda" in ident_cfg:
-                train_cfg.lambda_identity = float(ident_cfg["lambda"])
-            if ident_cfg.get("reset_every"):
-                train_cfg.identity_reset_every = int(ident_cfg["reset_every"])
-                if ident_cfg.get("reset_until") is not None:
-                    train_cfg.identity_reset_until = int(ident_cfg["reset_until"])
-            if "lambda_3d" in ident_cfg:
-                train_cfg.lambda_identity_3d = float(ident_cfg["lambda_3d"])
-            if "detach_geometry" in ident_cfg:
-                train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
+            train_views, identity_summary = self._attach_identity(
+                scene, train_views, run, ident_cfg)
             identity_summary["detach_geometry"] = train_cfg.identity_detach_geometry
             identity_summary["lambda_3d"] = train_cfg.lambda_identity_3d
             identity_summary["reset_every"] = train_cfg.identity_reset_every
@@ -396,6 +430,7 @@ class GaussianRenderBackend(RenderBackend):
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
+                "recipe": recipe,
                 **({"identity": {**identity_summary, "final_identity_loss": next(
                     (r["identity_loss"] for r in reversed(logs) if "identity_loss" in r), None
                 )}} if identity_summary else {}),
