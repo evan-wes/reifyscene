@@ -35,10 +35,16 @@ the post-render `handles` stage and its `gaussians` layer, and the graph stage's
 ~5 GPU-hours for the same rows. Whether an edit damages the rest of the scene is measured by
 `davis_edit_damage.json` instead. Re-run this when anything upstream of the graph changes.
 
+**Its runs are gone (2026-10-01).** Phase 2 of the data-stream work made every stage contract a
+clean break (frame numbers, recorded frame rates, recorded rasters): the `inv_*` runs could no
+longer load and were deleted, with the `cg_export` they fed into `davis_conceptgraphs.json`. The
+committed rows stand as measured at their commit; re-scoring either file starts with the rebuild
+above.
+
 ## `davis_edit_damage.json`
 
 Does removing an entity take the entity, and leave the rest of the scene alone? Scored on the
-ten `loop_*` runs against DAVIS ground truth: each annotated object is matched to a graph node
+ten `slice_*` runs against DAVIS ground truth: each annotated object is matched to a graph node
 and removed with the selection the graph's `gaussians` layer holds (FlashSplat + floater
 filter), on the checkpoint the app serves.
 
@@ -49,19 +55,21 @@ precision* (pixels where the removed Gaussians carry over half the weight, again
 mask), *alone precision* (the removed Gaussians rendered by themselves), *halo ratio*,
 *others damaged*, and *rest PSNR* (before vs after beyond 8 px of the object; 60 dB = untouched).
 
-**Finding (2026-09-30), 31 of 39 objects scored, 8 never proposed:**
+**Finding (2026-09-30; re-measured 2026-10-01 on the rebuilt `slice_*` runs, same checkpoint
+recipe), 31 of 39 objects scored, 8 never proposed:**
 
-- **The rest of the scene is left alone.** Median rest PSNR 50.5 dB; other annotated objects
-  lose a median 3% of their pixels. The exceptions are entanglement, not stray edits:
-  motocross (the rider shares the motorcycle's node: 40% of the rider changes) and dogs-scale
-  (29–41 dB; people and dogs overlap all clip).
+- **The rest of the scene is left alone.** Median rest PSNR 48.8 dB (50.5 before the rebuild);
+  other annotated objects lose a median 3% of their pixels. The exceptions are entanglement, not
+  stray edits: motocross (the rider shares the motorcycle's node: 57% of the rider changes, 40%
+  before the rebuild -- the one object the rebuild moved far, taken precision 0.61 -> 0.22) and
+  dogs-scale (30–41 dB; people and dogs overlap all clip).
 - **What is taken is the object, where it is visible.** Median taken precision 0.93.
-- **But removal is incomplete: median taken recall 0.39.** Under half of an object's pixels are
+- **But removal is incomplete: median taken recall 0.41.** Under half of an object's pixels are
   dominated by its own Gaussians. Worst on small, fast movers (the crossing pedestrians: 0.02,
   ~600-900 Gaussians each) -- the motion model renders them with Gaussians that belong to
   nothing or to the background, the same softness the identity scope's §8 records.
-- **Most of what a removal takes is hidden: median alone precision 0.38.** Rendered by
-  themselves, the removed Gaussians land on the object only 38% of the time; the rest sits
+- **Most of what a removal takes is hidden: median alone precision 0.36.** Rendered by
+  themselves, the removed Gaussians land on the object only 36% of the time; the rest sits
   behind or around it, invisible from the training cameras. This is the "shadow" the 3D took
   view shows behind the lab-coat people, measured.
 
@@ -74,7 +82,7 @@ The same questions from cameras the scene never trained on. DyCheck `spin` has h
 at other positions with real photos; the person is removed (graph `gaussians` layer) and judged
 on 60 held-out and 20 training views.
 
-    python scripts/heldout_edit_damage.py ../runs/spin_oracle_g4h2   # GPU, ~20 s
+    python scripts/heldout_edit_damage.py ../runs/slice_spin   # GPU, ~20 s
 
 Where the person *is* in each view comes from the photo, not from the removal: SAM 2 prompted
 by the person detector segments every person, and the one overlapping where the entity renders
@@ -83,13 +91,16 @@ masks -- pseudo ground truth -- saved under the run's `edits/heldout_damage/mask
 checked. (A first version judged "the rest" by the removal's own footprint, which cannot fail;
 it was replaced before being recorded.)
 
-**Finding (2026-09-30):**
+**Finding (2026-09-30; re-measured 2026-10-01 on the rebuilt `slice_spin`):**
 
 | | held-out (60) | training (20) |
 |---|---|---|
 | taken recall | 0.79 | 0.85 |
-| alone precision | 0.98 | 0.97 |
-| rest damage vs photo | -0.02 dB | +0.01 dB |
+| alone precision | 0.98 | 0.99 |
+| rest damage vs photo | -0.03 dB | -0.01 dB |
+
+The rebuild is spin's first run on its own frame numbers and recorded frame rate (phase 2d); every
+number held, and the photo PSNR before any edit rose slightly (held-out 20.6 -> 21.1 dB).
 
 - **No shadow when the camera went around.** Rendered by themselves, 98% of the removed
   Gaussians land on the person even from the held-out cameras. On lab-coat, seen from one side,
