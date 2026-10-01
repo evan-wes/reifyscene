@@ -80,9 +80,7 @@ def test_build_config_supports_geometry_and_tracking_time_spacing(tmp_path: Path
     assert cfg['geometry']['frame_spacing_sec'] == 0.5
     assert cfg['tracking']['frame_stride'] == 2
     assert cfg['tracking']['frame_spacing_sec'] == 0.25
-    assert cfg['render']['backend_name'] == 'gaussian4d'
-    assert cfg['render']['render_scale'] == 1
-    assert 'offline_high_quality' not in cfg['render']
+    assert cfg['render'] == {'backend_name': 'gaussian4d', 'device': 'cuda'}
 
 
 def test_build_config_records_which_settings_the_machine_picked(tmp_path: Path, monkeypatch) -> None:

@@ -290,11 +290,11 @@ def semantics(records=None, embeddings=None):
 
 
 def _record(category="mug", score=0.4, topk=None, **kw):
-    """A semantics record. Extra fields mimic the ones the abstention change adds."""
+    """A semantics record, with every field a real SemanticRecord carries."""
     base = dict(
         category=category, score=score,
         category_topk=topk if topk is not None else [("mug", 0.4), ("cup", 0.1)],
-        caption=None,
+        caption=None, margin=None, margin_z=None, abstained=False, abstain_reason=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -340,15 +340,6 @@ def test_an_abstention_leaves_the_node_labelled_human_and_says_why() -> None:
     assert person.attrs["category_margin"] == 0.004
 
 
-def test_a_record_without_the_separation_fields_still_lands() -> None:
-    """The graph reads optional evidence as optional -- it does not require PR-ordering."""
-    artifact = build(
-        tracking([[(10.0, 10.0)] * 4]), humans(), objects(),
-        semantics_artifact=semantics({"p1": _record("person", 0.5)}),
-    )
-    person = nodes_by_id(artifact)["human:cam0:p1"]
-    assert person.attrs["abstained"] is False
-    assert person.attrs["category_margin"] is None
 
 
 def test_without_a_semantics_artifact_the_graph_still_builds() -> None:

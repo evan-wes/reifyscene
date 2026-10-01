@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 from reifyscene.render.gaussian4d.rasterizer import gsplat_available
 
 requires_gsplat = pytest.mark.skipif(
@@ -62,7 +63,8 @@ def _synthetic_geometry(tmp_path: Path) -> GeometryArtifact:
         intrinsics_by_stream={"cam_00": intr},
         camera_states_by_stream={"cam_00": states},
         depthmaps_by_frame=depthmaps,
-        metadata={"debug_image_paths": debug_image_paths},
+        metadata={"debug_image_paths": debug_image_paths, "image_transforms": {"cam_00": transform_record(
+            ImageTransform.identity((W, H)), recorded_by="test")}},
     )
 
 
@@ -83,9 +85,9 @@ def test_assembler_builds_self_contained_renderable_scene(tmp_path: Path) -> Non
     assert len(scene.render_trajectory) == 6
 
 
-def test_assembler_tolerates_legacy_scene_config_keys() -> None:
-    # legacy ``scene:`` config fields from the retired toy must not raise
-    SingleVideoSceneAssembler(max_static_points_per_frame=8, max_static_points_total=16, timeline_source="geometry")
+def test_the_assembler_refuses_a_setting_it_does_not_know() -> None:
+    with pytest.raises(TypeError, match="max_static_points_per_frame"):
+        SingleVideoSceneAssembler(max_static_points_per_frame=8)
 
 
 def test_scene_artifact_roundtrip_persists_gt_frames(tmp_path: Path) -> None:

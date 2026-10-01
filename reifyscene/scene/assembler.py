@@ -32,11 +32,22 @@ from reifyscene.scene.scene_artifact import TRAIN_VIEWS_DIR, SceneArtifact, trai
 class SingleVideoSceneAssembler:
     """Assemble a self-contained renderable 4D scene from pipeline artifacts.
 
-    Tolerant ``**cfg`` constructor: unknown keys (e.g. legacy ``scene`` config
-    fields from the retired toy renderer) are ignored.
+    ``**cfg`` is the ``scene`` config section; a key it does not know is an error, not
+    silently ignored (``timeline_source`` is the pipeline's metadata label, read there).
     """
 
+    _KEYS = frozenset({
+        "seed_pixel_stride", "seed_max_points", "seed_depth_near", "seed_depth_far",
+        "seed_scale_mult", "seed_scale_min", "seed_scale_max", "max_train_views",
+        "num_render_cameras", "orbit_up_axis", "kind", "dynamic_num_fg", "dynamic_num_bg",
+        "dynamic_num_bases", "dynamic_seed", "device", "tracker", "dynamic_motion_gate",
+        "timeline_source",
+    })
+
     def __init__(self, **cfg: Any) -> None:
+        unknown = sorted(set(cfg) - self._KEYS)
+        if unknown:
+            raise TypeError(f"unknown scene setting(s) {unknown}")
         # Seed (mirrors run_render_proof's ``seed`` cfg).
         self.seed_pixel_stride = int(cfg.get("seed_pixel_stride", 1))
         self.seed_max_points = int(cfg.get("seed_max_points", 1_500_000))
@@ -125,7 +136,7 @@ class SingleVideoSceneAssembler:
         """
         with Image.open(path) as img:
             photo = img.convert("RGB")
-        transform = image_transform_for(geometry_artifact, str(stream_id), source_size=photo.size)
+        transform = image_transform_for(geometry_artifact, str(stream_id))
         return transform.apply_to_image(photo)
 
     def _camera_state_for_frame(self, geometry_artifact, frame_ref: FrameRef):
@@ -199,9 +210,7 @@ class SingleVideoSceneAssembler:
             path = self._gt_image_path(key, geometry_artifact)
             if path is None:
                 continue  # the geometry carries no photos at all (heuristic)
-            with Image.open(path) as img:
-                photo_size = (int(img.width), int(img.height))
-            transform = image_transform_for(geometry_artifact, str(frame.stream_id), source_size=photo_size)
+            transform = image_transform_for(geometry_artifact, str(frame.stream_id))
             width, height = transform.output_size
             intr = state.intrinsics
             views.append({

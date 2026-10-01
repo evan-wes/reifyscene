@@ -119,13 +119,13 @@ class GeometryArtifact(BaseArtifact):
 
     @staticmethod
     def _intrinsics_from_dict(raw: dict[str, Any]) -> CameraIntrinsics:
-        distortion_params = raw.get('distortion_params')
+        distortion_params = raw['distortion_params']
         return CameraIntrinsics(
             fx=float(raw['fx']),
             fy=float(raw['fy']),
             cx=float(raw['cx']),
             cy=float(raw['cy']),
-            distortion_model=str(raw.get('distortion_model', 'brown')),
+            distortion_model=str(raw['distortion_model']),
             distortion_params=None if distortion_params is None else np.asarray(distortion_params, dtype=float),
         )
 
@@ -730,7 +730,7 @@ class GeometryArtifact(BaseArtifact):
         depthmaps_by_frame: dict[str, Any] = {}
         pointmaps_by_frame: dict[str, Any] = {}
 
-        for frame_key, filename in raw.get('depth_index', {}).items():
+        for frame_key, filename in raw['depth_index'].items():
             payload = np.load(save_dir / 'depthmaps' / filename)
             confidence = payload['confidence']
             depthmaps_by_frame[frame_key] = {
@@ -738,7 +738,7 @@ class GeometryArtifact(BaseArtifact):
                 'confidence': None if confidence.size == 0 else confidence,
             }
 
-        for frame_key, filename in raw.get('point_index', {}).items():
+        for frame_key, filename in raw['point_index'].items():
             payload = np.load(save_dir / 'pointmaps' / filename)
             confidence = payload['confidence']
             pointmaps_by_frame[frame_key] = {
@@ -750,19 +750,19 @@ class GeometryArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
-            backend_name=raw.get('backend_name', 'unknown'),
-            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw.get('selected_frames', [])],
-            intrinsics_by_stream={k: cls._intrinsics_from_dict(v) for k, v in raw.get('intrinsics_by_stream', {}).items()},
+            metadata=raw['metadata'],
+            backend_name=raw['backend_name'],
+            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw['selected_frames']],
+            intrinsics_by_stream={k: cls._intrinsics_from_dict(v) for k, v in raw['intrinsics_by_stream'].items()},
             camera_states_by_stream={
                 k: [cls._camera_state_from_dict(state) for state in states]
-                for k, states in raw.get('camera_states_by_stream', {}).items()
+                for k, states in raw['camera_states_by_stream'].items()
             },
             pointmaps_by_frame=pointmaps_by_frame,
             depthmaps_by_frame=depthmaps_by_frame,
-            pairwise_matches=raw.get('pairwise_matches', {}),
-            view_graph_edges=raw.get('view_graph_edges', {}),
-            notes=raw.get('notes', []),
+            pairwise_matches=raw['pairwise_matches'],
+            view_graph_edges=raw['view_graph_edges'],
+            notes=raw['notes'],
         )
         return artifact
 

@@ -78,11 +78,6 @@ def apply_debug_config_to_runtime_cfg(cfg: dict[str, Any], debug_cfg: dict[str, 
     optimization_cfg['debug_max_trails'] = int(opt_debug.get('max_trails', optimization_cfg.get('debug_max_trails', 12)))
     optimization_cfg['debug_trail_window'] = int(opt_debug.get('trail_window', optimization_cfg.get('debug_trail_window', 12)))
 
-    render_cfg = cfg.setdefault('render', {})
-    render_debug = debug_cfg.get('render', {})
-    if render_debug:
-        render_cfg['debug_triptych'] = bool(render_debug.get('enabled', False)) and bool(render_debug.get('viewer', True))
-
     return cfg
 
 

@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from reifyscene.api.web.app import create_app, discover_runs  # noqa: E402
 from reifyscene.common.types import GraphNode  # noqa: E402
 from reifyscene.graph.graph_artifact import GraphArtifact  # noqa: E402
+from tests.conftest import write_ingest
 
 H, W = 6, 8
 PERSON = "human:cam_00:sam2:cam_00:2"
@@ -37,9 +38,7 @@ def _fixture_run(root: Path, name: str = "loop_demo") -> Path:
                   attrs={"category": "cup", "frame_indices": [1, 2]}),
     ]
     GraphArtifact(run_id=name, stage_name="graph", save_dir=run / "graph", nodes=nodes).save()
-    (run / "ingest").mkdir()                       # which streams the run has
-    (run / "ingest" / "artifact.json").write_text(json.dumps(
-        {"streams": [{"value": {"stream_id": "cam_00", "num_frames": 6}}]}))
+    write_ingest(run, num_frames=6, width=W, height=H)    # which streams the run has
     views = []
     (run / "scene" / "train_views").mkdir(parents=True)
     for f in range(6):

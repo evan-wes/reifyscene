@@ -57,13 +57,15 @@ class GraphArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> GraphArtifact:
         """Read the graph back, embeddings included."""
         raw = read_json(Path(save_dir) / 'artifact.json')
-        index = raw.pop('embedding_index', None) or {}
+        index = raw.pop('embedding_index')
+        # save() moves the vectors out of the JSON into embedding_index; the field
+        # is rebuilt from those files below.
+        raw['embeddings'] = {}
         artifact = cls.from_payload(raw)
         artifact.save_dir = Path(save_dir)
         for node_id, filename in index.items():
             emb_path = Path(save_dir) / 'embeddings' / filename
-            if emb_path.exists():
-                artifact.embeddings[str(node_id)] = np.load(emb_path)['embedding']
+            artifact.embeddings[str(node_id)] = np.load(emb_path)['embedding']
         return artifact
 
     def node_ids(self) -> list[str]:

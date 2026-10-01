@@ -154,19 +154,16 @@ class FrameStream(Dataset):
         return int(w), int(h)
 
     def frame_file(self, frame: int) -> Path:
-        """The image file of one frame of a folder stream (where it is now, if it moved)."""
+        """The image file of one frame of a folder stream, as ingest recorded it."""
         if self._index is None:
             raise StreamError(f"stream {self.id!r} is a video: its frames are not files")
         if int(frame) not in self._index:
             raise StreamError(f"stream {self.id!r} has no frame {frame}")
-        recorded = Path(self._index[int(frame)])
-        if recorded.is_file():
-            return recorded
-        moved = Path(self.ref.video_path) / recorded.name
-        if moved.is_file():
-            return moved
-        raise StreamError(f"stream {self.id!r}: frame {frame} is neither at {recorded} "
-                          f"nor in {self.ref.video_path}")
+        path = Path(self._index[int(frame)])
+        if not path.is_file():
+            raise StreamError(f"stream {self.id!r}: frame {frame} is not at {path}, where "
+                              "ingest recorded it")
+        return path
 
     def frame_tensor(self, frame: int) -> torch.Tensor:
         """Frame ``frame`` as ingested: RGB ``uint8`` ``(3, H, W)``."""
@@ -227,28 +224,6 @@ def collate_frames(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "stream": [b["stream"] for b in batch]}
 
 
-# kept for the call sites written against the first version of this module
-Stream = FrameStream
-
-
-def _ref_from_json(raw: dict[str, Any]):
-    """A ``VideoStreamRef`` from its serialized form (``{"value": {...}}`` or the bare fields).
-
-    Missing optional fields stay empty rather than defaulted: no fps is filled in (it is read
-    from the source), no size is invented (0 means ingest did not record one).
-    """
-    from reifyscene.common.types import VideoStreamRef
-
-    v = raw.get("value", raw) if isinstance(raw, dict) else {}
-    path = v.get("video_path", "")
-    path = path.get("value", "") if isinstance(path, dict) else path
-    return VideoStreamRef(
-        stream_id=str(v["stream_id"]), video_path=Path(str(path)),
-        fps=float(v.get("fps") or 0.0), num_frames=int(v.get("num_frames") or 0),
-        width=int(v.get("width") or 0), height=int(v.get("height") or 0),
-        has_audio=bool(v.get("has_audio", False)), metadata=dict(v.get("metadata") or {}))
-
-
 class RunStreams:
     """The streams of one run, in ingest order."""
 
@@ -257,19 +232,20 @@ class RunStreams:
 
     @classmethod
     def from_run(cls, run_dir: Path) -> RunStreams:
-        """Streams from ``<run>/ingest``, transforms from ``<run>/geometry`` when it exists.
+        """Streams from ``<run>/ingest``; their transforms from ``<run>/geometry`` once the
+        run has one (before the geometry stage there is nothing to map into)."""
+        from reifyscene.ingest.ingest_artifact import IngestArtifact
 
-        Reads the ingest JSON directly (only the stream records are needed), so a run whose
-        ingest predates fields added since still lists its streams.
-        """
         run_dir = Path(run_dir)
-        raw = json.loads((run_dir / "ingest" / "artifact.json").read_text())
-        refs = [_ref_from_json(s) for s in raw.get("streams") or []]
+        refs = IngestArtifact.load(run_dir / "ingest").streams
         records: dict[str, Any] = {}
         geometry = run_dir / "geometry" / "artifact.json"
         if geometry.is_file():
-            meta = json.loads(geometry.read_text()).get("metadata") or {}
-            records = meta.get("image_transforms") or {}
+            meta = json.loads(geometry.read_text())["metadata"]
+            if "image_transforms" not in meta:
+                raise StreamError(f"{run_dir.name}: its geometry records no image transforms; "
+                                  "its pixels cannot be related to the frames")
+            records = meta["image_transforms"]
         return cls([FrameStream(r, records.get(str(r.stream_id))) for r in refs])
 
     @property

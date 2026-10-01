@@ -1164,7 +1164,7 @@ class VGGTLongInitializer(VGGTInitializer):
             loader, target = self._input_loader()
             # version 2: the no-upscale loader crops tall frames (version 1 squashed them).
             artifact.metadata["vggt_long_input_loader"] = {
-                "loader": loader, "target_size": target, "version": 2,
+                "loader": loader, "target_size": target,
             }
             self._record_transforms(artifact, {
                 stream_id: vggt_input_transform(

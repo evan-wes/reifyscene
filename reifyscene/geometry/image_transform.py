@@ -312,9 +312,8 @@ def vggt_loader_ops(
     (``VGGTLongInitializer._load_and_preprocess_images_without_upscale``): width to
     ``min(target, w)`` in whole 14-pixel patches, height in proportion (floored to 14),
     then the rows centred on the target when taller -- like upstream, never upscaling.
-    ``bounded_v1`` is that loader before it cropped (it squashed tall frames), kept to
-    describe geometry it made. ``pad`` mode letterboxes, which no backend uses: it is not
-    implemented rather than guessed.
+    ``pad`` mode letterboxes, which no backend uses: it is not implemented rather than
+    guessed.
     """
     if mode != "crop":
         raise NotImplementedError(
@@ -337,18 +336,9 @@ def vggt_loader_ops(
         if new_height > target:
             start_y = (new_height - target) // 2
             ops.append(Crop((0, start_y, new_width, start_y + target)))
-    elif loader == "bounded_v1":
-        # The no-upscale loader before 2026-09-11: a float scale (720 at 252 floors to 238)
-        # and both sides clamped to the target, so a portrait frame was squashed. Kept to
-        # describe geometry it made.
-        target = max(14, int(target_size))
-        scale = min(1.0, float(target) / float(max(width, 1)))
-        new_width = min(target, max(14, int(np.floor((width * scale) / 14.0)) * 14))
-        new_height = min(target, max(14, int(np.floor((height * scale) / 14.0)) * 14))
-        ops.append(Resize((new_width, new_height), "bicubic"))
     else:
         raise ValueError(
-            f"unknown VGGT loader {loader!r}: expected 'upstream', 'bounded' or 'bounded_v1'"
+            f"unknown VGGT loader {loader!r}: expected 'upstream' or 'bounded'"
         )
     return ops
 
@@ -405,44 +395,17 @@ def transform_record(transform: ImageTransform, *, recorded_by: str) -> dict[str
     return {**transform.to_dict(), "source": "recorded", "recorded_by": str(recorded_by)}
 
 
-def _stream_depth_size(geometry_artifact, stream_id: str) -> tuple[int, int] | None:
-    prefix = f"{stream_id}:"
-    for key, payload in (getattr(geometry_artifact, "depthmaps_by_frame", {}) or {}).items():
-        if str(key).startswith(prefix) and payload is not None and payload.get("depth") is not None:
-            depth = np.asarray(payload["depth"])
-            if depth.ndim == 3 and depth.shape[-1] == 1:
-                depth = depth[..., 0]
-            return (int(depth.shape[1]), int(depth.shape[0]))
-    return None
-
-
-def image_transform_for(
-    geometry_artifact, stream_id: str, *, source_size: tuple[int, int] | None = None
-) -> ImageTransform:
+def image_transform_for(geometry_artifact, stream_id: str) -> ImageTransform:
     """The recorded ingest-frame -> geometry-pixels transform for one stream.
 
-    Without a record (an artifact made before transforms were recorded) the only
-    mapping that can be proven is the identity: when the frame is the size of the
-    geometry's depth maps (or the geometry has no depth maps to disagree with).
-    Anything else raises :class:`MissingImageTransform` -- re-run geometry, or resume
-    through the resume check, which derives the record where it can.
+    Every geometry backend records one; a stream without a record raises
+    :class:`MissingImageTransform` rather than being given a guessed mapping.
     """
     records = (getattr(geometry_artifact, "metadata", {}) or {}).get("image_transforms") or {}
     raw = records.get(str(stream_id))
-    if raw is not None:
-        return ImageTransform.from_dict(raw)
-    depth_size = _stream_depth_size(geometry_artifact, str(stream_id))
-    if source_size is not None:
-        size = (int(source_size[0]), int(source_size[1]))
-        if depth_size is None or depth_size == size:
-            return ImageTransform.identity(size)
-    elif depth_size is not None:
-        return ImageTransform.identity(depth_size)
-    depth_txt = None if depth_size is None else f"{depth_size[0]}x{depth_size[1]}"
-    frame_txt = None if source_size is None else f"{source_size[0]}x{source_size[1]}"
-    raise MissingImageTransform(
-        f"geometry stream {stream_id!r} has no recorded image transform, and its depth maps "
-        f"({depth_txt}) are not the size of the frame ({frame_txt}); the artifact predates "
-        "recorded transforms -- re-run the geometry stage, or resume through the resume check, "
-        "which derives it"
-    )
+    if raw is None:
+        raise MissingImageTransform(
+            f"geometry stream {stream_id!r} has no recorded image transform; its pixels cannot "
+            "be related to the frames"
+        )
+    return ImageTransform.from_dict(raw)

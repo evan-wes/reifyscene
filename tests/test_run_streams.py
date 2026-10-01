@@ -2,13 +2,14 @@
 
 What these pin: the stream id comes from the run -- ``cam_00`` for a video, ``0`` for a DyCheck
 frames folder -- and nothing downstream assumes it; with several streams and none named, the
-answer is an error listing them, not a guess; frame keys round-trip; a frames folder whose
-recorded paths moved is still read from where the stream is now.
+answer is an error listing them, not a guess; frame keys round-trip; a frame is read only where
+ingest recorded it.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,10 +21,16 @@ from reifyscene.ingest.streams import RunStreams, StreamError
 
 
 def _run(tmp_path, streams: list[dict], transforms: dict | None = None):
+    """A run whose ingest holds ``streams`` (VideoStreamRef fields; size/fps default)."""
+    from reifyscene.common.types import VideoStreamRef
+    from reifyscene.ingest.ingest_artifact import IngestArtifact
+
     run = tmp_path / "run"
-    (run / "ingest").mkdir(parents=True)
-    (run / "ingest" / "artifact.json").write_text(json.dumps({"streams": [
-        {"__type__": "dataclass", "class": "VideoStreamRef", "value": s} for s in streams]}))
+    refs = [VideoStreamRef(**{"video_path": Path(s.get("video_path") or run / "clip"),
+                              "fps": 30.0, "width": 8, "height": 6, "has_audio": False,
+                              "metadata": {}, **{k: v for k, v in s.items() if k != "video_path"}})
+            for s in streams]
+    IngestArtifact(run_id="run", stage_name="ingest", save_dir=run / "ingest", streams=refs).save()
     if transforms is not None:
         (run / "geometry").mkdir()
         (run / "geometry" / "artifact.json").write_text(json.dumps(
@@ -45,7 +52,7 @@ def _frames_dir(tmp_path, n=3, w=8, h=6):
 def test_a_frames_folder_stream_is_0_and_serves_its_frames_in_render_pixels(tmp_path) -> None:
     d, index = _frames_dir(tmp_path)
     t = ImageTransform((8, 6), (Resize(size=(4, 3)),))
-    run = _run(tmp_path, [{"stream_id": "0", "video_path": {"__type__": "path", "value": str(d)},
+    run = _run(tmp_path, [{"stream_id": "0", "video_path": d,
                            "fps": 30.0, "num_frames": 3, "width": 8, "height": 6,
                            "metadata": {"source": "frames", "frame_index": index}}],
                {"0": t.to_dict()})
@@ -56,12 +63,6 @@ def test_a_frames_folder_stream_is_0_and_serves_its_frames_in_render_pixels(tmp_
     assert s.key(2) == "0:2" and parse_key(s.key(2)) == ("0", 2)
 
 
-def test_a_moved_frames_folder_is_read_from_where_the_stream_is_now(tmp_path) -> None:
-    d, index = _frames_dir(tmp_path)
-    stale = {k: str(tmp_path / "gone" / "rgb" / v.rsplit("/", 1)[-1]) for k, v in index.items()}
-    run = _run(tmp_path, [{"stream_id": "0", "video_path": str(d), "num_frames": 3,
-                           "metadata": {"source": "frames", "frame_index": stale}}])
-    assert RunStreams.from_run(run).only().frame(2)[0, 0].tolist() == [30, 30, 30]
 
 
 def test_several_streams_and_none_named_is_an_error_not_a_guess(tmp_path) -> None:

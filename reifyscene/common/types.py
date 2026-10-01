@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Optional, get_args, get_origin, get_type_hints
 
@@ -236,8 +236,7 @@ class BaseArtifact:
             kwargs = {}
             nested_hints = get_type_hints(annotation)
             for f in fields(annotation):
-                if f.name in payload:
-                    kwargs[f.name] = cls._deserialize_value(nested_hints.get(f.name, f.type), payload[f.name])
+                kwargs[f.name] = cls._deserialize_value(nested_hints.get(f.name, f.type), payload[f.name])
             return annotation(**kwargs)
         return raw
 
@@ -268,17 +267,21 @@ class BaseArtifact:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "BaseArtifact":
-        """Reconstruct an artifact from a serialized payload."""
+        """Reconstruct an artifact from a serialized payload.
+
+        ``to_payload`` writes every dataclass field, so a missing field means an old
+        or truncated artifact: it raises instead of being filled with a default.
+        """
         kwargs = {}
         type_hints = get_type_hints(cls)
         for f in fields(cls):
+            if f.name not in payload:
+                raise KeyError(
+                    f"{cls.__name__} artifact payload is missing field {f.name!r} "
+                    "(old or truncated artifact; re-run the stage that writes it)"
+                )
             annotation = type_hints.get(f.name, f.type)
-            if f.name in payload:
-                kwargs[f.name] = cls._deserialize_value(annotation, payload[f.name])
-            elif f.default is not MISSING:
-                kwargs[f.name] = f.default
-            elif f.default_factory is not MISSING:  # type: ignore[attr-defined]
-                kwargs[f.name] = f.default_factory()  # type: ignore[misc]
+            kwargs[f.name] = cls._deserialize_value(annotation, payload[f.name])
         artifact = cls(**kwargs)
         artifact.save_dir = Path(artifact.save_dir)
         return artifact

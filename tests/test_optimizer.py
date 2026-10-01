@@ -13,6 +13,7 @@ from reifyscene.optimize.optimization_artifact import OptimizationArtifact
 from reifyscene.optimize.solver import JointSpatiotemporalSolver
 from reifyscene.sync.sync_artifact import SyncArtifact
 from reifyscene.tracking.track_artifact import TrackArtifact
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 
 
 def test_reprojection_factor_placeholder() -> None:
@@ -64,7 +65,8 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         camera_states_by_stream={stream_id: states},
         depthmaps_by_frame=depthmaps,
         pointmaps_by_frame=pointmaps,
-        metadata={'debug_image_paths': image_paths},
+        metadata={'debug_image_paths': image_paths, 'image_transforms': {'cam_00': transform_record(
+            ImageTransform.identity((64, 48)), recorded_by='test')}},
     )
 
 

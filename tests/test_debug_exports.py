@@ -56,7 +56,7 @@ def test_apply_debug_config_to_runtime_cfg_plumbs_stage_viewer_flags() -> None:
         'tracking': {'debug': False, 'debug_max_points': 7},
         'humans': {},
         'objects': {},
-        'render': {'debug_triptych': True},
+        'render': {},
     }
     debug_cfg = {
         'enabled': True,
@@ -81,4 +81,4 @@ def test_apply_debug_config_to_runtime_cfg_plumbs_stage_viewer_flags() -> None:
     assert out['objects']['save_debug_html'] is True
     assert out['optimization']['save_refinement_viewer'] is True
     assert out['optimization']['debug_max_points'] == 17
-    assert out['render']['debug_triptych'] is False
+    assert out['render'] == {}

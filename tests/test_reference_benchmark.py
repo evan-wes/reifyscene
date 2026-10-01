@@ -1067,22 +1067,15 @@ def test_completed_epochs_requires_proof_and_records_schedule(tmp_path: Path) ->
     # never be mistaken for a full baseline).
     (run_dir / rb.TRAINING_COMPLETE_SENTINEL).write_text("5\n")
     assert rb.completed_epochs(run_dir) == "5"
-    # Empty/legacy sentinel -> default schedule.
+    # An empty sentinel records no schedule: refused, not read as the default.
     (run_dir / rb.TRAINING_COMPLETE_SENTINEL).write_text("")
-    assert rb.completed_epochs(run_dir) == "default"
-    # Pre-sentinel runs: cfg.yaml num_epochs + final-epoch videos dir.
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "cfg.yaml").write_text("work_dir: x\nnum_epochs: 500\nbatch_size: 8\n")
-    assert rb.completed_epochs(legacy) is None  # no videos yet
-    (legacy / "videos" / "epoch_0499").mkdir(parents=True)
-    assert rb.completed_epochs(legacy) == "default"  # 500 = SoM default
-    # Non-default legacy schedule reports its actual epoch count.
-    short = tmp_path / "short"
-    short.mkdir()
-    (short / "cfg.yaml").write_text("num_epochs: 37\n")
-    (short / "videos" / "epoch_0036").mkdir(parents=True)
-    assert rb.completed_epochs(short) == "37"
+    with pytest.raises(ValueError, match="no epoch schedule"):
+        rb.completed_epochs(run_dir)
+    # Final-epoch videos without the sentinel do not prove completion.
+    other = tmp_path / "other"
+    (other / "videos" / "epoch_0499").mkdir(parents=True)
+    (other / "cfg.yaml").write_text("num_epochs: 500\n")
+    assert rb.completed_epochs(other) is None
 
 
 def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(

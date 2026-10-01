@@ -98,7 +98,7 @@ class DynMaskArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> "DynMaskArtifact":
         raw = read_json(save_dir / "artifact.json")
         masks: dict[str, np.ndarray] = {}
-        for frame_key, filename in raw.get("mask_index", {}).items():
+        for frame_key, filename in raw["mask_index"].items():
             path = require_file(save_dir / "masks" / filename, "dyn_mask mask")
             with np.load(path, allow_pickle=True) as npz:
                 masks[frame_key] = np.asarray(npz["mask"], dtype=np.uint8)
@@ -106,15 +106,15 @@ class DynMaskArtifact(BaseArtifact):
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
             save_dir=Path(save_dir),
-            metadata=raw.get("metadata", {}),
-            backend_name=raw.get("backend_name", "all-static"),
+            metadata=raw["metadata"],
+            backend_name=raw["backend_name"],
             selected_frames=[
                 FrameRef(stream_id=str(f["stream_id"]), frame_idx=int(f["frame_idx"]), timestamp_sec=float(f["timestamp_sec"]))
-                for f in raw.get("selected_frames", [])
+                for f in raw["selected_frames"]
             ],
             masks_by_frame=masks,
-            dynamic_fraction_by_frame={k: float(v) for k, v in raw.get("dynamic_fraction_by_frame", {}).items()},
-            notes=raw.get("notes", []),
+            dynamic_fraction_by_frame={k: float(v) for k, v in raw["dynamic_fraction_by_frame"].items()},
+            notes=raw["notes"],
         )
 
     def summary(self) -> dict[str, Any]:

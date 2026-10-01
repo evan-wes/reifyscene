@@ -128,55 +128,10 @@ class TrackArtifact(BaseArtifact):
         rgb: np.ndarray | None,
         max_points: int,
     ) -> tuple[np.ndarray, np.ndarray | None]:
-        """Sample a geometry point map for debug visualization.
-
-        This wrapper tolerates older and newer GeometryArtifact helper
-        signatures by falling back to the public geometry normalization helpers
-        if the direct sampler lookup is not callable in the current form.
-        """
-        kwargs = {
-            'rgb': rgb,
-            'max_points': max_points,
-            'confidence': point_payload.get('confidence'),
-        }
-        sample_fn = GeometryArtifact._sample_point_cloud
-        try:
-            return sample_fn(point_payload['points'], **kwargs)
-        except TypeError as exc:
-            message = str(exc)
-            if 'points' not in message:
-                raise
-            points = GeometryArtifact._points_to_debug_basis(
-                GeometryArtifact._ensure_hwc_points(point_payload['points'])
-            )
-            h, w, _ = points.shape
-            pts = points.reshape(-1, 3)
-            valid = np.isfinite(pts).all(axis=1)
-            conf = kwargs['confidence']
-            if conf is not None:
-                conf_arr = np.asarray(conf).reshape(-1)
-                if conf_arr.shape[0] == pts.shape[0]:
-                    valid &= np.isfinite(conf_arr)
-                    valid &= conf_arr > 0
-            cols = None
-            if rgb is not None:
-                rgb_arr = np.asarray(rgb)
-                if rgb_arr.ndim == 3 and rgb_arr.shape[-1] == 3:
-                    if rgb_arr.shape[:2] != (h, w):
-                        rgb_arr = np.asarray(
-                            Image.fromarray(rgb_arr.astype(np.uint8)).resize((w, h), resample=Image.BILINEAR)
-                        )
-                    flat_rgb = rgb_arr.reshape(-1, 3)
-                    if flat_rgb.shape[0] == pts.shape[0]:
-                        cols = flat_rgb[valid]
-            pts = pts[valid]
-            if pts.shape[0] > max_points:
-                stride = int(np.ceil(pts.shape[0] / max_points))
-                pts = pts[::stride]
-                if cols is not None:
-                    cols = cols[::stride]
-            return pts.astype(np.float32), None if cols is None else cols.astype(np.uint8)
-
+        """Sample a geometry point map for debug visualization."""
+        return GeometryArtifact._sample_point_cloud(
+            point_payload['points'], rgb=rgb, max_points=max_points,
+            confidence=point_payload.get('confidence'))
 
     @staticmethod
     def _observations_from_payload(stream_id: str, payload: dict[str, Any]) -> list[TrackObservation]:
@@ -756,10 +711,10 @@ class TrackArtifact(BaseArtifact):
         raw = read_json(save_dir / 'artifact.json')
         payloads: dict[str, dict[str, Any]] = {}
         observations: dict[str, list[TrackObservation]] = {}
-        payload_meta = raw.get('track_payload_meta', {})
-        for stream_id, filename in raw.get('track_index', {}).items():
+        payload_meta = raw['track_payload_meta']
+        for stream_id, filename in raw['track_index'].items():
             payload = np.load(save_dir / 'tracks' / filename)
-            stream_meta = payload_meta.get(stream_id, {})
+            stream_meta = payload_meta[stream_id]
             track_payload = {
                 'frame_indices': payload['frame_indices'],
                 'timestamps_sec': payload['timestamps_sec'],
@@ -767,7 +722,7 @@ class TrackArtifact(BaseArtifact):
                 'points_xy': payload['points_xy'],
                 'visibility': payload['visibility'],
                 'confidence': payload['confidence'],
-                'query_frame_idx': int(payload['query_frame_idx'][0]) if payload['query_frame_idx'].size else 0,
+                'query_frame_idx': int(payload['query_frame_idx'][0]),
                 'original_size_wh': payload['original_size_wh'],
                 'model_size_wh': payload['model_size_wh'],
                 'lifted_frame_indices': payload['lifted_frame_indices'],
@@ -775,14 +730,14 @@ class TrackArtifact(BaseArtifact):
                 'lifted_valid': payload['lifted_valid'],
                 'static_labels': payload['static_labels'],
                 'static_scores': payload['static_scores'],
-                'backend_used': stream_meta.get('backend_used'),
-                'windowing': stream_meta.get('windowing'),
+                'backend_used': stream_meta['backend_used'],
+                'windowing': stream_meta['windowing'],
             }
             payloads[stream_id] = track_payload
             observations[stream_id] = cls._observations_from_payload(stream_id, track_payload)
 
         depthmaps_by_frame: dict[str, Any] = {}
-        for frame_key, filename in raw.get('depth_index', {}).items():
+        for frame_key, filename in raw['depth_index'].items():
             payload = np.load(save_dir / 'depthmaps' / filename)
             confidence = payload['confidence']
             depthmaps_by_frame[frame_key] = {
@@ -791,7 +746,7 @@ class TrackArtifact(BaseArtifact):
             }
 
         pointmaps_by_frame: dict[str, Any] = {}
-        for frame_key, filename in raw.get('point_index', {}).items():
+        for frame_key, filename in raw['point_index'].items():
             payload = np.load(save_dir / 'pointmaps' / filename)
             confidence = payload['confidence']
             pointmaps_by_frame[frame_key] = {
@@ -800,25 +755,25 @@ class TrackArtifact(BaseArtifact):
             }
 
         all_pairs_by_stream: dict[str, AllPairsTracks] = {}
-        for stream_id, info in raw.get('all_pairs_index', {}).items():
+        for stream_id, info in raw['all_pairs_index'].items():
             all_pairs_by_stream[stream_id] = AllPairsTracks.load(save_dir / info['dir'])
 
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             per_stream_observations=observations,
-            seed_points_by_stream=raw.get('seed_points_by_stream', {}),
-            merged_track_groups=raw.get('merged_track_groups', {}),
-            visibility_masks=raw.get('visibility_masks', {}),
-            static_dynamic_hints=raw.get('static_dynamic_hints', {}),
+            seed_points_by_stream=raw['seed_points_by_stream'],
+            merged_track_groups=raw['merged_track_groups'],
+            visibility_masks=raw['visibility_masks'],
+            static_dynamic_hints=raw['static_dynamic_hints'],
             track_payloads_by_stream=payloads,
             all_pairs_by_stream=all_pairs_by_stream,
-            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw.get('selected_frames', [])],
+            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw['selected_frames']],
             depthmaps_by_frame=depthmaps_by_frame,
             pointmaps_by_frame=pointmaps_by_frame,
-            notes=raw.get('notes', []),
+            notes=raw['notes'],
         )
 
     def summary(self) -> dict[str, Any]:

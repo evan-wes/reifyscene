@@ -154,7 +154,7 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
     translation) to a seed pose set and assert the re-anchor inverts it, so the
     recovered poses land back on the seed (the relative geometry is preserved).
     """
-    from reifyscene.geometry.pose_refine import _apply_sim3_to_c2w, _sim3_src_to_dst
+    from reifyscene.geometry.similarity import apply_similarity_to_c2w, fit_similarity
 
     seed_c2w, seed_w2c = {}, {}
     for i in range(6):
@@ -179,10 +179,10 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
         drift_w2c[k] = np.linalg.inv(d)
 
     keys = list(seed_w2c)
-    s, R, t = _sim3_src_to_dst(drift_w2c, seed_w2c, keys)
+    s, R, t = fit_similarity(drift_w2c, seed_w2c, keys)
     assert np.isclose(s, 1.0 / s_true, rtol=1e-6)
     for k in keys:
-        back = _apply_sim3_to_c2w(np.linalg.inv(drift_w2c[k]), s, R, t)
+        back = apply_similarity_to_c2w(np.linalg.inv(drift_w2c[k]), s, R, t)
         assert np.allclose(back, seed_c2w[k], atol=1e-6)
 
 

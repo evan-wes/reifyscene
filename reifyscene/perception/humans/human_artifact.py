@@ -113,17 +113,17 @@ class HumanArtifact(BaseArtifact):
         }
 
     def _human_from_dict(self, raw: dict[str, Any]) -> HumanState:
-        det_id = raw.get('detection_id', raw['human_id'])
+        det_id = raw['detection_id']
         return HumanState(
             human_id=str(raw['human_id']),
             frame_ref=self._frame_ref_from_dict(raw['frame_ref']),
             bbox_xyxy=np.asarray(raw['bbox_xyxy'], dtype=np.float32),
-            mask_rle=raw.get('mask_rle'),
-            keypoints_2d=None if raw.get('keypoints_2d') is None else np.asarray(raw['keypoints_2d'], dtype=np.float32),
+            mask_rle=raw['mask_rle'],
+            keypoints_2d=None if raw['keypoints_2d'] is None else np.asarray(raw['keypoints_2d'], dtype=np.float32),
             densepose=self.densepose_payloads.get(det_id),
             smpl_params=self.smpl_payloads.get(det_id),
             confidence=float(raw['confidence']),
-            attributes=dict(raw.get('attributes', {})),
+            attributes=dict(raw['attributes']),
             dense=self.dense_payloads.get(det_id),
         )
 
@@ -182,8 +182,6 @@ class HumanArtifact(BaseArtifact):
                 draw = ImageDraw.Draw(overlay, 'RGBA')
             x1, y1, x2, y2 = map(float, h.bbox_xyxy.tolist())
             line_color = (*rgb_color, 255)
-            if mode == 'raw' and h.attributes.get('suppressed'):
-                line_color = (255, 0, 255, 255)
             draw.rectangle([x1, y1, x2, y2], outline=line_color, width=3)
             if h.keypoints_2d is not None:
                 self._draw_skeleton(draw, np.asarray(h.keypoints_2d, dtype=np.float32), rgb_color)
@@ -206,9 +204,6 @@ class HumanArtifact(BaseArtifact):
             life = f"{hist.get('lifespan_start', current_frame_idx)}-{hist.get('lifespan_end', current_frame_idx)}"
             visible = int(np.sum(np.asarray(h.keypoints_2d)[:, 2] > 0.05)) if h.keypoints_2d is not None else 0
             label = f"{h.human_id} kpt:{visible} trk:{support} d:{density:.2f} q:{quality:.2f} life:{life}"
-            if mode == 'raw' and h.attributes.get('suppressed'):
-                target = h.attributes.get('suppressed_by_detection_id', 'other')
-                label = f"SUPP -> {target} | {label}"
             draw.text((x1 + 4, max(4.0, y1 - 14.0)), label, fill=(*rgb_color, 255))
             history = [c for c in centers_by_id.get(h.human_id, []) if current_frame_idx - trail_window <= c[2] <= current_frame_idx]
             history = sorted(history, key=lambda item: item[2])
@@ -222,7 +217,6 @@ class HumanArtifact(BaseArtifact):
             ['Frame', frame_key],
             ['Raw detections', str(len(raw_frame_humans))],
             ['Kept humans', str(len(frame_humans))],
-            ['Suppressed', str(len([h for h in raw_frame_humans if h.attributes.get('suppressed')]))],
             ['Persistent IDs', str(len({h.human_id for h in self.humans}))],
         ]
         track_summaries = self.linked_ids.get('track_summaries', {})
@@ -443,17 +437,17 @@ class HumanArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> 'HumanArtifact':
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
-        for det_id in raw.get('mask_ids', []):
+        for det_id in raw['mask_ids']:
             path = require_file(save_dir / 'masks' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
             with np.load(path, allow_pickle=True) as npz:
                 mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         densepose_payloads: dict[str, dict[str, Any]] = {}
-        for det_id in raw.get('densepose_ids', []):
+        for det_id in raw['densepose_ids']:
             path = require_file(save_dir / 'densepose' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
             with np.load(path, allow_pickle=True) as npz:
                 densepose_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
         smpl_payloads: dict[str, dict[str, Any]] = {}
-        for det_id in raw.get('smpl_ids', []):
+        for det_id in raw['smpl_ids']:
             path = require_file(save_dir / 'smpl' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
             with np.load(path, allow_pickle=True) as npz:
                 payload = {}
@@ -462,7 +456,7 @@ class HumanArtifact(BaseArtifact):
                     payload[k] = arr.item() if arr.ndim == 0 and arr.dtype == object else arr
                 smpl_payloads[det_id] = payload
         dense_payloads: dict[str, dict[str, Any]] = {}
-        for det_id in raw.get('dense_ids', []):
+        for det_id in raw['dense_ids']:
             path = require_file(save_dir / 'dense' / f"{cls._sanitize_key(det_id)}.npz", "humans file")
             with np.load(path, allow_pickle=True) as npz:
                 dense_payloads[det_id] = {k: np.asarray(npz[k]) for k in npz.files}
@@ -470,17 +464,17 @@ class HumanArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             humans=[],
             raw_humans=[],
-            linked_ids=raw.get('linked_ids', {}),
-            frame_index=raw.get('frame_index', {}),
+            linked_ids=raw['linked_ids'],
+            frame_index=raw['frame_index'],
             mask_arrays=mask_arrays,
             densepose_payloads=densepose_payloads,
             smpl_payloads=smpl_payloads,
             dense_payloads=dense_payloads,
-            notes=list(raw.get('notes', [])),
+            notes=list(raw['notes']),
         )
-        artifact.humans = [artifact._human_from_dict(item) for item in raw.get('humans', [])]
-        artifact.raw_humans = [artifact._human_from_dict(item) for item in raw.get('raw_humans', [])]
+        artifact.humans = [artifact._human_from_dict(item) for item in raw['humans']]
+        artifact.raw_humans = [artifact._human_from_dict(item) for item in raw['raw_humans']]
         return artifact

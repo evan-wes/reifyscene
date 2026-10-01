@@ -115,16 +115,16 @@ class InstanceArtifact(BaseArtifact):
     @staticmethod
     def _obs_from_dict(raw: dict[str, Any]) -> InstanceObservation:
         fr = raw['frame_ref']
-        bbox = raw.get('bbox_xyxy')
+        bbox = raw['bbox_xyxy']
         return InstanceObservation(
             instance_id=str(raw['instance_id']),
             track_id=str(raw['track_id']),
             frame_ref=FrameRef(stream_id=str(fr['stream_id']), frame_idx=int(fr['frame_idx']), timestamp_sec=float(fr['timestamp_sec'])),
-            concept=str(raw.get('concept', '')),
-            kind=str(raw.get('kind', 'unknown')),
+            concept=str(raw['concept']),
+            kind=str(raw['kind']),
             bbox_xyxy=None if bbox is None else np.asarray(bbox, dtype=np.float32),
-            confidence=float(raw.get('confidence', 0.0)),
-            attributes=dict(raw.get('attributes', {})),
+            confidence=float(raw['confidence']),
+            attributes=dict(raw['attributes']),
         )
 
     # --- persistence (masks → npz + index, records → json) ------------------
@@ -153,7 +153,7 @@ class InstanceArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> 'InstanceArtifact':
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
-        for instance_id, filename in raw.get('mask_index', {}).items():
+        for instance_id, filename in raw['mask_index'].items():
             path = require_file(save_dir / 'masks' / filename, "segment mask")
             with np.load(path, allow_pickle=True) as npz:
                 mask_arrays[instance_id] = np.asarray(npz['mask'], dtype=bool)
@@ -161,12 +161,12 @@ class InstanceArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
-            observations=[cls._obs_from_dict(o) for o in raw.get('observations', [])],
+            metadata=raw['metadata'],
+            observations=[cls._obs_from_dict(o) for o in raw['observations']],
             mask_arrays=mask_arrays,
-            frame_index=raw.get('frame_index', {}),
-            track_index=raw.get('track_index', {}),
-            notes=raw.get('notes', []),
+            frame_index=raw['frame_index'],
+            track_index=raw['track_index'],
+            notes=raw['notes'],
         )
 
     def summary(self) -> dict[str, Any]:

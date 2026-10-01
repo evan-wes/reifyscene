@@ -279,8 +279,7 @@ def test_tracking_lift_and_optimizer_relift_agree(tmp_path: Path) -> None:
         save_dir=tmp_path / "tracking",
         track_payloads_by_stream={"cam_00": payload},
     )
-    ingest = SimpleNamespace(streams=[SimpleNamespace(stream_id="cam_00", width=W, height=H)])
-    TrackLifter3D(point_conf_threshold=1.0).lift(tracks, geom, ingest)
+    TrackLifter3D(point_conf_threshold=1.0).lift(tracks, geom)
     lifted = tracks.track_payloads_by_stream["cam_00"]["lifted_xyz"]
     assert tracks.metadata["lift"]["function"] == "lift_pixels"
     assert tracks.metadata["lift"]["image_transforms"]["cam_00"] == CROP.to_dict()

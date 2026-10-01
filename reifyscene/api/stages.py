@@ -171,9 +171,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'render': StageSpec(
             name='render',
-            dependencies=('scene', 'optimization', 'pose_refine', 'tracking', 'humans'),
+            dependencies=('scene',),
             artifact_cls=RenderArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene'], optimization_artifact=outputs['optimization'], geometry_artifact=outputs['pose_refine'], track_artifact=outputs['tracking'], human_artifact=outputs['humans']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene']),
             load_fn=RenderArtifact.load,
         ),
         'handles': StageSpec(

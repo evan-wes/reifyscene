@@ -755,7 +755,7 @@ class ReifyScenePipeline:
             tracked_frame_refs.extend(self.tracker.plan_frame_refs(stream))
         artifact.selected_frames = sorted(tracked_frame_refs, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         if geometry_artifact is not None:
-            artifact = self.track_lifter.lift(artifact, geometry_artifact, ingest_artifact)
+            artifact = self.track_lifter.lift(artifact, geometry_artifact)
             self.static_dynamic_partitioner.partition(artifact, geometry_artifact)
             tracking_cfg = self.cfg.get('tracking', {})
             artifact.metadata.update({
@@ -895,7 +895,7 @@ class ReifyScenePipeline:
             height, width = np.asarray(sample).shape[:2]
             try:
                 transform = image_transform_for(
-                    geometry_artifact, stream_id, source_size=(int(width), int(height))
+                    geometry_artifact, stream_id
                 )
             except MissingImageTransform:
                 continue
@@ -1340,13 +1340,11 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None, track_artifact=None, human_artifact=None):
+    def fit_renderer(self, scene_artifact):
         """Train + render the self-contained SceneArtifact (proven Gaussian trainer).
 
         The render stage consumes ONLY the SceneArtifact (dense seed + persisted
-        train views + render trajectory). The optimization/geometry/track/human
-        artifacts are accepted for stage-signature compatibility but unused here;
-        masked-NVS scoring against held-out GT is the eval stage's job (F0 follow-up).
+        train views + render trajectory).
         """
         render_dir = self._stage_dir('render')
         artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
@@ -1452,7 +1450,7 @@ class ReifyScenePipeline:
         graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
         scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
-        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
+        render_artifact = self.fit_renderer(scene_artifact)
         handles_artifact = self.bind_gaussians(graph_artifact, render_artifact)
         return {
             'ingest': ingest_artifact,

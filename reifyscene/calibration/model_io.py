@@ -226,7 +226,3 @@ def parse_colmap_text_model(model_dir: str | Path) -> ParsedColmapModel:
         reprojection_stats=reprojection_stats,
     )
 
-
-# Backwards-compatible alias (qvec_to_rotmat became public API once
-# gt_scoring and its tests needed it).
-_qvec_to_rotmat = qvec_to_rotmat

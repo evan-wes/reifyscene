@@ -22,11 +22,6 @@ def test_a_manifest_carries_both_axes() -> None:
     assert CapabilityManifest.from_dict(d).provides == m.provides
 
 
-def test_provides_round_trips_through_an_older_manifest() -> None:
-    """A manifest written before the second axis existed loads with an empty one."""
-    legacy = {'stage': 'reid', 'backend_used': 'dinov2', 'fidelity': 'dino_features',
-              'rungs': [], 'notes': []}
-    assert CapabilityManifest.from_dict(legacy).provides == {}
 
 
 def test_a_green_backend_can_still_report_a_useless_capability() -> None:

@@ -12,9 +12,8 @@ every stage declares a :class:`StageContract`:
   (:data:`ALWAYS_EXCLUDED`, plus per-stage ``exclude`` / ``exclude_when``).
 - ``version``: bump it whenever the stage's output changes for the same settings and
   input -- a new algorithm, OR A CHANGED CODE DEFAULT for a setting it reads (the
-  fingerprint records the value the config gives, not what the code falls back to) --
-  and say what changed in ``changes``; a resume quotes it when it rejects an older
-  artifact.
+  fingerprint records the value the config gives, not what the code falls back to).
+  An artifact of any other version is stale.
 - ``pinned``: settings the run script picks from the machine (free GPU memory) when
   they are not given explicitly. A resume takes them from the prior run instead of
   re-picking them, so a busy GPU does not change what "the same run" means.
@@ -25,8 +24,6 @@ every stage declares a :class:`StageContract`:
 - ``rebuildable``: the stage is cheap, runs no model, and is a pure function of its
   upstream artifacts and settings, so a resume that finds it stale re-runs it
   instead of rejecting.
-- ``relinks``: upstream stages whose change this stage can absorb without re-running
-  (tracking keeps its 2D tracks and re-lifts them onto a changed pose_refine).
 
 Every artifact records ``metadata["contract"]``: its stage, version, effective
 settings, the identity of the input frames, the digests of the upstream artifacts it
@@ -76,8 +73,6 @@ class StageContract:
     upstream: tuple[str, ...] = ()
     paths: tuple[str, ...] = ()
     rebuildable: bool | Callable[[Mapping[str, Any]], bool] = False
-    changes: Mapping[int, str] = field(default_factory=dict)
-    relinks: tuple[str, ...] = ()
 
     def excluded(self, cfg: Mapping[str, Any]) -> tuple[str, ...]:
         extra = tuple(self.exclude_when(cfg)) if self.exclude_when is not None else ()
@@ -188,39 +183,11 @@ def effective_settings(stage: str, cfg: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def current_view(stage: str, settings: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """Recorded settings as today's contract fingerprints them.
-
-    A key the contract has since excluded (it was found not to affect the output), or
-    an entry it no longer declares, is dropped, so taking a setting out of a
-    fingerprint does not make every older record look different.
-    """
-    contract = contract_for(stage)
-    patterns = contract.excluded(cfg)
-    out: dict[str, Any] = {}
-    for path, value in settings.items():
-        if path not in contract.settings or any(fnmatch.fnmatchcase(path, p) for p in patterns):
-            continue
-        out[path] = _prune(value, path, patterns)
-    return out
-
-
-def recorded_setting(record: Mapping[str, Any], path: str) -> Any:
-    """The value a fingerprint record holds for ``path`` (inside a subtree entry too)."""
-    settings = record.get("settings") or {}
-    if path in settings:
-        return settings[path]
-    for entry, value in settings.items():
-        if path.startswith(entry + ".") and isinstance(value, Mapping):
-            return get_path(value, path[len(entry) + 1:], MISSING)
-    return MISSING
-
-
 # -------------------------------------------------------------- input identity
 
 def _file_signature(path: Path) -> list[Any]:
     st = path.stat()
-    return [path.name, int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))]
+    return [path.name, int(st.st_size), int(st.st_mtime_ns)]
 
 
 def input_identity(video_paths: Iterable[str | Path], *,
@@ -266,25 +233,15 @@ def fingerprint(
     settings: Mapping[str, Any],
     input_id: Mapping[str, Any],
     upstream: Mapping[str, str | None],
-    version: int | None = None,
-    revisions: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """The record an artifact carries in ``metadata["contract"]``.
-
-    ``revisions`` name changes a resume made to the artifact's content (re-timed
-    cameras, re-lifted tracks); they are part of the digest, so what was built from the
-    unrevised artifact no longer matches it.
-    """
+    """The record an artifact carries in ``metadata["contract"]``."""
     record = {
         "stage": stage,
-        "version": contract_for(stage).version if version is None else int(version),
+        "version": contract_for(stage).version,
         "settings": stable(dict(settings)),
         "input": stable(dict(input_id)),
         "upstream": {k: upstream[k] for k in sorted(upstream)},
     }
-    revisions = list(revisions)
-    if revisions:
-        record["revisions"] = revisions
     record["digest"] = _digest(record)
     return record
 
@@ -405,16 +362,9 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "pose_refine",
             version=2,
-            changes={
-                2: "the bundle adjustment refines only cameras with enough observations to "
-                "determine a pose and runs single-threaded, so it repeats; a camera with "
-                "none used to come back from the solver's damping (one run turned one 143 "
-                "degrees and collapsed the scene's scale 60x)"
-            },
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),
-            relinks=("geometry",),
         ),
         StageContract(
             # Segment is configured by the objects section (detector, SAM 2, frame stride);
@@ -423,30 +373,22 @@ CONTRACTS: dict[str, StageContract] = {
             settings={"segment": {}, "objects": {}},
             exclude=("objects.embedder_*",),
             pinned=("objects.max_inference_side",),
-            upstream=("ingest",),
+            # segment places its instances with the refined geometry it is given
+            upstream=("ingest", "pose_refine"),
         ),
         StageContract(
             "reid",
             version=3,
-            changes={
-                2: "point tracks spanning an occlusion gap relax the appearance threshold for "
-                "the pair they bridge (the merge was appearance-only, which is weakest on the "
-                "similar-looking entities re-identification exists for)",
-                3: "tracklets in the same 3D place at the same time are merged as one entity "
-                "(co-visible pairs were refused outright, so a duplicate mask became two "
-                "entity nodes and nothing anywhere could join them)",
-            },
             settings={
                 "reid": {},
                 "objects.embedder_backend_mode": None,
                 "objects.embedder_max_inference_side": None,
             },
             pinned=("objects.embedder_max_inference_side",),
-            relinks=("tracking", "pose_refine"),
             upstream=("ingest", "segment", "tracking", "pose_refine"),
         ),
         StageContract(
-            "semantics", settings={"semantics": {}}, relinks=("reid",),
+            "semantics", settings={"semantics": {}},
             upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
@@ -467,22 +409,12 @@ CONTRACTS: dict[str, StageContract] = {
                 "humans.backend_mode",
             ),
             pinned=("humans.max_inference_side", "humans.pose_max_inference_side"),
-            relinks=("reid",),
-            upstream=("ingest", "segment", "reid"),
+            upstream=("ingest", "segment", "reid", "pose_refine"),
         ),
         StageContract(
             "tracking",
             version=3,
-            changes={
-                2: "tracks are lifted from the geometry's depth and cameras through its recorded "
-                "crop box (they were read off VGGT's point maps with the frame squashed onto the "
-                "crop, and positions outside it clamped to its edge)",
-                3: "query points are seeded on the segment masks as well as the uniform grid "
-                "(the grid was seeded on frame 0 only, so an entity that was small or absent "
-                "there got almost no points and one appearing later got none at all)",
-            },
             settings={"tracking": {}, "lifting": {}},
-            relinks=("pose_refine",),
             pinned=(
                 "tracking.frame_stride",
                 "tracking.max_frames",
@@ -499,21 +431,6 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "graph",
             version=5,
-            changes={
-                2: "entities carry the point tracks that are evidence for them (the graph held "
-                "a node per track); the tracks inside no entity are the background's",
-                3: "entity positions and extents come from the geometry's dense pointmaps "
-                "intersected with the masks (they came from the handful of point tracks that "
-                "happened to land on an entity), and a track's support ratio is measured "
-                "against the frames it was inside any entity rather than the entity's whole "
-                "co-visible life (which punished long presence, and so punished re-id)",
-                4: "nodes carry what the semantics stage decided -- category, ranked "
-                "alternatives, abstention and embedding -- and the graph records whether its "
-                "positions are gravity-aligned (a human node was hardcoded 'human' with no "
-                "category, and nothing said whether above/below were computable)",
-                5: "the renderable grade reads 'pending: gaussians layer' (it read 'absent'): "
-                "the handles stage now binds entities to Gaussians as a layer on the graph",
-            },
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
@@ -523,7 +440,6 @@ CONTRACTS: dict[str, StageContract] = {
             # debug-viewer switches.
             "optimization",
             version=2,
-            changes={2: "the re-lift goes through the tracking stage's crop box and lift function"},
             settings={"optimizer": {}},
             upstream=("sync", "pose_refine", "tracking", "humans", "objects", "graph"),
             rebuildable=True,
@@ -531,31 +447,14 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "scene",
             version=2,
-            changes={
-                2: "training photos, seed colours and the dynamic init's frames and masks are "
-                "put into the geometry's pixels (they were squashed onto its crop, so the photos "
-                "did not match the cameras)",
-            },
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
-            # timeline_source is only a metadata label; the human_* keys are legacy and
-            # ignored by the assembler.
-            exclude=("scene.timeline_source", "scene.human_*"),
+            # timeline_source is only a metadata label.
+            exclude=("scene.timeline_source",),
             upstream=("pose_refine", "segment"),
         ),
         StageContract(
-            # The run script's render presets (width, height, point_limit, ...) are legacy
-            # keys the Gaussian backend never reads.
             "render",
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
-            exclude=(
-                "render.width",
-                "render.height",
-                "render.point_limit",
-                "render.frame_stride",
-                "render.max_frames_per_path",
-                "render.enabled_paths",
-                "render.render_scale",
-            ),
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),
         ),

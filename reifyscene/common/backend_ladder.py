@@ -44,7 +44,8 @@ class RungStatus:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RungStatus:
-        return cls(name=str(d['name']), fidelity=str(d.get('fidelity', '')), status=str(d['status']), reason=str(d.get('reason', '')))
+        return cls(name=str(d['name']), fidelity=str(d['fidelity']), status=str(d['status']),
+                   reason=str(d['reason']))
 
 
 @dataclass
@@ -103,12 +104,12 @@ class CapabilityManifest:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CapabilityManifest:
         return cls(
-            stage=str(d.get('stage', '')),
-            backend_used=d.get('backend_used'),
-            fidelity=d.get('fidelity'),
-            rungs=[RungStatus.from_dict(r) for r in d.get('rungs', [])],
-            provides=dict(d.get('provides') or {}),
-            notes=list(d.get('notes', [])),
+            stage=str(d['stage']),
+            backend_used=d['backend_used'],
+            fidelity=d['fidelity'],
+            rungs=[RungStatus.from_dict(r) for r in d['rungs']],
+            provides=dict(d['provides']),
+            notes=list(d['notes']),
         )
 
 

@@ -94,10 +94,10 @@ class ObjectArtifact(BaseArtifact):
         }
 
     def _object_from_dict(self, raw: dict[str, Any], embedding_vectors: dict[str, np.ndarray]) -> ObjectState:
-        det_id = raw.get('detection_id', raw['object_id'])
+        det_id = raw['detection_id']
         # The stage files embeddings under the canonical track id (one per tracklet), not
         # the detection id; looking up only the detection id lost every one on reload.
-        track_id = (raw.get('attributes') or {}).get('track_id')
+        track_id = raw['attributes'].get('track_id')
         embedding = embedding_vectors.get(det_id)
         if embedding is None and track_id is not None:
             embedding = embedding_vectors.get(str(track_id))
@@ -106,10 +106,10 @@ class ObjectArtifact(BaseArtifact):
             frame_ref=self._frame_ref_from_dict(raw['frame_ref']),
             category=str(raw['category']),
             bbox_xyxy=np.asarray(raw['bbox_xyxy'], dtype=np.float32),
-            mask_rle=raw.get('mask_rle'),
+            mask_rle=raw['mask_rle'],
             embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),
             confidence=float(raw['confidence']),
-            attributes=dict(raw.get('attributes', {})),
+            attributes=dict(raw['attributes']),
         )
 
     def _copy_debug_images(self, image_dir: Path) -> dict[str, str]:
@@ -198,29 +198,16 @@ class ObjectArtifact(BaseArtifact):
                 x, y, _ = history[-1]
                 draw.ellipse([x - 4, y - 4, x + 4, y + 4], fill=(*rgb_color, 255), outline=(255, 255, 255, 255))
 
-        for obj in raw_frame_objects:
-            if not obj.attributes.get('suppressed'):
-                continue
-            x1, y1, x2, y2 = map(float, obj.bbox_xyxy.tolist())
-            draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 255, 255), width=2)
-            draw.line([(x1, y1), (x2, y2)], fill=(255, 0, 255, 210), width=2)
-            draw.line([(x1, y2), (x2, y1)], fill=(255, 0, 255, 210), width=2)
-            target = obj.attributes.get('suppressed_by_global_id') or obj.attributes.get('suppressed_by_detection_id', 'other')
-            text = f"supp {obj.attributes.get('current_category', obj.category)} -> {target}"
-            draw.text((x1 + 2, min(height - 16, y2 + 2)), text, fill=(255, 0, 255, 255))
-
         composed = Image.alpha_composite(base, overlay).convert('RGB')
         return np.asarray(composed, dtype=np.uint8)
 
     def _build_summary_rows(self, frame_key: str, frame_objects: list[ObjectState], raw_frame_objects: list[ObjectState]) -> list[list[str]]:
         track_summaries = self.linked_ids.get('track_summaries', {})
         visible_ids = sorted({obj.object_id for obj in frame_objects})
-        suppressed = [obj for obj in raw_frame_objects if obj.attributes.get('suppressed')]
         rows = [
             ['Frame', frame_key],
             ['Raw detections', str(len(raw_frame_objects))],
             ['Kept detections', str(len(frame_objects))],
-            ['Suppressed', str(len(suppressed))],
             ['Persistent IDs', str(len(visible_ids))],
         ]
         if visible_ids:
@@ -417,12 +404,12 @@ class ObjectArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> 'ObjectArtifact':
         raw = read_json(save_dir / 'artifact.json')
         mask_arrays: dict[str, np.ndarray] = {}
-        for det_id, filename in raw.get('mask_index', {}).items():
+        for det_id, filename in raw['mask_index'].items():
             path = require_file(save_dir / 'masks' / filename, "objects file")
             with np.load(path, allow_pickle=True) as npz:
                 mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         embedding_vectors: dict[str, np.ndarray] = {}
-        for det_id, filename in raw.get('embedding_index', {}).items():
+        for det_id, filename in raw['embedding_index'].items():
             path = require_file(save_dir / 'embeddings' / filename, "objects file")
             with np.load(path, allow_pickle=True) as npz:
                 embedding_vectors[det_id] = np.asarray(npz['embedding'], dtype=np.float32)
@@ -430,15 +417,15 @@ class ObjectArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             objects=[],
             raw_objects=[],
-            linked_ids=raw.get('linked_ids', {}),
-            frame_index=raw.get('frame_index', {}),
+            linked_ids=raw['linked_ids'],
+            frame_index=raw['frame_index'],
             mask_arrays=mask_arrays,
             embedding_vectors=embedding_vectors,
-            notes=raw.get('notes', []),
+            notes=raw['notes'],
         )
-        artifact.objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw.get('objects', [])]
-        artifact.raw_objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw.get('raw_objects', [])]
+        artifact.objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw['objects']]
+        artifact.raw_objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw['raw_objects']]
         return artifact

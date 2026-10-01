@@ -62,10 +62,6 @@ class TrackLifter3D:
         self.point_conf_threshold = float(point_conf_threshold)
 
     @staticmethod
-    def _stream_lookup(ingest_artifact) -> dict[str, Any]:
-        return {stream.stream_id: stream for stream in getattr(ingest_artifact, 'streams', [])}
-
-    @staticmethod
     def _find_camera_state(geometry_artifact, frame) -> Any | None:
         states = geometry_artifact.camera_states_by_stream.get(frame.stream_id, [])
         if not states:
@@ -79,7 +75,7 @@ class TrackLifter3D:
                 best_dt = dt
         return best
 
-    def lift(self, track_artifact, geometry_artifact, ingest_artifact) -> Any:
+    def lift(self, track_artifact, geometry_artifact) -> Any:
         """Attach lifted 3D point samples to a track artifact.
 
         Only the geometry keyframes are lifted in this first slice. Dense track
@@ -89,7 +85,6 @@ class TrackLifter3D:
         image transform, its depth and its (pose-refined) camera -- the same function
         the optimizer re-lifts with; ``metadata['lift']`` records what it ran with.
         """
-        stream_lookup = self._stream_lookup(ingest_artifact)
         geometry_selected_frames = list(geometry_artifact.selected_frames)
         # Preserve the tracking timeline already chosen upstream. Scene/render
         # uses TrackArtifact.selected_frames when timeline_source=tracking.
@@ -114,12 +109,11 @@ class TrackLifter3D:
             lifted_xyz = np.full((len(stream_frames), num_tracks, 3), np.nan, dtype=np.float32)
             lifted_valid = np.zeros((len(stream_frames), num_tracks), dtype=bool)
             lifted_frame_indices = np.asarray([f.frame_idx for f in stream_frames], dtype=np.int32)
-            stream = stream_lookup.get(stream_id)
-            original_wh = tuple(int(v) for v in payload.get('original_size_wh', [stream.width if stream else 0, stream.height if stream else 0]))
+            original_wh = tuple(int(v) for v in payload['original_size_wh'])
 
             transform = None
             if stream_frames and num_tracks:
-                transform = image_transform_for(geometry_artifact, stream_id, source_size=original_wh)
+                transform = image_transform_for(geometry_artifact, stream_id)
                 transforms[stream_id] = transform.to_dict()
             for k, frame in enumerate(stream_frames):
                 matches = np.where(frame_indices == int(frame.frame_idx))[0]

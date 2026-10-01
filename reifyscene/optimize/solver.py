@@ -86,12 +86,10 @@ class JointSpatiotemporalSolver:
         """
         # Each stream's transform, or why it has none (raised only if a re-lift needs it).
         image_transforms: dict[str, dict[str, Any] | str] = {}
-        for stream_id, payload in track_artifact.track_payloads_by_stream.items():
-            original_wh = tuple(int(v) for v in payload.get("original_size_wh", [0, 0]))
+        for stream_id in track_artifact.track_payloads_by_stream:
             try:
                 image_transforms[str(stream_id)] = image_transform_for(
-                    geometry_artifact, str(stream_id), source_size=original_wh
-                ).to_dict()
+                    geometry_artifact, str(stream_id)).to_dict()
             except MissingImageTransform as exc:
                 image_transforms[str(stream_id)] = str(exc)
         lift_settings = dict((getattr(track_artifact, "metadata", {}) or {}).get("lift") or {})

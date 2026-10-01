@@ -269,8 +269,7 @@ def place_heldout_views(data, cams, eval_cfg: dict[str, Any], backend) -> Heldou
     bundle_val = cams.get(eval_split) or cams.get("val") or []
     if bundle_val:
         # The bundle is built full-res relative to the eval factor, so K scales by the ratio.
-        has_factor = "factor" in getattr(data, "files", data)
-        bundle_factor = int(np.asarray(data["factor"])) if has_factor else 1
+        bundle_factor = int(np.asarray(data["factor"]))
         k_scale = float(bundle_factor) / float(eval_factor)
         val_cams = bundle_val[: int(max_eval)] if max_eval else bundle_val
         placements = [

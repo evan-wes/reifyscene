@@ -194,7 +194,7 @@ class ArtifactGeometryProvider(GeometryProvider):
             # (VGGT: resize + centre crop), never squashed to the depth size.
             with Image.open(path) as img:
                 photo = img.convert("RGB")
-            transform = image_transform_for(self.geometry_artifact, str(fr.stream_id), source_size=photo.size)
+            transform = image_transform_for(self.geometry_artifact, str(fr.stream_id))
             if transform.output_size != (w, h):
                 raise ValueError(
                     f"geometry frame {key}: its image transform lands on {transform.output_size}, depth is {(w, h)}"

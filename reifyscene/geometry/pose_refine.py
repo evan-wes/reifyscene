@@ -38,7 +38,7 @@ import numpy as np
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.similarity import apply_similarity_to_c2w, camera_center, fit_similarity
+from reifyscene.geometry.similarity import apply_similarity_to_c2w, fit_similarity
 
 
 class PoseRefineUnavailable(RuntimeError):
@@ -190,9 +190,9 @@ def _reanchor_to_seed(refined, refined_w2c_by_key, seed_w2c_by_key, moved):
     is still in the seed frame; putting it through the correction would push it off its
     own seed pose by exactly the drift it never had.
     """
-    s, R, t = _sim3_src_to_dst(refined_w2c_by_key, seed_w2c_by_key, list(moved))
+    s, R, t = fit_similarity(refined_w2c_by_key, seed_w2c_by_key, list(moved))
     for key in moved:
-        refined[key] = _apply_sim3_to_c2w(refined[key], s, R, t).astype(np.float64)
+        refined[key] = apply_similarity_to_c2w(refined[key], s, R, t).astype(np.float64)
     return s, R, t
 
 
@@ -396,13 +396,6 @@ def _cam_from_world_matrix(image) -> np.ndarray:
     return T
 
 
-# The Sim(3) helpers live in geometry/similarity.py (masked-NVS scoring uses them too);
-# these names are kept for the re-anchor below and its test.
-_center_from_w2c = camera_center
-_sim3_src_to_dst = fit_similarity
-_apply_sim3_to_c2w = apply_similarity_to_c2w
-
-
 # --------------------------------------------------------------------------- #
 # Refiner.
 # --------------------------------------------------------------------------- #
@@ -483,8 +476,7 @@ class PoseRefiner:
         from reifyscene.geometry.image_transform import image_transform_for
 
         stream = {s.stream_id: s for s in ingest_artifact.streams}.get(stream_id)
-        source_size = (int(stream.width), int(stream.height)) if stream is not None else None
-        transform = image_transform_for(geometry, stream_id, source_size=source_size)
+        transform = image_transform_for(geometry, stream_id)
         debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
         images = []
         for fr in frames:
@@ -656,7 +648,6 @@ class PoseRefiner:
         # are in BA's: they must not be swept along by the re-anchor fitted to the latter.
         kept_seed_keys: set[str] = set()
         kept_seed_ids = set(ba_info["kept_seed_ids"])
-        deltas = []
         for i, fr in enumerate(frames):
             key = frame_key(stream_id, fr.frame_idx)
             refined_w2c = _cam_from_world_matrix(rec.images[i + 1])
@@ -665,8 +656,6 @@ class PoseRefiner:
             seed_w2c_by_key[key] = w2c[i]
             if (i + 1) in kept_seed_ids:
                 kept_seed_keys.add(key)
-                continue
-            deltas.append(_rotation_delta_deg(refined_w2c, w2c[i]))
 
         moved = [k for k in refined if k not in kept_seed_keys]
         if len(moved) < self.cfg.min_reg_frames:
@@ -729,13 +718,9 @@ class PoseRefiner:
             "num_obs": int(nobs),
             "num_reg_frames": int(rec.num_reg_frames()),
             "mean_reproj_px": mean_reproj,
-            # Measured after the re-anchor; ``_before_reanchor`` is the old measure, kept
-            # so a resume can compare an older run's recorded numbers like for like.
+            # measured after the re-anchor
             "seed_to_refined_rot_delta_deg_median": float(np.median(anchored)) if anchored else 0.0,
             "seed_to_refined_rot_delta_deg_max": float(np.max(anchored)) if anchored else 0.0,
-            "seed_to_refined_rot_delta_deg_max_before_reanchor": (
-                float(np.max(deltas)) if deltas else 0.0
-            ),
             "cameras_refined": len(moved),
             "cameras_kept_seed": sorted(kept_seed_keys),
             "min_obs_per_camera": int(self.cfg.min_obs_per_camera),

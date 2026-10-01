@@ -19,6 +19,7 @@ from PIL import Image
 from reifyscene.eval.benchmarks.inventory.score import score_masks_by_frame
 from reifyscene.eval.reference.conceptgraphs import export_run, masks_by_frame, scale_to_reference
 from reifyscene.eval.reference.conceptgraphs.export import PNG_DEPTH_SCALE
+from tests.conftest import write_ingest
 
 W, H = 32, 20
 INTR = {"fx": 40.0, "fy": 40.0, "cx": W / 2, "cy": H / 2}
@@ -55,12 +56,9 @@ def _make_run(tmp_path: Path, frames: list[int], *, source_size=(W, H)) -> tuple
     src = tmp_path / "frames"
     src.mkdir()
     n = max(frames) + 1
-    (run / "ingest").mkdir()        # which streams the run has, and where their frames are
-    (run / "ingest" / "artifact.json").write_text(json.dumps({"streams": [{"value": {
-        "stream_id": "cam_00", "video_path": str(src), "num_frames": n,
-        "width": source_size[0], "height": source_size[1],
-        "metadata": {"source": "frames",
-                     "frame_index": {str(i): str(src / f"{i:05d}.jpg") for i in range(n)}}}}]}))
+    write_ingest(run, video_path=src, num_frames=n, width=source_size[0],
+                 height=source_size[1],
+                 frame_index={str(i): str(src / f"{i:05d}.jpg") for i in range(n)})
     states, point_index, selected = [], {}, []
     rng = np.random.default_rng(0)
     for i in range(max(frames) + 1):

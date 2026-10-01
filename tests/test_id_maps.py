@@ -24,6 +24,7 @@ from reifyscene.graph.id_maps import (
     round_trip_mismatches,
 )
 from reifyscene.graph.renderable_handle import RenderPixelMasks
+from tests.conftest import write_ingest
 
 H, W = 4, 6
 A, B = "object:cam_00:sam2:cam_00:0", "human:cam_00:sam2:cam_00:1"
@@ -88,10 +89,7 @@ def _fake_run(tmp_path, monkeypatch, *, pad: bool = False):
     Frame 2: nothing at all. Frame 3: B alone -- A has left the clip.
     """
     run = tmp_path / "run_x"
-    (run / "ingest").mkdir(parents=True)
-    (run / "ingest" / "artifact.json").write_text(json.dumps({"streams": [
-        {"value": {"stream_id": "cam_00", "num_frames": NUM_FRAMES}}
-    ]}))
+    write_ingest(run, num_frames=NUM_FRAMES, width=W, height=H)
     if pad:
         transform = ImageTransform((W - 1, H), (Pad(size=(W, H), offset=(0, 0)),))
     else:

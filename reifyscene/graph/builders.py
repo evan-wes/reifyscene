@@ -296,7 +296,7 @@ def _positions_from_geometry(geometry_artifact, stream_id: str, masks_by_frame) 
     height, width = np.asarray(sample).shape[:2]
     try:
         transform = image_transform_for(
-            geometry_artifact, stream_id, source_size=(int(width), int(height))
+            geometry_artifact, stream_id
         )
     except MissingImageTransform:
         return {}
@@ -466,20 +466,16 @@ def _apply_identity(attrs: dict[str, Any], entity, semantics_artifact) -> tuple[
         attrs["semantics_source"] = "objects" if attrs.get("category") else "none"
         return entity.label, None
 
-    # The separation statistics and the abstention flag arrive with the semantics
-    # abstention change (PR #5), which is not on this branch yet. Read them for what they
-    # are -- optional evidence a record may carry -- so the graph picks them up when the
-    # stage starts producing them, rather than requiring the two changes to land together.
-    abstained = bool(getattr(record, "abstained", False))
+    abstained = bool(record.abstained)
     attrs.update(
         {
             "category": record.category,
             "category_topk": [[str(lbl), float(sc)] for lbl, sc in record.category_topk],
             "category_score": float(record.score),
-            "category_margin": getattr(record, "margin", None),
-            "category_margin_z": getattr(record, "margin_z", None),
+            "category_margin": record.margin,
+            "category_margin_z": record.margin_z,
             "abstained": abstained,
-            "abstain_reason": getattr(record, "abstain_reason", None),
+            "abstain_reason": record.abstain_reason,
             "caption": record.caption,
             "semantics_source": "semantics",
         }

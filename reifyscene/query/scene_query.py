@@ -156,8 +156,8 @@ class SceneQuery:
         rels = self.relations()
         if not rels and not (self.graph.metadata or {}).get("relations"):
             return {"available": False,
-                    "reason": "this run's graph was built without relations; run "
-                              "scripts/add_graph_relations.py on it"}
+                    "reason": "this run's graph has no relations: the relation computer "
+                              "(VLA-3D) was not available when the graph was built"}
         out = []
         for r in rels:
             also = (r.attrs or {}).get("and")

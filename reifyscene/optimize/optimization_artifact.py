@@ -113,7 +113,7 @@ class OptimizationArtifact(BaseArtifact):
     def load(cls, save_dir: Path) -> 'OptimizationArtifact':
         raw = read_json(save_dir / 'artifact.json')
         refined_track_payloads_by_stream: dict[str, dict[str, Any]] = {}
-        for stream_id, info in raw.get('track_index', {}).items():
+        for stream_id, info in raw['track_index'].items():
             npz = np.load(save_dir / 'tracks' / info['file'], allow_pickle=True)
             refined_track_payloads_by_stream[stream_id] = {
                 'frame_indices': np.asarray(npz['frame_indices'], dtype=np.int32),
@@ -122,7 +122,7 @@ class OptimizationArtifact(BaseArtifact):
                 'points_xy': np.asarray(npz['points_xy'], dtype=np.float32),
                 'visibility': np.asarray(npz['visibility']).astype(bool),
                 'confidence': np.asarray(npz['confidence'], dtype=np.float32),
-                'query_frame_idx': int(np.asarray(npz['query_frame_idx']).reshape(-1)[0]) if 'query_frame_idx' in npz else 0,
+                'query_frame_idx': int(np.asarray(npz['query_frame_idx']).reshape(-1)[0]),
                 'original_size_wh': np.asarray(npz['original_size_wh'], dtype=np.int32),
                 'model_size_wh': np.asarray(npz['model_size_wh'], dtype=np.int32),
                 'lifted_frame_indices': np.asarray(npz['lifted_frame_indices'], dtype=np.int32),
@@ -135,29 +135,29 @@ class OptimizationArtifact(BaseArtifact):
                 'static_scores': np.asarray(npz['static_scores'], dtype=np.float32),
                 'refined_static_labels': np.asarray(npz['refined_static_labels'], dtype=np.int8),
                 'refined_static_scores': np.asarray(npz['refined_static_scores'], dtype=np.float32),
-                'backend_used': info.get('backend_used', 'unknown'),
-                'windowing': info.get('windowing', {}),
-                'refinement_summary': info.get('refinement_summary', {}),
-                'refined_classification_summary': info.get('refined_classification_summary', {}),
+                'backend_used': info['backend_used'],
+                'windowing': info['windowing'],
+                'refinement_summary': info['refinement_summary'],
+                'refined_classification_summary': info['refined_classification_summary'],
             }
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             refined_cameras={
                 stream_id: [GeometryArtifact._camera_state_from_dict(state) for state in states]
-                for stream_id, states in raw.get('refined_cameras', {}).items()
+                for stream_id, states in raw['refined_cameras'].items()
             },
-            refined_offsets=raw.get('refined_offsets', {}),
-            tracks_3d=raw.get('tracks_3d', {}),
+            refined_offsets=raw['refined_offsets'],
+            tracks_3d=raw['tracks_3d'],
             refined_track_payloads_by_stream=refined_track_payloads_by_stream,
-            selected_frames=[FrameRef(**item) for item in raw.get('selected_frames', [])],
-            object_trajectories=raw.get('object_trajectories', {}),
-            human_trajectories=raw.get('human_trajectories', {}),
-            stage_diagnostics=raw.get('stage_diagnostics', []),
-            schedule_used=raw.get('schedule_used', []),
-            pending_todos=raw.get('pending_todos', []),
+            selected_frames=[FrameRef(**item) for item in raw['selected_frames']],
+            object_trajectories=raw['object_trajectories'],
+            human_trajectories=raw['human_trajectories'],
+            stage_diagnostics=raw['stage_diagnostics'],
+            schedule_used=raw['schedule_used'],
+            pending_todos=raw['pending_todos'],
         )
 
     def export_refinement_viewer(self, track_artifact: TrackArtifact, geometry_artifact: GeometryArtifact) -> None:
