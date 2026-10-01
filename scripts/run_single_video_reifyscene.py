@@ -263,18 +263,18 @@ def _sorted_unique_frame_refs(frames):
 
 
 def _sample_rate_hz(frames) -> str:
+    """Mean sampling rate in Hz when every frame has a time, else the mean frame step (a
+    source with no recorded frame rate has no Hz)."""
     frames = _sorted_unique_frame_refs(frames)
-    if len(frames) < 2:
+    pairs = [(a, b) for a, b in zip(frames[:-1], frames[1:]) if a.stream_id == b.stream_id]
+    if not pairs:
         return "n/a"
-    deltas = []
-    for a, b in zip(frames[:-1], frames[1:]):
-        dt = float(b.timestamp_sec) - float(a.timestamp_sec)
-        if dt > 1e-6:
-            deltas.append(dt)
-    if not deltas:
-        return "n/a"
-    hz = 1.0 / (sum(deltas) / len(deltas))
-    return f"{hz:.2f} Hz"
+    if all(f.timestamp_sec is not None for f in frames):
+        deltas = [float(b.timestamp_sec) - float(a.timestamp_sec) for a, b in pairs]
+        deltas = [d for d in deltas if d > 1e-6]
+        return f"{1.0 / (sum(deltas) / len(deltas)):.2f} Hz" if deltas else "n/a"
+    steps = [int(b.frame_idx) - int(a.frame_idx) for a, b in pairs]
+    return f"every {sum(steps) / len(steps):.3g} frames"
 
 
 def _frame_set_from_states(states):
