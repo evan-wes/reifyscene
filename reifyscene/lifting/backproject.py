@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.depth import valid_depth_mask
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.lifting.lift import lift_pixels, lift_record
 
@@ -127,7 +128,7 @@ class TrackLifter3D:
                 t = int(matches[0])
                 xy = points_xy[t]
                 vis = visibility[t].astype(bool) if visibility.size else np.ones((num_tracks,), dtype=bool)
-                frame_key = f'{frame.stream_id}:{frame.frame_idx}'
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 depth_payload = geometry_artifact.depthmaps_by_frame.get(frame_key)
                 camera_state = self._find_camera_state(geometry_artifact, frame)
                 if depth_payload is None or camera_state is None:

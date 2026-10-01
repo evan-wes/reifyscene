@@ -54,8 +54,9 @@ def _gt_motion(run_dir: Path, frames: list[int], stream_id: str | None = None
     whose world position cannot be recovered are absent from the result rather than assumed
     static.
     """
+    from reifyscene.common.frame_keys import parse_key
     from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
-    from reifyscene.ingest.streams import RunStreams, parse_key
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
     geometry = run_dir / "geometry"

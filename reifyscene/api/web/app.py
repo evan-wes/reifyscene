@@ -106,7 +106,8 @@ class Run:
         """The scene's training photos (already in render pixels), by frame, for the run's
         one stream. The app has no stream picker yet, so a multi-stream run is refused rather
         than having one camera's frame 12 silently replace another's."""
-        from reifyscene.ingest.streams import RunStreams, parse_key
+        from reifyscene.common.frame_keys import parse_key
+        from reifyscene.ingest.streams import RunStreams
 
         if self._photos is None:
             stream = RunStreams.from_run(self.path).only().id

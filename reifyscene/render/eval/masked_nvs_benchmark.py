@@ -29,6 +29,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 from reifyscene.geometry.similarity import (
     apply_similarity_to_c2w,
@@ -196,14 +197,7 @@ def _keyframe_frames(train_cams) -> dict[int, tuple[str, int]]:
     Bundle frame names are ``<stream>:<frame>``. Sparse-keyframe scenes number their
     time by keyframe, so the frame cannot be read off the time id.
     """
-    frames = {}
-    for cam in train_cams:
-        stream, _, frame = str(cam.frame_name).rpartition(":")
-        try:
-            frames[int(cam.time_id)] = (stream or "0", int(frame))
-        except ValueError:
-            frames[int(cam.time_id)] = ("0", int(cam.time_id))
-    return frames
+    return {int(cam.time_id): parse_key(cam.frame_name) for cam in train_cams}
 
 
 def _nearest_scene_time(frame: int, keyframes: dict[int, tuple[str, int]]) -> int:

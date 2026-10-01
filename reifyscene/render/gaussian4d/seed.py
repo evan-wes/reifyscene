@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.render.gaussian4d.rasterizer import GaussianCloud
 
 
@@ -113,7 +114,7 @@ def seed_arrays_from_geometry(
     scale_parts: list[np.ndarray] = []
 
     for frame in geometry_artifact.selected_frames:
-        key = f"{frame.stream_id}:{int(frame.frame_idx)}"
+        key = frame_key(frame.stream_id, frame.frame_idx)
         depth_payload = geometry_artifact.depthmaps_by_frame.get(key)
         rgb = rgb_by_frame.get(key)
         state = state_by_key.get((str(frame.stream_id), round(float(frame.timestamp_sec), 6)))

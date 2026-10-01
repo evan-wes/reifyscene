@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import GraphEdge, GraphNode
 from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.graph.edges import EdgeFactory
@@ -280,7 +281,7 @@ def _positions_from_geometry(geometry_artifact, stream_id: str, masks_by_frame) 
         return {}
 
     def load(frame_idx: int):
-        payload = pointmaps.get(f"{stream_id}:{int(frame_idx)}")
+        payload = pointmaps.get(frame_key(stream_id, frame_idx))
         if not payload:
             return None
         points = payload.get("points")

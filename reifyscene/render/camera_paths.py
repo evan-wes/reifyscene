@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
+
 
 def _z_up_rot() -> np.ndarray:
     """Return the canonical world rotation.
@@ -78,7 +80,7 @@ class CameraPathGenerator:
     def _time_grid(self, scene_artifact) -> list[dict[str, Any]]:
         return [
             {
-                "frame_key": f"{fr.stream_id}:{int(fr.frame_idx)}",
+                "frame_key": frame_key(fr.stream_id, fr.frame_idx),
                 "time_sec": float(fr.timestamp_sec),
                 "frame_ref": fr,
             }

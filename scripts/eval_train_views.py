@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common.frame_keys import parse_key
+
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
@@ -65,7 +67,7 @@ def evaluate(run: Path, sub: str, stills: int) -> dict:
         g8 = (gt.cpu().numpy() * 255 + 0.5).astype(np.uint8)
         sharp.append(_laplacian_var(r8) / max(_laplacian_var(g8), 1e-9))
         if i in pick:
-            frame = str(keys[i]).rsplit(":", 1)[-1]
+            frame = parse_key(keys[i])[1]
             Image.fromarray(np.concatenate([g8, r8], axis=0)).save(
                 run / sub / f"train_eval_{int(frame):05d}.png")
     res = {"run": run.name, "sub": sub, "frames": len(views),

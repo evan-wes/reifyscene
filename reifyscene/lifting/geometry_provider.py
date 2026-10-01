@@ -27,6 +27,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from reifyscene.common.frame_keys import frame_key
+
 if TYPE_CHECKING:
     from reifyscene.lifting.native_track_lift import CameraRecords, FrameStack
 
@@ -114,7 +116,7 @@ class ArtifactGeometryProvider(GeometryProvider):
 
     @staticmethod
     def _frame_key(fr) -> str:
-        return f"{fr.stream_id}:{int(fr.frame_idx)}"
+        return frame_key(fr.stream_id, fr.frame_idx)
 
     def _state_for(self, fr):
         states = list((self.geometry_artifact.camera_states_by_stream or {}).get(fr.stream_id, []))
@@ -124,6 +126,7 @@ class ArtifactGeometryProvider(GeometryProvider):
 
     def _empty_cameras(self, device: str):
         import torch
+
         from reifyscene.lifting.native_track_lift import CameraRecords
 
         return CameraRecords(
@@ -146,7 +149,11 @@ class ArtifactGeometryProvider(GeometryProvider):
         from PIL import Image
 
         from reifyscene.common.depth import valid_depth_mask
-        from reifyscene.lifting.native_track_lift import CameraRecords, FrameStack, _intrinsics_matrix
+        from reifyscene.lifting.native_track_lift import (
+            CameraRecords,
+            FrameStack,
+            _intrinsics_matrix,
+        )
 
         if split != "train":
             raise NotImplementedError("ArtifactGeometryProvider only provides the 'train' frame stack.")

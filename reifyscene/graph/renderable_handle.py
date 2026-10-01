@@ -130,7 +130,7 @@ def trained_fg_positions(
     positions = means_t.detach().cpu().numpy().transpose(1, 0, 2)  # (G, T, 3) -> (T, G, 3)
     w2c = np.asarray(bundle["train_w2cs"], dtype=np.float64)
     intrinsics = np.asarray(bundle["train_Ks"], dtype=np.float64)
-    from reifyscene.ingest.streams import parse_key
+    from reifyscene.common.frame_keys import parse_key
 
     frames = [parse_key(str(n))[1] for n in np.asarray(bundle["train_frame_names"])]
     return positions, w2c, intrinsics, frames

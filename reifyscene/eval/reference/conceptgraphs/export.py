@@ -151,8 +151,9 @@ def export_run(
     """
     from PIL import Image
 
+    from reifyscene.common.frame_keys import parse_key
     from reifyscene.geometry.image_transform import ImageTransform
-    from reifyscene.ingest.streams import RunStreams, parse_key
+    from reifyscene.ingest.streams import RunStreams
 
     run_dir, out_dir = Path(run_dir), Path(out_dir)
     stream = RunStreams.from_run(run_dir).resolve(stream_id)

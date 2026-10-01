@@ -3,55 +3,69 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-import numpy as np
 from typing import Any
 
-from reifyscene.common.io import read_yaml
+import numpy as np
+
+from reifyscene.api.contracts import input_identity, stage_fingerprint
+from reifyscene.api.stages import build_stage_registry
 from reifyscene.calibration.runner import CalibrationRunner
-from reifyscene.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
-from reifyscene.common.paths import ensure_dir
+from reifyscene.common.backend_ladder import (
+    BackendLadder,
+    BackendRung,
+    CapabilityManifest,
+    RungStatus,
+    importable,
+)
+from reifyscene.common.frame_keys import frame_key, parse_key
+from reifyscene.common.io import read_yaml
 from reifyscene.common.memory import release_memory
+from reifyscene.common.paths import ensure_dir
+from reifyscene.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from reifyscene.data.dataset import MultiVideoDataset
 from reifyscene.geometry.camera_interpolation import densify_camera_states_for_frames
-from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
-from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
-from reifyscene.geometry.vggt_wrapper import VGGTInitializer
-from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
-from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
-from reifyscene.geometry.moge_wrapper import MoGeInitializer
 from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
 from reifyscene.geometry.compose import GeometryComposer
-from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
-from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
 from reifyscene.graph.builders import DynamicSceneGraphBuilder
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.ingest.quality import ClipQualityAssessor
-from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.lifting.backproject import TrackLifter3D
 from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
 from reifyscene.optimize.solver import JointSpatiotemporalSolver
-from reifyscene.perception.humans.detector import HumanDetector
-from reifyscene.perception.humans.pose2d import HumanPose2DEstimator
+from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.perception.humans.dense_ladder import (
+    BboxOnlyRung,
+    KeypointRcnnRung,
+    SapiensDenseRung,
+)
 from reifyscene.perception.humans.densepose_wrapper import DensePoseEstimator
-from reifyscene.perception.humans.smpl_fitter import SMPLFitter
-from reifyscene.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, SapiensDenseRung
-from reifyscene.perception.humans.sapiens_wrapper import sapiens_cached
+from reifyscene.perception.humans.detector import HumanDetector
 from reifyscene.perception.humans.human_artifact import HumanArtifact
+from reifyscene.perception.humans.pose2d import HumanPose2DEstimator
+from reifyscene.perception.humans.sapiens_wrapper import sapiens_cached
+from reifyscene.perception.humans.smpl_fitter import SMPLFitter
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from reifyscene.perception.instance.segment import FloorInstanceSegmenter
 from reifyscene.perception.objects.detector import ObjectDetector
 from reifyscene.perception.objects.embedder import InstanceEmbedder
 from reifyscene.perception.objects.object_artifact import ObjectArtifact
 from reifyscene.perception.objects.segmenter import ObjectSegmenter
-from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from reifyscene.perception.instance.segment import FloorInstanceSegmenter
-from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 from reifyscene.perception.reid.covisible import build_covisible_merge_map
+from reifyscene.perception.reid.dino_reid import DinoReid
 from reifyscene.perception.reid.reid_artifact import ReidArtifact
 from reifyscene.perception.reid.reid_stage import FloorReid
-from reifyscene.perception.reid.dino_reid import DinoReid
 from reifyscene.perception.semantics.semantics_artifact import (
     UNKNOWN_CATEGORY,
     SemanticsArtifact,
@@ -61,15 +75,11 @@ from reifyscene.perception.semantics.siglip_semantics import (
     FloorSemantics,
     SiglipSemantics,
 )
-from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
 from reifyscene.query.parser import PromptParser
-from reifyscene.api.contracts import input_identity, stage_fingerprint
-from reifyscene.api.stages import build_stage_registry
 from reifyscene.render.registry import build_renderer
 from reifyscene.scene.assembler import SingleVideoSceneAssembler
 from reifyscene.sync.global_time_solver import GlobalTimeAlignmentSolver
 from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
-
 
 # Fidelity tag each geometry backend carries in its CapabilityManifest (design §4A.1).
 # Joint rungs (vggt*/dataset) fill poses+depth; moge is depth-only, colmap pose-only.
@@ -242,7 +252,8 @@ class ReifyScenePipeline:
             self._run_video_paths = [str(p) for p in video_paths]
         key = tuple(str(p) for p in video_paths)
         if key not in self._input_identities:
-            self._input_identities[key] = input_identity(video_paths)
+            self._input_identities[key] = input_identity(
+                video_paths, frames_camera=self.cfg.get('frames_camera'))
         record = stage_fingerprint(stage_name, self.cfg, self._input_identities[key], self._stage_digests)
         artifact.metadata = dict(getattr(artifact, 'metadata', {}) or {})
         artifact.metadata['contract'] = record
@@ -275,7 +286,9 @@ class ReifyScenePipeline:
         2. Add window selection for long videos.
         3. Add optional audio metadata probing.
         """
-        streams = self.decoder.decode_many(video_paths)
+        frames_camera = self.cfg.get('frames_camera')
+        streams = self.decoder.decode_many(
+            video_paths, frames_camera=None if frames_camera is None else str(frames_camera))
         dataset = MultiVideoDataset(streams)
         keyframes = dataset.sample_keyframes(
             stride_sec=float(self.cfg.get('keyframe_stride_sec', 1.0)),
@@ -523,7 +536,7 @@ class ReifyScenePipeline:
             if depth is None or depth.ndim < 2:
                 continue
             depth = depth[..., 0] if depth.ndim == 3 and depth.shape[-1] == 1 else depth
-            stream_id = str(key).rpartition(':')[0]
+            stream_id = parse_key(key)[0]
             size = (int(depth.shape[1]), int(depth.shape[0]))
             if depth_sizes.setdefault(stream_id, size) != size:
                 raise ValueError(f"geometry stream {stream_id!r} has depth maps of different sizes")
@@ -638,13 +651,13 @@ class ReifyScenePipeline:
                 (
                     f for f in geometry_artifact.selected_frames
                     if str(f.stream_id) == stream_id
-                    and f"{stream_id}:{int(f.frame_idx)}" in geometry_artifact.pointmaps_by_frame
+                    and frame_key(stream_id, f.frame_idx) in geometry_artifact.pointmaps_by_frame
                 ),
                 key=lambda fr: int(fr.frame_idx),
             )
             rebuilt: list[TimedCameraState] = []
             for fr in keyframes:
-                key = f"{stream_id}:{int(fr.frame_idx)}"
+                key = frame_key(stream_id, fr.frame_idx)
                 orig = geometry_artifact._find_state_for_frame(fr)
                 rebuilt.append(TimedCameraState(
                     stream_id=stream_id,
@@ -870,7 +883,7 @@ class ReifyScenePipeline:
                 continue
 
             def load(frame_idx: int, _stream=stream_id):
-                payload = pointmaps.get(f"{_stream}:{int(frame_idx)}")
+                payload = pointmaps.get(frame_key(_stream, frame_idx))
                 if not payload:
                     return None
                 points = payload.get('points')
@@ -1080,7 +1093,7 @@ class ReifyScenePipeline:
                 'detection_id': o.instance_id,
                 'track_id': canonical,
                 'track_ids': [],  # point-track support decoupled (§4A)
-                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'frame_key': frame_key(o.frame_ref.stream_id, o.frame_ref.frame_idx),
                 'dense_backend': rec.get('backend', manifest.backend_used),
             }
             human_states.append(HumanState(
@@ -1180,7 +1193,7 @@ class ReifyScenePipeline:
                 'track_id': canonical,
                 'track_ids': [],  # point-track support decoupled (§4A); empty at FP1
                 'label_id': int(o.attributes.get('label_id', -1)),
-                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'frame_key': frame_key(o.frame_ref.stream_id, o.frame_ref.frame_idx),
                 'detector_backend': (instance_artifact.metadata.get('detector_backend') if instance_artifact is not None else None),
                 'semantic_topk': semantic_topk,
             }

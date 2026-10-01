@@ -15,7 +15,7 @@ with what the pipeline needs to know and must never guess:
   a bare folder -- recognised from the recorded input on disk, with its ground truth;
 - ``transform`` / ``render_raster``: the recorded image transform into the geometry's pixels
   (and so the render's), and the raster it lands in;
-- ``key()`` / :func:`parse_key`: the ``"<stream>:<frame>"`` format views and cameras are keyed by.
+- ``key()``: the frame key (:mod:`reifyscene.common.frame_keys`) views and cameras are keyed by.
 
 :class:`RunStreams` lists a run's streams from its ingest artifact and their transforms from its
 geometry; :meth:`RunStreams.resolve` takes an explicit id or the run's only stream, and refuses
@@ -34,6 +34,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from reifyscene.common.frame_keys import frame_key
+
 
 class StreamError(ValueError):
     """The run has no such stream, or which stream was meant is ambiguous, or it cannot say."""
@@ -41,18 +43,6 @@ class StreamError(ValueError):
 
 class UnknownFrameRate(StreamError):
     """A time in seconds was asked of a stream whose frame rate is not recorded anywhere."""
-
-
-def frame_key(stream_id: str, frame: int) -> str:
-    return f"{stream_id}:{int(frame)}"
-
-
-def parse_key(key: str) -> tuple[str, int]:
-    """``"cam_00:12"`` -> ``("cam_00", 12)``. The stream id may itself contain colons."""
-    stream, sep, frame = str(key).rpartition(":")
-    if not sep or not stream:
-        raise ValueError(f"not a frame key: {key!r} (expected '<stream>:<frame>')")
-    return stream, int(frame)
 
 
 class FrameStream(Dataset):

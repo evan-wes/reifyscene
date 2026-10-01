@@ -14,8 +14,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.geometry.image_transform import ImageTransform, Resize
-from reifyscene.ingest.streams import RunStreams, StreamError, parse_key
+from reifyscene.ingest.streams import RunStreams, StreamError
 
 
 def _run(tmp_path, streams: list[dict], transforms: dict | None = None):

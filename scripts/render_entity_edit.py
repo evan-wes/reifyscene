@@ -47,12 +47,13 @@ def main() -> None:
     import torch
     from PIL import Image
 
+    from reifyscene.common.frame_keys import parse_key
     from reifyscene.graph.renderable_handle import (
         compute_renderable_handles,
         drop_gaussians,
         entity_masks_in_render_pixels,
     )
-    from reifyscene.ingest.streams import RunStreams, parse_key
+    from reifyscene.ingest.streams import RunStreams
     from reifyscene.render.eval.checkpoint_views import _render, _to_u8
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import build_rasterizer

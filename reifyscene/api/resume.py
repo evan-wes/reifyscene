@@ -507,7 +507,7 @@ def check_resume(
         stages = list(STAGE_ORDER[: STAGE_ORDER.index(start_stage)])
     stages = [s for s in STAGE_ORDER if s in set(stages)]
     video_paths = [str(p) for p in video_paths]
-    current_input = input_identity(video_paths)
+    current_input = input_identity(video_paths, frames_camera=cfg.get("frames_camera"))
 
     verdicts: dict[str, StageVerdict] = {}
     records: dict[str, dict[str, Any]] = {}

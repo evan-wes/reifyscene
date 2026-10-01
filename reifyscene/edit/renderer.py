@@ -20,7 +20,7 @@ class CheckpointRenderer:
 
     def __init__(self, bundle: dict, device: str, *, raster: tuple[int, int],
                  stream_id: str) -> None:
-        from reifyscene.ingest.streams import parse_key
+        from reifyscene.common.frame_keys import parse_key
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
         from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 

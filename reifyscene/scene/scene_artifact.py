@@ -106,7 +106,7 @@ class SceneArtifact(BaseArtifact):
         for idx, view in enumerate(self.train_views):
             entry = {
                 "frame_key": str(view.get("frame_key", idx)),
-                "time_id": int(view.get("time_id", idx)),
+                "time_id": int(view["time_id"]),
                 "t_world_cam": np.asarray(view["t_world_cam"], dtype=np.float32).tolist(),
                 "intrinsics": {k: float(view["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
                 "width": int(view["width"]),
@@ -169,7 +169,7 @@ class SceneArtifact(BaseArtifact):
                     "intrinsics": {k: float(cam["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
                     "width": int(cam["width"]),
                     "height": int(cam["height"]),
-                    "time_id": int(cam.get("time_id", 0)),
+                    "time_id": int(cam["time_id"]),
                 }
                 for cam in self.render_trajectory
             ],

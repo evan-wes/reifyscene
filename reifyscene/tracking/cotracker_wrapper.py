@@ -208,7 +208,10 @@ class CoTrackerWrapper(PointTracker):
             frame_indices = [0]
             model_wh = (resized.shape[1], resized.shape[0])
         video = np.stack(frames, axis=0)
-        original_wh = (int(stream.width or frames[0].shape[1]), int(stream.height or frames[0].shape[0]))
+        if not (stream.width and stream.height):
+            # the resized frame's size is not the source's: tracks would never be scaled back
+            raise ValueError(f"stream {stream.stream_id!r} records no frame size")
+        original_wh = (int(stream.width), int(stream.height))
         assert model_wh is not None
         return video, np.asarray(frame_indices, dtype=np.int32), original_wh, model_wh
 

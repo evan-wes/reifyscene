@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-import shutil
 
 import numpy as np
 from PIL import Image, ImageDraw
 from rich.progress import track
 
 from reifyscene.common.backend_ladder import CapabilityManifest
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
-from reifyscene.common.types import BaseArtifact, CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.common.types import (
+    BaseArtifact,
+    CameraIntrinsics,
+    CameraPose,
+    FrameRef,
+    TimedCameraState,
+)
 
 
 @dataclass
@@ -413,7 +420,7 @@ class GeometryArtifact(BaseArtifact):
         overlay_dir = ensure_dir(self.save_dir / 'world_frame_overlays')
         overlay_index: dict[str, str] = {}
         for frame in self._progress_iter(self._world_frame_overlay_samples(), total=len(self._world_frame_overlay_samples()), description='[cyan]Geometry · world-frame overlays'):
-            frame_key = f'{frame.stream_id}:{int(frame.frame_idx)}'
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             state = self._find_state_for_frame(frame)
             if image_name is None or state is None:
@@ -432,7 +439,7 @@ class GeometryArtifact(BaseArtifact):
             state = self._find_state_for_frame(frame)
             if state is None:
                 continue
-            frame_key = self._sanitize_key(f"{frame.stream_id}:{frame.frame_idx}")
+            frame_key = self._sanitize_key(make_frame_key(frame.stream_id, frame.frame_idx))
             records.append(
                 {
                     'frame_key': frame_key,
@@ -468,7 +475,7 @@ class GeometryArtifact(BaseArtifact):
             pointcloud_dir = ensure_dir(self.save_dir / 'pointclouds')
             max_points = int(self.metadata.get('debug_max_points', 5000))
             for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting point clouds"):
-                frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 payload = self.pointmaps_by_frame.get(frame_key)
                 if not payload:
                     continue
@@ -528,7 +535,7 @@ class GeometryArtifact(BaseArtifact):
         frame_specs: list[dict[str, Any]] = []
         max_points = int(self.metadata.get('debug_max_points', 5000))
         for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · building debug viewer"):
-            frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             depth_payload = self.depthmaps_by_frame.get(frame_key)
             point_payload = self.pointmaps_by_frame.get(frame_key)
@@ -594,7 +601,7 @@ class GeometryArtifact(BaseArtifact):
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
 
             fig.add_trace(go.Image(z=spec['rgb'], visible=visible, name=f"rgb:{name}"), row=1, col=1)
             fig.add_trace(go.Image(z=spec['depth_preview'], visible=visible, name=f"depth:{name}"), row=1, col=2)
@@ -615,7 +622,7 @@ class GeometryArtifact(BaseArtifact):
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             visible = [False] * total_traces
             base = 3 * idx
             visible[base:base+3] = [True, True, True]

@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.image_transform import (
     ImageTransform,
@@ -300,7 +301,7 @@ class JointSpatiotemporalSolver:
                 if matches.size == 0 or transform is None:
                     continue
                 t = int(matches[0])
-                frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 depth_payload = depthmaps_by_frame.get(frame_key)
                 state_for_frame = self._find_state_for_frame(camera_states.get(stream_id, []), frame)
                 if depth_payload is None or state_for_frame is None:

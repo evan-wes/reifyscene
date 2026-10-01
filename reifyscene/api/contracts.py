@@ -223,13 +223,15 @@ def _file_signature(path: Path) -> list[Any]:
     return [path.name, int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))]
 
 
-def input_identity(video_paths: Iterable[str | Path]) -> dict[str, Any]:
+def input_identity(video_paths: Iterable[str | Path], *,
+                   frames_camera: str | None = None) -> dict[str, Any]:
     """What the run reads, independent of where it lives.
 
     A frame directory is identified by the frames the decoder actually reads from
     it (name, size and modification time of each), a video file by its own: moving
     or renaming the folder keeps the identity, editing a used frame changes it, and
-    unrelated files in the folder (another camera's frames) do not matter.
+    unrelated files in the folder (another camera's frames) do not matter. The camera is
+    chosen exactly as ingest chooses it (``VideoDecoder.requested_stream_id``).
     """
     from reifyscene.ingest.decoder import VideoDecoder
 
@@ -237,8 +239,9 @@ def input_identity(video_paths: Iterable[str | Path]) -> dict[str, Any]:
     for idx, raw in enumerate(video_paths):
         path = Path(raw).expanduser().resolve()
         if path.is_dir():
-            stream = VideoDecoder().decode(path, stream_id=f"cam_{idx:02d}")
-            index = stream.metadata.get("frame_index", {})
+            stream = VideoDecoder().decode(
+                path, stream_id=VideoDecoder.requested_stream_id(idx, frames_camera))
+            index = stream.metadata["frame_index"]
             files = [Path(index[k]) for k in sorted(index, key=lambda k: int(k))]
             kind = "frames"
         else:
@@ -365,6 +368,7 @@ CONTRACTS: dict[str, StageContract] = {
                 "keyframe_stride_sec": 1.0,
                 "keyframes_all": False,
                 "default_fps": 30.0,
+                "frames_camera": None,
             },
             exclude_when=_ingest_excluded,
         ),

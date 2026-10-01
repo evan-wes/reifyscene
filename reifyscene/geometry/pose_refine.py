@@ -35,6 +35,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.similarity import apply_similarity_to_c2w, camera_center, fit_similarity
@@ -462,7 +463,7 @@ class PoseRefiner:
     def _stream_frames(self, geometry: GeometryArtifact, stream_id: str) -> list[FrameRef]:
         frames = [f for f in geometry.selected_frames if str(f.stream_id) == str(stream_id)]
         # only frames that carry a per-pixel world pointmap can seed BA
-        frames = [f for f in frames if f"{stream_id}:{int(f.frame_idx)}" in geometry.pointmaps_by_frame]
+        frames = [f for f in frames if frame_key(stream_id, f.frame_idx) in geometry.pointmaps_by_frame]
         return sorted(frames, key=lambda fr: int(fr.frame_idx))
 
     def _geometry_space_images(
@@ -487,7 +488,7 @@ class PoseRefiner:
         debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
         images = []
         for fr in frames:
-            src = debug_paths.get(f"{stream_id}:{int(fr.frame_idx)}")
+            src = debug_paths.get(frame_key(stream_id, fr.frame_idx))
             if src and Path(src).exists():
                 with Image.open(src) as img:
                     images.append(transform.apply_to_image(img.convert("RGB")))
@@ -504,7 +505,6 @@ class PoseRefiner:
         self, geometry, stream_id, *, decoder, ingest_artifact, work_dir=None
     ) -> StreamRefinement | None:
         import torch
-
         from vggt.dependency.track_predict import predict_tracks
 
         frames = self._stream_frames(geometry, stream_id)
@@ -522,7 +522,7 @@ class PoseRefiner:
         names, w2c, points, conf = [], [], [], []
         shape: tuple[int, int] | None = None
         for fr in frames:
-            key = f"{stream_id}:{int(fr.frame_idx)}"
+            key = frame_key(stream_id, fr.frame_idx)
             state = geometry._find_state_for_frame(fr)
             if state is None:
                 self._log(f"stream {stream_id}: frame {key} has no camera state; skipped pose refinement.")
@@ -658,7 +658,7 @@ class PoseRefiner:
         kept_seed_ids = set(ba_info["kept_seed_ids"])
         deltas = []
         for i, fr in enumerate(frames):
-            key = f"{stream_id}:{int(fr.frame_idx)}"
+            key = frame_key(stream_id, fr.frame_idx)
             refined_w2c = _cam_from_world_matrix(rec.images[i + 1])
             refined[key] = np.linalg.inv(refined_w2c).astype(np.float64)  # back to T_world_cam
             refined_w2c_by_key[key] = refined_w2c

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import colorsys
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-import colorsys
-import shutil
 
 import numpy as np
 from PIL import Image
 from rich.progress import track
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, TrackObservation
@@ -382,7 +383,7 @@ class TrackArtifact(BaseArtifact):
         max_trails = int(self.metadata.get('debug_max_trails', 12))
         trail_window = int(self.metadata.get('debug_trail_window', 12))
         for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Tracking · building debug viewer"):
-            frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             depth_payload = self.depthmaps_by_frame.get(frame_key)
             point_payload = self.pointmaps_by_frame.get(frame_key)
@@ -462,7 +463,7 @@ class TrackArtifact(BaseArtifact):
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             track_state = spec['track_state']
             lifted_state = spec['lifted_state']
             track_ids = np.asarray(track_state['track_ids'], dtype=int)
@@ -602,7 +603,7 @@ class TrackArtifact(BaseArtifact):
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             visible = [False] * total_traces
             base = traces_per_frame * idx
             visible[base:base + traces_per_frame] = [True] * traces_per_frame

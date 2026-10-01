@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, ObjectState
@@ -31,7 +33,7 @@ class ObjectArtifact(BaseArtifact):
 
     @staticmethod
     def _frame_key(frame_ref: FrameRef) -> str:
-        return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+        return make_frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
     @staticmethod
     def _sanitize_key(key: str) -> str:
@@ -279,7 +281,7 @@ class ObjectArtifact(BaseArtifact):
             return {}
         debug_dir = ensure_dir(self.save_dir / 'debug')
         overlay_dir = ensure_dir(debug_dir / 'overlays')
-        frame_keys = sorted(copied_images.keys(), key=lambda key: (key.split(':')[0], int(key.split(':')[1])))
+        frame_keys = sorted(copied_images.keys(), key=parse_key)
         if not frame_keys:
             return {}
         overlay_files: dict[str, str] = {}
@@ -330,7 +332,7 @@ class ObjectArtifact(BaseArtifact):
         start_idx = len(traces)
         for tr in timeline_traces:
             fig.add_trace(tr, row=2, col=2)
-        frame_numbers = [int(key.split(':')[1]) for key in frame_keys]
+        frame_numbers = [parse_key(key)[1] for key in frame_keys]
         current_frame = frame_numbers[0]
         fig.update_yaxes(title_text='Persistent object', tickmode='array', tickvals=list(range(len(timeline_labels))), ticktext=timeline_labels, row=2, col=2)
         fig.update_xaxes(title_text='Frame index', row=2, col=2)
@@ -351,7 +353,7 @@ class ObjectArtifact(BaseArtifact):
             visible[2 * frame_idx + 1] = True
             for tidx in range(len(timeline_traces)):
                 visible[start_idx + tidx] = True
-            current_frame = int(frame_key.split(':')[1])
+            current_frame = parse_key(frame_key)[1]
             steps.append({
                 'method': 'update',
                 'label': frame_key,

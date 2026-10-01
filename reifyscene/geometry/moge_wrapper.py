@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
@@ -56,7 +57,7 @@ class MoGeInitializer(GeometryInitializer):
     # -- helpers -----------------------------------------------------------
 
     def _frame_key(self, frame: FrameRef) -> str:
-        return f"{frame.stream_id}:{frame.frame_idx}"
+        return frame_key(frame.stream_id, frame.frame_idx)
 
     def _select_frames(self, frames, ingest_artifact) -> list[FrameRef]:
         if frames:

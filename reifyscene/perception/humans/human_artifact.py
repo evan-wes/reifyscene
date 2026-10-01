@@ -12,9 +12,11 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
+from reifyscene.common.backend_ladder import CapabilityManifest
+from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
-from reifyscene.common.backend_ladder import CapabilityManifest
 from reifyscene.common.types import BaseArtifact, FrameRef, HumanState
 
 COCO_SKELETON = [
@@ -40,7 +42,7 @@ class HumanArtifact(BaseArtifact):
 
     @staticmethod
     def _frame_key(frame_ref: FrameRef) -> str:
-        return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+        return make_frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
     @staticmethod
     def _sanitize_key(key: str) -> str:
@@ -270,7 +272,7 @@ class HumanArtifact(BaseArtifact):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        frame_keys = sorted((self.frame_index or self._build_frame_index(self.humans)).keys(), key=lambda fk: (fk.split(':')[0], int(fk.split(':')[1])))
+        frame_keys = sorted((self.frame_index or self._build_frame_index(self.humans)).keys(), key=parse_key)
         if not frame_keys or not copied_images:
             return {}
         images_dir = self.save_dir / 'images'
@@ -321,7 +323,7 @@ class HumanArtifact(BaseArtifact):
             support_trace_indices.append(len(fig.data) - 1)
             fig.add_trace(
                 go.Scatter(
-                    x=[int(frame_key.split(':')[1])],
+                    x=[parse_key(frame_key)[1]],
                     y=[0],
                     mode='markers',
                     marker=dict(color='red', size=12, symbol='line-ns-open'),

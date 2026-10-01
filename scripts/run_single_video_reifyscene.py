@@ -55,6 +55,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
     cfg['keyframes_all'] = bool(getattr(args, 'keyframes_all', False))
+    if getattr(args, 'frames_camera', None) is not None:
+        cfg['frames_camera'] = str(args.frames_camera)
 
     geometry = cfg.setdefault('geometry', {})
     geometry['backend_name'] = args.geometry_backend_name
@@ -418,6 +420,9 @@ def _check_resume_only(args: argparse.Namespace, system_report: dict, debug_cfg:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
+    parser.add_argument('--frames-camera', default=None,
+                        help='Which camera of a --frames-dir that holds several (the prefix in '
+                             'file names like 0_00060.png). Required for such a folder.')
     parser.add_argument('--frames-dir', default=None,
                         help='Path to a directory of RGB frames (ingested losslessly, no re-encode). '
                              'Alternative to --video; exactly one is required. Camera id + frame indices '

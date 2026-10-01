@@ -28,6 +28,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reifyscene.common.backend_ladder import CapabilityManifest
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef
@@ -60,7 +61,7 @@ class InstanceArtifact(BaseArtifact):
     # --- keys / indices -----------------------------------------------------
     @staticmethod
     def _frame_key(frame_ref: FrameRef) -> str:
-        return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+        return frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
     @staticmethod
     def _sanitize_key(key: str) -> str:

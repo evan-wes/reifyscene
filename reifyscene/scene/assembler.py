@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.frame_keys import frame_key, parse_key
 from reifyscene.common.types import FrameRef
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.render.gaussian4d.rasterizer import look_at_viewmat
@@ -83,7 +84,7 @@ class SingleVideoSceneAssembler:
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
-        return f"{stream_id}:{int(frame_idx)}"
+        return frame_key(stream_id, frame_idx)
 
     @staticmethod
     def _scene_metadata(metadata: dict[str, Any] | None, geometry_artifact) -> dict[str, Any]:
@@ -175,7 +176,7 @@ class SingleVideoSceneAssembler:
         for idx, view in enumerate(views):
             view = dict(view)
             source = view.pop("source_image_path")
-            rgb = self._geometry_photo(source, geometry_artifact, str(view["frame_key"]).rpartition(":")[0])
+            rgb = self._geometry_photo(source, geometry_artifact, parse_key(view["frame_key"])[0])
             if rgb.shape[:2] != (int(view["height"]), int(view["width"])):
                 raise ValueError(
                     f"training view {view['frame_key']}: photo comes out {rgb.shape[1]}x{rgb.shape[0]} in the geometry's "
@@ -299,7 +300,10 @@ class SingleVideoSceneAssembler:
                 m = np.asarray(mask, dtype=bool)
                 if union is None:
                     union = m.copy()
-                elif union.shape == m.shape:
+                elif union.shape != m.shape:
+                    raise ValueError(f"{key}: instance masks of one frame have different "
+                                     f"rasters {union.shape} and {m.shape}")
+                else:
                     union |= m
             if union is not None:
                 out[key] = union.astype(np.float32)

@@ -16,13 +16,18 @@ import numpy as np
 import torch
 from PIL import Image
 
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import CameraIntrinsics
 from reifyscene.render.base import RenderBackend
 from reifyscene.render.export import write_video
 from reifyscene.render.gaussian4d.densify import DensifyConfig
 from reifyscene.render.gaussian4d.gaussian_field import GaussianField
-from reifyscene.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig, image_psnr
+from reifyscene.render.gaussian4d.gaussian_trainer import (
+    StaticGaussianTrainer,
+    TrainConfig,
+    image_psnr,
+)
 from reifyscene.render.gaussian4d.rasterizer import GaussianCloud, RenderCamera, build_rasterizer
 from reifyscene.render.gaussian4d.render_artifact import RenderArtifact
 
@@ -204,7 +209,7 @@ class GaussianRenderBackend(RenderBackend):
         self._train_frame_keys = []
         for view in scene_artifact.train_views:
             path = self._require_image_path(view)
-            out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view.get("time_id", 0))))
+            out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view["time_id"])))
             self._train_frame_keys.append(view.get("frame_key"))
         return out
 
@@ -227,8 +232,8 @@ class GaussianRenderBackend(RenderBackend):
                               seed=int(ident_cfg.get("seed", 0)))
         paired: list[tuple] = []
         for (camera, gt, time_id), key in zip(train_views, self._train_frame_keys, strict=True):
-            sid, _, idx = str(key).rpartition(":")
-            if sid != stream or int(idx) not in maps:
+            sid, idx = parse_key(key)
+            if sid != stream or idx not in maps:
                 raise ValueError(f"train view {key} has no id map in {run_dir / 'identity'}")
             arr = maps[int(idx)]
             if arr.shape != tuple(gt.shape[:2]):
@@ -250,7 +255,7 @@ class GaussianRenderBackend(RenderBackend):
         frames: list[np.ndarray] = []
         for i, spec in enumerate(traj):
             cam = self._camera(spec)
-            cloud = scene.cloud_at(int(spec.get("time_id", 0)))
+            cloud = scene.cloud_at(int(spec["time_id"]))
             out = rasterizer.rasterize(cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, cam)
             rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
             path = frames_dir / f"frame_{i:04d}.png"
@@ -282,7 +287,10 @@ class GaussianRenderBackend(RenderBackend):
         return path.name
 
     def _fit_dynamic(self, scene_artifact, save_dir: Path) -> RenderArtifact:
-        from reifyscene.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
+        from reifyscene.render.gaussian4d.dynamic_trainer import (
+            DynamicGaussianTrainer,
+            DynamicTrainConfig,
+        )
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
         bundle = scene_artifact.dynamic_bundle or {}

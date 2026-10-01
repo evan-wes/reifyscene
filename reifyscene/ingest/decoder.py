@@ -144,7 +144,11 @@ class VideoDecoder:
         parsed = [(*_parse_frame_name(f.stem), f) for f in files]  # (cam, idx, path)
         cams = sorted({cam for cam, _, _ in parsed if cam is not None})
         if len(cams) > 1:
-            target = stream_id if stream_id in cams else cams[0]
+            if stream_id not in cams:
+                raise ValueError(
+                    f"'{path}' holds frames of {len(cams)} cameras {cams}: say which one "
+                    "(stream_id) -- the first alphabetically is not a default")
+            target = stream_id
             parsed = [t for t in parsed if t[0] == target]
         elif cams:
             target = cams[0]
@@ -169,9 +173,22 @@ class VideoDecoder:
                       "num_frames": len(frame_index), "opened": True, "exists": True},
         )
 
-    def decode_many(self, video_paths: list[str | Path]) -> list[VideoStreamRef]:
-        """Decode a list of videos (or frame directories) into stream references."""
-        return [self.decode(path, stream_id=f"cam_{idx:02d}") for idx, path in enumerate(video_paths)]
+    def decode_many(self, video_paths: list[str | Path], *,
+                    frames_camera: str | None = None) -> list[VideoStreamRef]:
+        """Decode a list of videos (or frame directories) into stream references.
+
+        ``frames_camera`` picks the camera of a frames folder that holds several (DyCheck's
+        ``rgb/1x`` holds ``0_``, ``1_`` and ``2_`` frames); a folder of several cameras without
+        it is refused rather than given its first camera.
+        """
+        return [self.decode(path, stream_id=self.requested_stream_id(idx, frames_camera))
+                for idx, path in enumerate(video_paths)]
+
+    @staticmethod
+    def requested_stream_id(idx: int, frames_camera: str | None = None) -> str:
+        """The stream id ingest asks for the ``idx``-th input: the chosen camera of a frames
+        folder, else ``cam_<idx>``. Anything that must agree with ingest calls this."""
+        return frames_camera or f"cam_{idx:02d}"
 
     def _open_stream(self, stream: VideoStreamRef) -> cv2.VideoCapture:
         """Open a stream for frame access."""

@@ -31,6 +31,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.scale_reconcile import (
@@ -41,7 +42,7 @@ from reifyscene.geometry.scale_reconcile import (
 
 
 def _frame_key(frame: FrameRef) -> str:
-    return f"{frame.stream_id}:{frame.frame_idx}"
+    return frame_key(frame.stream_id, frame.frame_idx)
 
 
 @dataclass

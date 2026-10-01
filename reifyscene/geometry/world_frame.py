@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.types import CameraPose, TimedCameraState
 
 
@@ -62,7 +63,7 @@ class GroundPlaneCanonicalizer:
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
-        return f"{stream_id}:{int(frame_idx)}"
+        return make_frame_key(stream_id, frame_idx)
 
     @staticmethod
     def _normalize(vec: np.ndarray | None) -> np.ndarray | None:

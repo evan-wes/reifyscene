@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
@@ -180,7 +181,7 @@ class ColmapPoseInitializer(GeometryInitializer):
                 continue
             rgb = self.decoder.get_frame(stream, frame.frame_idx)
             if apply_mask:
-                mask = dyn_mask_artifact.mask_for(f"{frame.stream_id}:{frame.frame_idx}")
+                mask = dyn_mask_artifact.mask_for(frame_key(frame.stream_id, frame.frame_idx))
                 if mask is not None and mask.shape == rgb.shape[:2]:
                     rgb = rgb.copy()
                     rgb[np.asarray(mask) > 0.5] = 0

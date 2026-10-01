@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_yaml, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import FrameRef
@@ -86,7 +87,7 @@ def apply_debug_config_to_runtime_cfg(cfg: dict[str, Any], debug_cfg: dict[str, 
 
 
 def _frame_key(frame_ref: FrameRef) -> str:
-    return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+    return frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
 
 def plan_debug_frames(pipeline: Any, ingest_artifact: Any, debug_cfg: dict[str, Any]) -> list[FrameRef]:

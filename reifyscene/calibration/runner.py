@@ -13,6 +13,7 @@ from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
 from reifyscene.calibration.model_io import parse_colmap_text_model, timed_camera_from_image_record
 from reifyscene.calibration.report import write_calibration_report, write_calibration_viewer
 from reifyscene.calibration.sampler import CalibrationFrameSampler
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.io import read_json
 from reifyscene.common.paths import ensure_dir
 
@@ -46,7 +47,7 @@ class CalibrationRunner:
             frame_lookup = {(fr.stream_id, int(fr.frame_idx)): fr for fr in frame_refs}
             manifest = {}
             for key, rel in sampled_index.items():
-                stream_id, frame_idx = key.split(":", 1)
+                stream_id, frame_idx = parse_key(key)
                 frame_ref = frame_lookup.get((stream_id, int(frame_idx)))
                 if frame_ref is None:
                     continue

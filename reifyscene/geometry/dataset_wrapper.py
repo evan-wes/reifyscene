@@ -28,6 +28,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.common.depth import unproject_depth_to_world
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_json
 from reifyscene.common.types import (
     CameraIntrinsics,
@@ -265,7 +266,7 @@ class DatasetGeometryInitializer(GeometryInitializer):
             # ground-plane + every point-map consumer treat it like any other backend.
             world_pts, valid = unproject_depth_to_world(depth, intrinsics, t_world_cam)
             conf = valid.astype(np.float32)
-            key = f"{stream_id}:{frame_idx}"
+            key = frame_key(stream_id, frame_idx)
             depthmaps_by_frame[key] = {"depth": depth, "confidence": conf}
             pointmaps_by_frame[key] = {"points": world_pts, "confidence": conf}
             # Wire the GT RGB frame so scene/render seeding + debug export can find it

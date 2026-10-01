@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import filecmp
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -15,7 +14,6 @@ from reifyscene.api.contracts import (
     MISSING,
     contract_for,
     effective_settings,
-    input_identity,
     recorded_setting,
 )
 from reifyscene.api.pipeline import ReifyScenePipeline
@@ -206,18 +204,14 @@ def _write_frames(folder: Path, names: list[str]) -> Path:
     return folder
 
 
-def test_input_identity_is_the_frames_read_not_the_folder(tmp_path: Path) -> None:
-    frames = _write_frames(tmp_path / 'a' / '1x', ['0_00000.png', '0_00001.png'])
-    before = input_identity([frames])
-    moved = tmp_path / 'b' / '1x'
-    moved.parent.mkdir()
-    shutil.move(str(frames), str(moved))
-    assert input_identity([moved]) == before  # moved / renamed project folder
-    _write_frames(moved, ['1_00000.png'])  # another camera's frame: not read
-    assert input_identity([moved]) == before
-    target = moved / '0_00001.png'
-    os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 10**9))
-    assert input_identity([moved]) != before  # a frame the decoder reads changed
+def test_a_folder_of_several_cameras_is_refused_without_a_choice(tmp_path: Path) -> None:
+    from reifyscene.ingest.decoder import VideoDecoder
+
+    frames = _write_frames(tmp_path / '1x', ['0_00000.png', '0_00001.png', '1_00000.png'])
+    with pytest.raises(ValueError, match="2 cameras"):
+        VideoDecoder().decode_many([frames])
+    stream = VideoDecoder().decode_many([frames], frames_camera='0')[0]
+    assert stream.stream_id == '0' and stream.num_frames == 2
 
 
 # ------------------------------------------------------------------ a real prior run

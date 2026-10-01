@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, TimedCameraState
@@ -186,7 +187,7 @@ class OptimizationArtifact(BaseArtifact):
         frame_specs: list[dict[str, Any]] = []
         frames_for_view = list(self.selected_frames) or list(track_artifact.selected_frames)
         for frame in frames_for_view:
-            frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             depth_payload = geometry_artifact.depthmaps_by_frame.get(frame_key)
             point_payload = geometry_artifact.pointmaps_by_frame.get(frame_key)
@@ -249,7 +250,7 @@ class OptimizationArtifact(BaseArtifact):
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             ts = spec['track_state']
             ids = np.asarray(ts['track_ids'], dtype=int)
             marker_colors = [track_artifact._track_color(int(t)) for t in ids.tolist()]
@@ -317,7 +318,7 @@ class OptimizationArtifact(BaseArtifact):
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             visible = [False] * total_traces
             base = idx * traces_per_frame
             visible[base:base + traces_per_frame] = [True] * traces_per_frame

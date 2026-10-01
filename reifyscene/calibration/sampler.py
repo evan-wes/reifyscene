@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import FrameRef, VideoStreamRef
@@ -88,7 +89,7 @@ class CalibrationFrameSampler:
             path = output_dir / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(rgb).save(path)
-            image_index[f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"] = str(rel.as_posix())
+            image_index[frame_key(frame_ref.stream_id, frame_ref.frame_idx)] = str(rel.as_posix())
             manifest[str(rel.as_posix())] = {
                 "stream_id": frame_ref.stream_id,
                 "frame_idx": int(frame_ref.frame_idx),
