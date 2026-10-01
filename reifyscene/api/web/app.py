@@ -27,6 +27,7 @@ from fastapi import Query
 from pydantic import BaseModel
 
 from reifyscene.api.run_outputs import Checkpoint, RunOutputs
+from reifyscene.graph.node_ids import tracklet_number
 
 STATIC = Path(__file__).parent / "static"
 # relation roles on the frame: subject, object, between's third
@@ -325,7 +326,7 @@ def create_app(
             node = r.query.entity(body.entity).node_id
         except (QueryError, KeyError) as exc:
             raise HTTPException(400, str(exc)) from exc
-        jid = f"remove-{node.rsplit(':', 1)[-1]}-{uuid.uuid4().hex[:8]}"
+        jid = f"remove-{tracklet_number(node)}-{uuid.uuid4().hex[:8]}"
         jobs[jid] = Job(id=jid, run=name, op="remove",
                         params={"node_id": node, "slackness": body.slackness,
                                 "filtered": body.filtered})

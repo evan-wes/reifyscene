@@ -26,6 +26,7 @@ from reifyscene.common.types import GraphEdge, GraphNode
 from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.graph.edges import EdgeFactory
 from reifyscene.graph.graph_artifact import GraphArtifact
+from reifyscene.graph.node_ids import entity_node_id
 from reifyscene.graph.nodes import NodeFactory
 from reifyscene.graph.track_support import assign_track_support, positions_by_frame
 from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
@@ -177,7 +178,7 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
             avg_conf = float(np.mean([h.confidence for h in instances]))
             keypoints = [h for h in instances if h.keypoints_2d is not None]
             entity = _Entity(
-                node_id=f"human:{stream_id}:{human_id}",
+                node_id=entity_node_id("human", stream_id, human_id),
                 kind="human",
                 label="human",
                 confidence=min(1.0, avg_conf),
@@ -212,7 +213,7 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
         for (stream_id, object_id), instances in grouped_o.items():
             avg_conf = float(np.mean([o.confidence for o in instances]))
             entity = _Entity(
-                node_id=f"object:{stream_id}:{object_id}",
+                node_id=entity_node_id("object", stream_id, object_id),
                 kind="object",
                 label=instances[0].category,
                 confidence=min(1.0, avg_conf),

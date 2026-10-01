@@ -32,7 +32,9 @@ REMOVED_FILE = "removed.npz"     # the removed Gaussians, so the edit can be re-
 
 
 def edit_id(op: str, node_id: str) -> str:
-    return f"{op}-{node_id.rsplit(':', 1)[-1]}-{time.strftime('%Y%m%d-%H%M%S')}"
+    from reifyscene.graph.node_ids import tracklet_number
+
+    return f"{op}-{tracklet_number(node_id)}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
 class RemoveEditor:

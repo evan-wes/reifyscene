@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from reifyscene.graph.node_ids import tracklet_number
 from reifyscene.graph.presence import Presence, presence_from_frames
 
 ENTITY_TYPES = ("human", "object")
@@ -119,7 +120,7 @@ class SceneQuery:
         """By node id, or by its trailing tracklet number (``8`` for ``...:sam2:cam_00:8``)."""
         if ref in self.entities:
             return self.entities[ref]
-        hits = [e for e in self.entities.values() if e.node_id.rsplit(":", 1)[-1] == str(ref)]
+        hits = [e for e in self.entities.values() if tracklet_number(e.node_id) == str(ref)]
         if len(hits) == 1:
             return hits[0]
         raise QueryError(f"no entity {ref!r}" if not hits else f"{ref!r} is ambiguous")
@@ -193,7 +194,7 @@ class SceneQuery:
 
     def _name(self, node_id: str) -> str:
         e = self.entities.get(node_id)
-        return f"{e.category} {node_id.rsplit(':', 1)[-1]}" if e else node_id
+        return f"{e.category} {tracklet_number(node_id)}" if e else node_id
 
     def _sentence(self, pred: str, src: str, dst: str, also: str | None) -> str:
         if pred == "between":

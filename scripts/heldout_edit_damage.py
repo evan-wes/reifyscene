@@ -78,6 +78,7 @@ def main() -> int:
     from reifyscene.edit.renderer import outline
     from reifyscene.eval.benchmarks.edit_damage import dilate, rest_psnr
     from reifyscene.eval.benchmarks.edit_damage.silhouettes import PersonSegmenter, pick_entity
+    from reifyscene.graph.node_ids import tracklet_number
     from reifyscene.graph.renderable_handle import drop_gaussians
     from reifyscene.query.scene_query import SceneQuery
     from reifyscene.render.eval.masked_nvs_benchmark import (
@@ -136,7 +137,7 @@ def main() -> int:
     seg = PersonSegmenter(device=args.device)
     out_dir = run.output_dir("heldout_damage")
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
-    tag = nid.rsplit(":", 1)[-1]
+    tag = tracklet_number(nid)
 
     def score_view(name, photo, cam, t, covis, strip: bool) -> dict:
         h, w = photo.shape[:2]
