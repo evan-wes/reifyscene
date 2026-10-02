@@ -451,7 +451,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "scene",
-            version=4,
+            # 5: the dynamic bundle carries per-frame depth / mask targets for the render stage
+            version=5,
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
             # timeline_source is only a metadata label.
             exclude=("scene.timeline_source",),
@@ -461,7 +462,8 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "render",
             # 3: the render record keeps its checkpoint's recipe
-            version=3,
+            # 4: trains with Shape-of-Motion's depth, depth-gradient and mask terms
+            version=4,
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),
@@ -470,6 +472,9 @@ CONTRACTS: dict[str, StageContract] = {
             # FlashSplat assignment over the render's checkpoint, written onto the graph. Cheap
             # (seconds of GPU), a pure function of graph + checkpoint: rebuilt when stale.
             "handles",
+            # 2: people are bounded by their body volume (handles.body_bound, on by default),
+            #    and every entity records its view coverage
+            version=2,
             settings={"handles": {}},
             upstream=("graph", "render"),
             rebuildable=True,

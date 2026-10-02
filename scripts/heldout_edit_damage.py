@@ -67,6 +67,10 @@ def main() -> int:
     ap.add_argument("--min-iou", type=float, default=0.2,
                     help="a person counts as the entity only above this IoU with its render")
     ap.add_argument("--strips", type=int, default=4)
+    ap.add_argument("--out-name", default="heldout_damage",
+                    help="the run's output dir to write into")
+    ap.add_argument("--body-bound", action="store_true",
+                    help="bound the person's selection by their body volume (experimental)")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
@@ -112,7 +116,8 @@ def main() -> int:
     nid = node["node_id"]
 
     stream = run.streams.only()
-    ed = RemoveEditor(run.checkpoint(args.checkpoint), device=args.device)
+    ed = RemoveEditor(run.checkpoint(args.checkpoint), device=args.device,
+                      body_bound=args.body_bound)
     fg, bg, stats = ed.select(nid)
     if len(fg) + len(bg) == 0:
         raise SystemExit(f"{nid} has no Gaussians to remove")
@@ -135,7 +140,7 @@ def main() -> int:
                                           features=features)
 
     seg = PersonSegmenter(device=args.device)
-    out_dir = run.output_dir("heldout_damage")
+    out_dir = run.output_dir(args.out_name)
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     tag = tracklet_number(nid)
 

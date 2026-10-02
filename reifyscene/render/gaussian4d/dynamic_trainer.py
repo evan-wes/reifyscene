@@ -46,6 +46,7 @@ from reifyscene.render.gaussian4d.densify import DensificationController, Densif
 from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES, DynamicScene
 from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM, PARAM_NAMES
 from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_bchw
+from reifyscene.render.gaussian4d.losses import gradient_loss, masked_l1_loss
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 
 
@@ -82,6 +83,16 @@ class DynamicTrainConfig:
     lambda_l1: float = 0.8
     lambda_ssim: float = 0.2
     lambda_smooth: float = 1.0
+    # Shape-of-Motion's geometry terms (flow3d/configs.py): disparity against the depth prior
+    # (its weight, 0.5), its spatial gradient (theirs 1.0) and the mask term (theirs 1.0: total
+    # opacity driven to 1, the rendered foreground share against the foreground mask).
+    # Measured on lab-coat (2026-10-01, 47 frames, same geometry): depth alone +0.1 dB over
+    # photos only; + gradient -0.2 dB; the mask term -1.9 dB -- our "foreground" is every
+    # segmented instance, theirs the moving part, so it pushes static objects into the moving
+    # field. Gradient and mask are off until that is reconciled.
+    lambda_depth: float = 0.5
+    lambda_depth_grad: float = 0.0
+    lambda_mask: float = 0.0
     lr_means: float = 1.6e-4
     lr_scales: float = 5.0e-3
     lr_quats: float = 1.0e-3
@@ -298,22 +309,61 @@ class DynamicGaussianTrainer:
         loss = self.identity_loss(feat, id_map)
         return None if loss is None else self.cfg.lambda_identity * loss
 
+    def geometry_terms(self, out, fg_share, target) -> tuple[torch.Tensor, dict[str, float]]:
+        """The depth, depth-gradient and mask losses of one view against its ``target``
+        (``depth`` (H, W) in scene units, ``valid`` (H, W) bool, ``fg`` (H, W) float);
+        ``fg_share`` is the rendered foreground share, rendered only while the mask term is on."""
+        stats: dict[str, float] = {}
+        loss = torch.zeros((), device=out.depth.device)
+        valid = target["valid"]
+        if (self.cfg.lambda_depth > 0 or self.cfg.lambda_depth_grad > 0) and bool(valid.any()):
+            pred_disp = 1.0 / (out.depth + 1e-5)
+            tgt_disp = 1.0 / (target["depth"] + 1e-5)
+            weights = valid.to(pred_disp.dtype)[..., None]
+            depth = masked_l1_loss(pred_disp[..., None], tgt_disp[..., None], mask=weights,
+                                   quantile=0.98)
+            loss = loss + self.cfg.lambda_depth * depth
+            stats["depth_loss"] = float(depth.detach())
+            if self.cfg.lambda_depth_grad > 0:
+                grad = gradient_loss(pred_disp[None], tgt_disp[None], mask=valid[None],
+                                     quantile=0.95)
+                loss = loss + self.cfg.lambda_depth_grad * grad
+                stats["depth_grad_loss"] = float(grad.detach())
+        if self.cfg.lambda_mask > 0:
+            mask = F.mse_loss(out.alpha, torch.ones_like(out.alpha)) + masked_l1_loss(
+                fg_share[..., None], target["fg"][..., None], quantile=0.98)
+            loss = loss + self.cfg.lambda_mask * mask
+            stats["mask_loss"] = float(mask.detach())
+        return loss, stats
+
     def fit(
         self,
         train_views: list[tuple],
         *,
+        targets: list[dict] | None = None,
         on_log: Callable[[dict], None] | None = None,
         on_trace: Callable[[dict], None] | None = None,
         on_snapshot: Callable[[int, DynamicScene], None] | None = None,
     ) -> DynamicScene:
         """``train_views`` are ``(camera, gt, time_id)`` or, for identity training,
         ``(camera, gt, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor.
+        ``targets``, one per view, carry its geometry supervision (:meth:`geometry_terms`);
+        they are required while any geometry weight is on.
 
         ``on_trace`` receives an identity trace record every ``identity_trace_every`` steps
         (and at step 1); ``on_snapshot`` receives the scene at each of ``snapshot_steps``.
         """
         if not train_views:
             raise ValueError("DynamicGaussianTrainer.fit got no training views.")
+        geometry_on = (self.cfg.lambda_depth > 0 or self.cfg.lambda_depth_grad > 0
+                       or self.cfg.lambda_mask > 0)
+        if geometry_on and (targets is None or len(targets) != len(train_views)
+                            or any(t is None for t in targets)):
+            raise ValueError("the geometry terms are on but not every training view has "
+                             "depth / mask targets (set lambda_depth, lambda_depth_grad and "
+                             "lambda_mask to 0 to train on photos alone)")
+        geo_stats: dict[str, float] = {}
+        mask_on = self.cfg.lambda_mask > 0
         torch.manual_seed(self.cfg.random_seed)
         gen = torch.Generator(device="cpu").manual_seed(self.cfg.random_seed)
         n = len(train_views)
@@ -350,13 +400,24 @@ class DynamicGaussianTrainer:
                 camera, gt, time_id = view[:3]
                 id_map = view[3] if len(view) > 3 else None
                 cloud = self.scene.cloud_at(time_id)
+                feats = cloud.features if coupled else None
+                if mask_on:              # the foreground share rides as the last feature channel
+                    fg_ind = torch.zeros((n_fg + n_bg, 1), device=cloud.means.device)
+                    fg_ind[:n_fg] = 1.0
+                    feats = fg_ind if feats is None else torch.cat([feats, fg_ind], dim=-1)
                 out = self.rasterizer.rasterize(
                     cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera,
-                    with_telemetry=self.densify_cfg.enabled,
-                    features=cloud.features if coupled else None,
+                    with_telemetry=self.densify_cfg.enabled, features=feats,
                 )
                 photo, l1 = self._photometric(out.rgb, gt)
                 loss = loss + photo / batch
+                if geometry_on:
+                    fg_share = None
+                    if mask_on:
+                        fg_share = out.features[..., -1]
+                        out.features = out.features[..., :-1] if coupled else None
+                    geo, geo_stats = self.geometry_terms(out, fg_share, targets[idx])
+                    loss = loss + geo / batch
                 if cloud.features is not None and id_map is not None:
                     id_term = self.identity_term(cloud, camera, id_map, out)
                     if id_term is not None:
@@ -389,7 +450,7 @@ class DynamicGaussianTrainer:
                 with torch.no_grad():
                     psnr = image_psnr(out.rgb.detach().clamp(0, 1), gt)
                 record = {"step": step, "loss": float(loss.detach()), "l1": l1, "psnr": psnr,
-                          "num_gaussians": self.scene.num_gaussians}
+                          "num_gaussians": self.scene.num_gaussians, **geo_stats}
                 if self.scene.has_identity:
                     record["identity_loss"] = id_loss_value
                     record["identity_3d_loss"] = id3d_value

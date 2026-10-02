@@ -312,9 +312,17 @@ def test_render_backend_dynamic_trains_and_checkpoints(tmp_path: Path) -> None:
             "width": W, "height": H, "image_path": _write_frame(gt_dir / f"{i}.png"),
         })
 
+    bundle = dump_bundle(scene, {"train": cams})
+    # the scene stage's geometry targets: a constant depth (the camera is 3 away), a centre
+    # foreground square
+    fg = np.zeros((t, H, W), np.uint8)
+    fg[:, H // 4: 3 * H // 4, W // 4: 3 * W // 4] = 1
+    bundle.update(target_frame_names=np.asarray([f"f{i}" for i in range(t)]),
+                  target_depths=np.full((t, H, W), 3.0, np.float16),
+                  target_depth_valid=np.ones((t, H, W), np.uint8), target_fg=fg)
     art = SceneArtifact(
         run_id="scene", stage_name="scene", save_dir=tmp_path / "scene",
-        kind="dynamic", dynamic_bundle=dump_bundle(scene, {"train": cams}), train_views=views,
+        kind="dynamic", dynamic_bundle=bundle, train_views=views,
     )
     backend = GaussianRenderBackend({"device": "cuda", "iters": 3, "dynamic": {"log_every": 2}, "densify": {"enabled": False}})
     out = backend.fit(art, save_dir=tmp_path / "render")
@@ -326,3 +334,4 @@ def test_render_backend_dynamic_trains_and_checkpoints(tmp_path: Path) -> None:
     assert recipe == backend.dynamic_recipe(out.scene_state["num_frames"], art)
     assert recipe["trainer"]["iters"] == 3 and recipe["densify"]["enabled"] is False
     assert recipe["identity"] is None
+    assert recipe["trainer"]["lambda_depth"] == 0.5 and recipe["trainer"]["lambda_mask"] == 0.0

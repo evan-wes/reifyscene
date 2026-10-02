@@ -53,6 +53,8 @@ def main() -> int:
                     help="summed |RGB| difference that counts a pixel as changed")
     ap.add_argument("--ring", type=int, default=8,
                     help="px around the object excluded from rest PSNR")
+    ap.add_argument("--body-bound", action="store_true",
+                    help="bound people's selections by their body volume (experimental)")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     from reifyscene.api.run_outputs import RunOutputs
@@ -83,7 +85,8 @@ def main() -> int:
             continue
         row = score_run(checkpoint, frames=args.frames,
                         match_iou=args.match_iou, changed_threshold=args.changed_threshold,
-                        ring=args.ring, device=args.device)
+                        ring=args.ring, device=args.device,
+                        body_bound=args.body_bound)
         release_memory()
         rows.append(row)
         s = summarize([row])
@@ -98,7 +101,7 @@ def main() -> int:
         "commit": _git_head(),
         "params": {"frames": args.frames, "match_iou": args.match_iou,
                    "changed_threshold": args.changed_threshold, "ring": args.ring,
-                   "checkpoint": args.checkpoint},
+                   "checkpoint": args.checkpoint, "body_bound": args.body_bound},
         "summary": summarize(rows),
         "runs": rows,
     }

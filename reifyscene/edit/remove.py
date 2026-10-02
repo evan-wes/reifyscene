@@ -40,14 +40,20 @@ def edit_id(op: str, node_id: str) -> str:
 class RemoveEditor:
     """Holds one run's checkpoint on the GPU and executes removals against it."""
 
-    def __init__(self, checkpoint: Checkpoint, device: str = "cuda") -> None:
-        """``checkpoint``: the run's trained scene to edit (``RunOutputs.checkpoint()``)."""
+    def __init__(self, checkpoint: Checkpoint, device: str = "cuda", *,
+                 body_bound: bool = False) -> None:
+        """``checkpoint``: the run's trained scene to edit (``RunOutputs.checkpoint()``).
+        ``body_bound``: a filtered selection of a person keeps only what lies inside their
+        body (:mod:`reifyscene.edit.body_volume`)."""
         from reifyscene.edit.renderer import CheckpointRenderer
 
         self.checkpoint = checkpoint
         self.run = checkpoint.run
         self.device = device
         self.use_layer = True     # the handles stage turns this off: it is what writes the layer
+        self.body_bound = bool(body_bound)
+        self._bodies: dict[str, Any] = {}
+        self._placed = None
         self.bundle = checkpoint.load()
         self.renderer = CheckpointRenderer.for_run(self.bundle, device, self.run)
         self._counts = None
@@ -105,10 +111,15 @@ class RemoveEditor:
         layer when that was computed against this checkpoint; otherwise, and for any other
         parameters, it is computed here. ``stats["source"]`` says which.
         """
-        from reifyscene.graph.assignment import assign, assignment_handles, filter_members
+        from reifyscene.graph.assignment import (
+            assign,
+            assignment_handles,
+            bound_to_body,
+            filter_members,
+        )
         from reifyscene.graph.handles import StaleHandles, load_handles
 
-        if slackness == 0.0 and filtered and self.use_layer:
+        if slackness == 0.0 and filtered and self.use_layer and self._layer_matches():
             try:
                 fg, bg = load_handles(self.run, node_id, checkpoint=self.checkpoint)
                 return fg, bg, {"selected_fg": int(len(fg)), "selected_bg": int(len(bg)),
@@ -127,7 +138,54 @@ class RemoveEditor:
         if filtered and len(fg) + len(bg):
             fg, bg, dropped = filter_members(self.renderer.scene, fg, bg)
             stats["filter_dropped"] = dropped
+            body = self.body_of(node_id) if self.body_bound else None
+            if body is not None:
+                fg, bg, bounded = bound_to_body(self.renderer.scene, fg, bg, body,
+                                                self.renderer.time_of)
+                stats.update(bounded)
         return fg, bg, stats
+
+    def view_span(self, node_id: str, fg: np.ndarray, bg: np.ndarray) -> float | None:
+        """How far round the entity the cameras went (degrees; see
+        :func:`~reifyscene.graph.assignment.view_span_deg`)."""
+        from reifyscene.graph.assignment import view_span_deg
+
+        node = next((n for n in self.run.artifact("graph").nodes if n.node_id == node_id), None)
+        if node is None:
+            return None
+        r = self.renderer
+        times = [r.time_of[f] for f in node.attrs.get("frame_indices", []) if f in r.time_of]
+        span = view_span_deg(r.scene, r.cams, fg, bg, times)
+        return None if span is None else round(span, 2)
+
+    def _layer_matches(self) -> bool:
+        """Whether the graph's stored selection was made the way this editor selects."""
+        from reifyscene.graph.handles import LAYER
+
+        if not self.run.has("graph"):
+            return False
+        info = (self.run.record("graph")["metadata"].get("layers") or {}).get(LAYER)
+        return info is not None and bool(info.get("body_bound", False)) == self.body_bound
+
+    def body_of(self, node_id: str):
+        """The person's :class:`~reifyscene.edit.body_volume.BodyVolume`, or None when the
+        node is not a person, or the run has no human keypoints to build one from."""
+        from reifyscene.edit.body_volume import sapiens_body
+        from reifyscene.graph.renderable_handle import render_pixel_masks
+
+        if node_id in self._bodies:
+            return self._bodies[node_id]
+        node = next((n for n in self.run.artifact("graph").nodes if n.node_id == node_id), None)
+        body = None
+        if node is not None and node.node_type == "human" and self.run.has("humans"):
+            stream = self.run.streams.resolve(self.renderer.stream_id)
+            if self._placed is None:
+                self._placed = render_pixel_masks(self.run, stream_id=stream.id)
+            body = sapiens_body(self.renderer, self.run.artifact("humans"),
+                                node.attrs["track_id"], self._placed.by_frame, node_id, stream)
+            body = body if body.frames else None
+        self._bodies[node_id] = body
+        return body
 
     # -- the edit -----------------------------------------------------------------------------
 

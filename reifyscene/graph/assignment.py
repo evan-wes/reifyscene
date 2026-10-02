@@ -156,3 +156,69 @@ def filter_members(
             keep &= ~far
         kept.append(idx[keep])
     return kept[0], kept[1], stats
+
+
+def bound_to_body(
+    scene,
+    fg_idx: np.ndarray,
+    bg_idx: np.ndarray,
+    body,
+    time_of: dict[int, int],
+    *,
+    max_frames: int = 40,
+    fg_inside_fraction: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Keep only the Gaussians inside a person's body volume.
+
+    ``body`` is a :class:`~reifyscene.edit.body_volume.BodyVolume`; ``time_of`` maps a frame to
+    its training time. On up to ``max_frames`` of the frames the body was built on (evenly
+    spaced): a foreground Gaussian moves with the person, so it is kept when it is inside the
+    body on at least ``fg_inside_fraction`` of them; a background Gaussian is static while the
+    person may move, so it is kept when it is inside on any of them. A person with no frame
+    of body is returned untouched -- there is nothing to bound by.
+    """
+    fg_idx, bg_idx = np.asarray(fg_idx, dtype=int), np.asarray(bg_idx, dtype=int)
+    frames = sorted(f for f in body.frames if f in time_of)
+    if not frames or (fg_idx.size == 0 and bg_idx.size == 0):
+        return fg_idx, bg_idx, {"outside_body": 0, "body_frames": len(frames)}
+    pick = np.unique(np.linspace(0, len(frames) - 1, min(max_frames, len(frames))).round())
+    frames = [frames[int(i)] for i in pick]
+    n_fg = scene.fg.num_gaussians
+    fg_in = np.zeros(fg_idx.size)
+    bg_in = np.zeros(bg_idx.size, dtype=bool)
+    for frame in frames:
+        with torch.no_grad():
+            means = scene.cloud_at(int(time_of[frame])).means.detach().cpu().numpy()
+        if fg_idx.size:
+            fg_in += body.distance(means[fg_idx], frame) <= 0
+        if bg_idx.size:
+            bg_in |= body.distance(means[n_fg + bg_idx], frame) <= 0
+    keep_fg = fg_in >= fg_inside_fraction * len(frames)
+    stats = {"outside_body": int((~keep_fg).sum() + (~bg_in).sum()), "body_frames": len(frames)}
+    return fg_idx[keep_fg], bg_idx[bg_in], stats
+
+
+def view_span_deg(scene, cameras: dict[int, object], fg_idx: np.ndarray, bg_idx: np.ndarray,
+                  times: Sequence[int], *, max_frames: int = 40) -> float | None:
+    """How far round an entity the cameras went: the largest angle between two of the
+    directions from which it was seen (camera centre -> the median of its Gaussians), over up
+    to ``max_frames`` of the training ``times`` it appears at. A few degrees means it was only
+    ever seen from one side -- nothing carved the space behind it. None when it was seen on
+    fewer than two frames.
+    """
+    fg_idx, bg_idx = np.asarray(fg_idx, dtype=int), np.asarray(bg_idx, dtype=int)
+    times = sorted(set(int(t) for t in times))
+    if len(times) < 2 or fg_idx.size + bg_idx.size == 0:
+        return None
+    pick = np.unique(np.linspace(0, len(times) - 1, min(max_frames, len(times))).round())
+    n_fg = scene.fg.num_gaussians
+    dirs = []
+    for t in (times[int(i)] for i in pick):
+        with torch.no_grad():
+            means = scene.cloud_at(t).means.detach().cpu().numpy()
+        centre = np.median(np.concatenate([means[fg_idx], means[n_fg + bg_idx]]), axis=0)
+        eye = np.linalg.inv(np.asarray(cameras[t].w2c, dtype=np.float64))[:3, 3]
+        d = centre - eye
+        dirs.append(d / max(np.linalg.norm(d), 1e-12))
+    dirs = np.asarray(dirs)
+    return float(np.degrees(np.arccos(np.clip(dirs @ dirs.T, -1.0, 1.0).min())))

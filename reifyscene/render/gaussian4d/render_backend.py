@@ -304,6 +304,29 @@ class GaussianRenderBackend(RenderBackend):
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
         return path.name
 
+    def _train_targets(self, bundle) -> list[dict[str, torch.Tensor]]:
+        """Each training view's depth / validity / foreground targets, from the scene stage's
+        ``target_*`` arrays, matched by frame name (in the order of ``_train_frame_keys``)."""
+        names = [str(n) for n in np.asarray(bundle.get("target_frame_names", []))]
+        if not names:
+            raise ValueError("the scene carries no depth / mask targets; rebuild the scene "
+                             "stage, or train on photos alone (geometry weights 0)")
+        row = {n: i for i, n in enumerate(names)}
+        depths = np.asarray(bundle["target_depths"])
+        valid = np.asarray(bundle["target_depth_valid"])
+        fg = np.asarray(bundle["target_fg"])
+        out = []
+        for key in self._train_frame_keys:
+            if key not in row:
+                raise ValueError(f"training view {key} has no depth / mask target")
+            i = row[key]
+            out.append({
+                "depth": torch.as_tensor(depths[i].astype(np.float32), device=self.device),
+                "valid": torch.as_tensor(valid[i].astype(bool), device=self.device),
+                "fg": torch.as_tensor(fg[i].astype(np.float32), device=self.device),
+            })
+        return out
+
     def _dynamic_configs(self, num_frames: int):
         """``(DynamicTrainConfig, DensifyConfig, identity cfg)`` this backend's config gives a
         scene of ``num_frames`` frames: every default resolved, every identity override applied."""
@@ -383,6 +406,9 @@ class GaussianRenderBackend(RenderBackend):
             identity_summary["lambda_3d"] = train_cfg.lambda_identity_3d
             identity_summary["reset_every"] = train_cfg.identity_reset_every
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
+        geometry_on = (train_cfg.lambda_depth > 0 or train_cfg.lambda_depth_grad > 0
+                       or train_cfg.lambda_mask > 0)
+        targets = self._train_targets(bundle) if geometry_on else None
 
         logs: list[dict] = []
         on_trace = on_snapshot = None
@@ -402,7 +428,8 @@ class GaussianRenderBackend(RenderBackend):
             def on_snapshot(step: int, scene) -> None:
                 self._save_dynamic_checkpoint(scene, cams, bundle, Path(save_dir), raster=raster,
                                               name=f"trained_dynamic_step{step}.npz")
-        trained = trainer.fit(train_views, on_log=lambda record: logs.append(record),
+        trained = trainer.fit(train_views, targets=targets,
+                              on_log=lambda record: logs.append(record),
                               on_trace=on_trace, on_snapshot=on_snapshot)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)

@@ -48,6 +48,10 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--no-identity", action="store_true", help="the control: identity off")
+    ap.add_argument("--trainer-set", action="append", default=[], metavar="NAME=VALUE",
+                    help="override one dynamic-trainer setting (repeatable), e.g. lambda_mask=0")
+    ap.add_argument("--photo-only", action="store_true",
+                    help="train on photos alone: the depth, depth-gradient and mask weights 0")
     ap.add_argument("--dim", type=int, default=20)
     ap.add_argument("--lambda-identity", type=float, default=1.0)
     ap.add_argument("--lambda-3d", type=float, default=2.0,
@@ -88,6 +92,11 @@ def main() -> int:
                            "snapshot_steps": args.snapshot_steps}
     if args.views_per_step is not None:
         dyn["views_per_step"] = args.views_per_step
+    if args.photo_only:
+        dyn.update(lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0)
+    for item in args.trainer_set:
+        name, value = item.split("=", 1)
+        dyn[name] = json.loads(value)
     if args.lr_scales_final_ratio is not None:
         dyn["lr_scales_final_ratio"] = args.lr_scales_final_ratio
     cfg["dynamic"] = dyn

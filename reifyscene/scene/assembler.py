@@ -246,6 +246,23 @@ class SingleVideoSceneAssembler:
         t_gp = torch.as_tensor(np.asarray(gp, dtype=np.float32), dtype=transfm.dtype, device=transfm.device)
         return transfm @ t_gp
 
+    @staticmethod
+    def _train_targets(stack, norm) -> dict[str, np.ndarray]:
+        """Each training frame's geometry supervision, for the render stage's depth and mask
+        terms (Shape-of-Motion's): depth in the scene's normalized units (the geometry's depth
+        over ``norm.scale`` -- the normalization rotates the world, which leaves camera depth
+        alone, and divides translations by ``scale``), where that depth is valid, and the
+        foreground mask. Keyed by frame name, in the training raster. Depth as float16 (the
+        scene is ~unit-sized), masks as uint8: spin's 426 frames stay tens of MB."""
+        depth = (stack.depths / float(norm.scale)).cpu().numpy()
+        valid = (stack.valid.cpu().numpy() > 0.5) & np.isfinite(depth) & (depth > 0)
+        return {
+            "target_frame_names": np.asarray(list(stack.cameras.frame_names)),
+            "target_depths": np.where(valid, depth, 0.0).astype(np.float16),
+            "target_depth_valid": valid.astype(np.uint8),
+            "target_fg": (stack.fg.cpu().numpy() > 0.5).astype(np.uint8),
+        }
+
     def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
         """Per-frame union of all segment instance masks -> the dynamic foreground.
 
@@ -383,6 +400,7 @@ class SingleVideoSceneAssembler:
 
         norm.transfm = self._fold_ground_plane_into_norm(norm.transfm, geometry_artifact)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
+        bundle.update(self._train_targets(stack, norm))
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact, save_dir)
         render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
         notes = [

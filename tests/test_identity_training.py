@@ -130,8 +130,13 @@ def test_identity_follows_its_gaussian_through_split_clone_and_prune() -> None:
 
 # -- the loss ---------------------------------------------------------------------------------
 
+def _photo_cfg(**kw) -> DynamicTrainConfig:
+    """These scenes have no depth or masks: identity is trained on photos alone."""
+    return DynamicTrainConfig(lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0, **kw)
+
+
 def _trainer(scene):
-    return DynamicGaussianTrainer(scene, DynamicTrainConfig(iters=1), device="cpu")
+    return DynamicGaussianTrainer(scene, _photo_cfg(iters=1), device="cpu")
 
 
 def test_ignore_pixels_carry_no_loss_and_no_gradient() -> None:
@@ -227,7 +232,7 @@ def test_one_batch_overfit_separates_two_gaussians() -> None:
     logs: list[dict] = []
     # The 3D term is off: with two Gaussians each is the other's only neighbour, and I3 would
     # rightly pull them together. This pins the 2D loss alone.
-    cfg = DynamicTrainConfig(iters=400, lr_identity=2e-2, lr_identity_classifier=2e-2,
+    cfg = _photo_cfg(iters=400, lr_identity=2e-2, lr_identity_classifier=2e-2,
                              log_every=50, lambda_identity_3d=0.0)
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
         [(cam, gt, 0, id_map)], on_log=logs.append
@@ -248,7 +253,7 @@ def test_detached_identity_reads_geometry_and_never_writes_it(detach: bool) -> N
     scene, _ = bundle_to_scene(_bundle(g=2, nb=1, means=means, scale=0.12), device="cuda")
     scene.enable_identity(20, NODES, seed=0)
     cam = RenderCamera.from_look_at([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 96, 64)
-    cfg = DynamicTrainConfig(iters=1, identity_detach_geometry=detach)
+    cfg = _photo_cfg(iters=1, identity_detach_geometry=detach)
     tr = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=GsplatRasterizer("cuda"))
     id_map = torch.full((64, 96), 1, dtype=torch.long, device="cuda")
     id_map[:, 48:] = 2
@@ -327,7 +332,7 @@ def test_consistency_raises_agreement_within_clusters_not_across() -> None:
         flip = torch.randperm(n, generator=torch.Generator().manual_seed(2))[: n // 5]
         ident[flip] = ident[flip].flip(0)                          # 20% noise, both ways
         scene.fg.identity.copy_(ident)
-    cfg = DynamicTrainConfig(iters=1, identity_3d_samples=n, lr_identity=5e-2)
+    cfg = _photo_cfg(iters=1, identity_3d_samples=n, lr_identity=5e-2)
     tr = _trainer(scene)
     tr.cfg = cfg
     opt = torch.optim.Adam([scene.fg.identity, scene.bg.identity], lr=5e-2)
@@ -352,7 +357,7 @@ def test_consistency_raises_agreement_within_clusters_not_across() -> None:
 def test_the_3d_term_defaults_are_gaussian_groupings() -> None:
     """k=5, lambda=2, every 2 steps: their reg3d defaults. Their tuning only carries over
     because the KL is divided by their class count (200), not ours (4-24 per scene)."""
-    cfg = DynamicTrainConfig()
+    cfg = _photo_cfg()
     assert (cfg.identity_3d_k, cfg.lambda_identity_3d, cfg.identity_3d_every) == (5, 2.0, 2)
     assert cfg.identity_3d_norm == 200.0
 
@@ -407,7 +412,7 @@ def _two_blob_views():
 @requires_gsplat
 def test_the_trace_records_fit_stability_supervision_and_selection() -> None:
     scene, r, views = _two_blob_views()
-    cfg = DynamicTrainConfig(iters=300, lr_identity=2e-2, lr_identity_classifier=2e-2,
+    cfg = _photo_cfg(iters=300, lr_identity=2e-2, lr_identity_classifier=2e-2,
                              lambda_identity_3d=0.0, identity_trace_every=100)
     records, snaps = [], []
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
@@ -431,7 +436,7 @@ def test_the_trace_records_fit_stability_supervision_and_selection() -> None:
 @requires_gsplat
 def test_snapshots_fire_at_the_requested_steps() -> None:
     scene, r, views = _two_blob_views()
-    cfg = DynamicTrainConfig(iters=30, lambda_identity_3d=0.0, snapshot_steps=(10, 30))
+    cfg = _photo_cfg(iters=30, lambda_identity_3d=0.0, snapshot_steps=(10, 30))
     snaps = []
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
         views, on_snapshot=lambda s, sc: snaps.append(s))
@@ -460,7 +465,7 @@ def test_reset_zeroes_identity_and_its_momentum_and_keeps_the_head() -> None:
 
 def test_reset_schedule_leaves_a_recovery_window() -> None:
     scene, _ = _scene()
-    tr = DynamicGaussianTrainer(scene, DynamicTrainConfig(iters=5000, identity_reset_every=1000),
+    tr = DynamicGaussianTrainer(scene, _photo_cfg(iters=5000, identity_reset_every=1000),
                                 device="cpu")
     assert [s for s in range(1, 5001) if tr._identity_reset_due(s)] == [1000, 2000, 3000]
     tr.cfg.identity_reset_until = 1500
@@ -494,7 +499,7 @@ def test_a_hidden_gaussian_does_not_earn_its_identity_back(reset: bool) -> None:
             op[k] = c.opacities[k]
             id_map[r.rasterize(c.means, c.quats, c.scales, op, c.colors, cam).alpha > 0.3] = k + 1
         gt = r.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors, cam).rgb
-    cfg = DynamicTrainConfig(iters=600, lr_identity=2e-2, lr_identity_classifier=2e-2,
+    cfg = _photo_cfg(iters=600, lr_identity=2e-2, lr_identity_classifier=2e-2,
                              lambda_identity_3d=0.0,
                              identity_reset_every=200 if reset else 0, identity_reset_until=200)
     tr = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r)
@@ -519,7 +524,7 @@ def test_a_hidden_gaussian_does_not_earn_its_identity_back(reset: bool) -> None:
 def test_scales_lr_decays_to_its_final_ratio_and_batches_train() -> None:
     scene, r, views = _two_blob_views()
     views = views * 4                                   # four copies: a batch of distinct picks
-    cfg = DynamicTrainConfig(iters=20, lambda_identity_3d=0.0, views_per_step=3,
+    cfg = _photo_cfg(iters=20, lambda_identity_3d=0.0, views_per_step=3,
                              lr_scales_final_ratio=0.1)
     tr = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r)
     logs: list[dict] = []

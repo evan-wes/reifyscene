@@ -1399,7 +1399,8 @@ class ReifyScenePipeline:
         device = str(self.cfg.get('render', {}).get('device', 'cuda'))
         result = run_handles(graph_artifact, render_artifact, run=self.outputs, device=device,
                              slackness=float(hcfg.get('slackness', 0.0)),
-                             filtered=bool(hcfg.get('filtered', True)))
+                             filtered=bool(hcfg.get('filtered', True)),
+                             body_bound=bool(hcfg.get('body_bound', False)))
         out_dir = self._stage_dir('handles')
         artifact = HandlesArtifact(run_id=graph_artifact.run_id, stage_name='handles',
                                    save_dir=out_dir, result=result)

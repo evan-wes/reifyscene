@@ -83,6 +83,7 @@ def compute_handles(
             out[node] = (empty, empty, {"reason": "not in the id maps"})
             continue
         fg, bg, stats = editor.select(node, slackness=slackness, filtered=filtered)
+        stats["coverage_deg"] = editor.view_span(node, fg, bg)
         out[node] = (np.asarray(fg, np.int64), np.asarray(bg, np.int64), stats)
     return out
 
@@ -95,6 +96,7 @@ def write_layer(
     num_gaussians: int,
     slackness: float,
     filtered: bool,
+    body_bound: bool = False,
     stage: str = "handles",
 ) -> str:
     """Put the layer on ``graph`` (node attrs, index file, metadata) and save it.
@@ -114,7 +116,9 @@ def write_layer(
             "status": "grounded" if taken else "unassignable",
             "fg": int(len(fg)), "bg": int(len(bg)),
             "assigned_fraction": round(taken / max(num_gaussians, 1), 6),
-            **{k: v for k, v in stats.items() if k in ("filter_dropped", "reason")},
+            **{k: v for k, v in stats.items()
+               if k in ("filter_dropped", "reason", "outside_body", "body_frames",
+                        "coverage_deg")},
         }
     grade = ("grounded" if entities and grounded == len(entities)
              else "degraded" if grounded else "absent")
@@ -126,7 +130,9 @@ def write_layer(
         "stage": stage,
         "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": {"path": checkpoint.name, "digest": checkpoint.digest()},
-        "method": "FlashSplat evidence majority" + (" + floater filter" if filtered else ""),
+        "method": "FlashSplat evidence majority" + (" + floater filter" if filtered else "")
+                  + (" + body bound (people)" if body_bound else ""),
+        "body_bound": bool(body_bound),
         "slackness": slackness,
         "file": str(LAYER_FILE),
         "provides": {"renderable": grade},
@@ -164,7 +170,7 @@ def load_handles(run: RunOutputs, node_id: str, *,
 
 
 def run_handles(graph, render, *, run: RunOutputs, device: str, slackness: float = 0.0,
-                filtered: bool = True) -> dict[str, Any]:
+                filtered: bool = True, body_bound: bool = False) -> dict[str, Any]:
     """The ``handles`` stage: bind every entity to its Gaussians and write the layer.
 
     Absent, with the reason, when there is nothing to bind: no entities, or no trained dynamic
@@ -181,13 +187,14 @@ def run_handles(graph, render, *, run: RunOutputs, device: str, slackness: float
     from reifyscene.edit.remove import RemoveEditor
 
     checkpoint = run.checkpoint(Path(render.save_dir).name)   # the saved render, as recorded
-    editor = RemoveEditor(checkpoint, device=device)
+    editor = RemoveEditor(checkpoint, device=device, body_bound=body_bound and filtered)
     editor.use_layer = False          # this is what writes the layer: never read it back
     editor.evidence(refresh=True)     # the id maps and evidence of THIS graph and checkpoint
     handles = compute_handles(editor, entities, slackness=slackness, filtered=filtered)
     grade = write_layer(graph, handles, checkpoint=checkpoint,
                         num_gaussians=int(editor.renderer.scene.num_gaussians),
-                        slackness=slackness, filtered=filtered)
+                        slackness=slackness, filtered=filtered,
+                        body_bound=body_bound and filtered)
     info = layer_info(graph)
     return {"renderable": grade, "layer": LAYER, "checkpoint": info["checkpoint"],
             "counts": info["counts"],

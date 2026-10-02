@@ -171,7 +171,7 @@ METRICS = ("taken_recall", "taken_precision", "alone_precision", "halo_ratio",
 
 def score_run(checkpoint: Checkpoint, *, frames: int = 4,
               match_iou: float = 0.25, changed_threshold: int = 12, ring: int = 8,
-              device: str = "cuda") -> dict[str, Any]:
+              device: str = "cuda", body_bound: bool = False) -> dict[str, Any]:
     """Every annotated object of ``checkpoint``'s DAVIS run: matched, removed via the layer,
     scored."""
     from reifyscene.edit.remove import RemoveEditor
@@ -184,7 +184,7 @@ def score_run(checkpoint: Checkpoint, *, frames: int = 4,
     gt_by_frame = gt_masks(stream)
     matched, best, _ = match_objects(gt_by_frame, placed.by_frame, match_iou=match_iou)
 
-    ed = RemoveEditor(checkpoint, device=device)
+    ed = RemoveEditor(checkpoint, device=device, body_bound=body_bound)
     r = ed.renderer
     graph = run.record("graph")
     layer_status = {n["value"]["node_id"]: n["value"]["attrs"].get("gaussians", {}).get("status")
