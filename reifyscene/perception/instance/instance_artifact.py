@@ -28,6 +28,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reifyscene.common.backend_ladder import CapabilityManifest
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef
@@ -60,7 +61,7 @@ class InstanceArtifact(BaseArtifact):
     # --- keys / indices -----------------------------------------------------
     @staticmethod
     def _frame_key(frame_ref: FrameRef) -> str:
-        return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+        return frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
     @staticmethod
     def _sanitize_key(key: str) -> str:
@@ -99,11 +100,7 @@ class InstanceArtifact(BaseArtifact):
         return {
             'instance_id': obs.instance_id,
             'track_id': obs.track_id,
-            'frame_ref': {
-                'stream_id': obs.frame_ref.stream_id,
-                'frame_idx': int(obs.frame_ref.frame_idx),
-                'timestamp_sec': float(obs.frame_ref.timestamp_sec),
-            },
+            'frame_ref': obs.frame_ref.to_dict(),
             'concept': obs.concept,
             'kind': obs.kind,
             'bbox_xyxy': None if obs.bbox_xyxy is None else np.asarray(obs.bbox_xyxy, dtype=np.float32).tolist(),
@@ -114,16 +111,16 @@ class InstanceArtifact(BaseArtifact):
     @staticmethod
     def _obs_from_dict(raw: dict[str, Any]) -> InstanceObservation:
         fr = raw['frame_ref']
-        bbox = raw.get('bbox_xyxy')
+        bbox = raw['bbox_xyxy']
         return InstanceObservation(
             instance_id=str(raw['instance_id']),
             track_id=str(raw['track_id']),
-            frame_ref=FrameRef(stream_id=str(fr['stream_id']), frame_idx=int(fr['frame_idx']), timestamp_sec=float(fr['timestamp_sec'])),
-            concept=str(raw.get('concept', '')),
-            kind=str(raw.get('kind', 'unknown')),
+            frame_ref=FrameRef.from_dict(fr),
+            concept=str(raw['concept']),
+            kind=str(raw['kind']),
             bbox_xyxy=None if bbox is None else np.asarray(bbox, dtype=np.float32),
-            confidence=float(raw.get('confidence', 0.0)),
-            attributes=dict(raw.get('attributes', {})),
+            confidence=float(raw['confidence']),
+            attributes=dict(raw['attributes']),
         )
 
     # --- persistence (masks → npz + index, records → json) ------------------
@@ -138,7 +135,6 @@ class InstanceArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'observations': [self._obs_to_dict(o) for o in self.observations],
             'frame_index': self.frame_index or self._build_frame_index(self.observations),
@@ -150,9 +146,9 @@ class InstanceArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'InstanceArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         mask_arrays: dict[str, np.ndarray] = {}
-        for instance_id, filename in raw.get('mask_index', {}).items():
+        for instance_id, filename in raw['mask_index'].items():
             path = require_file(save_dir / 'masks' / filename, "segment mask")
             with np.load(path, allow_pickle=True) as npz:
                 mask_arrays[instance_id] = np.asarray(npz['mask'], dtype=bool)
@@ -160,12 +156,12 @@ class InstanceArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
-            observations=[cls._obs_from_dict(o) for o in raw.get('observations', [])],
+            metadata=raw['metadata'],
+            observations=[cls._obs_from_dict(o) for o in raw['observations']],
             mask_arrays=mask_arrays,
-            frame_index=raw.get('frame_index', {}),
-            track_index=raw.get('track_index', {}),
-            notes=raw.get('notes', []),
+            frame_index=raw['frame_index'],
+            track_index=raw['track_index'],
+            notes=raw['notes'],
         )
 
     def summary(self) -> dict[str, Any]:

@@ -7,6 +7,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 version scheme (canonical version in the `VERSION` file, read by
 `pyproject.toml` at build time).
 
+## [Unreleased]
+
+## [0.4.0.0] - 2026-10-16
+
+The queryable-scene-graph spike lands: entities get Gaussians, relations and a query and edit
+surface, and a local app shows all of it. Every artifact format that changed is a clean break:
+runs made before this version are rebuilt, not read.
+
+### Added
+- **The graph's entities own Gaussians.** A `handles` stage writes each entity's Gaussians onto
+  the graph as a layer. Selection is FlashSplat's evidence-majority assignment (each Gaussian's
+  blending weight per id-map class over every training view, with a slackness dial), followed
+  by a floater filter that drops isolated and oversized Gaussians from a selection. The graph
+  records which entities have no Gaussians at all.
+- **Relations between entities**, per frame, from VLA-3D's relation functions. Each vertical
+  fact is stored once per frame, and contradictions are flagged.
+- **Structured queries and `remove(entity)` over a finished run** (`reifyscene query`,
+  `reifyscene edit`). A removal writes before, after and "took" renders and records what it
+  took from each field.
+- **A local web app** (`reifyscene serve`) to browse the scene graph, query it and remove an
+  entity: graph edges with predicate filters and an interval timeline, one panel showing the
+  frame and the graph at the same moment, a selected relation's entities outlined through the
+  clip, and a 3D view (orbit, pan, zoom) over every Gaussian view, including what a removal
+  took.
+- **Per-Gaussian identity in training**, off by default: a learnable identity vector on both
+  fields trained against per-frame entity id maps, detached from geometry, with Gaussian
+  Grouping's 3D neighbour consistency term. Identity reset and a training-time identity trace
+  are available, off by default.
+- **Depth-supervised training**, on by default: an L1 on disparity against the geometry's
+  depth (weight 0.5). The depth-gradient and mask terms exist, off.
+- **Parked, opt-in:** a Sapiens-keypoint body volume that bounds a person's selection
+  (`handles.body_bound`, `--body-bound`), and each entity's view coverage on the handles layer.
+- **A checkpoint records how it was trained** (its recipe), so a retrain can be named and
+  re-rendered.
+- **Segmentation:** the person detector can propose entities, not only label them.
+- **Re-identification:** two tracklets in the same place at the same time are merged as one
+  thing. Tracks are seeded on the entities and inform identity.
+- **Every stage reports how it resolved and what may be claimed from it;** the naming stage
+  grades itself and downstream stages inherit the verdict.
+- **Evaluation tools:** the entity inventory scored against DAVIS's annotations; an offline
+  mask-filter study; an open-vocabulary detector's view of what the pipeline never proposes;
+  ConceptGraphs run on our own geometry and scored the same way; an identity removal gate
+  against DAVIS ground truth; an edit-damage benchmark (does a removal take the object and spare
+  the rest), on DAVIS and on held-out DyCheck views.
+- **`third_party_patches/`:** every edit made to a third-party checkout, as numbered patch
+  files applied by the installers.
+- Design documents: the spike plan, the back-half ladders and graph contract, the stage audit,
+  a learned covisible-merge proposal, the roadmap of in-house components and modalities, the
+  ConceptGraphs verdict, the per-Gaussian identity scope, graph layers, and the local web app;
+  and a survey of existing components for the back half.
+
+### Changed
+- **Training uses 8 views per step** (Shape-of-Motion's batch, with the densification gradient
+  rescaled by it), and each field is capped at 1,000,000 Gaussians by default.
+- **Inputs are read from records, never guessed.** Camera streams own their data (ids, frame
+  numbers, sizes, datasets); each dataset's on-disk layout lives in one class; frames are
+  identified by number, and time exists only when a frame rate is recorded; photos, raster
+  and track ids come from records; silent data defaults became errors. Guard tests keep each
+  of these with the module that knows it.
+- **A run's outputs are found by what they are** (`RunOutputs`), and a run's records name no
+  folder of their own, so runs can be moved.
+- **One frame-key format** across the pipeline.
+
+### Removed
+- **Every compatibility path.** Artifacts load exactly or not at all; there are no upgrade or
+  migration readers for older runs.
+- A render config key nothing read.
+
+### Fixed
+- **Pose refinement could not run on a landscape clip.** The VGGSfM tracker asserts a square
+  frame; landscape clips now get bottom-right padding, which leaves every real pixel's
+  coordinates unchanged. The padding carries zero confidence, and any observation that lands
+  in it is marked invisible. Portrait and square clips are unaffected.
+- **Opacity reset now clears the optimiser momentum** of prefixed parameter groups.
+- **Tracking records how its query points were chosen.**
+- **A track's support ratio asks which entity**, not how long it stayed.
+- **Late-arrival seeding in segmentation** is corrected, and disabled.
+- **The run summary reports frame spacing** when the source records no frame rate.
+
 ## [0.3.0.1] - 2026-09-12
 
 ### Fixed

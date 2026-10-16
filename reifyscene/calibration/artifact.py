@@ -42,7 +42,6 @@ class CalibrationArtifact(BaseArtifact):
         payload = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "streams": [self._serialize_value(stream) for stream in self.streams],
             "sampled_frames": [GeometryArtifact._frame_ref_to_dict(fr) for fr in self.sampled_frames],
             "sampled_image_index": dict(self.sampled_image_index),
@@ -60,25 +59,25 @@ class CalibrationArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "CalibrationArtifact":
-        raw = read_json(Path(save_dir) / "artifact.json")
+        raw = read_json(Path(save_dir) / cls.FILE)
         npz = np.load(Path(save_dir) / "sparse_points.npz")
         return cls(
             run_id=str(raw["run_id"]),
             stage_name=str(raw["stage_name"]),
             save_dir=Path(save_dir),
-            streams=[cls._deserialize_value(VideoStreamRef, item) for item in raw.get("streams", [])],
-            sampled_frames=[GeometryArtifact._frame_ref_from_dict(fr) for fr in raw.get("sampled_frames", [])],
-            sampled_image_index={str(k): str(v) for k, v in raw.get("sampled_image_index", {}).items()},
-            intrinsics_by_stream={stream_id: GeometryArtifact._intrinsics_from_dict(intr) for stream_id, intr in raw.get("intrinsics_by_stream", {}).items()},
+            streams=[cls._deserialize_value(VideoStreamRef, item) for item in raw["streams"]],
+            sampled_frames=[GeometryArtifact._frame_ref_from_dict(fr) for fr in raw["sampled_frames"]],
+            sampled_image_index={str(k): str(v) for k, v in raw["sampled_image_index"].items()},
+            intrinsics_by_stream={stream_id: GeometryArtifact._intrinsics_from_dict(intr) for stream_id, intr in raw["intrinsics_by_stream"].items()},
             camera_states_by_stream={
                 stream_id: [GeometryArtifact._camera_state_from_dict(state) for state in states]
-                for stream_id, states in raw.get("camera_states_by_stream", {}).items()
+                for stream_id, states in raw["camera_states_by_stream"].items()
             },
             sparse_points_xyz=np.asarray(npz["xyz"], dtype=np.float32),
             sparse_points_rgb=np.asarray(npz["rgb"], dtype=np.uint8),
             sparse_point_errors=np.asarray(npz["errors"], dtype=np.float32),
-            connected_components=[list(comp) for comp in raw.get("connected_components", [])],
-            reprojection_stats={str(k): float(v) for k, v in raw.get("reprojection_stats", {}).items()},
-            notes=[str(v) for v in raw.get("notes", [])],
-            metadata=cls._deserialize_untyped(raw.get("metadata", {})),
+            connected_components=[list(comp) for comp in raw["connected_components"]],
+            reprojection_stats={str(k): float(v) for k, v in raw["reprojection_stats"].items()},
+            notes=[str(v) for v in raw["notes"]],
+            metadata=cls._deserialize_untyped(raw["metadata"]),
         )

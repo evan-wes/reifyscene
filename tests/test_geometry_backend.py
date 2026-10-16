@@ -75,7 +75,7 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
     video_path = tmp_path / "sample.mp4"
     _write_test_video(video_path)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="test",
@@ -102,7 +102,7 @@ def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_roundtrip.mp4"
     _write_test_video(video_path)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="roundtrip",
@@ -157,7 +157,7 @@ def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_long.mp4"
     _write_test_video(video_path, num_frames=2)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="test_long",
@@ -277,7 +277,7 @@ def test_vggt_long_auto_tune_backs_off_chunk_and_resize_on_oom(tmp_path: Path, c
     video_path = tmp_path / "sample_auto_tune.mp4"
     _write_test_video(video_path, width=320, height=240, num_frames=8)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(8)]
     ingest = IngestArtifact(
@@ -364,7 +364,7 @@ def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tm
     video_path = tmp_path / "sample_cpu_probe.mp4"
     _write_test_video(video_path, num_frames=1)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="cpu_probe",
@@ -390,7 +390,7 @@ def test_pipeline_dense_camera_interpolation_matches_tracking_timeline(tmp_path:
     video_path = tmp_path / "sample_dense_interp.mp4"
     _write_test_video(video_path, num_frames=5, fps=10.0)
 
-    decoder = VideoDecoder(default_fps=10.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="dense_interp",
@@ -423,7 +423,7 @@ def test_pipeline_geometry_frame_source_tracking_uses_tracker_timeline(tmp_path:
     video_path = tmp_path / "sample_tracking_source.mp4"
     _write_test_video(video_path, num_frames=6, fps=10.0)
 
-    decoder = VideoDecoder(default_fps=10.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="tracking_source",
@@ -455,7 +455,7 @@ def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) ->
     video_path = tmp_path / "sample_all_source.mp4"
     _write_test_video(video_path, num_frames=4, fps=8.0)
 
-    decoder = VideoDecoder(default_fps=8.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="all_source",
@@ -489,7 +489,7 @@ def test_vggt_long_auto_tune_exhaustion_reports_attempt_summary(tmp_path: Path) 
     video_path = tmp_path / "sample_auto_tune_fail.mp4"
     _write_test_video(video_path, width=320, height=240, num_frames=4)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(4)]
     ingest = IngestArtifact(

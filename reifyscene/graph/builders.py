@@ -21,11 +21,15 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import GraphEdge, GraphNode
+from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
 from reifyscene.graph.edges import EdgeFactory
 from reifyscene.graph.graph_artifact import GraphArtifact
+from reifyscene.graph.node_ids import entity_node_id
 from reifyscene.graph.nodes import NodeFactory
 from reifyscene.graph.track_support import assign_track_support, positions_by_frame
+from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
 DEFAULT_MIN_RATIO = 0.5
 DEFAULT_MIN_FRAMES = 2
@@ -43,11 +47,13 @@ class DynamicSceneGraphBuilder:
         self.edge_factory = EdgeFactory()
 
     def build(
-        self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None
+        self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None,
+        semantics_artifact=None,
     ) -> GraphArtifact:
         """Build the graph: a node per camera, person, object and room, with their evidence."""
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
+        embeddings: dict[str, Any] = {}
         notes: list[str] = []
 
         for stream_id in geometry_artifact.stream_ids():
@@ -72,14 +78,23 @@ class DynamicSceneGraphBuilder:
             )
             notes.append(_coverage_note(stream_id, payload, mask_frames, support))
 
+            geometry_positions = _positions_from_geometry(
+                geometry_artifact, stream_id, masks_by_frame
+            )
+            notes.append(_position_note(stream_id, entities[stream_id], geometry_positions))
+
             for entity in entities[stream_id]:
                 attrs = dict(entity.attrs)
                 attrs.update(evidence.for_entity(entity.node_id))
+                _apply_positions(attrs, geometry_positions.get(entity.node_id))
+                label, embedding = _apply_identity(attrs, entity, semantics_artifact)
+                if embedding is not None:
+                    embeddings[entity.node_id] = embedding
                 node = (
-                    self.node_factory.human_node(entity.node_id, attrs)
+                    self.node_factory.human_node(entity.node_id, attrs, label=label)
                     if entity.kind == "human"
                     else self.node_factory.object_node(
-                        entity.node_id, label=entity.label, attrs=attrs
+                        entity.node_id, label=label, attrs=attrs
                     )
                 )
                 nodes.append(node)
@@ -103,12 +118,21 @@ class DynamicSceneGraphBuilder:
                 edges.append(self.edge_factory.observed_by(background_id, stream_id, conf=1.0))
 
         notes.append(
-            f"track support: inside its mask on at least {self.min_frames} frames and "
-            f"at least {self.min_ratio:.0%} of the frames the two share"
+            f"track support: inside its mask on at least {self.min_frames} frames, and on "
+            f"at least {self.min_ratio:.0%} of the frames it was inside any entity"
         )
         notes.append(
             "TODO: associate entities across streams; a person seen by two cameras is two nodes."
         )
+
+        named = sum(
+            1 for n in nodes
+            if n.node_type in ("human", "object") and not (n.attrs or {}).get("abstained", False)
+            and (n.attrs or {}).get("semantics_source") == "semantics"
+        )
+        entity_count = sum(len(v) for v in entities.values())
+        if semantics_artifact is not None:
+            notes.append(f"semantics named {named} of {entity_count} entities")
 
         return GraphArtifact(
             run_id=geometry_artifact.run_id,
@@ -116,13 +140,15 @@ class DynamicSceneGraphBuilder:
             save_dir=Path("."),
             nodes=nodes,
             edges=edges,
+            embeddings=embeddings,
             node_histories={},
             uncertainty={},
             source_summary={
                 "num_geometry_streams": len(geometry_artifact.stream_ids()),
                 "num_track_streams": len(track_artifact.stream_ids()),
-                "num_entities": sum(len(v) for v in entities.values()),
+                "num_entities": entity_count,
             },
+            metadata={"world_frame": _world_frame(geometry_artifact)},
             notes=notes,
         )
 
@@ -152,12 +178,13 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
             avg_conf = float(np.mean([h.confidence for h in instances]))
             keypoints = [h for h in instances if h.keypoints_2d is not None]
             entity = _Entity(
-                node_id=f"human:{stream_id}:{human_id}",
+                node_id=entity_node_id("human", stream_id, human_id),
                 kind="human",
                 label="human",
                 confidence=min(1.0, avg_conf),
                 attrs={
                     "stream_id": stream_id,
+                    "track_id": str(human_id),
                     "num_observations": len(instances),
                     "frame_indices": sorted({int(h.frame_ref.frame_idx) for h in instances}),
                     "avg_confidence": avg_conf,
@@ -186,17 +213,23 @@ def _entities_by_stream(human_artifact, object_artifact) -> dict[str, list[_Enti
         for (stream_id, object_id), instances in grouped_o.items():
             avg_conf = float(np.mean([o.confidence for o in instances]))
             entity = _Entity(
-                node_id=f"object:{stream_id}:{object_id}",
+                node_id=entity_node_id("object", stream_id, object_id),
                 kind="object",
                 label=instances[0].category,
                 confidence=min(1.0, avg_conf),
                 attrs={
                     "stream_id": stream_id,
+                    "track_id": str(object_id),
                     "category": instances[0].category,
                     "categories": sorted({o.category for o in instances}),
                     "num_observations": len(instances),
                     "frame_indices": sorted({int(o.frame_ref.frame_idx) for o in instances}),
                     "avg_confidence": avg_conf,
+                    # The detector's own id and the ranked alternatives `objects` carried
+                    # down: dropped here for the life of the stage, because this dict was
+                    # built fresh instead of extending what the instance already held.
+                    "detector_backend": (instances[0].attributes or {}).get("detector_backend"),
+                    "label_id": (instances[0].attributes or {}).get("label_id"),
                 },
             )
             entity.masks = _instance_masks(instances, object_artifact, "object_id")
@@ -232,6 +265,48 @@ def _masks_by_frame(entities: list[_Entity]) -> tuple[dict[int, dict[str, np.nda
         for frame_idx, mask in entity.masks.items():
             by_frame.setdefault(frame_idx, {})[entity.node_id] = mask
     return by_frame, set(by_frame)
+
+
+def _positions_from_geometry(geometry_artifact, stream_id: str, masks_by_frame) -> dict:
+    """Per-entity position and extent from the geometry's dense pointmaps.
+
+    The geometry stage already wrote a world point for every pixel; ``segment`` already
+    said which pixels are which entity. That is a far better answer than the handful of
+    point tracks that happened to land on an entity -- on a clip where four of eight
+    entities had no supporting track at all, this gives every one of them a position on
+    every frame it is masked. See :mod:`reifyscene.lifting.entity_geometry`.
+
+    Anything missing (no pointmaps, no recorded image transform) returns ``{}`` and the
+    track-derived positions stand: empty in, empty out, never a crash.
+    """
+    pointmaps = getattr(geometry_artifact, "pointmaps_by_frame", None) or {}
+    if not pointmaps or not masks_by_frame:
+        return {}
+
+    def load(frame_idx: int):
+        payload = pointmaps.get(frame_key(stream_id, frame_idx))
+        if not payload:
+            return None
+        points = payload.get("points")
+        return None if points is None else (np.asarray(points), payload.get("confidence"))
+
+    # The masks are in ingest pixels; their own shape is the only honest source for the
+    # size the transform maps from.
+    first = next(iter(masks_by_frame.values()), None)
+    sample = next(iter((first or {}).values()), None)
+    if sample is None:
+        return {}
+    height, width = np.asarray(sample).shape[:2]
+    try:
+        transform = image_transform_for(
+            geometry_artifact, stream_id
+        )
+    except MissingImageTransform:
+        return {}
+
+    return entity_positions_from_pointmaps(
+        masks_by_frame, pointmap_for_frame=load, transform=transform
+    )
 
 
 def _support_for_stream(payload, masks_by_frame, min_ratio: float, min_frames: int):
@@ -272,13 +347,19 @@ class _Evidence:
             return _empty_evidence()
         inside = self.support.inside_frames.get(node_id, {})
         shared = self.support.shared_frames.get(node_id, {})
+        anywhere = self.support.inside_any_frames
         track_ids = sorted(inside)
-        ratios = [inside[t] / shared[t] for t in track_ids if shared.get(t)]
+        # How decisively each track belongs to *this* entity rather than another.
+        ratios = [inside[t] / anywhere[t] for t in track_ids if anywhere.get(t)]
+        # And, separately, how much of the entity's own co-visible life it covers --
+        # worth knowing, but not what decides whose evidence it is.
+        coverage = [inside[t] / shared[t] for t in track_ids if shared.get(t)]
         return {
             "support_track_ids": track_ids,
             "support_frames": {str(t): int(inside[t]) for t in track_ids},
             "num_support_tracks": len(track_ids),
             "mean_support_ratio": float(np.mean(ratios)) if ratios else None,
+            "mean_covisible_ratio": float(np.mean(coverage)) if coverage else None,
             "support_motion": self._motion(track_ids),
             "positions": self._positions(track_ids),
         }
@@ -338,9 +419,104 @@ def _empty_evidence() -> dict[str, Any]:
         "support_frames": {},
         "num_support_tracks": 0,
         "mean_support_ratio": None,
+        "mean_covisible_ratio": None,
         "support_motion": {"static": 0, "moving": 0, "uncertain": 0, "static_fraction": None},
         "positions": [],
     }
+
+
+def _world_frame(geometry_artifact) -> dict[str, Any]:
+    """Whether the positions in this graph are gravity-aligned, and on which axis.
+
+    ``above`` / ``below`` / ``on`` are defined against gravity, and the answer lives two
+    stages upstream in the geometry metadata. Nothing carried it here, so a consumer
+    reading only ``graph/artifact.json`` could not tell whether a missing vertical
+    relation meant *false* or *not computable* -- and those are different claims.
+    """
+    md = getattr(geometry_artifact, "metadata", {}) or {}
+    frame = dict(md.get("world_frame") or {})
+    applied = bool(md.get("ground_plane_applied"))
+    return {
+        "gravity_aligned": applied and frame.get("type") == "ground_plane_z_up",
+        "type": frame.get("type"),
+        "up_axis": "+z" if frame.get("type") == "ground_plane_z_up" else None,
+        "ground_plane_applied": applied,
+        "inlier_ratio": frame.get("inlier_ratio"),
+    }
+
+
+def _apply_identity(attrs: dict[str, Any], entity, semantics_artifact) -> tuple[str, Any]:
+    """Put what the `semantics` stage decided onto the node, refusal included.
+
+    The graph never saw the semantics artifact: an object's category reached it
+    second-hand through `objects`, its ranked alternatives and embedding were dropped at
+    this boundary, and a human node was hardcoded ``label="human"`` with no category at
+    all. Everything here already existed, correct, one stage upstream.
+
+    An abstention travels as a value, not a gap. ``category`` is ``"unknown"`` with
+    ``abstained`` and the margins beside it, so a consumer can tell a refusal from a
+    question never asked -- the distinction the semantics stage exists to make.
+
+    Returns ``(label, embedding)``: the label the node should carry, and the vector to
+    store beside the graph if there is one.
+    """
+    record = None
+    if semantics_artifact is not None:
+        record = semantics_artifact.records.get(entity.attrs["track_id"])
+    if record is None:
+        # `objects` already copied a category down; keep it, and say nothing was asked.
+        attrs.setdefault("category", None)
+        attrs["semantics_source"] = "objects" if attrs.get("category") else "none"
+        return entity.label, None
+
+    abstained = bool(record.abstained)
+    attrs.update(
+        {
+            "category": record.category,
+            "category_topk": [[str(lbl), float(sc)] for lbl, sc in record.category_topk],
+            "category_score": float(record.score),
+            "category_margin": record.margin,
+            "category_margin_z": record.margin_z,
+            "abstained": abstained,
+            "abstain_reason": record.abstain_reason,
+            "caption": record.caption,
+            "semantics_source": "semantics",
+        }
+    )
+    embedding = None
+    if semantics_artifact is not None:
+        embedding = semantics_artifact.embeddings.get(entity.attrs["track_id"])
+    label = record.category if record.category and not abstained else entity.label
+    return label, embedding
+
+
+def _apply_positions(attrs: dict[str, Any], geometry_positions) -> None:
+    """Put the best available positions on an entity, and say which they are.
+
+    Dense geometry wins when it is there: it covers every frame the entity is masked,
+    not the handful a point track happened to reach, and it carries an extent, which a
+    centroid of sparse tracks cannot. The track-derived positions stay as the fallback,
+    and ``position_source`` records which one answered so a consumer weighs it rather
+    than trusting it. ``extent`` is the per-frame median, the scale-free summary the
+    relation vocabulary needs for above / below / in / on.
+    """
+    if geometry_positions:
+        attrs["positions"] = geometry_positions
+        attrs["position_source"] = "pointmap"
+        extents = np.asarray([r["extent"] for r in geometry_positions], dtype=float)
+        attrs["extent"] = [float(v) for v in np.median(extents, axis=0)]
+        return
+    attrs["position_source"] = "track_support" if attrs.get("positions") else "none"
+    attrs["extent"] = None
+
+
+def _position_note(stream_id: str, entities: list, geometry_positions) -> str:
+    """How many entities dense geometry could place, against how many there are."""
+    placed = sum(1 for e in entities if geometry_positions.get(e.node_id))
+    return (
+        f"{stream_id}: dense geometry placed {placed} of {len(entities)} entities "
+        f"({'pointmaps' if geometry_positions else 'unavailable -- track support only'})"
+    )
 
 
 def _coverage_note(stream_id: str, payload, mask_frames: set[int], support) -> str:

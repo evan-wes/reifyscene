@@ -20,7 +20,8 @@ def test_build_config_debug_enables_geometry_debug(tmp_path: Path) -> None:
         device="cpu",
         frame_cache_dir=None,
         max_keyframes=2,
-        keyframe_stride_sec=1.0,
+        keyframe_stride=None,
+        keyframe_stride_sec=None,
         debug=True,
         debug_max_points=1234,
     )
@@ -56,7 +57,7 @@ def test_geometry_artifact_writes_camera_json_ply_and_html(tmp_path: Path) -> No
     intr = CameraIntrinsics(fx=10.0, fy=10.0, cx=1.0, cy=1.0)
     state = TimedCameraState(
         stream_id="cam_00",
-        time_sec=0.0,
+        frame_idx=0,
         intrinsics=intr,
         pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32)),
     )

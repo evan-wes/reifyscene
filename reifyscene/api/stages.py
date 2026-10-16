@@ -6,10 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from reifyscene.common.io import write_json
-from reifyscene.common.paths import ensure_dir
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.graph.graph_artifact import GraphArtifact
+from reifyscene.graph.handles import HandlesArtifact
 from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.optimize.optimization_artifact import OptimizationArtifact
@@ -36,7 +35,8 @@ class StageSpec:
 
     @property
     def dir_name(self) -> str:
-        return 'tracking' if self.name == 'tracking' else self.name
+        """The stage's folder inside a run (use ``RunOutputs.stage_dir``)."""
+        return self.name
 
 
 STAGE_ORDER: tuple[str, ...] = (
@@ -46,15 +46,24 @@ STAGE_ORDER: tuple[str, ...] = (
     'geometry',
     'pose_refine',
     'segment',
+    # `tracking` runs here, not after `humans`. Design §4A asked only for it to follow
+    # `segment` (so its dynamic split is seeded by real foreground masks); placing it
+    # five stages later also put it after `reid`, which meant identity was decided
+    # before point tracks existed and could never use them. The fourth invariant
+    # forbids the *ladder* reordering the pipeline, not redesign, and tracking's
+    # declared dependencies are all satisfied here.
+    'tracking',
     'reid',
     'semantics',
     'objects',
     'humans',
-    'tracking',
     'graph',
     'optimization',
     'scene',
     'render',
+    # After render: binds each entity to its Gaussians, as a layer on the graph
+    # (docs/design/2026-09-30-graph-layers.md). The graph cannot know this when it is built.
+    'handles',
 )
 
 
@@ -105,9 +114,9 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'reid': StageSpec(
             name='reid',
-            dependencies=('ingest', 'segment'),
+            dependencies=('ingest', 'segment', 'tracking', 'pose_refine'),
             artifact_cls=ReidArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.compute_reid(outputs['ingest'], outputs['segment'], track_artifact=outputs['tracking'], geometry_artifact=outputs['pose_refine']),
             load_fn=ReidArtifact.load,
         ),
         'semantics': StageSpec(
@@ -135,14 +144,14 @@ def build_stage_registry() -> dict[str, StageSpec]:
             name='tracking',
             dependencies=('ingest', 'pose_refine', 'segment'),
             artifact_cls=TrackArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.track(outputs['ingest'], geometry_artifact=outputs['pose_refine'], instance_artifact=outputs['segment']),
             load_fn=TrackArtifact.load,
         ),
         'graph': StageSpec(
             name='graph',
-            dependencies=('pose_refine', 'tracking', 'humans', 'objects'),
+            dependencies=('pose_refine', 'tracking', 'humans', 'objects', 'semantics'),
             artifact_cls=GraphArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.build_graph(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.build_graph(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], semantics_artifact=outputs['semantics']),
             load_fn=GraphArtifact.load,
         ),
         'optimization': StageSpec(
@@ -154,23 +163,30 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'scene': StageSpec(
             name='scene',
-            dependencies=('pose_refine', 'segment', 'tracking', 'humans', 'objects', 'optimization'),
+            dependencies=('ingest', 'pose_refine', 'segment', 'tracking', 'humans', 'objects', 'optimization'),
             artifact_cls=SceneArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['ingest'], outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment']),
             load_fn=SceneArtifact.load,
         ),
         'render': StageSpec(
             name='render',
-            dependencies=('scene', 'optimization', 'pose_refine', 'tracking', 'humans'),
+            dependencies=('scene',),
             artifact_cls=RenderArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene'], optimization_artifact=outputs['optimization'], geometry_artifact=outputs['pose_refine'], track_artifact=outputs['tracking'], human_artifact=outputs['humans']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.fit_renderer(outputs['scene']),
             load_fn=RenderArtifact.load,
+        ),
+        'handles': StageSpec(
+            name='handles',
+            dependencies=('graph', 'render'),
+            artifact_cls=HandlesArtifact,
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.bind_gaussians(outputs['graph'], outputs['render']),
+            load_fn=HandlesArtifact.load,
         ),
     }
 
 
 def write_run_manifest(run_dir: str | Path, manifest: dict[str, Any]) -> Path:
     """Persist a run-level manifest used for resume/debugging."""
-    out = ensure_dir(run_dir) / 'run_manifest.json'
-    write_json(out, manifest)
-    return out
+    from reifyscene.api.run_outputs import RunOutputs
+
+    return RunOutputs.create(run_dir).write_manifest(manifest)

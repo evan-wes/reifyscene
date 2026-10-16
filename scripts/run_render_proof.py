@@ -108,7 +108,7 @@ def cmd_checkpoint0(args) -> None:
     )
 
     seed_specs = _parse_frames(args.seed_frames)
-    seed_refs = [FrameRef(stream_id=c, frame_idx=t, timestamp_sec=float(t)) for c, t in seed_specs]
+    seed_refs = [FrameRef(stream_id=c, frame_idx=t) for c, t in seed_specs]
     geometry = backend.initialize(seed_refs)
     rgb_by_frame = {f"{c}:{t}": backend.load_rgb(backend.frame_name(c, t)) for c, t in seed_specs}
     cloud = seed_cloud_from_geometry(
@@ -155,7 +155,7 @@ def cmd_train(args) -> None:
     # cover the scene; a static rig camera needs only one.
     seed_times = ds.get("seed_times") or [ds["seed_time"]]
     seed_specs = [(cam, int(t)) for cam in ds["train_cameras"] for t in seed_times]
-    seed_refs = [FrameRef(stream_id=c, frame_idx=t, timestamp_sec=float(t)) for c, t in seed_specs]
+    seed_refs = [FrameRef(stream_id=c, frame_idx=t) for c, t in seed_specs]
     geometry = backend.initialize(seed_refs)
     rgb_by_frame = {f"{c}:{t}": backend.load_rgb(backend.frame_name(c, t)) for c, t in seed_specs}
     seed_cloud = seed_cloud_from_geometry(geometry, rgb_by_frame, device=device, **cfg["seed"])

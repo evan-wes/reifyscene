@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 
 from reifyscene.common.depth import valid_depth_mask
+from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.types import camera_state_at
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.lifting.lift import lift_pixels, lift_record
 
@@ -61,24 +63,10 @@ class TrackLifter3D:
         self.point_conf_threshold = float(point_conf_threshold)
 
     @staticmethod
-    def _stream_lookup(ingest_artifact) -> dict[str, Any]:
-        return {stream.stream_id: stream for stream in getattr(ingest_artifact, 'streams', [])}
-
-    @staticmethod
     def _find_camera_state(geometry_artifact, frame) -> Any | None:
-        states = geometry_artifact.camera_states_by_stream.get(frame.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        return camera_state_at(geometry_artifact.camera_states_by_stream, frame)
 
-    def lift(self, track_artifact, geometry_artifact, ingest_artifact) -> Any:
+    def lift(self, track_artifact, geometry_artifact) -> Any:
         """Attach lifted 3D point samples to a track artifact.
 
         Only the geometry keyframes are lifted in this first slice. Dense track
@@ -88,7 +76,6 @@ class TrackLifter3D:
         image transform, its depth and its (pose-refined) camera -- the same function
         the optimizer re-lifts with; ``metadata['lift']`` records what it ran with.
         """
-        stream_lookup = self._stream_lookup(ingest_artifact)
         geometry_selected_frames = list(geometry_artifact.selected_frames)
         # Preserve the tracking timeline already chosen upstream. Scene/render
         # uses TrackArtifact.selected_frames when timeline_source=tracking.
@@ -96,7 +83,7 @@ class TrackLifter3D:
         if not getattr(track_artifact, 'selected_frames', None):
             track_artifact.selected_frames = list(geometry_selected_frames)
         track_artifact.metadata['geometry_selected_frames'] = [
-            {'stream_id': frame.stream_id, 'frame_idx': int(frame.frame_idx), 'timestamp_sec': float(frame.timestamp_sec)}
+            frame.to_dict()
             for frame in geometry_selected_frames
         ]
         track_artifact.depthmaps_by_frame = dict(geometry_artifact.depthmaps_by_frame)
@@ -113,12 +100,11 @@ class TrackLifter3D:
             lifted_xyz = np.full((len(stream_frames), num_tracks, 3), np.nan, dtype=np.float32)
             lifted_valid = np.zeros((len(stream_frames), num_tracks), dtype=bool)
             lifted_frame_indices = np.asarray([f.frame_idx for f in stream_frames], dtype=np.int32)
-            stream = stream_lookup.get(stream_id)
-            original_wh = tuple(int(v) for v in payload.get('original_size_wh', [stream.width if stream else 0, stream.height if stream else 0]))
+            original_wh = tuple(int(v) for v in payload['original_size_wh'])
 
             transform = None
             if stream_frames and num_tracks:
-                transform = image_transform_for(geometry_artifact, stream_id, source_size=original_wh)
+                transform = image_transform_for(geometry_artifact, stream_id)
                 transforms[stream_id] = transform.to_dict()
             for k, frame in enumerate(stream_frames):
                 matches = np.where(frame_indices == int(frame.frame_idx))[0]
@@ -127,7 +113,7 @@ class TrackLifter3D:
                 t = int(matches[0])
                 xy = points_xy[t]
                 vis = visibility[t].astype(bool) if visibility.size else np.ones((num_tracks,), dtype=bool)
-                frame_key = f'{frame.stream_id}:{frame.frame_idx}'
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 depth_payload = geometry_artifact.depthmaps_by_frame.get(frame_key)
                 camera_state = self._find_camera_state(geometry_artifact, frame)
                 if depth_payload is None or camera_state is None:

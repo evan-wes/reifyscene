@@ -37,3 +37,4 @@ third_party/
 # Internal cache
 .reifyscene_cache
 .claude/
+third_party/concept-graphs-weights/

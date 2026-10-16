@@ -68,7 +68,7 @@ def _score(poses, ds, names):
     if len(common) < 4:
         return None
     intr = CameraIntrinsics(fx=1, fy=1, cx=0, cy=0)
-    states = {"cam": [TimedCameraState("cam", float(i), intr, CameraPose(T_world_cam=poses[i][0])) for i in common]}
+    states = {"cam": [TimedCameraState("cam", int(i), intr, CameraPose(T_world_cam=poses[i][0])) for i in common]}
     health = assess_pose_health(states)
     def RC(T):
         w2c = np.linalg.inv(T)

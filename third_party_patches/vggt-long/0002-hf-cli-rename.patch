@@ -1,0 +1,26 @@
+Use the current Hugging Face CLI name and drop a removed flag.
+
+Upstream pin: VGGT-Long @ c160869d1d99c96bb227f414afb3bc68c29c9a76
+
+huggingface-cli was renamed to hf, and --local-dir-use-symlinks was removed from the download
+command. The weight-download script still uses both.
+
+Without it: the bundled weight download script fails on a current huggingface_hub.
+diff --git a/scripts/download_weights.sh b/scripts/download_weights.sh
+index c110fde..8efc721 100644
+--- a/scripts/download_weights.sh
++++ b/scripts/download_weights.sh
+@@ -26,11 +26,11 @@ curl -L "$VGGT_URL" -o "./model.pt"
+ 
+ # Pi3
+ echo "Downloading Pi3 weights..."
+-huggingface-cli download yyfz233/Pi3 --local-dir ./Pi3 --local-dir-use-symlinks False
++hf download yyfz233/Pi3 --local-dir ./Pi3
+ 
+ # mapanything
+ echo "Downloading mapanything weights..."
+-huggingface-cli download facebook/map-anything --local-dir ./map_anything --local-dir-use-symlinks False
++hf download facebook/map-anything --local-dir ./map_anything
+ 
+ 
+ # you will see 6 files under `./weights` when finished

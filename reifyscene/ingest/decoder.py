@@ -44,16 +44,6 @@ class VideoDecoder:
     4. Add optional frame extraction cache for repeated downstream use.
     """
 
-    def __init__(self, default_fps: float = 30.0) -> None:
-        """Configure the OpenCV-backed decoder.
-
-        Parameters
-        ----------
-        default_fps:
-            Used when container metadata is missing or invalid.
-        """
-        self.default_fps = default_fps
-
     def _probe_capture(self, path: Path) -> dict[str, float | int | bool | str]:
         """Probe a video container with OpenCV.
 
@@ -67,6 +57,8 @@ class VideoDecoder:
         if not path.exists():
             raise FileNotFoundError(f"Video file does not exist: '{path}'.")
 
+        from reifyscene.ingest.frame_decoders import video_fps
+
         capture = cv2.VideoCapture(str(path))
         opened = bool(capture.isOpened())
         if not opened:
@@ -75,13 +67,13 @@ class VideoDecoder:
                 f"Could not open video stream '{path}'. Verify the file exists and OpenCV can decode it."
             )
 
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         num_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         capture.release()
         return {
-            "fps": fps if fps > 0 else self.default_fps,
+            # The same reader the stream's DataSource uses, so the two never disagree.
+            "fps": video_fps(path),
             "num_frames": num_frames,
             "width": width,
             "height": height,
@@ -116,7 +108,7 @@ class VideoDecoder:
         return VideoStreamRef(
             stream_id=stream_id or path.stem,
             video_path=path,
-            fps=float(meta["fps"]),
+            fps=None if meta["fps"] is None else float(meta["fps"]),
             num_frames=int(meta["num_frames"]),
             width=int(meta["width"]),
             height=int(meta["height"]),
@@ -126,6 +118,7 @@ class VideoDecoder:
                 "probed": bool(meta["probed"]),
                 "exists": bool(meta["exists"]),
                 "opened": True,
+                "fps_source": "container" if meta["fps"] else "unknown",
             },
         )
 
@@ -144,7 +137,11 @@ class VideoDecoder:
         parsed = [(*_parse_frame_name(f.stem), f) for f in files]  # (cam, idx, path)
         cams = sorted({cam for cam, _, _ in parsed if cam is not None})
         if len(cams) > 1:
-            target = stream_id if stream_id in cams else cams[0]
+            if stream_id not in cams:
+                raise ValueError(
+                    f"'{path}' holds frames of {len(cams)} cameras {cams}: say which one "
+                    "(stream_id) -- the first alphabetically is not a default")
+            target = stream_id
             parsed = [t for t in parsed if t[0] == target]
         elif cams:
             target = cams[0]
@@ -157,21 +154,38 @@ class VideoDecoder:
         if probe is None:
             raise RuntimeError(f"OpenCV could not read frame '{files[0]}'.")
         height, width = probe.shape[:2]
+        from reifyscene.ingest.sources import detect_source
+
+        source = detect_source(path)
         return VideoStreamRef(
             stream_id=str(target),
             video_path=path,
-            fps=self.default_fps,
+            fps=source.fps,
             num_frames=len(frame_index),
             width=int(width),
             height=int(height),
             has_audio=False,
             metadata={"decoder": "frames", "source": "frames", "frame_index": frame_index,
-                      "num_frames": len(frame_index), "opened": True, "exists": True},
+                      "num_frames": len(frame_index), "opened": True, "exists": True,
+                      "fps_source": source.fps_source},
         )
 
-    def decode_many(self, video_paths: list[str | Path]) -> list[VideoStreamRef]:
-        """Decode a list of videos (or frame directories) into stream references."""
-        return [self.decode(path, stream_id=f"cam_{idx:02d}") for idx, path in enumerate(video_paths)]
+    def decode_many(self, video_paths: list[str | Path], *,
+                    frames_camera: str | None = None) -> list[VideoStreamRef]:
+        """Decode a list of videos (or frame directories) into stream references.
+
+        ``frames_camera`` picks the camera of a frames folder that holds several (DyCheck's
+        ``rgb/1x`` holds ``0_``, ``1_`` and ``2_`` frames); a folder of several cameras without
+        it is refused rather than given its first camera.
+        """
+        return [self.decode(path, stream_id=self.requested_stream_id(idx, frames_camera))
+                for idx, path in enumerate(video_paths)]
+
+    @staticmethod
+    def requested_stream_id(idx: int, frames_camera: str | None = None) -> str:
+        """The stream id ingest asks for the ``idx``-th input: the chosen camera of a frames
+        folder, else ``cam_<idx>``. Anything that must agree with ingest calls this."""
+        return frames_camera or f"cam_{idx:02d}"
 
     def _open_stream(self, stream: VideoStreamRef) -> cv2.VideoCapture:
         """Open a stream for frame access."""

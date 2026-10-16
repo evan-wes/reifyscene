@@ -82,7 +82,6 @@ class ReidArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'merge_map': dict(self.merge_map),
             'embedding_index': emb_index,
@@ -92,9 +91,9 @@ class ReidArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'ReidArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         embeddings: dict[str, np.ndarray] = {}
-        for track_id, filename in raw.get('embedding_index', {}).items():
+        for track_id, filename in raw['embedding_index'].items():
             path = require_file(save_dir / 'embeddings' / filename, "reid embedding")
             with np.load(path, allow_pickle=True) as npz:
                 embeddings[track_id] = np.asarray(npz['embedding'], dtype=np.float32)
@@ -102,10 +101,10 @@ class ReidArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             embeddings=embeddings,
-            merge_map=raw.get('merge_map', {}),
-            notes=raw.get('notes', []),
+            merge_map=raw['merge_map'],
+            notes=raw['notes'],
         )
 
     def summary(self) -> dict[str, Any]:

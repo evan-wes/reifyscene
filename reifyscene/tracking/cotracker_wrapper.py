@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-import math
 
 import cv2
 import numpy as np
@@ -13,7 +12,24 @@ from rich.progress import track
 from reifyscene.common.types import FrameRef, TrackObservation, VideoStreamRef
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.tracking.base import PointTracker
+from reifyscene.tracking.mask_seeds import entity_seed_queries, queries_for_window
 from reifyscene.tracking.track_artifact import TrackArtifact
+
+
+def _seeding_note(backend_used: str, entity_queries: np.ndarray, grid_size: int) -> str:
+    """One line saying where the tracker's query points came from."""
+    if backend_used == 'heuristic':
+        return "Query points: none (the heuristic backend synthesizes tracks)."
+    count = 0 if entity_queries is None else int(np.asarray(entity_queries).shape[0])
+    if count == 0:
+        return (
+            f"Query points: a {grid_size}x{grid_size} uniform grid on the first frame only "
+            "(no instance masks were available to seed the entities)."
+        )
+    return (
+        f"Query points: {count} sampled on the entity masks, plus a {grid_size}x{grid_size} "
+        "uniform grid per window for the background."
+    )
 
 
 class CoTrackerWrapper(PointTracker):
@@ -35,11 +51,19 @@ class CoTrackerWrapper(PointTracker):
 
     def __init__(self, cfg: dict | None = None) -> None:
         self.cfg = cfg or {}
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
+        self.decoder = VideoDecoder()
         self.backend_mode = str(self.cfg.get('backend_mode', 'auto'))
         self.device = str(self.cfg.get('device', 'cuda'))
         self.model_name = str(self.cfg.get('model_name', 'cotracker3_offline'))
         self.grid_size = int(self.cfg.get('grid_size', 12))
+        # Mask seeding: points per entity scale with masked area, with a floor so a
+        # small object still survives losing some, and a ceiling so one near-frame-
+        # filling entity cannot crowd out the rest. A gap longer than reseed_gap means
+        # the entity was unobserved and its points may not have survived it.
+        self.seed_min_points = int(self.cfg.get('seed_min_points', 16))
+        self.seed_per_kilopixel = float(self.cfg.get('seed_per_kilopixel', 2.0))
+        self.seed_max_points = int(self.cfg.get('seed_max_points', 256))
+        self.seed_reseed_gap = int(self.cfg.get('seed_reseed_gap', 4))
         self.frame_stride = max(int(self.cfg.get('frame_stride', 1)), 1)
         self.frame_spacing_sec = self.cfg.get('frame_spacing_sec')
         self.max_frames = self.cfg.get('max_frames')
@@ -117,33 +141,23 @@ class CoTrackerWrapper(PointTracker):
 
 
     def _planned_frame_indices(self, stream: VideoStreamRef) -> list[int]:
-        """Return frame indices after applying stride or time-spacing controls."""
-        num_frames = max(int(stream.num_frames), 1)
-        stride = self.frame_stride
-        spacing_sec = self.frame_spacing_sec
-        if spacing_sec is not None:
-            try:
-                spacing_sec = float(spacing_sec)
-            except Exception:
-                spacing_sec = None
-        if spacing_sec is not None and spacing_sec > 0.0:
-            fps = max(float(stream.fps), 1e-6)
-            stride = max(1, int(math.ceil(spacing_sec * fps - 1e-9)))
-        frame_indices: list[int] = list(range(0, num_frames, max(int(stride), 1)))
+        """The stream's own frame numbers, every ``frame_stride``-th -- or spaced by
+        ``frame_spacing_sec`` converted with the recorded fps (refused when there is none)."""
+        if self.frame_spacing_sec is not None:
+            stride = stream.stride_frames(seconds=float(self.frame_spacing_sec),
+                                          setting="tracking.frame_spacing_sec")
+        else:
+            stride = stream.stride_frames(frames=self.frame_stride, setting="tracking.frame_stride")
+        frame_indices = stream.frame_numbers[::stride]
         if self.max_frames is not None:
             frame_indices = frame_indices[: int(self.max_frames)]
         if not frame_indices:
-            frame_indices = [0]
+            raise ValueError(f"stream {stream.stream_id!r} has no frames to track")
         return frame_indices
 
     def plan_frame_refs(self, stream: VideoStreamRef) -> list[FrameRef]:
         """Return the sampled frame refs this tracker would process for a stream."""
-        frame_indices = self._planned_frame_indices(stream)
-        fps = max(float(stream.fps), 1e-6)
-        return [
-            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
-            for frame_idx in frame_indices
-        ]
+        return [stream.frame_ref(i) for i in self._planned_frame_indices(stream)]
 
     def release_resources(self) -> None:
         self._model = None
@@ -176,14 +190,11 @@ class CoTrackerWrapper(PointTracker):
             resized, _, _ = self._resize_frame(frame, self.resize_max_dim)
             frames.append(resized)
             model_wh = (resized.shape[1], resized.shape[0])
-        if not frames:
-            frame = self.decoder.get_frame(stream, 0)
-            resized, _, _ = self._resize_frame(frame, self.resize_max_dim)
-            frames = [resized]
-            frame_indices = [0]
-            model_wh = (resized.shape[1], resized.shape[0])
         video = np.stack(frames, axis=0)
-        original_wh = (int(stream.width or frames[0].shape[1]), int(stream.height or frames[0].shape[0]))
+        if not (stream.width and stream.height):
+            # the resized frame's size is not the source's: tracks would never be scaled back
+            raise ValueError(f"stream {stream.stream_id!r} records no frame size")
+        original_wh = (int(stream.width), int(stream.height))
         assert model_wh is not None
         return video, np.asarray(frame_indices, dtype=np.int32), original_wh, model_wh
 
@@ -220,20 +231,38 @@ class CoTrackerWrapper(PointTracker):
             start = next_start
         return windows
 
-    def _run_real_backend_single(self, video_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _run_real_backend_single(
+        self, video_rgb: np.ndarray, queries: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Track one clip. ``queries`` are ``(N, 3)`` ``(t, x, y)`` in model pixels.
+
+        With queries the tracker is told what to follow -- the uniform grid plus points
+        sampled on each entity's mask (:mod:`reifyscene.tracking.mask_seeds`). Without
+        them it falls back to CoTracker's own grid, which is the behaviour when no
+        instance masks are available.
+        """
         self._load_model()
         if not self._is_loaded or self._model is None or self._torch is None:
             raise RuntimeError('CoTracker backend is unavailable.')
         torch = self._torch
+        use_queries = queries is not None and np.asarray(queries).size > 0
         if self.debug:
-            print(f"[TRACK DEBUG] Running CoTracker on video tensor with shape={video_rgb.shape}, grid_size={self.grid_size}, device={self.device}")
+            how = f"queries={np.asarray(queries).shape[0]}" if use_queries else f"grid_size={self.grid_size}"
+            print(f"[TRACK DEBUG] Running CoTracker on video tensor with shape={video_rgb.shape}, {how}, device={self.device}")
         video = torch.from_numpy(video_rgb).permute(0, 3, 1, 2)[None].float().to(self.device)
+        kwargs: dict[str, Any] = {}
+        if use_queries:
+            kwargs['queries'] = torch.from_numpy(
+                np.asarray(queries, dtype=np.float32)
+            )[None].float().to(self.device)
+        else:
+            kwargs['grid_size'] = self.grid_size
         with torch.inference_mode():
             if self.device.startswith('cuda') and self.use_autocast:
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    pred_tracks, pred_visibility = self._model(video, grid_size=self.grid_size)
+                    pred_tracks, pred_visibility = self._model(video, **kwargs)
             else:
-                pred_tracks, pred_visibility = self._model(video, grid_size=self.grid_size)
+                pred_tracks, pred_visibility = self._model(video, **kwargs)
         tracks = pred_tracks[0].detach().cpu().float().numpy()
         visibility = pred_visibility[0].detach().cpu().float().numpy()
         if visibility.ndim == 3 and visibility.shape[-1] == 1:
@@ -389,10 +418,24 @@ class CoTrackerWrapper(PointTracker):
             'global_track_count': int(tracks.shape[1]),
         }
 
-    def _run_real_backend(self, video_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    def _run_real_backend(
+        self, video_rgb: np.ndarray, entity_queries: np.ndarray | None = None,
+        model_wh: tuple[int, int] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        grid_xy = None
+        if entity_queries is not None and np.asarray(entity_queries).size and model_wh:
+            grid_xy = self._grid_seed_points(model_wh[0], model_wh[1], self.grid_size)
+
+        def window_queries(start: int, end: int) -> np.ndarray | None:
+            if grid_xy is None:
+                return None
+            return queries_for_window(entity_queries, start=start, end=end, grid_xy=grid_xy)
+
         windows = self._window_slices(video_rgb.shape[0])
         if len(windows) == 1:
-            tracks, visibility = self._run_real_backend_single(video_rgb)
+            tracks, visibility = self._run_real_backend_single(
+                video_rgb, window_queries(0, int(video_rgb.shape[0]))
+            )
             return tracks, visibility, {
                 'windowed': False,
                 'windows': [{'start': 0, 'end': int(video_rgb.shape[0]), 'track_offset': 0, 'num_tracks': int(tracks.shape[1])}],
@@ -405,7 +448,9 @@ class CoTrackerWrapper(PointTracker):
         blocks: list[dict[str, Any]] = []
         total_tracks = 0
         for start, end in window_iter:
-            chunk_tracks, chunk_visibility = self._run_real_backend_single(video_rgb[start:end])
+            chunk_tracks, chunk_visibility = self._run_real_backend_single(
+                video_rgb[start:end], window_queries(int(start), int(end))
+            )
             blocks.append({
                 'start': int(start),
                 'end': int(end),
@@ -458,14 +503,52 @@ class CoTrackerWrapper(PointTracker):
     def _payload_to_observations(self, stream: VideoStreamRef, payload: dict[str, Any]) -> list[TrackObservation]:
         return TrackArtifact._observations_from_payload(stream.stream_id, payload)
 
+    def _entity_queries(
+        self, instance_artifact, stream, frame_indices, model_wh, original_wh
+    ) -> np.ndarray:
+        """Query points on this stream's entities, or an empty array if there are none.
+
+        Missing masks are not an error -- the grid alone is a valid, weaker answer, and
+        is exactly what ran before masks were available here.
+        """
+        if instance_artifact is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        masks_by_frame: dict[int, dict[str, Any]] = {}
+        for obs in getattr(instance_artifact, 'observations', []):
+            if obs.frame_ref.stream_id != stream.stream_id:
+                continue
+            mask = instance_artifact.mask_arrays.get(obs.instance_id)
+            if mask is None:
+                continue
+            masks_by_frame.setdefault(int(obs.frame_ref.frame_idx), {})[str(obs.track_id)] = mask
+        if not masks_by_frame:
+            return np.zeros((0, 3), dtype=np.float32)
+        return entity_seed_queries(
+            masks_by_frame,
+            frame_indices=frame_indices,
+            model_wh=model_wh,
+            source_wh=original_wh,
+            min_points=self.seed_min_points,
+            per_kilopixel=self.seed_per_kilopixel,
+            max_points=self.seed_max_points,
+            reseed_gap=self.seed_reseed_gap,
+        )
+
     def track(
         self,
         stream: VideoStreamRef,
         *,
         frame_refs: list[FrameRef] | None = None,
         seed_points: np.ndarray | None = None,
+        instance_artifact: Any = None,
     ) -> TrackArtifact:
-        """Track a sparse grid of points through the full stream.
+        """Track points through the full stream, seeded on the entities when it can be.
+
+        With ``instance_artifact`` the query points are the uniform grid **plus** points
+        sampled inside each entity's mask, at the frame it appears and again after a gap
+        (:mod:`reifyscene.tracking.mask_seeds`). Without it the grid alone is used, which
+        is the previous behaviour: an entity that is small or absent at frame 0 gets
+        almost no points and nothing downstream can recover them.
 
         Notes
         -----
@@ -477,6 +560,9 @@ class CoTrackerWrapper(PointTracker):
         if self.debug:
             print(f"[TRACK DEBUG] Preparing tracking clip for {stream.stream_id} (fps={stream.fps}, frames={stream.num_frames})")
         video_rgb, frame_indices, original_wh, model_wh = self._read_video_frames(stream)
+        entity_queries = self._entity_queries(
+            instance_artifact, stream, frame_indices, model_wh, original_wh
+        )
         backend_used = 'heuristic'
         tracks_xy_model: np.ndarray
         visibility: np.ndarray
@@ -485,8 +571,12 @@ class CoTrackerWrapper(PointTracker):
             tracks_xy_model, visibility = self._run_heuristic_backend(video_rgb)
         else:
             try:
-                tracks_xy_model, visibility, backend_meta = self._run_real_backend(video_rgb)
+                tracks_xy_model, visibility, backend_meta = self._run_real_backend(
+                    video_rgb, entity_queries, model_wh
+                )
                 backend_used = 'cotracker_windowed' if backend_meta.get('windowed') else 'cotracker'
+                backend_meta['seeding'] = 'mask+grid' if entity_queries.size else 'grid'
+                backend_meta['num_entity_queries'] = int(entity_queries.shape[0])
             except Exception as exc:
                 self._backend_error = exc
                 if self.backend_mode == 'real':
@@ -502,10 +592,8 @@ class CoTrackerWrapper(PointTracker):
         tracks_xy[..., 0] *= scale_x
         tracks_xy[..., 1] *= scale_y
         track_ids = np.arange(tracks_xy.shape[1], dtype=np.int32)
-        timestamps = frame_indices.astype(np.float32) / max(float(stream.fps), 1e-6)
         payload = {
             'frame_indices': frame_indices,
-            'timestamps_sec': timestamps,
             'track_ids': track_ids,
             'points_xy': tracks_xy,
             'visibility': vis_bool,
@@ -519,6 +607,11 @@ class CoTrackerWrapper(PointTracker):
         notes = [
             f"Tracker backend used: {backend_used}.",
             f"Tracked {tracks_xy.shape[1]} points over {tracks_xy.shape[0]} frames.",
+            # How the points were chosen decides what the tracks can answer, so the run has
+            # to say it. The payload's `windowing` block does not survive serialization, and
+            # a run that cannot report its own seeding is the silent degradation the ladder
+            # design exists to prevent.
+            _seeding_note(backend_used, entity_queries, self.grid_size),
         ]
         if backend_meta.get('windowed'):
             notes.append(
@@ -565,6 +658,7 @@ class CoTrackerWrapper(PointTracker):
         streams: list[VideoStreamRef],
         *,
         frame_refs_by_stream: dict[str, list[FrameRef]] | None = None,
+        instance_artifact: Any = None,
     ) -> TrackArtifact:
         per_stream_observations: dict[str, list[TrackObservation]] = {}
         seed_points_by_stream: dict[str, list[list[float]]] = {}
@@ -574,7 +668,11 @@ class CoTrackerWrapper(PointTracker):
         notes: list[str] = []
 
         for stream in streams:
-            artifact = self.track(stream, frame_refs=(frame_refs_by_stream or {}).get(stream.stream_id))
+            artifact = self.track(
+                stream,
+                frame_refs=(frame_refs_by_stream or {}).get(stream.stream_id),
+                instance_artifact=instance_artifact,
+            )
             per_stream_observations.update(artifact.per_stream_observations)
             seed_points_by_stream.update(artifact.seed_points_by_stream)
             visibility_masks.update(artifact.visibility_masks)

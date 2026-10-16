@@ -27,6 +27,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from reifyscene.common.frame_keys import frame_key
+from reifyscene.common.types import camera_state_at
+
 if TYPE_CHECKING:
     from reifyscene.lifting.native_track_lift import CameraRecords, FrameStack
 
@@ -104,26 +107,25 @@ class ArtifactGeometryProvider(GeometryProvider):
     so ``val`` is empty here.
     """
 
-    def __init__(self, geometry_artifact, *, stream_id: str | None = None, fg_mask_by_frame: dict | None = None) -> None:
+    def __init__(self, geometry_artifact, *, stream, fg_mask_by_frame: dict | None = None) -> None:
+        """``stream``: the :class:`~reifyscene.ingest.streams.FrameStream` this geometry is of;
+        its frames are the photos, and only its frames are used (streams are never merged)."""
         self.geometry_artifact = geometry_artifact
+        self.stream = stream
         self.fg_mask_by_frame = dict(fg_mask_by_frame or {})
-        frames = list(geometry_artifact.selected_frames)
-        if stream_id is not None:
-            frames = [fr for fr in frames if str(fr.stream_id) == str(stream_id)]
+        frames = [fr for fr in geometry_artifact.selected_frames if str(fr.stream_id) == stream.id]
         self.train_frames = sorted(frames, key=lambda fr: (str(fr.stream_id), int(fr.frame_idx)))
 
     @staticmethod
     def _frame_key(fr) -> str:
-        return f"{fr.stream_id}:{int(fr.frame_idx)}"
+        return frame_key(fr.stream_id, fr.frame_idx)
 
     def _state_for(self, fr):
-        states = list((self.geometry_artifact.camera_states_by_stream or {}).get(fr.stream_id, []))
-        if not states:
-            return None
-        return min(states, key=lambda s: abs(float(s.time_sec) - float(fr.timestamp_sec)))
+        return camera_state_at(self.geometry_artifact.camera_states_by_stream, fr)
 
     def _empty_cameras(self, device: str):
         import torch
+
         from reifyscene.lifting.native_track_lift import CameraRecords
 
         return CameraRecords(
@@ -143,17 +145,19 @@ class ArtifactGeometryProvider(GeometryProvider):
     def frame_stack(self, split: str, *, device: str = "cpu") -> "FrameStack":
         import numpy as np
         import torch
-        from PIL import Image
 
         from reifyscene.common.depth import valid_depth_mask
-        from reifyscene.lifting.native_track_lift import CameraRecords, FrameStack, _intrinsics_matrix
+        from reifyscene.lifting.native_track_lift import (
+            CameraRecords,
+            FrameStack,
+            _intrinsics_matrix,
+        )
 
         if split != "train":
             raise NotImplementedError("ArtifactGeometryProvider only provides the 'train' frame stack.")
 
         from reifyscene.geometry.image_transform import image_transform_for
 
-        debug = (self.geometry_artifact.metadata or {}).get("debug_image_paths", {}) or {}
         depthmaps = self.geometry_artifact.depthmaps_by_frame or {}
         names: list[str] = []
         w2cs: list[torch.Tensor] = []
@@ -173,26 +177,18 @@ class ArtifactGeometryProvider(GeometryProvider):
             state = self._state_for(fr)
             if state is None:
                 raise ValueError(f"geometry frame {key} has depth but no camera state")
-            path = debug.get(key)
-            if not path or not Path(path).exists():
-                raise FileNotFoundError(
-                    f"geometry frame {key} has no photo on disk (debug_image_paths entry: {path!r}); "
-                    "a frame the geometry lists must have its photo -- nothing is dropped silently"
-                )
             depth = np.squeeze(np.asarray(payload["depth"], dtype=np.float32))
             if depth.ndim != 2:
                 raise ValueError(f"geometry frame {key}: depth map has shape {depth.shape}, expected HxW")
             h, w = depth.shape
             # Photos and masks into the geometry's pixels through its recorded transform
             # (VGGT: resize + centre crop), never squashed to the depth size.
-            with Image.open(path) as img:
-                photo = img.convert("RGB")
-            transform = image_transform_for(self.geometry_artifact, str(fr.stream_id), source_size=photo.size)
+            transform = image_transform_for(self.geometry_artifact, str(fr.stream_id))
             if transform.output_size != (w, h):
                 raise ValueError(
                     f"geometry frame {key}: its image transform lands on {transform.output_size}, depth is {(w, h)}"
                 )
-            rgb = transform.apply_to_image(photo)
+            rgb = self.stream.frame_in_render(fr.frame_idx)
             fg = self.fg_mask_by_frame.get(key)
             if fg is None:
                 fg_arr = np.zeros((h, w), dtype=np.float32)

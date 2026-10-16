@@ -106,7 +106,7 @@ class SceneArtifact(BaseArtifact):
         for idx, view in enumerate(self.train_views):
             entry = {
                 "frame_key": str(view.get("frame_key", idx)),
-                "time_id": int(view.get("time_id", idx)),
+                "time_id": int(view["time_id"]),
                 "t_world_cam": np.asarray(view["t_world_cam"], dtype=np.float32).tolist(),
                 "intrinsics": {k: float(view["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
                 "width": int(view["width"]),
@@ -158,7 +158,6 @@ class SceneArtifact(BaseArtifact):
         serializable = {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "metadata": self.metadata,
             "kind": self.kind,
             "render_seed": seed_meta,
@@ -169,13 +168,13 @@ class SceneArtifact(BaseArtifact):
                     "intrinsics": {k: float(cam["intrinsics"][k]) for k in ("fx", "fy", "cx", "cy")},
                     "width": int(cam["width"]),
                     "height": int(cam["height"]),
-                    "time_id": int(cam.get("time_id", 0)),
+                    "time_id": int(cam["time_id"]),
                 }
                 for cam in self.render_trajectory
             ],
             "dynamic_bundle": self._save_dynamic_bundle(self.save_dir),
             "frame_refs": [
-                {"stream_id": fr.stream_id, "frame_idx": int(fr.frame_idx), "timestamp_sec": float(fr.timestamp_sec)}
+                fr.to_dict()
                 for fr in self.frame_refs
             ],
             "timeline": self.timeline,
@@ -187,11 +186,7 @@ class SceneArtifact(BaseArtifact):
 
     @classmethod
     def _load_seed(cls, save_dir: Path, raw_seed: dict[str, Any]) -> dict[str, Any]:
-        npz_rel = (raw_seed or {}).get("npz_file")
-        if not npz_rel:
-            return {"means_xyz": np.zeros((0, 3), dtype=np.float32), "colors_rgb": np.zeros((0, 3), dtype=np.uint8),
-                    "scales_xyz": np.zeros((0, 3), dtype=np.float32), "num_gaussians": 0}
-        npz = np.load(save_dir / Path(npz_rel))
+        npz = np.load(save_dir / Path(raw_seed["npz_file"]))
         means = np.asarray(npz["means_xyz"], dtype=np.float32)
         return {
             "means_xyz": means,
@@ -216,10 +211,10 @@ class SceneArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "SceneArtifact":
-        raw = read_json(save_dir / "artifact.json")
-        render_seed = cls._load_seed(save_dir, raw.get("render_seed", {}))
+        raw = read_json(save_dir / cls.FILE)
+        render_seed = cls._load_seed(save_dir, raw["render_seed"])
         train_views = []
-        for view in raw.get("train_views", []):
+        for view in raw["train_views"]:
             entry = dict(view)
             image_file = entry.get("image_file")
             if image_file is not None:
@@ -227,25 +222,25 @@ class SceneArtifact(BaseArtifact):
             entry["t_world_cam"] = np.asarray(entry["t_world_cam"], dtype=np.float32)
             train_views.append(entry)
         render_trajectory = []
-        for cam in raw.get("render_trajectory", []):
+        for cam in raw["render_trajectory"]:
             entry = dict(cam)
             entry["t_world_cam"] = np.asarray(entry["t_world_cam"], dtype=np.float32)
             render_trajectory.append(entry)
         frame_refs = [
-            FrameRef(stream_id=str(fr["stream_id"]), frame_idx=int(fr["frame_idx"]), timestamp_sec=float(fr["timestamp_sec"]))
-            for fr in raw.get("frame_refs", [])
+            FrameRef.from_dict(fr)
+            for fr in raw["frame_refs"]
         ]
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
             save_dir=Path(save_dir),
-            metadata=raw.get("metadata", {}),
-            kind=str(raw.get("kind", "static")),
+            metadata=raw["metadata"],
+            kind=str(raw["kind"]),
             render_seed=render_seed,
             train_views=train_views,
             render_trajectory=render_trajectory,
-            dynamic_bundle=cls._load_dynamic_bundle(save_dir, raw.get("dynamic_bundle", {})),
+            dynamic_bundle=cls._load_dynamic_bundle(save_dir, raw["dynamic_bundle"]),
             frame_refs=frame_refs,
-            timeline=raw.get("timeline", {}),
-            notes=raw.get("notes", []),
+            timeline=raw["timeline"],
+            notes=raw["notes"],
         )

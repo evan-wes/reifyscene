@@ -31,7 +31,7 @@ class ClipQualityAssessor:
         """Return placeholder stream-level quality statistics."""
         return {
             "usable": 1.0,
-            "fps": float(stream.fps),
+            "fps": stream.fps,
             "has_audio": 1.0 if stream.has_audio else 0.0,
             "resolution_known": 1.0 if stream.width > 0 and stream.height > 0 else 0.0,
         }

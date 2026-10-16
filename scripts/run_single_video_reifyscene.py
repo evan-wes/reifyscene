@@ -10,6 +10,7 @@ This helper exercises the implemented vertical slice:
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 from time import perf_counter
 
@@ -52,9 +53,13 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cfg['_resume_video_paths'] = [str(Path(args.video).expanduser().resolve())]
     if args.max_keyframes is not None:
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
+    if args.keyframe_stride is not None:
+        cfg['keyframe_stride'] = int(args.keyframe_stride)
     if args.keyframe_stride_sec is not None:
         cfg['keyframe_stride_sec'] = float(args.keyframe_stride_sec)
     cfg['keyframes_all'] = bool(getattr(args, 'keyframes_all', False))
+    if getattr(args, 'frames_camera', None) is not None:
+        cfg['frames_camera'] = str(args.frames_camera)
 
     geometry = cfg.setdefault('geometry', {})
     geometry['backend_name'] = args.geometry_backend_name
@@ -195,29 +200,9 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
         scene_cfg.setdefault('timeline_source', str(scene_cfg.get('timeline_source', 'geometry')).lower())
 
     render_cfg = cfg.setdefault('render', {})
-    render_presets = {
-        'lowmem': {'width': 800, 'height': 450, 'point_limit': 10000, 'frame_stride': 1, 'max_frames_per_path': 32},
-        'balanced': {'width': 960, 'height': 540, 'point_limit': 16000, 'frame_stride': 1, 'max_frames_per_path': 48},
-        'full': {'width': 1280, 'height': 720, 'point_limit': 30000, 'frame_stride': 1, 'max_frames_per_path': None},
-    }
-    render_preset = render_presets.get((rec or {}).get('profile', 'lowmem'), render_presets['lowmem'])
     render_cfg.setdefault('backend_name', 'gaussian4d')
-    render_cfg.setdefault('debug_triptych', True)
-    render_cfg.setdefault('render_scale', 1)
-    render_cfg.setdefault('width', render_preset['width'])
-    render_cfg.setdefault('height', render_preset['height'])
-    render_cfg.setdefault('point_limit', render_preset['point_limit'])
-    render_cfg.setdefault('frame_stride', render_preset['frame_stride'])
-    render_cfg.setdefault('max_frames_per_path', render_preset['max_frames_per_path'])
     # The renderer is gsplat-backed and GPU-only; there is no CPU render path.
     render_cfg.setdefault('device', 'cuda')
-    render_cfg.setdefault('enabled_paths', {
-        'orbit': True,
-        'overhead': True,
-        'replay': True,
-        'follow_human': True,
-        'follow_object': True,
-    })
 
     lifting = cfg.setdefault('lifting', {})
     lifting['point_conf_threshold'] = float(args.point_conf_threshold)
@@ -278,18 +263,18 @@ def _sorted_unique_frame_refs(frames):
 
 
 def _sample_rate_hz(frames) -> str:
+    """Mean sampling rate in Hz when every frame has a time, else the mean frame step (a
+    source with no recorded frame rate has no Hz)."""
     frames = _sorted_unique_frame_refs(frames)
-    if len(frames) < 2:
+    pairs = [(a, b) for a, b in zip(frames[:-1], frames[1:]) if a.stream_id == b.stream_id]
+    if not pairs:
         return "n/a"
-    deltas = []
-    for a, b in zip(frames[:-1], frames[1:]):
-        dt = float(b.timestamp_sec) - float(a.timestamp_sec)
-        if dt > 1e-6:
-            deltas.append(dt)
-    if not deltas:
-        return "n/a"
-    hz = 1.0 / (sum(deltas) / len(deltas))
-    return f"{hz:.2f} Hz"
+    if all(f.timestamp_sec is not None for f in frames):
+        deltas = [float(b.timestamp_sec) - float(a.timestamp_sec) for a, b in pairs]
+        deltas = [d for d in deltas if d > 1e-6]
+        return f"{1.0 / (sum(deltas) / len(deltas)):.2f} Hz" if deltas else "n/a"
+    steps = [int(b.frame_idx) - int(a.frame_idx) for a, b in pairs]
+    return f"every {sum(steps) / len(steps):.3g} frames"
 
 
 def _frame_set_from_states(states):
@@ -418,6 +403,9 @@ def _check_resume_only(args: argparse.Namespace, system_report: dict, debug_cfg:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
+    parser.add_argument('--frames-camera', default=None,
+                        help='Which camera of a --frames-dir that holds several (the prefix in '
+                             'file names like 0_00060.png). Required for such a folder.')
     parser.add_argument('--frames-dir', default=None,
                         help='Path to a directory of RGB frames (ingested losslessly, no re-encode). '
                              'Alternative to --video; exactly one is required. Camera id + frame indices '
@@ -431,10 +419,13 @@ def main() -> None:
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
     parser.add_argument('--frame-cache-dir', default=None)
     parser.add_argument('--max-keyframes', type=int, default=4)
-    parser.add_argument('--keyframe-stride-sec', type=float, default=1.0)
+    parser.add_argument('--keyframe-stride', type=int, default=None,
+                        help='Keyframe spacing in frames (30 when neither stride is given).')
+    parser.add_argument('--keyframe-stride-sec', type=float, default=None,
+                        help='Keyframe spacing in seconds; needs a source that records its fps.')
     parser.add_argument('--keyframes-all', action='store_true',
                         help='Use every frame as a keyframe (dense reconstruction / benchmark-protocol '
-                             'parity). Overrides --keyframe-stride-sec and --max-keyframes.')
+                             'parity). Overrides the keyframe stride and --max-keyframes.')
     parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-camera-params', default=None,
@@ -552,7 +543,7 @@ def main() -> None:
         console.print(f'run_dir: {args.run_dir}')
         console.print(f'geometry: {args.geometry_backend_mode} on {args.geometry_device}')
         console.print(f'tracking: {args.tracking_backend_mode} on {cfg["tracking"]["device"]}')
-        console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}')
+        console.print(f'max_keyframes: {args.max_keyframes}  keyframe_stride: {args.keyframe_stride}  keyframe_stride_sec: {args.keyframe_stride_sec}')
         console.print(
             f"tracking_grid_size: {cfg['tracking']['grid_size']}  resize_max_dim: {cfg['tracking']['resize_max_dim']} "
             f"max_frames: {cfg['tracking']['max_frames']}  frame_stride: {cfg['tracking']['frame_stride']}"
@@ -595,14 +586,19 @@ def main() -> None:
 
     manifest = {
             'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
-            'run_dir': str(Path(args.run_dir).expanduser().resolve()),
+            # no run_dir: where the run is is where its manifest is (runs can be moved)
             'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
             'start_stage': args.start_stage,
             'stop_stage': args.stop_stage,
-            'config': cfg,
+            # which experiment config built this run: its path and exact content
+            'config_file': None if not args.config else {
+                'path': str(Path(args.config).expanduser().resolve()),
+                'sha256': hashlib.sha256(Path(args.config).expanduser().read_bytes()).hexdigest(),
+            },
+            'config': {k: v for k, v in cfg.items() if k != 'run_dir'},
             'resume': None if plan is None else {
                 'pinned': plan.pins,
-                'stages': {s: {'action': v.action, 'derived': v.derived} for s, v in plan.verdicts.items()},
+                'stages': {s: {'action': v.action, 'notes': v.notes} for s, v in plan.verdicts.items()},
             },
     }
     write_run_manifest(args.run_dir, manifest)

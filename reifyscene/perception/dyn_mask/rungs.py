@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import FrameRef
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
@@ -40,11 +41,11 @@ class DynMaskInitializer:
         self.cfg = cfg or {}
         self.run_id = str(self.cfg.get("run_id", "dyn_mask"))
         self.save_dir = self.cfg.get("dyn_mask_save_dir", "artifacts/dyn_mask")
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
 
     @staticmethod
     def _frame_key(frame: FrameRef) -> str:
-        return f"{frame.stream_id}:{frame.frame_idx}"
+        return frame_key(frame.stream_id, frame.frame_idx)
 
     def _select_frames(self, frames, ingest_artifact) -> list[FrameRef]:
         if frames:

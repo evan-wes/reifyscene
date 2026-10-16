@@ -1,18 +1,4 @@
 render:
   backend_name: gaussian4d
   device: cuda
-  width: 800
-  height: 450
-  point_limit: 10000000
-  max_dynamic_entities_per_kind: 3
-  frame_stride: 1
-  max_frames_per_path: 24
   label_entities: true
-  debug_triptych: true
-  render_scale: 2
-  enabled_paths:
-    orbit: true
-    overhead: false
-    replay: false
-    follow_human: false
-    follow_object: false

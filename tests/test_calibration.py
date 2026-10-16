@@ -57,7 +57,7 @@ def test_calibration_artifact_roundtrip(tmp_path: Path) -> None:
         sampled_image_index={"cam_00:0": "cam_00/frame_000000.png"},
         intrinsics_by_stream={"cam_00": CameraIntrinsics(500.0, 500.0, 320.0, 240.0)},
         camera_states_by_stream={
-            "cam_00": [TimedCameraState("cam_00", 0.0, CameraIntrinsics(500.0, 500.0, 320.0, 240.0), CameraPose(np.eye(4, dtype=np.float32)))]
+            "cam_00": [TimedCameraState("cam_00", 0, CameraIntrinsics(500.0, 500.0, 320.0, 240.0), CameraPose(np.eye(4, dtype=np.float32)))]
         },
         sparse_points_xyz=np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
         sparse_points_rgb=np.asarray([[255, 0, 0]], dtype=np.uint8),

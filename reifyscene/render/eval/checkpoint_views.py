@@ -47,17 +47,6 @@ def pick_evenly(n: int, count: int) -> list[int]:
     return [round(i * (n - 1) / (count - 1)) for i in range(count)]
 
 
-def replay_size(K: np.ndarray) -> tuple[int, int]:
-    """(width, height) a camera's intrinsics imply: twice its rounded principal point.
-
-    Bundles store K but not the image size. This is exact for a centred principal
-    point (VGGT's square crops) and within a couple of pixels for real phone
-    cameras, whose principal point sits slightly off centre. Always even, which
-    video encoders want.
-    """
-    return 2 * int(round(float(K[0, 2]))), 2 * int(round(float(K[1, 2])))
-
-
 def _to_u8(img: torch.Tensor) -> np.ndarray:
     return (img.clamp(0.0, 1.0).detach().cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
 
@@ -205,18 +194,22 @@ def export_replay(
     out_path: str | Path,
     *,
     rasterizer,
+    raster: tuple[int, int],
     fps: int = 30,
     stride: int = 1,
 ) -> dict[str, Any]:
     """Render every ``stride``-th training camera at its own time and encode a video.
 
-    Writes the video (mp4v, like the pipeline's flythrough) and a sidecar
-    ``<name>.json`` with the size, fps and the time id of every frame.
+    ``raster`` is the (width, height) the scene was trained at -- the run's stream says
+    (``FrameStream.render_raster``); it is not inferred from the intrinsics. ``fps`` is the
+    output video's playback rate, not a claim about the capture. Writes the video (mp4v, like
+    the pipeline's flythrough) and a sidecar ``<name>.json`` with the size, fps and the time id
+    of every frame.
     """
     train = sorted(cams.get("train") or [], key=lambda cam: cam.time_id)[:: max(1, int(stride))]
     if not train:
         raise ValueError("the bundle has no training cameras to replay")
-    width, height = replay_size(train[0].K)
+    width, height = int(raster[0]), int(raster[1])
     frames = [
         _to_u8(_render(rasterizer, scene, cam.render_camera(width, height), cam.time_id))
         for cam in train

@@ -101,9 +101,11 @@ def tracking(paths, *, static_labels=None, lifted=None, stream_id: str = "cam0")
     )
 
 
-def build(track_artifact, human_artifact=None, object_artifact=None, cfg=None):
+def build(track_artifact, human_artifact=None, object_artifact=None, cfg=None,
+          semantics_artifact=None):
     builder = DynamicSceneGraphBuilder(cfg)
-    return builder.build(geometry(), track_artifact, human_artifact, object_artifact)
+    return builder.build(geometry(), track_artifact, human_artifact, object_artifact,
+                         semantics_artifact=semantics_artifact)
 
 
 def nodes_by_id(artifact):
@@ -202,17 +204,51 @@ def test_an_entity_reports_whether_its_evidence_moved() -> None:
 
 
 def test_the_thresholds_come_from_the_config() -> None:
-    # Inside the person on two of four frames: accepted at 0.5, refused at 0.75.
-    half_inside = [(10.0, 10.0), (10.0, 10.0), (28.0, 35.0), (28.0, 35.0)]
-    loose = build(tracking([half_inside]), humans(), objects())
+    """A genuinely ambiguous track: half its inside-frames on the person, half on the mug."""
+    ambiguous = [(10.0, 10.0), (10.0, 10.0), (45.0, 15.0), (45.0, 15.0)]
+    loose = build(tracking([ambiguous]), humans(), objects())
     strict = build(
-        tracking([half_inside]),
+        tracking([ambiguous]),
         humans(),
         objects(),
         cfg={"track_membership_min_ratio": 0.75, "track_membership_min_frames": 2},
     )
+    # At 0.5 the tie goes to the person (equal counts, equal ratio, smaller id).
     assert nodes_by_id(loose)["human:cam0:p1"].attrs["support_track_ids"] == [0]
+    # At 0.75 neither entity owns it decisively enough, so it supports neither.
     assert nodes_by_id(strict)["human:cam0:p1"].attrs["support_track_ids"] == []
+    assert nodes_by_id(strict)["object:cam0:o1"].attrs["support_track_ids"] == []
+
+
+def test_a_track_inside_one_entity_only_is_its_evidence_however_briefly() -> None:
+    """The ratio asks *which* entity, not how long -- min_frames asks how long.
+
+    A point on the person for two frames of four, and inside nothing on the others, is
+    unambiguously the person's. Under the old rule its denominator was the person's whole
+    co-visible life, so it scored 0.5 and only survived a lenient threshold; a longer
+    clip would have thrown it away entirely.
+    """
+    brief = [(10.0, 10.0), (10.0, 10.0), (28.0, 35.0), (28.0, 35.0)]  # (28,35) is in neither box
+    strict = build(
+        tracking([brief]),
+        humans(),
+        objects(),
+        cfg={"track_membership_min_ratio": 0.9, "track_membership_min_frames": 2},
+    )
+    person = nodes_by_id(strict)["human:cam0:p1"]
+    assert person.attrs["support_track_ids"] == [0]
+    assert person.attrs["mean_support_ratio"] == 1.0      # decisive: inside nothing else
+    assert person.attrs["mean_covisible_ratio"] == 0.5    # and honest about its coverage
+
+
+def test_dwell_is_still_required() -> None:
+    """Unambiguous is not the same as sufficient: one frame inside is still one frame."""
+    glancing = [(10.0, 10.0), (28.0, 35.0), (28.0, 35.0), (28.0, 35.0)]
+    artifact = build(
+        tracking([glancing]), humans(), objects(),
+        cfg={"track_membership_min_ratio": 0.5, "track_membership_min_frames": 2},
+    )
+    assert nodes_by_id(artifact)["human:cam0:p1"].attrs["support_track_ids"] == []
 
 
 def test_entities_without_masks_carry_no_evidence_and_the_notes_say_so() -> None:
@@ -241,3 +277,106 @@ def test_every_entity_is_observed_by_its_camera() -> None:
         ("object:cam0:o1", "cam0"),
         ("background:cam0", "cam0"),
     }
+
+
+# --- what the semantics stage decided reaches the node -----------------------
+
+def semantics(records=None, embeddings=None):
+    """The little of the SemanticsArtifact the builder reads, keyed by canonical track."""
+    return SimpleNamespace(
+        records=records if records is not None else {},
+        embeddings=embeddings if embeddings is not None else {},
+    )
+
+
+def _record(category="mug", score=0.4, topk=None, **kw):
+    """A semantics record, with every field a real SemanticRecord carries."""
+    base = dict(
+        category=category, score=score,
+        category_topk=topk if topk is not None else [("mug", 0.4), ("cup", 0.1)],
+        caption=None, margin=None, margin_z=None, abstained=False, abstain_reason=None,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_a_node_carries_the_category_its_alternatives_and_its_embedding() -> None:
+    recs = {"p1": _record("person", 0.5), "o1": _record("mug", 0.4)}
+    embs = {"p1": np.arange(4, dtype=np.float32)}
+    artifact = build(
+        tracking([[(10.0, 10.0)] * 4]), humans(), objects(),
+        semantics_artifact=semantics(recs, embs),
+    )
+    person = nodes_by_id(artifact)["human:cam0:p1"]
+    assert person.attrs["category"] == "person"
+    assert person.attrs["category_topk"] == [["mug", 0.4], ["cup", 0.1]]
+    assert person.attrs["semantics_source"] == "semantics"
+    assert artifact.embeddings["human:cam0:p1"].tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert "object:cam0:o1" not in artifact.embeddings  # no vector, no entry
+    assert any("semantics named 2 of 2" in n for n in artifact.notes)
+
+
+def test_a_human_node_is_labelled_by_semantics_not_hardcoded() -> None:
+    artifact = build(
+        tracking([[(10.0, 10.0)] * 4]), humans(), objects(),
+        semantics_artifact=semantics({"p1": _record("cyclist", 0.6)}),
+    )
+    assert nodes_by_id(artifact)["human:cam0:p1"].label == "cyclist"
+
+
+def test_an_abstention_leaves_the_node_labelled_human_and_says_why() -> None:
+    """A refusal is a value: the node falls back, and records that it was asked."""
+    refused = _record("unknown", 0.1, abstained=True, abstain_reason="low_separation",
+                      margin=0.004, margin_z=0.8)
+    artifact = build(
+        tracking([[(10.0, 10.0)] * 4]), humans(), objects(),
+        semantics_artifact=semantics({"p1": refused}),
+    )
+    person = nodes_by_id(artifact)["human:cam0:p1"]
+    assert person.label == "human"                       # not "unknown"
+    assert person.attrs["category"] == "unknown"
+    assert person.attrs["abstained"] is True
+    assert person.attrs["abstain_reason"] == "low_separation"
+    assert person.attrs["category_margin"] == 0.004
+
+
+
+
+def test_without_a_semantics_artifact_the_graph_still_builds() -> None:
+    artifact = build(tracking([[(10.0, 10.0)] * 4]), humans(), objects())
+    person = nodes_by_id(artifact)["human:cam0:p1"]
+    mug = nodes_by_id(artifact)["object:cam0:o1"]
+    assert person.label == "human"
+    assert person.attrs["semantics_source"] == "none"
+    assert mug.attrs["semantics_source"] == "objects"    # category came down via objects
+    assert mug.label == "mug"
+    assert artifact.embeddings == {}
+
+
+# --- the graph says whether its vertical relations are computable -------------
+
+def test_the_graph_records_whether_its_positions_are_gravity_aligned() -> None:
+    """A missing `above` edge means *false* or *not computable*; a consumer must be able
+    to tell, and the answer lives two stages upstream."""
+    geo = geometry()
+    geo.metadata = {
+        "ground_plane_applied": True,
+        "world_frame": {"type": "ground_plane_z_up", "inlier_ratio": 0.45},
+    }
+    builder = DynamicSceneGraphBuilder()
+    artifact = builder.build(geo, tracking([[(10.0, 10.0)] * 4]), humans(), objects())
+    frame = artifact.metadata["world_frame"]
+    assert frame["gravity_aligned"] is True
+    assert frame["up_axis"] == "+z"
+    assert frame["inlier_ratio"] == 0.45
+
+
+def test_a_canonicalizer_that_did_not_run_is_recorded_as_such() -> None:
+    geo = geometry()
+    geo.metadata = {"ground_plane_applied": False, "world_frame": {}}
+    artifact = DynamicSceneGraphBuilder().build(
+        geo, tracking([[(10.0, 10.0)] * 4]), humans(), objects()
+    )
+    frame = artifact.metadata["world_frame"]
+    assert frame["gravity_aligned"] is False
+    assert frame["up_axis"] is None

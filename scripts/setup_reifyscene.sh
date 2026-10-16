@@ -101,6 +101,11 @@ MOGE_COMMIT="07444410f1e33f402353b99d6ccd26bd31e469e8"
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
+# VLA-3D's scene-graph relation functions (MIT): the graph stage's relation computer calls them
+# (reifyscene/graph/relations.py). Two patches in third_party_patches/vla-3d/.
+VLA3D_REPO="https://github.com/HaochenZ11/VLA-3D.git"
+VLA3D_COMMIT="a0c023c9662bd875f0b3aeff4ff60adc1991e449"
+
 HLOC_REPO="https://github.com/cvg/Hierarchical-Localization.git"
 HLOC_TAG="v1.4"
 COLMAP_UPSTREAM_TAG="3.13.0"
@@ -155,6 +160,7 @@ INSTALL_SIGLIP2=0
 INSTALL_SAPIENS=0
 INSTALL_MOGE=0
 INSTALL_VGGT_LONG=0
+INSTALL_VLA3D=1
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
 INSTALL_VISION=1
@@ -165,6 +171,9 @@ INSTALL_FFMPEG=1
 FORCE_VGGT_LONG_WEIGHTS=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Every reifyscene edit to third-party code goes through third_party_patches/ + this helper.
+# shellcheck source=scripts/lib/patch_series.sh
+source "${ROOT_DIR}/scripts/lib/patch_series.sh"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 VGGT_DIR="${THIRD_PARTY_DIR}/vggt"
 COTRACKER_DIR="${THIRD_PARTY_DIR}/co-tracker"
@@ -174,6 +183,7 @@ SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
 MOGE_DIR="${THIRD_PARTY_DIR}/MoGe"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
+VLA3D_DIR="${THIRD_PARTY_DIR}/VLA-3D"
 VGGT_LONG_WEIGHTS_DIR="${VGGT_LONG_DIR}/weights"
 VGGT_LONG_WEIGHTS_STAMP="${VGGT_LONG_WEIGHTS_DIR}/.reifyscene_download_complete"
 VGGT_LONG_WEIGHTS_MIN_MB="${VGGT_LONG_WEIGHTS_MIN_MB:-8000}"
@@ -208,6 +218,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_MOGE=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
+    --no-vla3d)
+      INSTALL_VLA3D=0; shift ;;
     --with-gsplat)
       INSTALL_GSPLAT=1; shift ;;
     --no-gsplat)
@@ -267,6 +279,7 @@ Install options:
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the reifyscene renderer requires it)
+  --no-vla3d              Skip VLA-3D (scene-graph relations; on by default)
   --no-gsplat             Skip the gsplat source build
   --force-vggt-long-weights
                           Re-download VGGT-Long weights even if already present
@@ -1300,68 +1313,18 @@ if [[ $INSTALL_CALIBRATION -eq 1 ]]; then
   echo "Installing hloc from ${HLOC_DIR} (tag ${HLOC_TAG})..."
   python -m pip install -e "${HLOC_DIR}"
 
-  # Patch hloc for pycolmap >= 3.10 API drift (the pinned hloc tag predates
-  # it): import_images renamed image_list->image_names and requires an
-  # ImageReaderOptions instance; verify_matches moved its RANSAC kwargs into
-  # TwoViewGeometryOptions; incremental_mapping requires
-  # IncrementalPipelineOptions; all three require str paths. Idempotent:
-  # each replacement is skipped when already applied, and a missing anchor
-  # fails LOUDLY instead of silently shipping an unpatched tree.
+  # Patch hloc for pycolmap >= 3.10 API drift; see the patch header for the three call sites.
   echo "Patching hloc for pycolmap >= 3.10 API drift..."
-  python - "${HLOC_DIR}" <<'PYEOF'
-import sys
-from pathlib import Path
+  apply_patch_series "${HLOC_DIR}" "${ROOT_DIR}/third_party_patches/hloc" "hloc"
+fi
 
-hloc_dir = Path(sys.argv[1])
-PATCHES = [
-    (hloc_dir / "hloc" / "reconstruction.py", """    with pycolmap.ostream():
-        pycolmap.import_images(database_path, image_dir, camera_mode,
-                               image_list=image_list or [],
-                               options=options)""", """    with pycolmap.ostream():
-        # reifyscene patch (applied by scripts/setup_reifyscene.sh): pycolmap >= 3.10
-        # renamed the image_list kwarg to image_names and requires an
-        # ImageReaderOptions instance (dicts are no longer accepted); paths
-        # must be str.
-        reader_options = pycolmap.ImageReaderOptions()
-        for key, value in (options or {}).items():
-            setattr(reader_options, key, value)
-        pycolmap.import_images(str(database_path), str(image_dir), camera_mode,
-                               image_names=image_list or [],
-                               options=reader_options)"""),
-    (hloc_dir / "hloc" / "reconstruction.py", """            reconstructions = pycolmap.incremental_mapping(
-                database_path, image_dir, models_path, options=options)""", """            # reifyscene patch (applied by scripts/setup_reifyscene.sh): pycolmap
-            # >= 3.10 requires IncrementalPipelineOptions and str paths.
-            mapper_options_obj = pycolmap.IncrementalPipelineOptions()
-            if options:
-                mapper_options_obj.mergedict(options)
-            reconstructions = pycolmap.incremental_mapping(
-                str(database_path), str(image_dir), str(models_path),
-                options=mapper_options_obj)"""),
-    (hloc_dir / "hloc" / "triangulation.py", """    with OutputCapture(verbose):
-        with pycolmap.ostream():
-            pycolmap.verify_matches(
-                database_path, pairs_path,
-                max_num_trials=20000, min_inlier_ratio=0.1)""", """    with OutputCapture(verbose):
-        with pycolmap.ostream():
-            # reifyscene patch (applied by scripts/setup_reifyscene.sh): pycolmap
-            # >= 3.10 moved the RANSAC kwargs into TwoViewGeometryOptions
-            # and requires str paths.
-            options = pycolmap.TwoViewGeometryOptions()
-            options.ransac.max_num_trials = 20000
-            options.ransac.min_inlier_ratio = 0.1
-            pycolmap.verify_matches(str(database_path), str(pairs_path),
-                                    options=options)"""),
-]
-for path, old, new in PATCHES:
-    src = path.read_text()
-    if new in src:
-        continue  # already patched
-    if old not in src:
-        sys.exit(f"hloc patch anchor not found in {path} -- upstream "
-                 "drifted; update the patch in setup_reifyscene.sh")
-    path.write_text(src.replace(old, new))
-    print(f"  patched {path.name}")
-PYEOF
+if [[ $INSTALL_VLA3D -eq 1 ]]; then
+  # Relations for the scene graph. Their code is imported from the checkout, not pip-installed;
+  # shapely and numba are what it needs (the `relations` extra in pyproject.toml).
+  clone_or_update_checkout "${VLA3D_REPO}" "${VLA3D_DIR}" "${VLA3D_COMMIT}"
+  python -m pip install "shapely>=2.0" "numba>=0.60"
+  echo "Applying VLA-3D patches..."
+  apply_patch_series "${VLA3D_DIR}" "${ROOT_DIR}/third_party_patches/vla-3d" "VLA-3D"
 fi
 
 if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
@@ -1371,41 +1334,11 @@ if [[ $INSTALL_VGGT_LONG -eq 1 ]]; then
   ensure_faiss
   ensure_cuda_toolkit_for_torch_extensions
 
-  # Patch VGGT-Long's loop-closure DINOv2 backbone: it torch.hub.load's
-  # './LoopModels/dinov2' relative to the process CWD, so loop closure breaks
-  # whenever VGGT-Long runs from any directory but its own (always, under
-  # reifyscene). Anchor the path to the module's own location. Idempotent; fails
-  # loudly if the upstream anchor is gone.
-  echo "Patching VGGT-Long loop-closure DINOv2 path (CWD-relative -> __file__-anchored)..."
-  python - "${VGGT_LONG_DIR}" <<'PYEOF'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1]) / "LoopModels" / "backbones" / "dinov2.py"
-OLD = "        self.model = torch.hub.load('./LoopModels/dinov2', model_name, source='local', pretrained=False)"
-NEW = (
-    "        # reifyscene patch (applied by scripts/setup_reifyscene.sh): the upstream './LoopModels/dinov2'\n"
-    "        # path is resolved against the process CWD, so loop closure breaks whenever VGGT-Long\n"
-    "        # runs from any directory but its own (always, under reifyscene). Anchor it to this file.\n"
-    "        import os as _os\n"
-    "        _dinov2_repo = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'dinov2')\n"
-    "        self.model = torch.hub.load(_dinov2_repo, model_name, source='local', pretrained=False)"
-)
-src = path.read_text()
-if "_dinov2_repo" in src:
-    print("  dinov2 path already patched")
-elif OLD in src:
-    path.write_text(src.replace(OLD, NEW))
-    print(f"  patched {path.name}")
-else:
-    sys.exit(f"dinov2 patch anchor not found in {path} -- upstream drifted; update the patch in setup_reifyscene.sh")
-PYEOF
-
-  if [[ -f "${VGGT_LONG_DIR}/scripts/download_weights.sh" ]]; then
-    echo "Patching VGGT-Long download_weights.sh for current Hugging Face CLI..."
-    sed -i 's/\bhuggingface-cli\b/hf/g' "${VGGT_LONG_DIR}/scripts/download_weights.sh"
-    sed -i 's/[[:space:]]*--local-dir-use-symlinks[[:space:]]\+False//g' "${VGGT_LONG_DIR}/scripts/download_weights.sh"
-  fi
+  # Two VGGT-Long patches, both in third_party_patches/vggt-long/: the loop-closure DINOv2
+  # backbone's CWD-relative torch.hub path anchored to __file__, and the weight-download script
+  # moved onto the current Hugging Face CLI. See each patch header for why.
+  echo "Applying VGGT-Long patches..."
+  apply_patch_series "${VGGT_LONG_DIR}" "${ROOT_DIR}/third_party_patches/vggt-long" "VGGT-Long"
 
   # Provide a compatibility shim if the environment has `hf` but not `huggingface-cli`.
   if ! command -v huggingface-cli >/dev/null 2>&1 && command -v hf >/dev/null 2>&1; then

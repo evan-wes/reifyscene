@@ -173,7 +173,7 @@ def _train_views_factor2(cams_train, dataset_root: str, factor: int):
             "intrinsics": {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "cx": float(K[0, 2]), "cy": float(K[1, 2])},
             "width": int(width),
             "height": int(height),
-            "image_path": str(backend.rgb_dir / f"{cam.frame_name}.png"),
+            "image_path": str(backend.sequence.rgb_path(cam.frame_name, backend.factor)),
         })
     return views
 

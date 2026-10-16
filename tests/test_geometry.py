@@ -33,13 +33,13 @@ def test_ground_plane_detection_canonicalizes_to_z_up(tmp_path: Path) -> None:
         intrinsics_by_stream={'cam_00': CameraIntrinsics(500, 500, 12, 12)},
         camera_states_by_stream={
             'cam_00': [
-                TimedCameraState('cam_00', 0.0, CameraIntrinsics(500, 500, 12, 12), CameraPose(np.array([
+                TimedCameraState('cam_00', 0, CameraIntrinsics(500, 500, 12, 12), CameraPose(np.array([
                     [1.0, 0.0, 0.0, 0.0],
                     [0.0, 1.0, 0.0, 0.0],
                     [0.0, 0.0, 1.0, 1.5],
                     [0.0, 0.0, 0.0, 1.0],
                 ], dtype=np.float32))),
-                TimedCameraState('cam_00', 0.1, CameraIntrinsics(500, 500, 12, 12), CameraPose(np.array([
+                TimedCameraState('cam_00', 1, CameraIntrinsics(500, 500, 12, 12), CameraPose(np.array([
                     [1.0, 0.0, 0.0, 0.1],
                     [0.0, 1.0, 0.0, 0.0],
                     [0.0, 0.0, 1.0, 1.55],
@@ -97,7 +97,7 @@ def test_geometry_debug_exports_world_frame_diagnostics(tmp_path: Path) -> None:
         save_dir=tmp_path / 'geometry_diag',
         selected_frames=[frame0],
         intrinsics_by_stream={'cam_00': CameraIntrinsics(200, 200, 12, 12)},
-        camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0.0, CameraIntrinsics(200, 200, 12, 12), CameraPose(np.eye(4, dtype=np.float32)))]},
+        camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0, CameraIntrinsics(200, 200, 12, 12), CameraPose(np.eye(4, dtype=np.float32)))]},
         pointmaps_by_frame={'cam_00:0': {'points': pts, 'confidence': np.ones((24, 24), dtype=np.float32)}},
         depthmaps_by_frame={},
         metadata={'debug_image_paths': {'cam_00:0': str(rgb_path)}, 'save_debug_assets': True},

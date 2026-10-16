@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, TimedCameraState
@@ -58,7 +59,6 @@ class OptimizationArtifact(BaseArtifact):
             np.savez_compressed(
                 track_dir / filename,
                 frame_indices=np.asarray(payload.get('frame_indices', []), dtype=np.int32),
-                timestamps_sec=np.asarray(payload.get('timestamps_sec', []), dtype=np.float32),
                 track_ids=np.asarray(payload.get('track_ids', []), dtype=np.int32),
                 points_xy=np.asarray(payload.get('points_xy', np.zeros((0, 0, 2), dtype=np.float32)), dtype=np.float32),
                 visibility=np.asarray(payload.get('visibility', np.zeros((0, 0), dtype=bool))),
@@ -87,7 +87,6 @@ class OptimizationArtifact(BaseArtifact):
         raw = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'refined_cameras': {
                 stream_id: [GeometryArtifact._camera_state_to_dict(state) for state in states]
@@ -97,7 +96,7 @@ class OptimizationArtifact(BaseArtifact):
             'tracks_3d': self._to_serializable(self.tracks_3d),
             'track_index': track_index,
             'selected_frames': [
-                {'stream_id': f.stream_id, 'frame_idx': int(f.frame_idx), 'timestamp_sec': float(f.timestamp_sec)}
+                f.to_dict()
                 for f in self.selected_frames
             ],
             'object_trajectories': self._to_serializable(self.object_trajectories),
@@ -110,18 +109,17 @@ class OptimizationArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'OptimizationArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         refined_track_payloads_by_stream: dict[str, dict[str, Any]] = {}
-        for stream_id, info in raw.get('track_index', {}).items():
+        for stream_id, info in raw['track_index'].items():
             npz = np.load(save_dir / 'tracks' / info['file'], allow_pickle=True)
             refined_track_payloads_by_stream[stream_id] = {
                 'frame_indices': np.asarray(npz['frame_indices'], dtype=np.int32),
-                'timestamps_sec': np.asarray(npz['timestamps_sec'], dtype=np.float32),
                 'track_ids': np.asarray(npz['track_ids'], dtype=np.int32),
                 'points_xy': np.asarray(npz['points_xy'], dtype=np.float32),
                 'visibility': np.asarray(npz['visibility']).astype(bool),
                 'confidence': np.asarray(npz['confidence'], dtype=np.float32),
-                'query_frame_idx': int(np.asarray(npz['query_frame_idx']).reshape(-1)[0]) if 'query_frame_idx' in npz else 0,
+                'query_frame_idx': int(np.asarray(npz['query_frame_idx']).reshape(-1)[0]),
                 'original_size_wh': np.asarray(npz['original_size_wh'], dtype=np.int32),
                 'model_size_wh': np.asarray(npz['model_size_wh'], dtype=np.int32),
                 'lifted_frame_indices': np.asarray(npz['lifted_frame_indices'], dtype=np.int32),
@@ -134,29 +132,29 @@ class OptimizationArtifact(BaseArtifact):
                 'static_scores': np.asarray(npz['static_scores'], dtype=np.float32),
                 'refined_static_labels': np.asarray(npz['refined_static_labels'], dtype=np.int8),
                 'refined_static_scores': np.asarray(npz['refined_static_scores'], dtype=np.float32),
-                'backend_used': info.get('backend_used', 'unknown'),
-                'windowing': info.get('windowing', {}),
-                'refinement_summary': info.get('refinement_summary', {}),
-                'refined_classification_summary': info.get('refined_classification_summary', {}),
+                'backend_used': info['backend_used'],
+                'windowing': info['windowing'],
+                'refinement_summary': info['refinement_summary'],
+                'refined_classification_summary': info['refined_classification_summary'],
             }
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             refined_cameras={
                 stream_id: [GeometryArtifact._camera_state_from_dict(state) for state in states]
-                for stream_id, states in raw.get('refined_cameras', {}).items()
+                for stream_id, states in raw['refined_cameras'].items()
             },
-            refined_offsets=raw.get('refined_offsets', {}),
-            tracks_3d=raw.get('tracks_3d', {}),
+            refined_offsets=raw['refined_offsets'],
+            tracks_3d=raw['tracks_3d'],
             refined_track_payloads_by_stream=refined_track_payloads_by_stream,
-            selected_frames=[FrameRef(**item) for item in raw.get('selected_frames', [])],
-            object_trajectories=raw.get('object_trajectories', {}),
-            human_trajectories=raw.get('human_trajectories', {}),
-            stage_diagnostics=raw.get('stage_diagnostics', []),
-            schedule_used=raw.get('schedule_used', []),
-            pending_todos=raw.get('pending_todos', []),
+            selected_frames=[FrameRef(**item) for item in raw['selected_frames']],
+            object_trajectories=raw['object_trajectories'],
+            human_trajectories=raw['human_trajectories'],
+            stage_diagnostics=raw['stage_diagnostics'],
+            schedule_used=raw['schedule_used'],
+            pending_todos=raw['pending_todos'],
         )
 
     def export_refinement_viewer(self, track_artifact: TrackArtifact, geometry_artifact: GeometryArtifact) -> None:
@@ -186,7 +184,7 @@ class OptimizationArtifact(BaseArtifact):
         frame_specs: list[dict[str, Any]] = []
         frames_for_view = list(self.selected_frames) or list(track_artifact.selected_frames)
         for frame in frames_for_view:
-            frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             depth_payload = geometry_artifact.depthmaps_by_frame.get(frame_key)
             point_payload = geometry_artifact.pointmaps_by_frame.get(frame_key)
@@ -249,7 +247,7 @@ class OptimizationArtifact(BaseArtifact):
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             ts = spec['track_state']
             ids = np.asarray(ts['track_ids'], dtype=int)
             marker_colors = [track_artifact._track_color(int(t)) for t in ids.tolist()]
@@ -317,15 +315,15 @@ class OptimizationArtifact(BaseArtifact):
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             visible = [False] * total_traces
             base = idx * traces_per_frame
             visible[base:base + traces_per_frame] = [True] * traces_per_frame
-            slider_steps.append({'method': 'update', 'label': name, 'args': [{'visible': visible}, {'title': {'text': f"Refinement debug | keyframe {name} | t={fr.timestamp_sec:.3f}s"}}]})
+            slider_steps.append({'method': 'update', 'label': name, 'args': [{'visible': visible}, {'title': {'text': f"Refinement debug | keyframe {fr.describe()}"}}]})
 
         first = frame_specs[0]['frame_ref']
         fig.update_layout(
-            title={'text': f"Refinement debug | keyframe {first.stream_id}:{first.frame_idx} | t={first.timestamp_sec:.3f}s"},
+            title={'text': f"Refinement debug | keyframe {first.describe()}"},
             template='plotly_white',
             width=1850,
             height=1100,

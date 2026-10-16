@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
@@ -59,7 +60,7 @@ class ColmapPoseInitializer(GeometryInitializer):
         self.camera_params = self.cfg.get("camera_params")
         self.fix_intrinsics = bool(self.cfg.get("fix_intrinsics", True)) and self.camera_params is not None
         self.retrieval_top_k = int(self.cfg.get("retrieval_top_k", 20))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
         # FP6b step 3: apply the dyn_mask only when the scene is large-dynamic — the spike
         # found masking is a SIZE-GATED robustness help (tightens large-dynamic scenes,
         # neutral/worse on small ones). Gate on the median per-frame dynamic fraction.
@@ -180,7 +181,7 @@ class ColmapPoseInitializer(GeometryInitializer):
                 continue
             rgb = self.decoder.get_frame(stream, frame.frame_idx)
             if apply_mask:
-                mask = dyn_mask_artifact.mask_for(f"{frame.stream_id}:{frame.frame_idx}")
+                mask = dyn_mask_artifact.mask_for(frame_key(frame.stream_id, frame.frame_idx))
                 if mask is not None and mask.shape == rgb.shape[:2]:
                     rgb = rgb.copy()
                     rgb[np.asarray(mask) > 0.5] = 0
@@ -199,14 +200,15 @@ class ColmapPoseInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
-                    time_sec=float(frame.timestamp_sec),
+                    frame_idx=int(frame.frame_idx),
+                    time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics_by_stream[frame.stream_id],
                     pose=CameraPose(T_world_cam=t_world_cam),
                 )
             )
             registered.append(frame)
         for states in camera_states_by_stream.values():
-            states.sort(key=lambda s: (s.time_sec, s.stream_id))
+            states.sort(key=lambda s: s.key)
 
         reg_frac = len(registered) / max(len(selected), 1)
         # COLMAP is up-to-similarity; if intrinsics were free-estimated, note the

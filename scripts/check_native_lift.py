@@ -20,11 +20,11 @@ Example (reifyscene env):
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import numpy as np
 import torch
 
+from reifyscene.ingest.datasets import DyCheckSequence
 from reifyscene.lifting.native_track_lift import build_native_init_inputs
 
 
@@ -60,7 +60,7 @@ def main() -> None:
     print(f"  fg xyz    : {_bbox(tracks.xyz)}")
     print(f"  train cams: {len(cameras['train'].frame_names)}  val cams: {len(cameras['val'].frame_names)}")
 
-    cache_dir = Path(args.dataset_root) / "flow3d_preprocessed" / "cache"
+    cache_dir = DyCheckSequence(args.dataset_root).preprocessed / "cache"
     snd_path = cache_dir / "scene_norm_dict.pth"
     trk_path = cache_dir / f"tracks_3d_{args.num_fg}.pth"
     if not (snd_path.exists() and trk_path.exists()):

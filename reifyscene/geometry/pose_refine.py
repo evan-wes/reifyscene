@@ -35,9 +35,10 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.similarity import apply_similarity_to_c2w, camera_center, fit_similarity
+from reifyscene.geometry.similarity import apply_similarity_to_c2w, fit_similarity
 
 
 class PoseRefineUnavailable(RuntimeError):
@@ -114,6 +115,32 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(int(seed))  # every device, CUDA's generator included
 
 
+def _pad_to_square(images, conf, points):
+    """Pad a landscape/portrait frame stack to a square, bottom-right, for the tracker.
+
+    The VGGSfM tracker scales image coordinates onto the confidence grid with a single
+    factor, so it asserts both are square and refuses anything else. VGGT-Long's loader
+    takes a frame's width to the target and keeps its height in proportion, so a landscape
+    clip (940x496) lands at 518x280 and pose refinement would fail outright.
+
+    Padding at the bottom-right leaves every real pixel's coordinate unchanged, so the
+    tracks come back in the geometry's own pixel space with nothing to undo. The padding
+    carries zero confidence, which the tracker's own filter drops. Returns the padded
+    arrays and how much was added; a square input is returned untouched.
+    """
+    height, width = int(images.shape[-2]), int(images.shape[-1])
+    if height == width:
+        return images, conf, points, 0, 0
+    side = max(height, width)
+    pad_h, pad_w = side - height, side - width
+    import torch
+
+    images = torch.nn.functional.pad(images, (0, pad_w, 0, pad_h))
+    conf = np.pad(np.asarray(conf), ((0, 0), (0, pad_h), (0, pad_w)))
+    points = np.pad(np.asarray(points), ((0, 0), (0, pad_h), (0, pad_w), (0, 0)))
+    return images, conf, points, pad_h, pad_w
+
+
 def _rotation_delta_deg(a_w2c: np.ndarray, b_w2c: np.ndarray) -> float:
     """The angle between two cameras' orientations, in degrees."""
     cos = (np.trace(np.asarray(a_w2c)[:3, :3] @ np.asarray(b_w2c)[:3, :3].T) - 1.0) / 2.0
@@ -163,9 +190,9 @@ def _reanchor_to_seed(refined, refined_w2c_by_key, seed_w2c_by_key, moved):
     is still in the seed frame; putting it through the correction would push it off its
     own seed pose by exactly the drift it never had.
     """
-    s, R, t = _sim3_src_to_dst(refined_w2c_by_key, seed_w2c_by_key, list(moved))
+    s, R, t = fit_similarity(refined_w2c_by_key, seed_w2c_by_key, list(moved))
     for key in moved:
-        refined[key] = _apply_sim3_to_c2w(refined[key], s, R, t).astype(np.float64)
+        refined[key] = apply_similarity_to_c2w(refined[key], s, R, t).astype(np.float64)
     return s, R, t
 
 
@@ -369,13 +396,6 @@ def _cam_from_world_matrix(image) -> np.ndarray:
     return T
 
 
-# The Sim(3) helpers live in geometry/similarity.py (masked-NVS scoring uses them too);
-# these names are kept for the re-anchor below and its test.
-_center_from_w2c = camera_center
-_sim3_src_to_dst = fit_similarity
-_apply_sim3_to_c2w = apply_similarity_to_c2w
-
-
 # --------------------------------------------------------------------------- #
 # Refiner.
 # --------------------------------------------------------------------------- #
@@ -390,7 +410,7 @@ class PoseRefiner:
 
     # -- public API -------------------------------------------------------- #
     def refine(
-        self, geometry: GeometryArtifact, *, decoder, ingest_artifact, work_dir: str | Path | None = None
+        self, geometry: GeometryArtifact, *, ingest_artifact, work_dir: str | Path | None = None
     ) -> dict[str, StreamRefinement]:
         """Return a per-stream refinement for every stream that refines cleanly.
 
@@ -404,7 +424,7 @@ class PoseRefiner:
         results: dict[str, StreamRefinement] = {}
         for stream_id in geometry.stream_ids():
             refinement = self._refine_stream(
-                geometry, stream_id, decoder=decoder, ingest_artifact=ingest_artifact, work_dir=work_dir
+                geometry, stream_id, ingest_artifact=ingest_artifact, work_dir=work_dir
             )
             if refinement is not None:
                 results[stream_id] = refinement
@@ -436,49 +456,29 @@ class PoseRefiner:
     def _stream_frames(self, geometry: GeometryArtifact, stream_id: str) -> list[FrameRef]:
         frames = [f for f in geometry.selected_frames if str(f.stream_id) == str(stream_id)]
         # only frames that carry a per-pixel world pointmap can seed BA
-        frames = [f for f in frames if f"{stream_id}:{int(f.frame_idx)}" in geometry.pointmaps_by_frame]
+        frames = [f for f in frames if frame_key(stream_id, f.frame_idx) in geometry.pointmaps_by_frame]
         return sorted(frames, key=lambda fr: int(fr.frame_idx))
 
     def _geometry_space_images(
-        self, geometry, stream_id, frames, *, decoder, ingest_artifact
+        self, geometry, stream_id, frames, *, ingest_artifact
     ) -> np.ndarray:
         """``frames`` as (N, H, W, 3) uint8 in the geometry's own pixel space.
 
         The geometry's recorded image transform says how its backend turned a frame
         into the pixels its K and point maps describe (VGGT: resize + centre crop);
         applying it reproduces those pixels exactly, so BA's tracks share the
-        artifact's coordinates. Prefers the backend's materialized inputs
-        (``metadata.debug_image_paths``, the files it ran on); decodes the ingest
-        frame when those are gone (e.g. resuming from ``--start-stage``).
+        artifact's coordinates. The frames are the ingest stream's own, read through
+        :class:`~reifyscene.ingest.streams.FrameStream`.
         """
-        from PIL import Image
+        from reifyscene.ingest.streams import RunStreams
 
-        from reifyscene.geometry.image_transform import image_transform_for
-
-        stream = {s.stream_id: s for s in ingest_artifact.streams}.get(stream_id)
-        source_size = (int(stream.width), int(stream.height)) if stream is not None else None
-        transform = image_transform_for(geometry, stream_id, source_size=source_size)
-        debug_paths = dict((geometry.metadata or {}).get("debug_image_paths", {}) or {})
-        images = []
-        for fr in frames:
-            src = debug_paths.get(f"{stream_id}:{int(fr.frame_idx)}")
-            if src and Path(src).exists():
-                with Image.open(src) as img:
-                    images.append(transform.apply_to_image(img.convert("RGB")))
-            else:
-                if stream is None:
-                    raise ValueError(
-                        f"stream {stream_id!r} frame {fr.frame_idx}: no materialized input and "
-                        "no ingest stream to decode"
-                    )
-                images.append(transform.apply_to_image(decoder.get_frame(stream, fr.frame_idx)))
-        return np.stack(images)
+        stream = RunStreams.from_artifacts(ingest_artifact, geometry).get(str(stream_id))
+        return np.stack([stream.frame_in_render(fr.frame_idx) for fr in frames])
 
     def _refine_stream(
-        self, geometry, stream_id, *, decoder, ingest_artifact, work_dir=None
+        self, geometry, stream_id, *, ingest_artifact, work_dir=None
     ) -> StreamRefinement | None:
         import torch
-
         from vggt.dependency.track_predict import predict_tracks
 
         frames = self._stream_frames(geometry, stream_id)
@@ -496,7 +496,7 @@ class PoseRefiner:
         names, w2c, points, conf = [], [], [], []
         shape: tuple[int, int] | None = None
         for fr in frames:
-            key = f"{stream_id}:{int(fr.frame_idx)}"
+            key = frame_key(stream_id, fr.frame_idx)
             state = geometry._find_state_for_frame(fr)
             if state is None:
                 self._log(f"stream {stream_id}: frame {key} has no camera state; skipped pose refinement.")
@@ -530,7 +530,7 @@ class PoseRefiner:
 
         work_dir = Path(work_dir) if work_dir is not None else Path(geometry.save_dir)
         rgb = self._geometry_space_images(
-            geometry, stream_id, frames, decoder=decoder, ingest_artifact=ingest_artifact
+            geometry, stream_id, frames, ingest_artifact=ingest_artifact
         )
         # Same float conversion as VGGT's loader (``ToTensor``: uint8 / 255).
         images = torch.from_numpy(rgb).permute(0, 3, 1, 2).float().div(255.0).to(self.cfg.device)
@@ -542,6 +542,22 @@ class PoseRefiner:
                 f"stream {stream_id}: tracker image space {tuple(images.shape[-2:])} != geometry "
                 f"pointmap space {(H, W)}; the recorded image transform disagrees with the point "
                 "maps — refusing to seed BA with mismatched coordinates."
+            )
+
+        # The VGGSfM tracker refuses a non-square frame (it scales image coordinates onto
+        # the confidence grid with a single factor, so it asserts both are square). A
+        # landscape clip gives landscape geometry -- VGGT-Long's loader takes the width to
+        # the target and keeps the height in proportion, so a 940x496 clip lands at
+        # 518x280 -- and pose refinement would simply fail on it. Padding to a square at
+        # the BOTTOM-RIGHT leaves every real pixel's coordinates unchanged, so the tracks
+        # come back in the geometry's own pixel space with nothing to undo. The padding is
+        # zero confidence, which the tracker's own filter drops; observations that land in
+        # it anyway are marked invisible below. A square clip is untouched.
+        images, conf, points, pad_h, pad_w = _pad_to_square(images, conf, points)
+        if pad_h or pad_w:
+            self._log(
+                f"stream {stream_id}: geometry is {W}x{H}; padded to {max(H, W)}x{max(H, W)} "
+                "for the tracker, which requires a square frame"
             )
 
         self._log(f"stream {stream_id}: {len(frames)} keyframes at {W}x{H}; predicting VGGSfM tracks.")
@@ -561,6 +577,18 @@ class PoseRefiner:
 
         N = len(frames)
         obs_mask = pred_vis > self.cfg.vis_thresh
+        if pad_h or pad_w:
+            # Anything the tracker put in the padding is not an observation of this scene.
+            inside = (
+                (pred_tracks[..., 0] >= 0)
+                & (pred_tracks[..., 0] < W)
+                & (pred_tracks[..., 1] >= 0)
+                & (pred_tracks[..., 1] < H)
+            )
+            dropped = int((obs_mask & ~inside).sum())
+            obs_mask = obs_mask & inside
+            if dropped:
+                self._log(f"stream {stream_id}: dropped {dropped} observations that fell in the padding")
         refine_K_any = self.cfg.refine_focal or self.cfg.refine_pp
         rec, npts, nobs = _seed_reconstruction_via_text(
             names, w2c, K, pred_tracks, obs_mask, pred_pts3d, pred_rgb,
@@ -602,17 +630,14 @@ class PoseRefiner:
         # are in BA's: they must not be swept along by the re-anchor fitted to the latter.
         kept_seed_keys: set[str] = set()
         kept_seed_ids = set(ba_info["kept_seed_ids"])
-        deltas = []
         for i, fr in enumerate(frames):
-            key = f"{stream_id}:{int(fr.frame_idx)}"
+            key = frame_key(stream_id, fr.frame_idx)
             refined_w2c = _cam_from_world_matrix(rec.images[i + 1])
             refined[key] = np.linalg.inv(refined_w2c).astype(np.float64)  # back to T_world_cam
             refined_w2c_by_key[key] = refined_w2c
             seed_w2c_by_key[key] = w2c[i]
             if (i + 1) in kept_seed_ids:
                 kept_seed_keys.add(key)
-                continue
-            deltas.append(_rotation_delta_deg(refined_w2c, w2c[i]))
 
         moved = [k for k in refined if k not in kept_seed_keys]
         if len(moved) < self.cfg.min_reg_frames:
@@ -675,13 +700,9 @@ class PoseRefiner:
             "num_obs": int(nobs),
             "num_reg_frames": int(rec.num_reg_frames()),
             "mean_reproj_px": mean_reproj,
-            # Measured after the re-anchor; ``_before_reanchor`` is the old measure, kept
-            # so a resume can compare an older run's recorded numbers like for like.
+            # measured after the re-anchor
             "seed_to_refined_rot_delta_deg_median": float(np.median(anchored)) if anchored else 0.0,
             "seed_to_refined_rot_delta_deg_max": float(np.max(anchored)) if anchored else 0.0,
-            "seed_to_refined_rot_delta_deg_max_before_reanchor": (
-                float(np.max(deltas)) if deltas else 0.0
-            ),
             "cameras_refined": len(moved),
             "cameras_kept_seed": sorted(kept_seed_keys),
             "min_obs_per_camera": int(self.cfg.min_obs_per_camera),

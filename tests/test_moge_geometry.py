@@ -51,7 +51,7 @@ def _write_test_video(path, *, width=32, height=24, num_frames=2, fps=5.0) -> No
 def _ingest_for(tmp_path, name="ingest"):
     video = tmp_path / f"{name}.mp4"
     _write_test_video(video)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / name,
         streams=[stream],

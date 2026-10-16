@@ -3,66 +3,87 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-import numpy as np
 from typing import Any
 
-from reifyscene.common.io import read_yaml
+import numpy as np
+
+from reifyscene.api.contracts import input_identity, stage_fingerprint
+from reifyscene.api.run_outputs import RunOutputs
+from reifyscene.api.stages import build_stage_registry
 from reifyscene.calibration.runner import CalibrationRunner
-from reifyscene.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
-from reifyscene.common.paths import ensure_dir
+from reifyscene.common.backend_ladder import (
+    BackendLadder,
+    BackendRung,
+    CapabilityManifest,
+    RungStatus,
+    importable,
+)
+from reifyscene.common.frame_keys import frame_key, parse_key
+from reifyscene.common.io import read_yaml
 from reifyscene.common.memory import release_memory
+from reifyscene.common.paths import ensure_dir
+from reifyscene.common.types import CameraPose, FrameRef, HumanState, ObjectState, TimedCameraState
 from reifyscene.data.dataset import MultiVideoDataset
 from reifyscene.geometry.camera_interpolation import densify_camera_states_for_frames
-from reifyscene.geometry.geometry_artifact import GeometryArtifact
-from reifyscene.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
-from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
-from reifyscene.geometry.vggt_wrapper import VGGTInitializer
-from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
-from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
-from reifyscene.geometry.moge_wrapper import MoGeInitializer
 from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
 from reifyscene.geometry.compose import GeometryComposer
-from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
-from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import MissingImageTransform, image_transform_for
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer
+from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
 from reifyscene.graph.builders import DynamicSceneGraphBuilder
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.ingest.quality import ClipQualityAssessor
 from reifyscene.lifting.backproject import TrackLifter3D
+from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
 from reifyscene.optimize.solver import JointSpatiotemporalSolver
-from reifyscene.perception.humans.detector import HumanDetector
-from reifyscene.perception.humans.pose2d import HumanPose2DEstimator
+from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.perception.humans.dense_ladder import (
+    BboxOnlyRung,
+    KeypointRcnnRung,
+    SapiensDenseRung,
+)
 from reifyscene.perception.humans.densepose_wrapper import DensePoseEstimator
-from reifyscene.perception.humans.smpl_fitter import SMPLFitter
-from reifyscene.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, SapiensDenseRung
-from reifyscene.perception.humans.sapiens_wrapper import sapiens_cached
+from reifyscene.perception.humans.detector import HumanDetector
 from reifyscene.perception.humans.human_artifact import HumanArtifact
+from reifyscene.perception.humans.pose2d import HumanPose2DEstimator
+from reifyscene.perception.humans.sapiens_wrapper import sapiens_cached
+from reifyscene.perception.humans.smpl_fitter import SMPLFitter
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from reifyscene.perception.instance.segment import FloorInstanceSegmenter
 from reifyscene.perception.objects.detector import ObjectDetector
 from reifyscene.perception.objects.embedder import InstanceEmbedder
 from reifyscene.perception.objects.object_artifact import ObjectArtifact
 from reifyscene.perception.objects.segmenter import ObjectSegmenter
-from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from reifyscene.perception.instance.segment import FloorInstanceSegmenter
-from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from reifyscene.perception.reid.covisible import build_covisible_merge_map
+from reifyscene.perception.reid.dino_reid import DinoReid
 from reifyscene.perception.reid.reid_artifact import ReidArtifact
 from reifyscene.perception.reid.reid_stage import FloorReid
-from reifyscene.perception.reid.dino_reid import DinoReid
 from reifyscene.perception.semantics.semantics_artifact import (
     UNKNOWN_CATEGORY,
     SemanticsArtifact,
 )
-from reifyscene.perception.semantics.siglip_semantics import FloorSemantics, SiglipSemantics
-from reifyscene.common.backend_ladder import BackendLadder, BackendRung, CapabilityManifest, RungStatus, importable
+from reifyscene.perception.semantics.siglip_semantics import (
+    DEFAULT_MIN_MARGIN_Z,
+    FloorSemantics,
+    SiglipSemantics,
+)
 from reifyscene.query.parser import PromptParser
-from reifyscene.api.contracts import input_identity, stage_fingerprint
-from reifyscene.api.stages import build_stage_registry
 from reifyscene.render.registry import build_renderer
 from reifyscene.scene.assembler import SingleVideoSceneAssembler
 from reifyscene.sync.global_time_solver import GlobalTimeAlignmentSolver
 from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
 
+# Keyframe spacing in frames when the config gives neither a frame nor a seconds stride.
+_DEFAULT_KEYFRAME_STRIDE = 30
 
 # Fidelity tag each geometry backend carries in its CapabilityManifest (design §4A.1).
 # Joint rungs (vggt*/dataset) fill poses+depth; moge is depth-only, colmap pose-only.
@@ -75,6 +96,31 @@ _GEOMETRY_FIDELITY = {
 }
 
 
+def _grade_category(items, semantics_artifact) -> str:
+    """Inherit the naming stage's own verdict; never re-derive it from the labels.
+
+    A label is only as good as the stage's ability to refuse one, and the stage is the
+    only thing that knows whether it had that ability -- the answer is in its
+    configuration, not in its output. Read from the outside, a run with the separation
+    gate disarmed looks exactly like one where every label was checked and stood, because
+    in both cases nothing abstained. Deriving a grade here from the records is how a node
+    ends up labelled `cup` and graded `grounded` for a fence panel.
+    """
+    if not items:
+        return 'absent'
+    capability = (getattr(semantics_artifact, 'metadata', {}) or {}).get('capability') or {}
+    inherited = (capability.get('provides') or {}).get('category')
+    # No manifest to inherit from is not permission to assume the best.
+    return str(inherited) if inherited else 'degraded'
+
+
+def _grade_axis(produced: int, total: int) -> str:
+    """How far a stage got on one capability: all of it, some of it, or none."""
+    if not total or not produced:
+        return 'absent'
+    return 'grounded' if produced == total else 'degraded'
+
+
 class ReifyScenePipeline:
     """Top-level orchestrator for the staged reconstruction pipeline."""
 
@@ -85,8 +131,6 @@ class ReifyScenePipeline:
         -------------------------
         run_dir:
             Root directory for persisted artifacts.
-        default_fps:
-            Used by the OpenCV decoder when metadata is missing.
         geometry:
             Passed directly to :class:`VGGTInitializer`.
         tracking:
@@ -100,7 +144,8 @@ class ReifyScenePipeline:
         self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
         self._run_video_paths: list[str] = []
         self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get('default_fps', 30.0)))
+        self.outputs = RunOutputs.create(self.run_dir)
+        self.decoder = VideoDecoder()
         self.quality = ClipQualityAssessor()
         self.sync_solver = GlobalTimeAlignmentSolver()
         geometry_cfg = self.cfg.get('geometry', {})
@@ -181,7 +226,7 @@ class ReifyScenePipeline:
 
     def _stage_dir(self, stage_name: str) -> Path:
         """Return the canonical save directory for a stage artifact."""
-        return ensure_dir(self.run_dir / stage_name)
+        return ensure_dir(self.outputs.stage_dir(stage_name))
 
     def stage_registry(self):
         """Return the declarative stage registry for this pipeline instance."""
@@ -210,7 +255,8 @@ class ReifyScenePipeline:
             self._run_video_paths = [str(p) for p in video_paths]
         key = tuple(str(p) for p in video_paths)
         if key not in self._input_identities:
-            self._input_identities[key] = input_identity(video_paths)
+            self._input_identities[key] = input_identity(
+                video_paths, frames_camera=self.cfg.get('frames_camera'))
         record = stage_fingerprint(stage_name, self.cfg, self._input_identities[key], self._stage_digests)
         artifact.metadata = dict(getattr(artifact, 'metadata', {}) or {})
         artifact.metadata['contract'] = record
@@ -228,7 +274,7 @@ class ReifyScenePipeline:
         """Run phase-1 static-frame calibration on one or more input videos."""
         artifact = self.calibration_runner.run(
             run_id=self.cfg.get('run_id', 'dev'),
-            save_dir=self._stage_dir('calibration'),
+            save_dir=ensure_dir(self.outputs.calibration_dir),
             video_paths=video_paths,
         )
         self._stamp_stage_metadata(artifact, 'calibration', video_paths=[str(Path(p).expanduser().resolve()) for p in video_paths])
@@ -243,10 +289,14 @@ class ReifyScenePipeline:
         2. Add window selection for long videos.
         3. Add optional audio metadata probing.
         """
-        streams = self.decoder.decode_many(video_paths)
+        frames_camera = self.cfg.get('frames_camera')
+        streams = self.decoder.decode_many(
+            video_paths, frames_camera=None if frames_camera is None else str(frames_camera))
         dataset = MultiVideoDataset(streams)
+        stride, stride_sec = self.cfg.get('keyframe_stride'), self.cfg.get('keyframe_stride_sec')
         keyframes = dataset.sample_keyframes(
-            stride_sec=float(self.cfg.get('keyframe_stride_sec', 1.0)),
+            stride=_DEFAULT_KEYFRAME_STRIDE if stride is None and stride_sec is None else stride,
+            stride_sec=stride_sec,
             max_frames_per_stream=self.cfg.get('max_keyframes_per_stream', 8),
             all_frames=bool(self.cfg.get('keyframes_all', False)),
         )
@@ -283,29 +333,26 @@ class ReifyScenePipeline:
         return artifact
 
     @staticmethod
-    def _all_frame_refs_for_stream(stream) -> list[FrameRef]:
-        fps = max(float(stream.fps), 1e-6)
-        num_frames = max(int(stream.num_frames), 1)
-        return [
-            FrameRef(stream_id=stream.stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps)
-            for frame_idx in range(num_frames)
-        ]
-
-    @staticmethod
-    def _subsample_frame_refs(frames: list[FrameRef], *, frame_stride: int | None = None, frame_spacing_sec: float | None = None) -> list[FrameRef]:
+    def _subsample_frame_refs(frames: list[FrameRef], streams, *, frame_stride: int | None = None, frame_spacing_sec: float | None = None) -> list[FrameRef]:
+        """Every ``frame_stride``-th frame of each stream, or -- with ``frame_spacing_sec`` --
+        frames at least that far apart, converted to frames with the stream's recorded fps
+        (refused when it records none)."""
+        stream_by_id = {str(s.stream_id): s for s in streams}
         by_stream: dict[str, list[FrameRef]] = {}
-        for frame in sorted(frames, key=lambda fr: (fr.stream_id, float(fr.timestamp_sec), int(fr.frame_idx))):
+        for frame in sorted(frames, key=lambda fr: fr.key):
             by_stream.setdefault(str(frame.stream_id), []).append(frame)
 
         selected: list[FrameRef] = []
         for stream_id in sorted(by_stream):
             stream_frames = by_stream[stream_id]
             if frame_spacing_sec is not None and float(frame_spacing_sec) > 0.0:
-                last_time: float | None = None
+                gap = stream_by_id[stream_id].stride_frames(
+                    seconds=frame_spacing_sec, setting="geometry.frame_spacing_sec")
+                last: int | None = None
                 for frame in stream_frames:
-                    if last_time is None or float(frame.timestamp_sec) >= last_time + float(frame_spacing_sec) - 1e-9:
+                    if last is None or int(frame.frame_idx) >= last + gap:
                         selected.append(frame)
-                        last_time = float(frame.timestamp_sec)
+                        last = int(frame.frame_idx)
                 continue
             stride = max(int(frame_stride or 1), 1)
             selected.extend(stream_frames[::stride])
@@ -325,13 +372,14 @@ class ReifyScenePipeline:
         elif frame_source == 'all':
             frames = []
             for stream in ingest_artifact.streams:
-                frames.extend(self._all_frame_refs_for_stream(stream))
+                frames.extend(stream.frame_refs())
         else:
             frame_source = 'keyframes'
             frames = list(ingest_artifact.keyframes)
 
         frames = self._subsample_frame_refs(
             frames,
+            ingest_artifact.streams,
             frame_stride=geometry_cfg.get('frame_stride'),
             frame_spacing_sec=geometry_cfg.get('frame_spacing_sec'),
         )
@@ -491,7 +539,7 @@ class ReifyScenePipeline:
             if depth is None or depth.ndim < 2:
                 continue
             depth = depth[..., 0] if depth.ndim == 3 and depth.shape[-1] == 1 else depth
-            stream_id = str(key).rpartition(':')[0]
+            stream_id = parse_key(key)[0]
             size = (int(depth.shape[1]), int(depth.shape[0]))
             if depth_sizes.setdefault(stream_id, size) != size:
                 raise ValueError(f"geometry stream {stream_id!r} has depth maps of different sizes")
@@ -585,7 +633,7 @@ class ReifyScenePipeline:
             refiner = PoseRefiner(pose_cfg)
             try:
                 refinements = refiner.refine(
-                    geometry_artifact, decoder=self.decoder, ingest_artifact=ingest_artifact, work_dir=save_dir
+                    geometry_artifact, ingest_artifact=ingest_artifact, work_dir=save_dir
                 )
             except PoseRefineUnavailable as exc:
                 extra_notes.append(f"Pose refinement unavailable; emitted geometry unchanged ({exc}).")
@@ -606,17 +654,17 @@ class ReifyScenePipeline:
                 (
                     f for f in geometry_artifact.selected_frames
                     if str(f.stream_id) == stream_id
-                    and f"{stream_id}:{int(f.frame_idx)}" in geometry_artifact.pointmaps_by_frame
+                    and frame_key(stream_id, f.frame_idx) in geometry_artifact.pointmaps_by_frame
                 ),
                 key=lambda fr: int(fr.frame_idx),
             )
             rebuilt: list[TimedCameraState] = []
             for fr in keyframes:
-                key = f"{stream_id}:{int(fr.frame_idx)}"
-                orig = geometry_artifact._find_state_for_frame(fr)
+                key = frame_key(stream_id, fr.frame_idx)
                 rebuilt.append(TimedCameraState(
                     stream_id=stream_id,
-                    time_sec=float(orig.time_sec) if orig is not None else float(fr.timestamp_sec),
+                    frame_idx=int(fr.frame_idx),
+                    time_sec=fr.timestamp_sec,
                     intrinsics=refinement.refined_intrinsics,
                     pose=CameraPose(T_world_cam=np.asarray(refinement.refined_T_world_cam_by_frame_key[key], dtype=float)),
                 ))
@@ -655,8 +703,15 @@ class ReifyScenePipeline:
         refined.save()
         return refined
 
-    def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None):
-        """Run point tracking, 3D lifting, and static/dynamic partitioning."""
+    def track(self, ingest_artifact: IngestArtifact, geometry_artifact=None, instance_artifact=None):
+        """Run point tracking, 3D lifting, and static/dynamic partitioning.
+
+        ``instance_artifact`` (the `segment` stage) puts the tracker's query points on
+        the entities instead of only on a uniform grid over frame 0 -- the dependency
+        was declared from the start and never passed, so an entity that was small or
+        absent at the seed frame got almost no points and nothing downstream could
+        recover them.
+        """
         frame_refs_by_stream: dict[str, list] = {}
         for stream in ingest_artifact.streams:
             frame_refs_by_stream[stream.stream_id] = self.tracker.plan_frame_refs(stream)
@@ -664,7 +719,29 @@ class ReifyScenePipeline:
         artifact = self.tracker.track_many(
             ingest_artifact.streams,
             frame_refs_by_stream=frame_refs_by_stream,
+            instance_artifact=instance_artifact,
         )
+
+        seeded = any(
+            'sampled on the entity masks' in str(n) for n in (artifact.notes or [])
+        )
+        backend = next(
+            (str(n).split(': ')[-1].rstrip('.') for n in (artifact.notes or [])
+             if str(n).startswith('Tracker backend used')), 'unknown'
+        )
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'tracking',
+            backend_used=backend,
+            fidelity='mask_seeded' if seeded else 'grid_only',
+            provides={
+                # What the graph can ask of these tracks. Position is not among them --
+                # it comes from the geometry's dense pointmaps, and tracks were always
+                # the wrong source for it.
+                'motion': 'grounded' if backend.startswith('cotracker') else 'degraded',
+                'track_support': 'grounded' if seeded else 'degraded',
+                'identity_bridges': 'grounded' if seeded else 'degraded',
+            },
+        ))
 
         # Preserve the actual tracking timeline on the artifact so later stages
         # (scene/render) can use it instead of falling back to geometry frames.
@@ -681,7 +758,7 @@ class ReifyScenePipeline:
             tracked_frame_refs.extend(self.tracker.plan_frame_refs(stream))
         artifact.selected_frames = sorted(tracked_frame_refs, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         if geometry_artifact is not None:
-            artifact = self.track_lifter.lift(artifact, geometry_artifact, ingest_artifact)
+            artifact = self.track_lifter.lift(artifact, geometry_artifact)
             self.static_dynamic_partitioner.partition(artifact, geometry_artifact)
             tracking_cfg = self.cfg.get('tracking', {})
             artifact.metadata.update({
@@ -718,9 +795,7 @@ class ReifyScenePipeline:
                     continue
                 unique_indices = np.unique(frame_indices)
                 chosen = unique_indices[::semantic_stride]
-                fps = max(float(stream.fps), 1e-6)
-                for frame_idx in chosen.tolist():
-                    frames.append(FrameRef(stream_id=stream_id, frame_idx=int(frame_idx), timestamp_sec=float(frame_idx) / fps))
+                frames.extend(stream.frame_ref(int(i)) for i in chosen.tolist())
             if frames:
                 return sorted(frames, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         keyframes = sorted(list(ingest_artifact.keyframes), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
@@ -785,7 +860,62 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def compute_reid(self, ingest_artifact, instance_artifact=None):
+    def _covisible_duplicates(self, instance_artifact, geometry_artifact) -> dict[str, str]:
+        """Tracklets the segmenter emitted twice for one object, found by where they are.
+
+        Needs the geometry's dense pointmaps and the instance masks; without either it
+        returns nothing and the appearance merge stands alone.
+        """
+        if instance_artifact is None or geometry_artifact is None:
+            return {}
+        by_stream: dict[str, dict[int, dict[str, Any]]] = {}
+        for obs in getattr(instance_artifact, 'observations', []):
+            mask = instance_artifact.mask_arrays.get(obs.instance_id)
+            if mask is None:
+                continue
+            by_stream.setdefault(obs.frame_ref.stream_id, {}).setdefault(
+                int(obs.frame_ref.frame_idx), {}
+            )[str(obs.track_id)] = mask
+
+        merged: dict[str, str] = {}
+        pointmaps = getattr(geometry_artifact, 'pointmaps_by_frame', None) or {}
+        for stream_id, masks_by_frame in by_stream.items():
+            if not masks_by_frame or not pointmaps:
+                continue
+
+            def load(frame_idx: int, _stream=stream_id):
+                payload = pointmaps.get(frame_key(_stream, frame_idx))
+                if not payload:
+                    return None
+                points = payload.get('points')
+                return None if points is None else (np.asarray(points), payload.get('confidence'))
+
+            sample = next(iter(next(iter(masks_by_frame.values())).values()), None)
+            if sample is None:
+                continue
+            height, width = np.asarray(sample).shape[:2]
+            try:
+                transform = image_transform_for(
+                    geometry_artifact, stream_id
+                )
+            except MissingImageTransform:
+                continue
+            placed = entity_positions_from_pointmaps(
+                masks_by_frame, pointmap_for_frame=load, transform=transform
+            )
+            positions = {
+                t: {int(r['frame_idx']): np.asarray(r['xyz']) for r in rows}
+                for t, rows in placed.items()
+            }
+            extents = {
+                t: np.median([r['extent'] for r in rows], axis=0)
+                for t, rows in placed.items() if rows
+            }
+            merged.update(build_covisible_merge_map(positions, extents))
+        return merged
+
+    def compute_reid(self, ingest_artifact, instance_artifact=None, track_artifact=None,
+                     geometry_artifact=None):
         """Per-tracklet appearance embeddings + cross-gap merges → ReidArtifact.
 
         Consumes the `InstanceArtifact` track ids. Runs a backend ladder: the
@@ -804,7 +934,9 @@ class ReifyScenePipeline:
             # can't load, run() raises and the ladder degrades to the floor.
             BackendRung(
                 'dinov2', 'dino_features',
-                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(inp['ingest'], inp['instances']),
+                runner=lambda inp: DinoReid(self.decoder, reid_cfg).run(
+                    inp['ingest'], inp['instances'], inp.get('tracks')
+                ),
                 probe=importable('transformers'),
             ),
             BackendRung('resnet18', 'imagenet_features', runner=lambda inp: floor.run(inp['ingest'], inp['instances']),
@@ -812,8 +944,19 @@ class ReifyScenePipeline:
             BackendRung('empty', 'empty', runner=lambda inp: ({}, {})),
         ])
         empty = InstanceArtifact(run_id=ingest_artifact.run_id, stage_name='segment', save_dir=self._stage_dir('segment'))
-        result, manifest = ladder.run({'ingest': ingest_artifact, 'instances': instance_artifact if instance_artifact is not None else empty})
+        result, manifest = ladder.run({
+            'ingest': ingest_artifact,
+            'instances': instance_artifact if instance_artifact is not None else empty,
+            'tracks': track_artifact,
+        })
         embeddings, merge_map = result if result is not None else ({}, {})
+
+        # Geometry settles what appearance cannot: two tracklets in the same place at the
+        # same time are one thing. This runs whichever rung produced the embeddings --
+        # it is a fact about the reconstruction, not about the appearance model.
+        duplicates = self._covisible_duplicates(instance_artifact, geometry_artifact)
+        merge_map = {**(merge_map or {}), **duplicates}
+
         artifact = ReidArtifact(
             run_id=ingest_artifact.run_id,
             stage_name='reid',
@@ -824,6 +967,10 @@ class ReifyScenePipeline:
         )
         artifact.attach_manifest(manifest)
         artifact.notes.append(f"embedded_tracks={len(artifact.embeddings)}")
+        artifact.notes.append(
+            f"merged {len(merge_map)} tracklet(s): {len(duplicates)} co-visible duplicate(s) "
+            f"by 3D coincidence, {len(merge_map) - len(duplicates)} across occlusion gaps"
+        )
         self._stamp_stage_metadata(artifact, 'reid', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
@@ -864,6 +1011,23 @@ class ReifyScenePipeline:
             embeddings=embeddings or {},
             metadata={},
         )
+        # Only this stage knows whether it was *able* to refuse. With the separation gate
+        # disarmed -- the default -- no record can ever abstain, so counting the ones that
+        # "stood" grades an off-domain vocabulary `grounded`: it named fence panels `cup`
+        # and `handbag` and nothing contradicted it. A stage that cannot say "I don't know"
+        # has not earned `grounded`, whatever its labels look like.
+        gate_armed = semantics_cfg.get('min_margin_z', DEFAULT_MIN_MARGIN_Z) is not None
+        if not artifact.records:
+            category_grade = 'absent'
+        elif not gate_armed:
+            category_grade = 'degraded'
+        else:
+            stood = sum(1 for r in artifact.records.values() if not r.abstained)
+            category_grade = _grade_axis(stood, len(artifact.records))
+        manifest.provides = {
+            'category': category_grade,
+            'embedding': 'grounded' if artifact.embeddings else 'absent',
+        }
         artifact.attach_manifest(manifest)
         named = sum(1 for r in artifact.records.values() if r.category != UNKNOWN_CATEGORY)
         artifact.notes.append(f"named_tracks={named}/{len(artifact.records)}")
@@ -930,7 +1094,7 @@ class ReifyScenePipeline:
                 'detection_id': o.instance_id,
                 'track_id': canonical,
                 'track_ids': [],  # point-track support decoupled (§4A)
-                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'frame_key': frame_key(o.frame_ref.stream_id, o.frame_ref.frame_idx),
                 'dense_backend': rec.get('backend', manifest.backend_used),
             }
             human_states.append(HumanState(
@@ -967,6 +1131,18 @@ class ReifyScenePipeline:
                 'num_human_tracks': len({h.human_id for h in human_states}),
             },
         )
+        # `humans` is two independent sub-ladders (design §4A) -- dense maps and SMPL --
+        # and the manifest has one backend slot. On davis_lab-coat_full that reported
+        # `sapiens_dense` while the SMPL directory was empty, so a whole missing
+        # capability was invisible. Record each axis by what it actually produced.
+        total = len(human_states)
+        manifest.provides = {
+            'keypoints': _grade_axis(
+                sum(1 for h in human_states if h.keypoints_2d is not None), total
+            ),
+            'dense': _grade_axis(sum(1 for h in human_states if (h.dense or {})), total),
+            'smpl': _grade_axis(sum(1 for h in human_states if (h.smpl_params or {})), total),
+        }
         artifact.attach_manifest(manifest)
         artifact.frame_index = artifact._build_frame_index(artifact.humans)
         artifact.notes.append(f"human_instances={len(human_states)} human_tracks={artifact.metadata['num_human_tracks']}")
@@ -1018,7 +1194,7 @@ class ReifyScenePipeline:
                 'track_id': canonical,
                 'track_ids': [],  # point-track support decoupled (§4A); empty at FP1
                 'label_id': int(o.attributes.get('label_id', -1)),
-                'frame_key': f"{o.frame_ref.stream_id}:{int(o.frame_ref.frame_idx)}",
+                'frame_key': frame_key(o.frame_ref.stream_id, o.frame_ref.frame_idx),
                 'detector_backend': (instance_artifact.metadata.get('detector_backend') if instance_artifact is not None else None),
                 'semantic_topk': semantic_topk,
             }
@@ -1053,18 +1229,79 @@ class ReifyScenePipeline:
             },
         )
         artifact.frame_index = artifact._build_frame_index(artifact.objects)
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'objects',
+            backend_used='semantics' if semantics_artifact is not None else 'detector',
+            fidelity='open_vocab' if semantics_artifact is not None else 'closed_vocab',
+            provides={
+                'instances': 'grounded' if object_states else 'absent',
+                'category': _grade_category(object_states, semantics_artifact),
+            },
+        ))
         artifact.notes.append(f"object_instances={len(object_states)} object_tracks={artifact.metadata['num_object_tracks']}")
         self._stamp_stage_metadata(artifact, 'objects', video_paths=self._video_paths_for_stage(ingest_artifact))
         artifact.save()
         return artifact
 
-    def build_graph(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None):
-        """Build the dynamic scene graph."""
-        artifact = self.graph_builder.build(geometry_artifact, track_artifact, human_artifact, object_artifact)
+    def build_graph(self, geometry_artifact, track_artifact, human_artifact=None,
+                    object_artifact=None, semantics_artifact=None):
+        """Build the dynamic scene graph.
+
+        ``semantics_artifact`` carries the open-vocab category, its ranked alternatives,
+        its abstention and its embedding onto the entity nodes. The graph never received
+        it: an object's category arrived second-hand through `objects`, and a human node
+        had none at all.
+        """
+        artifact = self.graph_builder.build(
+            geometry_artifact, track_artifact, human_artifact, object_artifact,
+            semantics_artifact=semantics_artifact,
+        )
+        entities = [n for n in artifact.nodes if n.node_type in ('human', 'object')]
+        placed = [n for n in entities if (n.attrs or {}).get('position_source') == 'pointmap']
+        gravity = bool((artifact.metadata.get('world_frame') or {}).get('gravity_aligned'))
+        relations = self._add_relations(artifact)
+
+        def grade(hit: int, total: int) -> str:
+            if not total or not hit:
+                return 'absent'
+            return 'grounded' if hit == total else 'degraded'
+
+        artifact.attach_manifest(CapabilityManifest.direct(
+            'graph',
+            backend_used='entity_builder',
+            fidelity='entities_with_evidence',
+            provides={
+                'entities': 'grounded' if entities else 'absent',
+                'position': grade(len(placed), len(entities)),
+                'extent': grade(len(placed), len(entities)),
+                'identity': _grade_category(entities, semantics_artifact),
+                # Vertical relations are defined against gravity; without a canonicalized
+                # world the graph cannot claim them at all.
+                'vertical_relations': 'grounded' if gravity else 'absent',
+                # VLA-3D's predicates per frame, with validity intervals. Degraded without
+                # gravity (the vertical four are not computed); absent when VLA-3D is missing.
+                'relations': relations,
+                # Known only after render: the handles stage provides it as the graph's
+                # `gaussians` layer (docs/design/2026-09-30-graph-layers.md, rule 6).
+                'renderable': 'pending: gaussians layer',
+            },
+        ))
         artifact.save_dir = self._stage_dir('graph')
         self._stamp_stage_metadata(artifact, 'graph', video_paths=self._video_paths_for_stage())
         artifact.save()
         return artifact
+
+    @staticmethod
+    def _add_relations(artifact) -> str:
+        """Relation edges onto the graph; the manifest grade for them."""
+        from reifyscene.graph.relations import RelationsUnavailable, add_relations
+
+        try:
+            meta = add_relations(artifact)
+        except RelationsUnavailable as exc:
+            artifact.notes.append(f"relations not computed: {exc}")
+            return 'absent'
+        return 'grounded' if meta.get('gravity_aligned') else 'degraded'
 
     def optimize(self, sync_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, graph_artifact=None):
         """Run staged joint optimization."""
@@ -1081,12 +1318,15 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def assemble_scene(self, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
+    def assemble_scene(self, ingest_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
         """Assemble a lightweight static/dynamic single-video 4D scene.
 
         ``instance_artifact`` (segment stage) supplies the per-frame foreground
-        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from.
+        masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from;
+        the training photos are the ingest streams' own frames.
         """
+        from reifyscene.ingest.streams import RunStreams
+
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -1095,6 +1335,7 @@ class ReifyScenePipeline:
             human_artifact=human_artifact,
             object_artifact=object_artifact,
             instance_artifact=instance_artifact,
+            streams=RunStreams.from_artifacts(ingest_artifact, geometry_artifact),
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),
@@ -1104,16 +1345,14 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def fit_renderer(self, scene_artifact, optimization_artifact=None, geometry_artifact=None, track_artifact=None, human_artifact=None):
+    def fit_renderer(self, scene_artifact):
         """Train + render the self-contained SceneArtifact (proven Gaussian trainer).
 
         The render stage consumes ONLY the SceneArtifact (dense seed + persisted
-        train views + render trajectory). The optimization/geometry/track/human
-        artifacts are accepted for stage-signature compatibility but unused here;
-        masked-NVS scoring against held-out GT is the eval stage's job (F0 follow-up).
+        train views + render trajectory).
         """
         render_dir = self._stage_dir('render')
-        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir)
+        artifact = self.renderer.fit(scene_artifact, save_dir=render_dir, run=self.outputs)
         # Masked-NVS scoring against held-out GT runs only on a benchmark dataset
         # (covisibility masks / held-out cameras don't exist for arbitrary video).
         eval_cfg = dict(self.cfg.get('evaluation', {}).get('masked_nvs', {}) or {})
@@ -1146,6 +1385,28 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
+
+    def bind_gaussians(self, graph_artifact, render_artifact):
+        """The handles stage: each entity's Gaussians, as the `gaussians` layer on the graph.
+
+        Runs FlashSplat evidence-majority assignment (+ floater filter) over the render's
+        checkpoint and writes the layer onto the graph in place -- the graph's own facts are
+        untouched. Its own artifact records the grade and the checkpoint it describes.
+        """
+        from reifyscene.graph.handles import HandlesArtifact, run_handles
+
+        hcfg = dict(self.cfg.get('handles', {}) or {})
+        device = str(self.cfg.get('render', {}).get('device', 'cuda'))
+        result = run_handles(graph_artifact, render_artifact, run=self.outputs, device=device,
+                             slackness=float(hcfg.get('slackness', 0.0)),
+                             filtered=bool(hcfg.get('filtered', True)),
+                             body_bound=bool(hcfg.get('body_bound', False)))
+        out_dir = self._stage_dir('handles')
+        artifact = HandlesArtifact(run_id=graph_artifact.run_id, stage_name='handles',
+                                   save_dir=out_dir, result=result)
+        self._stamp_stage_metadata(artifact, 'handles', video_paths=self._video_paths_for_stage())
+        artifact.save()
+        return artifact
 
     def release_stage_resources(self, stage_name: str) -> None:
         """Release heavy backend state after a stage completes."""
@@ -1194,8 +1455,9 @@ class ReifyScenePipeline:
         track_artifact = self.track(ingest_artifact, geometry_artifact=pose_geometry)
         graph_artifact = self.build_graph(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact)
         optimization_artifact = self.optimize(sync_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, graph_artifact=graph_artifact)
-        scene_artifact = self.assemble_scene(pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
-        render_artifact = self.fit_renderer(scene_artifact, optimization_artifact=optimization_artifact, geometry_artifact=pose_geometry, track_artifact=track_artifact, human_artifact=human_artifact)
+        scene_artifact = self.assemble_scene(ingest_artifact, pose_geometry, track_artifact, human_artifact=human_artifact, object_artifact=object_artifact, optimization_artifact=optimization_artifact, instance_artifact=instance_artifact)
+        render_artifact = self.fit_renderer(scene_artifact)
+        handles_artifact = self.bind_gaussians(graph_artifact, render_artifact)
         return {
             'ingest': ingest_artifact,
             'sync': sync_artifact,
@@ -1211,4 +1473,5 @@ class ReifyScenePipeline:
             'optimization': optimization_artifact,
             'scene': scene_artifact,
             'render': render_artifact,
+            'handles': handles_artifact,
         }

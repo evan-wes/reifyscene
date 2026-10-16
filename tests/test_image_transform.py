@@ -16,7 +16,7 @@ import pytest
 import torch
 from PIL import Image
 
-from reifyscene.common.types import FrameRef
+from reifyscene.common.types import FrameRef, VideoStreamRef
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 from reifyscene.geometry.image_transform import (
     Crop,
@@ -115,12 +115,6 @@ def test_bounded_loader_crops_a_portrait_frame_like_upstream() -> None:
     assert transform.output_size == (252, 252)
 
 
-def test_bounded_v1_describes_the_old_squashing_loader() -> None:
-    # Before the fix: 720 * (252 / 720) floored to 238 in floating point and the height was
-    # clamped to the target, so the portrait frame went in squashed (0.94 aspect, not 0.75).
-    transform = vggt_input_transform((720, 960), loader="bounded_v1", target_size=252)
-    assert transform.ops == (Resize((238, 252), "bicubic"),)
-    assert transform.is_pure_resize
 
 
 def test_pad_mode_is_not_guessed() -> None:
@@ -211,16 +205,13 @@ class _Geom:
         self.depthmaps_by_frame = {} if depth is None else {"0:0": {"depth": depth}}
 
 
-def test_image_transform_for_reads_the_record_or_proves_the_identity() -> None:
+def test_image_transform_for_reads_the_record_and_never_guesses() -> None:
     transform = vggt_input_transform((720, 960))
     geom = _Geom({"image_transforms": {"0": transform.to_dict()}}, depth=np.ones((518, 518)))
-    assert image_transform_for(geom, "0", source_size=(720, 960)) == transform
-    # no record: identity only when the frame is the depth's size ...
-    legacy = _Geom(depth=np.ones((48, 64)))
-    assert image_transform_for(legacy, "0", source_size=(64, 48)).is_identity
-    # ... never a guessed crop
+    assert image_transform_for(geom, "0") == transform
+    # no record: refused, even where an identity would fit the depth
     with pytest.raises(MissingImageTransform):
-        image_transform_for(_Geom(depth=np.ones((518, 518))), "0", source_size=(720, 960))
+        image_transform_for(_Geom(depth=np.ones((48, 64))), "0")
 
 
 def _write_dataset(root: Path, size=(8, 6)) -> None:
@@ -238,11 +229,13 @@ def _write_dataset(root: Path, size=(8, 6)) -> None:
     np.save(root / "depth" / "2x" / "0_00000.npy", np.full((h, w), 2.0, np.float32))
     Image.fromarray(np.zeros((h, w, 3), np.uint8)).save(root / "rgb" / "2x" / "0_00000.png")
     (root / "splits" / "train.json").write_text(json.dumps({"camera_ids": ["0"], "time_ids": [0]}))
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0, "factor": 2}))  # as DyCheck ships
 
 
 def test_dataset_backend_records_its_factor_resize(tmp_path: Path) -> None:
     _write_dataset(tmp_path, size=(8, 6))
-    stream = type("S", (), {"stream_id": "0", "width": 16, "height": 12})()
+    stream = VideoStreamRef(stream_id="0", video_path=tmp_path, fps=30.0, num_frames=1,
+                            width=16, height=12, has_audio=False)
     ingest = type("I", (), {"streams": [stream], "keyframes": [FrameRef("0", 0, 0.0)]})()
     art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 2}).initialize(
         ingest_artifact=ingest
@@ -273,7 +266,7 @@ def _video(tmp_path: Path, name: str, width=64, height=48, num_frames=3) -> Path
 
 
 def _ingest(tmp_path: Path, video: Path, frames=(0, 1)) -> IngestArtifact:
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="1x",
         stage_name="ingest",
@@ -314,7 +307,7 @@ def test_vggt_long_records_the_loader_it_ran(tmp_path: Path) -> None:
 
     video = tmp_path / "v.mp4"
     _write_test_video(video, width=320, height=240, num_frames=8)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     frames = [FrameRef("cam_00", i, i / 30.0) for i in range(8)]
     ingest = IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path, streams=[stream], keyframes=frames
@@ -337,7 +330,7 @@ def test_vggt_long_records_the_loader_it_ran(tmp_path: Path) -> None:
         }
     )
     art = init.initialize(frames, ingest_artifact=ingest, sync_artifact=None)
-    assert art.metadata["vggt_long_input_loader"] == {"loader": "bounded", "target_size": 126, "version": 2}
+    assert art.metadata["vggt_long_input_loader"] == {"loader": "bounded", "target_size": 126}
     transform = ImageTransform.from_dict(art.metadata["image_transforms"]["cam_00"])
     assert transform == vggt_input_transform(
         (320, 240), loader="bounded", target_size=126, resize_max_dim=128

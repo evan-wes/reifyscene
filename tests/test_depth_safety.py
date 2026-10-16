@@ -36,7 +36,7 @@ def test_unproject_identity_pose_and_holes():
 
 def test_backprojector_zero_and_nan_depth_are_nan_not_origin():
     intr = CameraIntrinsics(fx=2.0, fy=2.0, cx=1.0, cy=1.0)
-    state = TimedCameraState("cam", 0.0, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32)))
+    state = TimedCameraState("cam", 0, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32)))
     depth = np.array([[3.0, 0.0], [3.0, np.nan]], dtype=np.float32)
     pix = np.array([[0, 0], [1, 0], [1, 1]], dtype=np.float32)   # (u,v): valid, zero-hole, nan
     xyz = Backprojector().backproject(pix, state, depth)
@@ -52,6 +52,7 @@ def _fake_dataset(root):
     (root / "depth" / "1x").mkdir(parents=True)
     (root / "rgb" / "1x").mkdir(parents=True)
     json.dump({"camera_ids": ["0", "0"], "time_ids": [0, 1]}, open(root / "splits" / "train.json", "w"))
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
     for t in (0, 1):
         name = f"0_{t:05d}"
         json.dump(

@@ -161,7 +161,9 @@ class DensificationController:
         self.count = torch.zeros(n, device=dev)
 
     @torch.no_grad()
-    def after_backward(self, output: Any, gaussian_range: tuple[int, int] | None = None) -> None:
+    def after_backward(
+        self, output: Any, gaussian_range: tuple[int, int] | None = None, grad_scale: float = 1.0
+    ) -> None:
         """Accumulate per-Gaussian screen-space gradient from a RasterOutput.
 
         ``gaussian_range`` selects this field's slice of a combined-cloud
@@ -179,8 +181,10 @@ class DensificationController:
         # gsplat's means2d gradient is in [-1, 1] NDC; rescale to pixel units so
         # the ported grad2d_threshold (0.0002) is applied in the same space as
         # gsplat's DefaultStrategy.
-        grad[..., 0] *= output.width / 2.0
-        grad[..., 1] *= output.height / 2.0
+        # grad_scale undoes a batch mean: with B views averaged, each view's gradient is 1/B of
+        # what the threshold was set for (Shape-of-Motion multiplies by the batch size too).
+        grad[..., 0] *= output.width / 2.0 * grad_scale
+        grad[..., 1] *= output.height / 2.0 * grad_scale
         gnorm = grad.norm(dim=-1)
 
         radii = output.radii
@@ -324,8 +328,11 @@ class DensificationController:
         cap = float(logit(torch.tensor(self.cfg.reset_opacity_value)))
         capped = torch.minimum(self.field.logit_opacities.data, torch.full_like(self.field.logit_opacities.data, cap))
         self.field.logit_opacities.data.copy_(capped)
+        # The group is named with this controller's prefix ("fg."/"bg." in the dynamic
+        # trainer). Matching the bare name missed both there, so the reset's momentum survived
+        # and pushed culled opacities straight back up.
         for group in self.optimizer.param_groups:
-            if group.get("name") == "logit_opacities":
+            if group.get("name") == self.group_prefix + "logit_opacities":
                 state = self.optimizer.state.get(group["params"][0])
                 if state:
                     state["exp_avg"].zero_()

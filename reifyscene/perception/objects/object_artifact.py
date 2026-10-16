@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageColor, ImageDraw
 from rich.progress import track
 
+from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.io import read_json, require_file, write_json
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import BaseArtifact, FrameRef, ObjectState
@@ -31,7 +33,7 @@ class ObjectArtifact(BaseArtifact):
 
     @staticmethod
     def _frame_key(frame_ref: FrameRef) -> str:
-        return f"{frame_ref.stream_id}:{int(frame_ref.frame_idx)}"
+        return make_frame_key(frame_ref.stream_id, frame_ref.frame_idx)
 
     @staticmethod
     def _sanitize_key(key: str) -> str:
@@ -71,11 +73,11 @@ class ObjectArtifact(BaseArtifact):
 
     @staticmethod
     def _frame_ref_to_dict(frame: FrameRef) -> dict[str, Any]:
-        return {'stream_id': frame.stream_id, 'frame_idx': int(frame.frame_idx), 'timestamp_sec': float(frame.timestamp_sec)}
+        return frame.to_dict()
 
     @staticmethod
     def _frame_ref_from_dict(raw: dict[str, Any]) -> FrameRef:
-        return FrameRef(stream_id=str(raw['stream_id']), frame_idx=int(raw['frame_idx']), timestamp_sec=float(raw['timestamp_sec']))
+        return FrameRef.from_dict(raw)
 
     def _object_to_dict(self, obj: ObjectState) -> dict[str, Any]:
         det_id = obj.attributes.get('detection_id', obj.object_id)
@@ -92,10 +94,10 @@ class ObjectArtifact(BaseArtifact):
         }
 
     def _object_from_dict(self, raw: dict[str, Any], embedding_vectors: dict[str, np.ndarray]) -> ObjectState:
-        det_id = raw.get('detection_id', raw['object_id'])
+        det_id = raw['detection_id']
         # The stage files embeddings under the canonical track id (one per tracklet), not
         # the detection id; looking up only the detection id lost every one on reload.
-        track_id = (raw.get('attributes') or {}).get('track_id')
+        track_id = raw['attributes'].get('track_id')
         embedding = embedding_vectors.get(det_id)
         if embedding is None and track_id is not None:
             embedding = embedding_vectors.get(str(track_id))
@@ -104,10 +106,10 @@ class ObjectArtifact(BaseArtifact):
             frame_ref=self._frame_ref_from_dict(raw['frame_ref']),
             category=str(raw['category']),
             bbox_xyxy=np.asarray(raw['bbox_xyxy'], dtype=np.float32),
-            mask_rle=raw.get('mask_rle'),
+            mask_rle=raw['mask_rle'],
             embedding=None if embedding is None else np.asarray(embedding, dtype=np.float32),
             confidence=float(raw['confidence']),
-            attributes=dict(raw.get('attributes', {})),
+            attributes=dict(raw['attributes']),
         )
 
     def _copy_debug_images(self, image_dir: Path) -> dict[str, str]:
@@ -196,29 +198,16 @@ class ObjectArtifact(BaseArtifact):
                 x, y, _ = history[-1]
                 draw.ellipse([x - 4, y - 4, x + 4, y + 4], fill=(*rgb_color, 255), outline=(255, 255, 255, 255))
 
-        for obj in raw_frame_objects:
-            if not obj.attributes.get('suppressed'):
-                continue
-            x1, y1, x2, y2 = map(float, obj.bbox_xyxy.tolist())
-            draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 255, 255), width=2)
-            draw.line([(x1, y1), (x2, y2)], fill=(255, 0, 255, 210), width=2)
-            draw.line([(x1, y2), (x2, y1)], fill=(255, 0, 255, 210), width=2)
-            target = obj.attributes.get('suppressed_by_global_id') or obj.attributes.get('suppressed_by_detection_id', 'other')
-            text = f"supp {obj.attributes.get('current_category', obj.category)} -> {target}"
-            draw.text((x1 + 2, min(height - 16, y2 + 2)), text, fill=(255, 0, 255, 255))
-
         composed = Image.alpha_composite(base, overlay).convert('RGB')
         return np.asarray(composed, dtype=np.uint8)
 
     def _build_summary_rows(self, frame_key: str, frame_objects: list[ObjectState], raw_frame_objects: list[ObjectState]) -> list[list[str]]:
         track_summaries = self.linked_ids.get('track_summaries', {})
         visible_ids = sorted({obj.object_id for obj in frame_objects})
-        suppressed = [obj for obj in raw_frame_objects if obj.attributes.get('suppressed')]
         rows = [
             ['Frame', frame_key],
             ['Raw detections', str(len(raw_frame_objects))],
             ['Kept detections', str(len(frame_objects))],
-            ['Suppressed', str(len(suppressed))],
             ['Persistent IDs', str(len(visible_ids))],
         ]
         if visible_ids:
@@ -279,7 +268,7 @@ class ObjectArtifact(BaseArtifact):
             return {}
         debug_dir = ensure_dir(self.save_dir / 'debug')
         overlay_dir = ensure_dir(debug_dir / 'overlays')
-        frame_keys = sorted(copied_images.keys(), key=lambda key: (key.split(':')[0], int(key.split(':')[1])))
+        frame_keys = sorted(copied_images.keys(), key=parse_key)
         if not frame_keys:
             return {}
         overlay_files: dict[str, str] = {}
@@ -330,7 +319,7 @@ class ObjectArtifact(BaseArtifact):
         start_idx = len(traces)
         for tr in timeline_traces:
             fig.add_trace(tr, row=2, col=2)
-        frame_numbers = [int(key.split(':')[1]) for key in frame_keys]
+        frame_numbers = [parse_key(key)[1] for key in frame_keys]
         current_frame = frame_numbers[0]
         fig.update_yaxes(title_text='Persistent object', tickmode='array', tickvals=list(range(len(timeline_labels))), ticktext=timeline_labels, row=2, col=2)
         fig.update_xaxes(title_text='Frame index', row=2, col=2)
@@ -351,7 +340,7 @@ class ObjectArtifact(BaseArtifact):
             visible[2 * frame_idx + 1] = True
             for tidx in range(len(timeline_traces)):
                 visible[start_idx + tidx] = True
-            current_frame = int(frame_key.split(':')[1])
+            current_frame = parse_key(frame_key)[1]
             steps.append({
                 'method': 'update',
                 'label': frame_key,
@@ -398,7 +387,6 @@ class ObjectArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'objects': [self._object_to_dict(obj) for obj in self.objects],
             'raw_objects': [self._object_to_dict(obj) for obj in self.raw_objects],
@@ -413,14 +401,14 @@ class ObjectArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'ObjectArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         mask_arrays: dict[str, np.ndarray] = {}
-        for det_id, filename in raw.get('mask_index', {}).items():
+        for det_id, filename in raw['mask_index'].items():
             path = require_file(save_dir / 'masks' / filename, "objects file")
             with np.load(path, allow_pickle=True) as npz:
                 mask_arrays[det_id] = np.asarray(npz['mask'], dtype=bool)
         embedding_vectors: dict[str, np.ndarray] = {}
-        for det_id, filename in raw.get('embedding_index', {}).items():
+        for det_id, filename in raw['embedding_index'].items():
             path = require_file(save_dir / 'embeddings' / filename, "objects file")
             with np.load(path, allow_pickle=True) as npz:
                 embedding_vectors[det_id] = np.asarray(npz['embedding'], dtype=np.float32)
@@ -428,15 +416,15 @@ class ObjectArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             objects=[],
             raw_objects=[],
-            linked_ids=raw.get('linked_ids', {}),
-            frame_index=raw.get('frame_index', {}),
+            linked_ids=raw['linked_ids'],
+            frame_index=raw['frame_index'],
             mask_arrays=mask_arrays,
             embedding_vectors=embedding_vectors,
-            notes=raw.get('notes', []),
+            notes=raw['notes'],
         )
-        artifact.objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw.get('objects', [])]
-        artifact.raw_objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw.get('raw_objects', [])]
+        artifact.objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw['objects']]
+        artifact.raw_objects = [artifact._object_from_dict(item, embedding_vectors) for item in raw['raw_objects']]
         return artifact

@@ -15,7 +15,7 @@ def test_decoder_probes_and_reads_frames(tmp_path: Path) -> None:
     video_path = tmp_path / "sample.mp4"
     write_test_video(video_path)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_a")
 
     assert stream.metadata["probed"] is True
@@ -33,7 +33,7 @@ def test_decoder_probes_and_reads_frames(tmp_path: Path) -> None:
 
 
 def test_decoder_raises_for_missing_video(tmp_path: Path) -> None:
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     missing = tmp_path / "missing.mp4"
 
     with pytest.raises(FileNotFoundError):

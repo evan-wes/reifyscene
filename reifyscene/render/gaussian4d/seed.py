@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.render.gaussian4d.rasterizer import GaussianCloud
 
 
@@ -103,20 +104,20 @@ def seed_arrays_from_geometry(
     contributes no seed points only when ``rgb_by_frame`` is empty (the geometry has
     no photos at all); otherwise it raises -- a photo is never dropped silently.
     """
-    state_by_key: dict[tuple[str, float], Any] = {}
-    for stream_id, states in geometry_artifact.camera_states_by_stream.items():
-        for state in states:
-            state_by_key[(str(stream_id), round(float(state.time_sec), 6))] = state
+    state_by_key: dict[tuple[str, int], Any] = {
+        state.key: state
+        for states in geometry_artifact.camera_states_by_stream.values() for state in states
+    }
 
     xyz_parts: list[np.ndarray] = []
     color_parts: list[np.ndarray] = []
     scale_parts: list[np.ndarray] = []
 
     for frame in geometry_artifact.selected_frames:
-        key = f"{frame.stream_id}:{int(frame.frame_idx)}"
+        key = frame_key(frame.stream_id, frame.frame_idx)
         depth_payload = geometry_artifact.depthmaps_by_frame.get(key)
         rgb = rgb_by_frame.get(key)
-        state = state_by_key.get((str(frame.stream_id), round(float(frame.timestamp_sec), 6)))
+        state = state_by_key.get(frame.key)
         if depth_payload is None or state is None or not rgb_by_frame:
             continue
         if rgb is None:

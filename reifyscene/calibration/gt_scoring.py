@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 from reifyscene.calibration.model_io import ParsedColmapModel, qvec_to_rotmat
+from reifyscene.ingest.datasets import DatasetLayoutError, DyCheckSequence
 
 GT_MANIFEST_NAME = "gt_manifest.json"
 MANIFEST_SCHEMA = "gt_manifest_v1"
@@ -87,17 +88,7 @@ class GTCamera:
 DATASETS = ("iphone", "nvidia")
 
 
-def camera_of(frame_name: str) -> str:
-    """Camera id from the ``{cam}_{t:05d}`` frame-name convention."""
-    return str(frame_name).split("_", 1)[0]
-
-
-def _rgb_dir(data_dir: Path) -> Path:
-    return data_dir / "rgb" / "1x"
-
-
-def _camera_dir(data_dir: Path) -> Path:
-    return data_dir / "camera"
+camera_of = DyCheckSequence.camera_of  # the dataset's frame-name convention, not ours
 
 
 def _evenly_spaced(items: list[str], count: int) -> list[str]:
@@ -155,16 +146,10 @@ def enumerate_frames(dataset: str, data_dir: Path) -> list[str]:
     """
     if dataset not in DATASETS:
         raise GTSchemaError(f"unknown dataset {dataset!r} (expected one of {DATASETS})")
-    rgb_dir = _rgb_dir(data_dir)
-    cam_dir = _camera_dir(data_dir)
-    if not rgb_dir.is_dir() or not cam_dir.is_dir():
-        raise GTSchemaError(f"{data_dir}: missing rgb/1x/ or camera/")
-    rgb_frames = {p.stem for p in rgb_dir.glob("*.png")}
-    cam_frames = {p.stem for p in cam_dir.glob("*.json")}
-    frames = sorted(rgb_frames & cam_frames)
-    if not frames:
-        raise GTSchemaError(f"{data_dir}: no frames with both rgb/1x png and camera json")
-    return frames
+    try:
+        return DyCheckSequence(data_dir).frames(1)
+    except DatasetLayoutError as exc:
+        raise GTSchemaError(str(exc)) from exc
 
 
 def select_frames(
@@ -198,8 +183,8 @@ def load_gt_cameras(dataset: str, data_dir: Path, frame_names: list[str]) -> lis
         raise GTSchemaError("no frames selected — nothing to score")
     cameras = []
     for frame in frame_names:
-        rgb = _rgb_dir(data_dir) / f"{frame}.png"
-        cam_json = _camera_dir(data_dir) / f"{frame}.json"
+        seq = DyCheckSequence(data_dir)
+        rgb, cam_json = seq.rgb_path(frame, 1), seq.camera_path(frame)
         if not rgb.is_file():
             raise GTSchemaError(f"selected frame {frame!r} has no rgb at {rgb}")
         if not cam_json.is_file():

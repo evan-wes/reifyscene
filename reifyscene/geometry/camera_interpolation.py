@@ -10,9 +10,6 @@ import numpy as np
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 
 
-_TIME_EPSILON_SEC = 1e-6
-
-
 def _copy_intrinsics(intr: CameraIntrinsics) -> CameraIntrinsics:
     return CameraIntrinsics(
         fx=float(intr.fx),
@@ -24,10 +21,12 @@ def _copy_intrinsics(intr: CameraIntrinsics) -> CameraIntrinsics:
     )
 
 
-def _copy_state(state: TimedCameraState, *, time_sec: float | None = None) -> TimedCameraState:
+def _copy_state(state: TimedCameraState, *, frame: FrameRef | None = None) -> TimedCameraState:
+    """A copy of ``state``, re-labelled as ``frame``'s when one is given."""
     return TimedCameraState(
         stream_id=str(state.stream_id),
-        time_sec=float(state.time_sec if time_sec is None else time_sec),
+        frame_idx=int(state.frame_idx if frame is None else frame.frame_idx),
+        time_sec=state.time_sec if frame is None else frame.timestamp_sec,
         intrinsics=_copy_intrinsics(state.intrinsics),
         pose=CameraPose(T_world_cam=np.asarray(state.pose.T_world_cam, dtype=float).copy()),
     )
@@ -159,62 +158,52 @@ def _interp_pose(a: np.ndarray, b: np.ndarray, alpha: float) -> np.ndarray:
     return out
 
 
-def _find_exact_state(states: list[TimedCameraState], time_sec: float, *, eps: float = _TIME_EPSILON_SEC) -> TimedCameraState | None:
-    for state in states:
-        if abs(float(state.time_sec) - float(time_sec)) <= eps:
-            return state
-    return None
-
-
 def _interpolate_state_pair(
     state_a: TimedCameraState,
     state_b: TimedCameraState,
-    *,
-    target_time_sec: float,
+    target: FrameRef,
 ) -> TimedCameraState:
-    ta = float(state_a.time_sec)
-    tb = float(state_b.time_sec)
-    if abs(tb - ta) <= _TIME_EPSILON_SEC:
-        return _copy_state(state_a, time_sec=target_time_sec)
-    alpha = float((float(target_time_sec) - ta) / (tb - ta))
+    fa, fb = int(state_a.frame_idx), int(state_b.frame_idx)
+    if fa == fb:
+        return _copy_state(state_a, frame=target)
+    alpha = float((int(target.frame_idx) - fa) / (fb - fa))
     intr = _interp_intrinsics(state_a.intrinsics, state_b.intrinsics, alpha)
     pose = _interp_pose(state_a.pose.T_world_cam, state_b.pose.T_world_cam, alpha)
     return TimedCameraState(
         stream_id=str(state_a.stream_id),
-        time_sec=float(target_time_sec),
+        frame_idx=int(target.frame_idx),
+        time_sec=target.timestamp_sec,
         intrinsics=intr,
         pose=CameraPose(T_world_cam=pose.astype(float)),
     )
 
 
-def _state_for_target_time(states: list[TimedCameraState], time_sec: float) -> tuple[TimedCameraState | None, str]:
+def _state_for_target_frame(states: list[TimedCameraState], target: FrameRef) -> tuple[TimedCameraState | None, str]:
+    """``states`` sorted by frame number."""
     if not states:
         return None, "missing"
-    exact = _find_exact_state(states, time_sec)
-    if exact is not None:
-        return _copy_state(exact, time_sec=float(time_sec)), "exact"
+    numbers = [int(state.frame_idx) for state in states]
+    idx = bisect_left(numbers, int(target.frame_idx))
+    if idx < len(states) and numbers[idx] == int(target.frame_idx):
+        return states[idx], "exact"
     if len(states) == 1:
-        return _copy_state(states[0], time_sec=float(time_sec)), "copied_single"
-
-    sorted_states = sorted(states, key=lambda state: float(state.time_sec))
-    times = [float(state.time_sec) for state in sorted_states]
-    idx = bisect_left(times, float(time_sec))
+        return _copy_state(states[0], frame=target), "copied_single"
     if idx <= 0:
-        return _interpolate_state_pair(sorted_states[0], sorted_states[1], target_time_sec=float(time_sec)), "extrapolated_before"
-    if idx >= len(sorted_states):
-        return _interpolate_state_pair(sorted_states[-2], sorted_states[-1], target_time_sec=float(time_sec)), "extrapolated_after"
-    return _interpolate_state_pair(sorted_states[idx - 1], sorted_states[idx], target_time_sec=float(time_sec)), "interpolated"
+        return _interpolate_state_pair(states[0], states[1], target), "extrapolated_before"
+    if idx >= len(states):
+        return _interpolate_state_pair(states[-2], states[-1], target), "extrapolated_after"
+    return _interpolate_state_pair(states[idx - 1], states[idx], target), "interpolated"
 
 
 def densify_camera_states_for_frames(
     camera_states_by_stream: dict[str, list[TimedCameraState]],
     target_frames: list[FrameRef],
 ) -> dict[str, Any]:
-    """Mutate ``camera_states_by_stream`` so it covers every target frame time.
+    """Mutate ``camera_states_by_stream`` so it covers every target frame.
 
-    Existing states are preserved. Missing target times are filled by pose
-    interpolation between the nearest states in the same stream, with boundary
-    extrapolation when the requested frame lies just outside the geometry span.
+    Existing states are preserved. A missing frame is filled by pose interpolation between
+    the nearest states of the same stream (by frame number), with boundary extrapolation
+    when the frame lies just outside the geometry's span.
     """
     targets_by_stream: dict[str, list[FrameRef]] = {}
     for frame in target_frames:
@@ -243,20 +232,21 @@ def densify_camera_states_for_frames(
             summary["streams"][stream_id] = stream_summary
             continue
 
-        augmented = [_copy_state(state) for state in sorted(existing_states, key=lambda state: float(state.time_sec))]
-        for frame in sorted(frames, key=lambda fr: float(fr.timestamp_sec)):
-            state, mode = _state_for_target_time(augmented, float(frame.timestamp_sec))
+        augmented = sorted((_copy_state(state) for state in existing_states),
+                           key=lambda state: int(state.frame_idx))
+        for frame in sorted(frames, key=lambda fr: int(fr.frame_idx)):
+            state, mode = _state_for_target_frame(augmented, frame)
             stream_summary[mode] = int(stream_summary.get(mode, 0)) + 1
             if state is None:
                 continue
             if mode != "exact":
                 augmented.append(state)
-                augmented.sort(key=lambda item: float(item.time_sec))
+                augmented.sort(key=lambda item: int(item.frame_idx))
                 stream_summary["added"] = int(stream_summary["added"]) + 1
 
         deduped: list[TimedCameraState] = []
-        for state in sorted(augmented, key=lambda item: float(item.time_sec)):
-            if deduped and abs(float(deduped[-1].time_sec) - float(state.time_sec)) <= _TIME_EPSILON_SEC:
+        for state in augmented:
+            if deduped and int(deduped[-1].frame_idx) == int(state.frame_idx):
                 continue
             deduped.append(state)
         camera_states_by_stream[stream_id] = deduped

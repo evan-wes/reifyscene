@@ -21,7 +21,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from reifyscene.common.types import FrameRef
+from reifyscene.common.frame_keys import frame_key, parse_key
+from reifyscene.common.types import FrameRef, camera_state_at
 from reifyscene.geometry.image_transform import image_transform_for
 from reifyscene.render.gaussian4d.rasterizer import look_at_viewmat
 from reifyscene.render.gaussian4d.seed import seed_arrays_from_geometry
@@ -31,11 +32,22 @@ from reifyscene.scene.scene_artifact import TRAIN_VIEWS_DIR, SceneArtifact, trai
 class SingleVideoSceneAssembler:
     """Assemble a self-contained renderable 4D scene from pipeline artifacts.
 
-    Tolerant ``**cfg`` constructor: unknown keys (e.g. legacy ``scene`` config
-    fields from the retired toy renderer) are ignored.
+    ``**cfg`` is the ``scene`` config section; a key it does not know is an error, not
+    silently ignored (``timeline_source`` is the pipeline's metadata label, read there).
     """
 
+    _KEYS = frozenset({
+        "seed_pixel_stride", "seed_max_points", "seed_depth_near", "seed_depth_far",
+        "seed_scale_mult", "seed_scale_min", "seed_scale_max", "max_train_views",
+        "num_render_cameras", "orbit_up_axis", "kind", "dynamic_num_fg", "dynamic_num_bg",
+        "dynamic_num_bases", "dynamic_seed", "device", "tracker", "dynamic_motion_gate",
+        "timeline_source",
+    })
+
     def __init__(self, **cfg: Any) -> None:
+        unknown = sorted(set(cfg) - self._KEYS)
+        if unknown:
+            raise TypeError(f"unknown scene setting(s) {unknown}")
         # Seed (mirrors run_render_proof's ``seed`` cfg).
         self.seed_pixel_stride = int(cfg.get("seed_pixel_stride", 1))
         self.seed_max_points = int(cfg.get("seed_max_points", 1_500_000))
@@ -83,7 +95,7 @@ class SingleVideoSceneAssembler:
 
     @staticmethod
     def _frame_key(stream_id: str, frame_idx: int) -> str:
-        return f"{stream_id}:{int(frame_idx)}"
+        return frame_key(stream_id, frame_idx)
 
     @staticmethod
     def _scene_metadata(metadata: dict[str, Any] | None, geometry_artifact) -> dict[str, Any]:
@@ -94,44 +106,14 @@ class SingleVideoSceneAssembler:
             out["image_transforms"] = {str(k): dict(v) for k, v in transforms.items()}
         return out
 
-    @staticmethod
-    def _photo_map(geometry_artifact) -> dict[str, str]:
-        return dict((getattr(geometry_artifact, "metadata", {}) or {}).get("debug_image_paths", {}) or {})
-
-    def _gt_image_path(self, frame_key: str, geometry_artifact) -> str | None:
-        """The photo of a frame the geometry lists, or ``None`` when the geometry has no photos at all.
-
-        Heuristic geometry carries no photos by design (an empty map), and the scene
-        is then built without training views. But a frame missing from a non-empty
-        map, or whose file is gone, raises: it would silently drop that frame.
-        """
-        src_map = self._photo_map(geometry_artifact)
-        if not src_map:
-            return None
-        path = src_map.get(frame_key)
-        if path is None or not Path(path).exists():
-            raise FileNotFoundError(
-                f"geometry frame {frame_key} has no photo on disk (debug_image_paths entry: {path!r})"
-            )
-        return str(path)
-
-    @staticmethod
-    def _geometry_photo(path: str, geometry_artifact, stream_id: str) -> np.ndarray:
-        """A frame's photo in the geometry's pixels, through its recorded image transform.
-
-        VGGT's cameras and depth describe a resized, centre-cropped square; the photo
-        is cropped and resized the same way (never squashed) so it matches them.
-        """
-        with Image.open(path) as img:
-            photo = img.convert("RGB")
-        transform = image_transform_for(geometry_artifact, str(stream_id), source_size=photo.size)
-        return transform.apply_to_image(photo)
+    def _photo(self, frame_key: str) -> np.ndarray:
+        """A frame's photo in the geometry's pixels: the ingest stream's own frame, put through
+        the geometry's recorded image transform (VGGT: resize + centre crop; never squashed)."""
+        stream_id, frame = parse_key(frame_key)
+        return self._streams.get(stream_id).frame_in_render(frame)
 
     def _camera_state_for_frame(self, geometry_artifact, frame_ref: FrameRef):
-        states = list((geometry_artifact.camera_states_by_stream or {}).get(frame_ref.stream_id, []))
-        if not states:
-            return None
-        return min(states, key=lambda s: abs(float(s.time_sec) - float(frame_ref.timestamp_sec)))
+        return camera_state_at(geometry_artifact.camera_states_by_stream, frame_ref)
 
     def _build_seed(self, geometry_artifact) -> dict[str, Any]:
         rgb_by_frame: dict[str, np.ndarray] = {}
@@ -139,10 +121,7 @@ class SingleVideoSceneAssembler:
             key = self._frame_key(frame.stream_id, frame.frame_idx)
             if key not in (geometry_artifact.depthmaps_by_frame or {}):
                 continue  # no depth to seed from: the frame contributes no seed points
-            path = self._gt_image_path(key, geometry_artifact)
-            if path is None:
-                continue
-            rgb_by_frame[key] = self._geometry_photo(path, geometry_artifact, frame.stream_id)
+            rgb_by_frame[key] = self._photo(key)
         means, colors, scales = seed_arrays_from_geometry(
             geometry_artifact,
             rgb_by_frame,
@@ -174,8 +153,7 @@ class SingleVideoSceneAssembler:
         out: list[dict[str, Any]] = []
         for idx, view in enumerate(views):
             view = dict(view)
-            source = view.pop("source_image_path")
-            rgb = self._geometry_photo(source, geometry_artifact, str(view["frame_key"]).rpartition(":")[0])
+            rgb = self._photo(str(view["frame_key"]))
             if rgb.shape[:2] != (int(view["height"]), int(view["width"])):
                 raise ValueError(
                     f"training view {view['frame_key']}: photo comes out {rgb.shape[1]}x{rgb.shape[0]} in the geometry's "
@@ -189,18 +167,15 @@ class SingleVideoSceneAssembler:
 
     def _build_train_views(self, geometry_artifact, save_dir) -> list[dict[str, Any]]:
         views: list[dict[str, Any]] = []
+        if not geometry_artifact.depthmaps_by_frame:
+            return views  # heuristic geometry: cameras without depth are no training views
         frames = sorted(geometry_artifact.selected_frames, key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         for frame in frames:
             key = self._frame_key(frame.stream_id, frame.frame_idx)
             state = self._camera_state_for_frame(geometry_artifact, frame)
             if state is None:
                 continue  # no camera for this frame: it cannot be a training view
-            path = self._gt_image_path(key, geometry_artifact)
-            if path is None:
-                continue  # the geometry carries no photos at all (heuristic)
-            with Image.open(path) as img:
-                photo_size = (int(img.width), int(img.height))
-            transform = image_transform_for(geometry_artifact, str(frame.stream_id), source_size=photo_size)
+            transform = image_transform_for(geometry_artifact, str(frame.stream_id))
             width, height = transform.output_size
             intr = state.intrinsics
             views.append({
@@ -210,7 +185,6 @@ class SingleVideoSceneAssembler:
                 "intrinsics": {"fx": float(intr.fx), "fy": float(intr.fy), "cx": float(intr.cx), "cy": float(intr.cy)},
                 "width": int(width),
                 "height": int(height),
-                "source_image_path": str(path),
             })
         if self.max_train_views is not None and len(views) > self.max_train_views:
             idx = np.linspace(0, len(views) - 1, int(self.max_train_views)).round().astype(int)
@@ -272,6 +246,23 @@ class SingleVideoSceneAssembler:
         t_gp = torch.as_tensor(np.asarray(gp, dtype=np.float32), dtype=transfm.dtype, device=transfm.device)
         return transfm @ t_gp
 
+    @staticmethod
+    def _train_targets(stack, norm) -> dict[str, np.ndarray]:
+        """Each training frame's geometry supervision, for the render stage's depth and mask
+        terms (Shape-of-Motion's): depth in the scene's normalized units (the geometry's depth
+        over ``norm.scale`` -- the normalization rotates the world, which leaves camera depth
+        alone, and divides translations by ``scale``), where that depth is valid, and the
+        foreground mask. Keyed by frame name, in the training raster. Depth as float16 (the
+        scene is ~unit-sized), masks as uint8: spin's 426 frames stay tens of MB."""
+        depth = (stack.depths / float(norm.scale)).cpu().numpy()
+        valid = (stack.valid.cpu().numpy() > 0.5) & np.isfinite(depth) & (depth > 0)
+        return {
+            "target_frame_names": np.asarray(list(stack.cameras.frame_names)),
+            "target_depths": np.where(valid, depth, 0.0).astype(np.float16),
+            "target_depth_valid": valid.astype(np.uint8),
+            "target_fg": (stack.fg.cpu().numpy() > 0.5).astype(np.uint8),
+        }
+
     def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
         """Per-frame union of all segment instance masks -> the dynamic foreground.
 
@@ -299,7 +290,10 @@ class SingleVideoSceneAssembler:
                 m = np.asarray(mask, dtype=bool)
                 if union is None:
                     union = m.copy()
-                elif union.shape == m.shape:
+                elif union.shape != m.shape:
+                    raise ValueError(f"{key}: instance masks of one frame have different "
+                                     f"rasters {union.shape} and {m.shape}")
+                else:
                     union |= m
             if union is not None:
                 out[key] = union.astype(np.float32)
@@ -316,9 +310,6 @@ class SingleVideoSceneAssembler:
         views: list[dict[str, Any]] = []
         for cam in cams_train:
             key = str(cam.frame_name)
-            path = self._gt_image_path(key, geometry_artifact)
-            if path is None:
-                raise FileNotFoundError(f"dynamic training camera {key} has no photo (the geometry lists none)")
             t_world_cam = np.linalg.inv(np.asarray(cam.w2c, dtype=np.float32)).astype(np.float32)
             K = np.asarray(cam.K, dtype=np.float32)
             views.append({
@@ -328,7 +319,6 @@ class SingleVideoSceneAssembler:
                 "intrinsics": {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "cx": float(K[0, 2]), "cy": float(K[1, 2])},
                 "width": int(width),
                 "height": int(height),
-                "source_image_path": str(path),
             })
         return self._write_train_photos(views, geometry_artifact, save_dir)
 
@@ -361,7 +351,8 @@ class SingleVideoSceneAssembler:
         from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
 
         fg_by_frame = self._fg_mask_by_frame(instance_artifact)
-        provider = ArtifactGeometryProvider(geometry_artifact, fg_mask_by_frame=fg_by_frame)
+        provider = ArtifactGeometryProvider(geometry_artifact, stream=self._streams.only(),
+                                            fg_mask_by_frame=fg_by_frame)
         # NOTE: build_native_init_inputs re-reads frame_stack internally; we read it
         # once more here for the all-pairs frames + the lift resolution (acceptable
         # for v1 -- it reads the in-memory artifact, not disk-heavy dataset loaders).
@@ -409,6 +400,7 @@ class SingleVideoSceneAssembler:
 
         norm.transfm = self._fold_ground_plane_into_norm(norm.transfm, geometry_artifact)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
+        bundle.update(self._train_targets(stack, norm))
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact, save_dir)
         render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
         notes = [
@@ -438,12 +430,16 @@ class SingleVideoSceneAssembler:
         object_artifact=None,
         instance_artifact=None,
         metadata: dict[str, Any] | None = None,
+        streams,
     ) -> SceneArtifact:
+        """``streams``: the run's :class:`~reifyscene.ingest.streams.RunStreams` -- where every
+        training photo is read from."""
+        self._streams = streams
         frame_refs = sorted(list(geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
             "source": "geometry",
-            "time_min_sec": float(min((fr.timestamp_sec for fr in frame_refs), default=0.0)),
-            "time_max_sec": float(max((fr.timestamp_sec for fr in frame_refs), default=0.0)),
+            "frame_min": min((int(fr.frame_idx) for fr in frame_refs), default=None),
+            "frame_max": max((int(fr.frame_idx) for fr in frame_refs), default=None),
             "frame_keys": [self._frame_key(fr.stream_id, fr.frame_idx) for fr in frame_refs],
         }
         if self.kind == "dynamic":

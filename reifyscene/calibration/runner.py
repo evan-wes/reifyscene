@@ -13,6 +13,7 @@ from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
 from reifyscene.calibration.model_io import parse_colmap_text_model, timed_camera_from_image_record
 from reifyscene.calibration.report import write_calibration_report, write_calibration_viewer
 from reifyscene.calibration.sampler import CalibrationFrameSampler
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.io import read_json
 from reifyscene.common.paths import ensure_dir
 
@@ -46,14 +47,14 @@ class CalibrationRunner:
             frame_lookup = {(fr.stream_id, int(fr.frame_idx)): fr for fr in frame_refs}
             manifest = {}
             for key, rel in sampled_index.items():
-                stream_id, frame_idx = key.split(":", 1)
+                stream_id, frame_idx = parse_key(key)
                 frame_ref = frame_lookup.get((stream_id, int(frame_idx)))
                 if frame_ref is None:
                     continue
                 manifest[str(rel)] = {
                     "stream_id": stream_id,
                     "frame_idx": int(frame_ref.frame_idx),
-                    "timestamp_sec": float(frame_ref.timestamp_sec),
+                    "timestamp_sec": frame_ref.timestamp_sec,
                 }
         text_model_dir = self._copy_text_model(sparse_dir, save_dir)
         model = parse_colmap_text_model(text_model_dir)
@@ -69,7 +70,7 @@ class CalibrationRunner:
             intrinsics_by_stream.setdefault(state.stream_id, intr)
             camera_states_by_stream.setdefault(state.stream_id, []).append(state)
         for states in camera_states_by_stream.values():
-            states.sort(key=lambda s: (s.time_sec, s.stream_id))
+            states.sort(key=lambda s: s.key)
 
         point_ids = sorted(model.point_records.keys())
         if point_ids:

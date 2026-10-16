@@ -12,9 +12,8 @@ every stage declares a :class:`StageContract`:
   (:data:`ALWAYS_EXCLUDED`, plus per-stage ``exclude`` / ``exclude_when``).
 - ``version``: bump it whenever the stage's output changes for the same settings and
   input -- a new algorithm, OR A CHANGED CODE DEFAULT for a setting it reads (the
-  fingerprint records the value the config gives, not what the code falls back to) --
-  and say what changed in ``changes``; a resume quotes it when it rejects an older
-  artifact.
+  fingerprint records the value the config gives, not what the code falls back to).
+  An artifact of any other version is stale.
 - ``pinned``: settings the run script picks from the machine (free GPU memory) when
   they are not given explicitly. A resume takes them from the prior run instead of
   re-picking them, so a busy GPU does not change what "the same run" means.
@@ -25,8 +24,6 @@ every stage declares a :class:`StageContract`:
 - ``rebuildable``: the stage is cheap, runs no model, and is a pure function of its
   upstream artifacts and settings, so a resume that finds it stale re-runs it
   instead of rejecting.
-- ``relinks``: upstream stages whose change this stage can absorb without re-running
-  (tracking keeps its 2D tracks and re-lifts them onto a changed pose_refine).
 
 Every artifact records ``metadata["contract"]``: its stage, version, effective
 settings, the identity of the input frames, the digests of the upstream artifacts it
@@ -76,8 +73,6 @@ class StageContract:
     upstream: tuple[str, ...] = ()
     paths: tuple[str, ...] = ()
     rebuildable: bool | Callable[[Mapping[str, Any]], bool] = False
-    changes: Mapping[int, str] = field(default_factory=dict)
-    relinks: tuple[str, ...] = ()
 
     def excluded(self, cfg: Mapping[str, Any]) -> tuple[str, ...]:
         extra = tuple(self.exclude_when(cfg)) if self.exclude_when is not None else ()
@@ -188,48 +183,22 @@ def effective_settings(stage: str, cfg: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def current_view(stage: str, settings: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """Recorded settings as today's contract fingerprints them.
-
-    A key the contract has since excluded (it was found not to affect the output), or
-    an entry it no longer declares, is dropped, so taking a setting out of a
-    fingerprint does not make every older record look different.
-    """
-    contract = contract_for(stage)
-    patterns = contract.excluded(cfg)
-    out: dict[str, Any] = {}
-    for path, value in settings.items():
-        if path not in contract.settings or any(fnmatch.fnmatchcase(path, p) for p in patterns):
-            continue
-        out[path] = _prune(value, path, patterns)
-    return out
-
-
-def recorded_setting(record: Mapping[str, Any], path: str) -> Any:
-    """The value a fingerprint record holds for ``path`` (inside a subtree entry too)."""
-    settings = record.get("settings") or {}
-    if path in settings:
-        return settings[path]
-    for entry, value in settings.items():
-        if path.startswith(entry + ".") and isinstance(value, Mapping):
-            return get_path(value, path[len(entry) + 1:], MISSING)
-    return MISSING
-
-
 # -------------------------------------------------------------- input identity
 
 def _file_signature(path: Path) -> list[Any]:
     st = path.stat()
-    return [path.name, int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))]
+    return [path.name, int(st.st_size), int(st.st_mtime_ns)]
 
 
-def input_identity(video_paths: Iterable[str | Path]) -> dict[str, Any]:
+def input_identity(video_paths: Iterable[str | Path], *,
+                   frames_camera: str | None = None) -> dict[str, Any]:
     """What the run reads, independent of where it lives.
 
     A frame directory is identified by the frames the decoder actually reads from
     it (name, size and modification time of each), a video file by its own: moving
     or renaming the folder keeps the identity, editing a used frame changes it, and
-    unrelated files in the folder (another camera's frames) do not matter.
+    unrelated files in the folder (another camera's frames) do not matter. The camera is
+    chosen exactly as ingest chooses it (``VideoDecoder.requested_stream_id``).
     """
     from reifyscene.ingest.decoder import VideoDecoder
 
@@ -237,8 +206,9 @@ def input_identity(video_paths: Iterable[str | Path]) -> dict[str, Any]:
     for idx, raw in enumerate(video_paths):
         path = Path(raw).expanduser().resolve()
         if path.is_dir():
-            stream = VideoDecoder().decode(path, stream_id=f"cam_{idx:02d}")
-            index = stream.metadata.get("frame_index", {})
+            stream = VideoDecoder().decode(
+                path, stream_id=VideoDecoder.requested_stream_id(idx, frames_camera))
+            index = stream.metadata["frame_index"]
             files = [Path(index[k]) for k in sorted(index, key=lambda k: int(k))]
             kind = "frames"
         else:
@@ -263,25 +233,15 @@ def fingerprint(
     settings: Mapping[str, Any],
     input_id: Mapping[str, Any],
     upstream: Mapping[str, str | None],
-    version: int | None = None,
-    revisions: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """The record an artifact carries in ``metadata["contract"]``.
-
-    ``revisions`` name changes a resume made to the artifact's content (re-timed
-    cameras, re-lifted tracks); they are part of the digest, so what was built from the
-    unrevised artifact no longer matches it.
-    """
+    """The record an artifact carries in ``metadata["contract"]``."""
     record = {
         "stage": stage,
-        "version": contract_for(stage).version if version is None else int(version),
+        "version": contract_for(stage).version,
         "settings": stable(dict(settings)),
         "input": stable(dict(input_id)),
         "upstream": {k: upstream[k] for k in sorted(upstream)},
     }
-    revisions = list(revisions)
-    if revisions:
-        record["revisions"] = revisions
     record["digest"] = _digest(record)
     return record
 
@@ -323,7 +283,8 @@ _VGGT_LONG_ONLY = (
 
 def _ingest_excluded(cfg):
     # With every frame a keyframe the stride and cap select nothing.
-    return ("max_keyframes_per_stream", "keyframe_stride_sec") if cfg.get("keyframes_all") else ()
+    return (("max_keyframes_per_stream", "keyframe_stride", "keyframe_stride_sec")
+            if cfg.get("keyframes_all") else ())
 
 
 def _dyn_mask_excluded(cfg):
@@ -360,11 +321,14 @@ CONTRACTS: dict[str, StageContract] = {
     for c in (
         StageContract(
             "ingest",
+            # 2: a stream's fps is its source's record or None, never a default
+            version=2,
             settings={
                 "max_keyframes_per_stream": 8,
-                "keyframe_stride_sec": 1.0,
+                "keyframe_stride": None,        # frames (30 when neither is given)
+                "keyframe_stride_sec": None,    # or seconds, when the source records an fps
                 "keyframes_all": False,
-                "default_fps": 30.0,
+                "frames_camera": None,
             },
             exclude_when=_ingest_excluded,
         ),
@@ -386,6 +350,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "geometry",
+            # 2: camera states are identified by frame number (time only when fps is recorded)
+            version=2,
             settings={"geometry": {}, **_TRACK_PLAN, "env:MOGE_MODEL_ID": None},
             # Where VGGT-Long keeps its scratch files, and whether, change nothing it outputs.
             exclude=(
@@ -400,17 +366,10 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             "pose_refine",
-            version=2,
-            changes={
-                2: "the bundle adjustment refines only cameras with enough observations to "
-                "determine a pose and runs single-threaded, so it repeats; a camera with "
-                "none used to come back from the solver's damping (one run turned one 143 "
-                "degrees and collapsed the scene's scale 60x)"
-            },
+            version=4,
             settings={"pose_refine": {}},
             exclude_when=_pose_refine_excluded,
             upstream=("ingest", "geometry"),
-            relinks=("geometry",),
         ),
         StageContract(
             # Segment is configured by the objects section (detector, SAM 2, frame stride);
@@ -419,20 +378,23 @@ CONTRACTS: dict[str, StageContract] = {
             settings={"segment": {}, "objects": {}},
             exclude=("objects.embedder_*",),
             pinned=("objects.max_inference_side",),
-            upstream=("ingest",),
+            # segment places its instances with the refined geometry it is given
+            upstream=("ingest", "pose_refine"),
         ),
         StageContract(
             "reid",
+            version=3,
             settings={
                 "reid": {},
                 "objects.embedder_backend_mode": None,
                 "objects.embedder_max_inference_side": None,
             },
             pinned=("objects.embedder_max_inference_side",),
-            upstream=("ingest", "segment"),
+            upstream=("ingest", "segment", "tracking", "pose_refine"),
         ),
         StageContract(
-            "semantics", settings={"semantics": {}}, upstream=("ingest", "segment", "reid")
+            "semantics", settings={"semantics": {}},
+            upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
         StageContract(
@@ -452,78 +414,70 @@ CONTRACTS: dict[str, StageContract] = {
                 "humans.backend_mode",
             ),
             pinned=("humans.max_inference_side", "humans.pose_max_inference_side"),
-            upstream=("ingest", "segment", "reid"),
+            upstream=("ingest", "segment", "reid", "pose_refine"),
         ),
         StageContract(
             "tracking",
-            version=2,
-            changes={
-                2: "tracks are lifted from the geometry's depth and cameras through its recorded "
-                "crop box (they were read off VGGT's point maps with the frame squashed onto the "
-                "crop, and positions outside it clamped to its edge)",
-            },
+            version=4,
             settings={"tracking": {}, "lifting": {}},
-            relinks=("pose_refine",),
             pinned=(
                 "tracking.frame_stride",
                 "tracking.max_frames",
                 "tracking.resize_max_dim",
                 "tracking.window_size",
                 "tracking.window_overlap",
+                "tracking.seed_min_points",
+                "tracking.seed_per_kilopixel",
+                "tracking.seed_max_points",
+                "tracking.seed_reseed_gap",
             ),
-            upstream=("ingest", "pose_refine"),
+            upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
             "graph",
-            version=2,
-            changes={
-                2: "entities carry the point tracks that are evidence for them (the graph held "
-                "a node per track); the tracks inside no entity are the background's"
-            },
+            version=6,
             settings={"graph": {}},
-            upstream=("pose_refine", "tracking", "humans", "objects"),
+            upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
         ),
         StageContract(
             # The solver reads the ``optimizer`` section; ``optimization`` holds only
             # debug-viewer switches.
             "optimization",
-            version=2,
-            changes={2: "the re-lift goes through the tracking stage's crop box and lift function"},
+            version=3,
             settings={"optimizer": {}},
             upstream=("sync", "pose_refine", "tracking", "humans", "objects", "graph"),
             rebuildable=True,
         ),
         StageContract(
             "scene",
-            version=2,
-            changes={
-                2: "training photos, seed colours and the dynamic init's frames and masks are "
-                "put into the geometry's pixels (they were squashed onto its crop, so the photos "
-                "did not match the cameras)",
-            },
+            # 5: the dynamic bundle carries per-frame depth / mask targets for the render stage
+            version=5,
             settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
-            # timeline_source is only a metadata label; the human_* keys are legacy and
-            # ignored by the assembler.
-            exclude=("scene.timeline_source", "scene.human_*"),
-            upstream=("pose_refine", "segment"),
+            # timeline_source is only a metadata label.
+            exclude=("scene.timeline_source",),
+            # its training photos are the ingest streams' own frames
+            upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
-            # The run script's render presets (width, height, point_limit, ...) are legacy
-            # keys the Gaussian backend never reads.
             "render",
+            # 3: the render record keeps its checkpoint's recipe
+            # 4: trains with Shape-of-Motion's depth, depth-gradient and mask terms
+            version=4,
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
-            exclude=(
-                "render.width",
-                "render.height",
-                "render.point_limit",
-                "render.frame_stride",
-                "render.max_frames_per_path",
-                "render.enabled_paths",
-                "render.render_scale",
-            ),
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),
+        ),
+        StageContract(
+            # FlashSplat assignment over the render's checkpoint, written onto the graph. Cheap
+            # (seconds of GPU), a pure function of graph + checkpoint: rebuilt when stale.
+            "handles",
+            # 2: people are bounded by their body volume (handles.body_bound, on by default),
+            #    and every entity records its view coverage
+            version=2,
+            settings={"handles": {}},
+            upstream=("graph", "render"),
+            rebuildable=True,
         ),
     )
 }

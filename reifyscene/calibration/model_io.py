@@ -88,7 +88,7 @@ def image_name_to_frame_ref(image_name: str, image_manifest: dict[str, dict[str,
     return FrameRef(
         stream_id=str(payload["stream_id"]),
         frame_idx=int(payload["frame_idx"]),
-        timestamp_sec=float(payload["timestamp_sec"]),
+        timestamp_sec=None if payload["timestamp_sec"] is None else float(payload["timestamp_sec"]),
     )
 
 
@@ -103,7 +103,8 @@ def timed_camera_from_image_record(image_name: str, record: dict[str, Any], imag
     T_wc = np.linalg.inv(T_cw)
     return TimedCameraState(
         stream_id=frame_ref.stream_id,
-        time_sec=float(frame_ref.timestamp_sec),
+        frame_idx=int(frame_ref.frame_idx),
+        time_sec=frame_ref.timestamp_sec,
         intrinsics=intr,
         pose=CameraPose(T_world_cam=T_wc.astype(np.float32)),
     )
@@ -226,7 +227,3 @@ def parse_colmap_text_model(model_dir: str | Path) -> ParsedColmapModel:
         reprojection_stats=reprojection_stats,
     )
 
-
-# Backwards-compatible alias (qvec_to_rotmat became public API once
-# gt_scoring and its tests needed it).
-_qvec_to_rotmat = qvec_to_rotmat

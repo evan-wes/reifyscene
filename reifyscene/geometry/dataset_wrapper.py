@@ -25,10 +25,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from reifyscene.common.depth import unproject_depth_to_world
-from reifyscene.common.io import read_json
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import (
     CameraIntrinsics,
     CameraPose,
@@ -38,6 +37,7 @@ from reifyscene.common.types import (
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.image_transform import ImageTransform, Resize, transform_record
+from reifyscene.ingest.datasets import DyCheckSequence
 
 
 class DatasetGeometryInitializer(GeometryInitializer):
@@ -54,116 +54,35 @@ class DatasetGeometryInitializer(GeometryInitializer):
                 "(path to a DyCheck-format sequence directory)."
             )
         self.dataset_root = Path(cfg["dataset_root"])
+        self.sequence = DyCheckSequence(self.dataset_root)
         self.factor = int(cfg.get("factor", 1))
         self.split = str(cfg.get("split", "train"))
-        # Camera times follow the ingest stream's clock (frame / stream fps) whenever an
-        # ingest artifact is given, so they line up with every other stage's frames. This
-        # fps is only the fallback for standalone use. (It used to be the clock itself:
-        # time = frame number, and tracking-frame cameras interpolated between the wrong
-        # dataset frames.)
-        self.fps = float(cfg.get("fps", 1.0))
-        self.name_pad = int(cfg.get("name_pad", 5))
         self.run_id = str(cfg.get("run_id", f"dataset:{self.dataset_root.name}"))
         self.save_dir = Path(cfg.get("geometry_save_dir", "artifacts/geometry_dataset"))
 
-    # -- path helpers ------------------------------------------------------
-
-    @property
-    def camera_dir(self) -> Path:
-        return self.dataset_root / "camera"
-
-    @property
-    def depth_dir(self) -> Path:
-        return self.dataset_root / "depth" / f"{self.factor}x"
-
-    @property
-    def rgb_dir(self) -> Path:
-        return self.dataset_root / "rgb" / f"{self.factor}x"
+    # -- the sequence, at this initializer's factor ---------------------------
 
     def frame_name(self, stream_id: Any, frame_idx: int) -> str:
-        """Dataset frame name ``{camera}_{time:0Nd}`` for a (stream, frame)."""
-        return f"{stream_id}_{int(frame_idx):0{self.name_pad}d}"
-
-    # -- dataset readers ---------------------------------------------------
-
-    def _distortion(self, cam: dict[str, Any]) -> np.ndarray | None:
-        radial = list(cam.get("radial_distortion", []) or [])
-        tangential = list(cam.get("tangential_distortion", []) or [])
-        k1 = radial[0] if len(radial) > 0 else 0.0
-        k2 = radial[1] if len(radial) > 1 else 0.0
-        k3 = radial[2] if len(radial) > 2 else 0.0
-        p1 = tangential[0] if len(tangential) > 0 else 0.0
-        p2 = tangential[1] if len(tangential) > 1 else 0.0
-        params = np.asarray([k1, k2, p1, p2, k3], dtype=float)
-        if np.allclose(params, 0.0):
-            return None
-        return params
+        return self.sequence.frame_name(stream_id, frame_idx)
 
     def load_camera(self, frame_name: str) -> tuple[CameraIntrinsics, np.ndarray, tuple[int, int]]:
-        """Return (intrinsics, T_world_cam 4x4, (width, height)) for a frame.
-
-        Intrinsics and image size are scaled by ``factor`` to match the
-        ``{factor}x`` rgb/depth resolution actually used downstream.
-        """
-        cam = read_json(self.camera_dir / f"{frame_name}.json")
-        full_w, full_h = (int(round(float(v))) for v in cam["image_size"])
-        factor = self.factor
-        focal = float(cam["focal_length"])
-        aspect = float(cam.get("pixel_aspect_ratio", 1.0))
-        cx, cy = (float(v) for v in cam["principal_point"])
-        intrinsics = CameraIntrinsics(
-            fx=focal / factor,
-            fy=(focal * aspect) / factor,
-            cx=cx / factor,
-            cy=cy / factor,
-            distortion_model="brown",
-            distortion_params=self._distortion(cam),
-        )
-        R = np.asarray(cam["orientation"], dtype=np.float64).reshape(3, 3)
-        p = np.asarray(cam["position"], dtype=np.float64).reshape(3)
-        w2c = np.eye(4, dtype=np.float64)
-        w2c[:3, :3] = R
-        w2c[:3, 3] = -R @ p
-        t_world_cam = np.linalg.inv(w2c).astype(np.float32)
-        return intrinsics, t_world_cam, (full_w // factor, full_h // factor)
+        """Return (intrinsics, T_world_cam 4x4, (width, height)) at the ``factor`` resolution."""
+        return self.sequence.load_camera(frame_name, self.factor)
 
     def load_depth(self, frame_name: str) -> np.ndarray:
-        """Metric depth (HxW float32) for a frame; squeezes a trailing channel."""
-        arr = np.load(self.depth_dir / f"{frame_name}.npy")
-        return np.squeeze(np.asarray(arr, dtype=np.float32))
+        return self.sequence.load_depth(frame_name, self.factor)
 
     def load_rgb(self, frame_name: str) -> np.ndarray:
-        """RGB image (HxWx3 uint8) for a frame."""
-        with Image.open(self.rgb_dir / f"{frame_name}.png") as img:
-            return np.asarray(img.convert("RGB"), dtype=np.uint8)
+        return self.sequence.load_rgb(frame_name, self.factor)
 
     def load_fg_mask(self, frame_name: str) -> np.ndarray:
-        """Foreground (dynamic-object) mask (HxW float in [0, 1]) for a frame.
-
-        DyCheck/SoM sequences ship Track-Anything masks under
-        ``flow3d_preprocessed/track_anything/{factor}x/``; 1 = foreground. Used
-        by the native motion initializer to split fg trajectories from bg points.
-        """
-        path = self.dataset_root / "flow3d_preprocessed" / "track_anything" / f"{self.factor}x" / f"{frame_name}.png"
-        with Image.open(path) as img:
-            return np.asarray(img.convert("L"), dtype=np.float32) / 255.0
+        return self.sequence.load_fg_mask(frame_name, self.factor)
 
     def load_covisible(self, frame_name: str, split: str = "val") -> np.ndarray:
-        """Co-visibility mask (HxW bool) for a held-out frame, True = covisible.
-
-        DyCheck/NVIDIA sequences ship these under covisible/{factor}x/{split}/.
-        """
-        path = self.dataset_root / "covisible" / f"{self.factor}x" / split / f"{frame_name}.png"
-        with Image.open(path) as img:
-            return np.asarray(img.convert("L")) > 0
+        return self.sequence.load_covisible(frame_name, self.factor, split)
 
     def split_frames(self, split: str | None = None) -> list[tuple[str, int]]:
-        """Return (camera_id, time_id) pairs from a split json."""
-        split = split or self.split
-        meta = read_json(self.dataset_root / "splits" / f"{split}.json")
-        cameras = [str(c) for c in meta["camera_ids"]]
-        times = [int(t) for t in meta["time_ids"]]
-        return list(zip(cameras, times))
+        return self.sequence.split_frames(split or self.split)
 
     # -- artifact construction --------------------------------------------
 
@@ -233,29 +152,27 @@ class DatasetGeometryInitializer(GeometryInitializer):
         depth_sizes: dict[str, tuple[int, int]] = {}
         selected_frames: list[FrameRef] = []
 
-        stream_fps = {
-            str(s.stream_id): float(s.fps)
-            for s in getattr(ingest_artifact, "streams", []) or []
-            if float(getattr(s, "fps", 0) or 0) > 0
-        }
+        ingest_streams = {str(s.stream_id): s
+                          for s in getattr(ingest_artifact, "streams", []) or []}
         for stream_id, frame_idx, time_id in specs:
             stream_id = str(stream_id)
             frame_idx = int(frame_idx)
             name = self.frame_name(stream_id, frame_idx)
             intrinsics, t_world_cam, _wh = self.load_camera(name)
             depth = np.squeeze(np.asarray(self.load_depth(name), dtype=np.float32))
-            if stream_id in stream_fps:
-                time_sec = float(frame_idx) / stream_fps[stream_id]  # the ingest clock
+            if stream_id in ingest_streams:
+                frame_ref = ingest_streams[stream_id].frame_ref(frame_idx)  # the ingest clock
             else:
-                time_sec = float(time_id) / self.fps
-
-            frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx, timestamp_sec=time_sec)
+                fps = self.sequence.fps
+                frame_ref = FrameRef(stream_id=stream_id, frame_idx=frame_idx,
+                                     timestamp_sec=float(time_id) / fps if fps else None)
             selected_frames.append(frame_ref)
             intrinsics_by_stream[stream_id] = intrinsics
             camera_states_by_stream.setdefault(stream_id, []).append(
                 TimedCameraState(
                     stream_id=stream_id,
-                    time_sec=time_sec,
+                    frame_idx=frame_idx,
+                    time_sec=frame_ref.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=t_world_cam),
                 )
@@ -265,12 +182,12 @@ class DatasetGeometryInitializer(GeometryInitializer):
             # ground-plane + every point-map consumer treat it like any other backend.
             world_pts, valid = unproject_depth_to_world(depth, intrinsics, t_world_cam)
             conf = valid.astype(np.float32)
-            key = f"{stream_id}:{frame_idx}"
+            key = frame_key(stream_id, frame_idx)
             depthmaps_by_frame[key] = {"depth": depth, "confidence": conf}
             pointmaps_by_frame[key] = {"points": world_pts, "confidence": conf}
             # Wire the GT RGB frame so scene/render seeding + debug export can find it
             # (same metadata['debug_image_paths'] contract VGGT populates).
-            rgb_path = self.rgb_dir / f"{name}.png"
+            rgb_path = self.sequence.rgb_path(name, self.factor)
             if rgb_path.exists():
                 debug_image_paths[key] = str(rgb_path.resolve())
             depth_sizes.setdefault(stream_id, (int(depth.shape[1]), int(depth.shape[0])))

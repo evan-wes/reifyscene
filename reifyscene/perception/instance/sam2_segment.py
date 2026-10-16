@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -30,7 +30,7 @@ _DEFAULT_CKPT = Path(__file__).resolve().parents[3] / "third_party" / "sam2" / "
 _DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 
-def _mask_bbox_xyxy(mask: np.ndarray) -> Optional[np.ndarray]:
+def _mask_bbox_xyxy(mask: np.ndarray) -> np.ndarray | None:
     ys, xs = np.where(mask)
     if xs.size == 0:
         return None
@@ -74,6 +74,33 @@ class SAM2InstanceSegmenter:
         self.max_instances = int(cfg.get("sam2_max_instances", 20))
         self.points_per_side = int(cfg.get("sam2_points_per_side", 32))
         self.person_iou = float(cfg.get("sam2_person_iou", 0.5))
+        # Every Nth frame is checked for a person no track accounts for. 1 is exact
+        # and costs a detector pass per frame; the detector already runs on every
+        # frame for the `kind` vote, so this shares that cost rather than adding to it.
+        self.person_seed_stride = int(cfg.get("sam2_person_seed_stride", 1))
+        # Seeding people who arrive after the keyframe is OFF until it is correct. The
+        # first attempt compared each detection against boxes claimed on earlier frames,
+        # and a walking person's box drifts away from her own earlier one, so she was
+        # re-seeded every few frames: davis_lab-coat went from 8 tracks to 54. Catching a
+        # late arrival needs re-propagating after each round of seeds, not one pass over
+        # stale boxes. The keyframe seeding below is independent of this and is on.
+        # OFF by default, on evidence rather than caution. Two things argue against it:
+        # DAVIS has no late arrivals to gain from -- 205 of its 206 annotated objects are
+        # present on frame 0, and all 63 the inventory misses are -- and enabling it
+        # regressed davis_lab-coat, where SAM 2 raises "mat1 and mat2 must have the same
+        # dtype" on a second propagation and the ladder falls back to the detector floor.
+        # The loop itself is correct and unit-tested; it is the repeat propagation
+        # underneath it that is not ready, and there is no measurable upside here to pay
+        # for finding out in production.
+        self.person_seed_late = bool(cfg.get("sam2_person_seed_late", False))
+        self.person_seed_rounds = int(cfg.get("sam2_person_seed_rounds", 3))
+        # How many consecutive checked frames a person must go unaccounted for before she
+        # is treated as a new arrival. One frame is not evidence: a tracked person whose
+        # mask degrades briefly falls below person_iou against her own detection box and
+        # looks uncovered, which on lab-coat is exactly what fired the loop when nobody
+        # had arrived at all.
+        self.person_seed_patience = int(cfg.get("sam2_person_seed_patience", 3))
+        self._person_box_cache: dict[int, list[np.ndarray]] = {}
         self.checkpoint = str(cfg.get("sam2_checkpoint", _DEFAULT_CKPT))
         self.config = str(cfg.get("sam2_config", _DEFAULT_CONFIG))
         self.device = str(cfg.get("sam2_device", "cuda"))
@@ -128,15 +155,137 @@ class SAM2InstanceSegmenter:
                 out.append(np.asarray(d["bbox_xyxy"], dtype=np.float32))
         return out
 
+    def _propagate(
+        self, tmp_dir: Path, seed_masks: list[np.ndarray],
+        box_seeds: dict[int, list[np.ndarray]],
+    ) -> dict[int, dict[int, np.ndarray]]:
+        """Track every seed through the clip. Masks seed the keyframe, boxes seed a frame.
+
+        Object ids are assigned to the mask seeds first, so adding a box seed never
+        renumbers an existing track.
+        """
+        state = self._video_predictor.init_state(str(tmp_dir))
+        next_id = 0
+        for mask in seed_masks:
+            self._video_predictor.add_new_mask(
+                state, frame_idx=0, obj_id=next_id, mask=mask
+            )
+            next_id += 1
+        for pos in sorted(box_seeds):
+            for box in box_seeds[pos]:
+                self._video_predictor.add_new_points_or_box(
+                    state, frame_idx=int(pos), obj_id=next_id,
+                    box=np.asarray(box, dtype=np.float32),
+                )
+                next_id += 1
+
+        per_frame: dict[int, dict[int, np.ndarray]] = {}
+        for frame_pos, obj_ids, mask_logits in self._video_predictor.propagate_in_video(state):
+            masks = (mask_logits > 0.0).squeeze(1).detach().cpu().numpy()  # (num_obj, H, W)
+            per_frame[int(frame_pos)] = {
+                int(o): masks[k].astype(bool) for k, o in enumerate(obj_ids)
+            }
+        return per_frame
+
+    def _uncovered_person_boxes(
+        self, frame_rgb: np.ndarray, existing: list[np.ndarray | None],
+        *, boxes: list[np.ndarray] | None = None,
+    ) -> list[np.ndarray]:
+        """Person detections on this frame that no existing track accounts for.
+
+        ``boxes`` lets a caller pass detections it already has, so a clip that is checked
+        over several rounds runs the detector once per frame rather than once per round.
+        """
+        if boxes is None:
+            boxes = self._person_boxes(frame_rgb)
+        if not boxes:
+            return []
+        known = [b for b in existing if b is not None]
+        return [
+            box for box in boxes
+            if not known or max(_box_iou(box, k) for k in known) < self.person_iou
+        ]
+
+    def _earliest_uncovered_people(
+        self, images: list[np.ndarray], per_frame: dict[int, dict[int, np.ndarray]]
+    ) -> tuple[int, list[np.ndarray]] | None:
+        """The first frame holding a person no current track accounts for.
+
+        Only the earliest such frame is returned, and the caller re-propagates before
+        asking again. That is what keeps one person from becoming many: seeding every
+        uncovered detection across every frame in a single pass re-seeds a walking person
+        each time her box drifts from the one already claimed for her, which turned eight
+        tracks into fifty-four. After a propagation she is tracked, so she stops being
+        uncovered and the next round moves on to someone else.
+        """
+        streak = 0
+        first_seen: tuple[int, list[np.ndarray]] | None = None
+        for pos in range(0, len(images), max(1, self.person_seed_stride)):
+            if pos not in self._person_box_cache:
+                self._person_box_cache[pos] = self._person_boxes(images[pos])
+            if not self._person_box_cache[pos]:
+                streak, first_seen = 0, None
+                continue
+            tracked = [
+                _mask_bbox_xyxy(m) for m in per_frame.get(pos, {}).values() if m.any()
+            ]
+            uncovered = self._uncovered_person_boxes(
+                images[pos], tracked, boxes=self._person_box_cache[pos]
+            )
+            if not uncovered:
+                streak, first_seen = 0, None
+                continue
+            streak += 1
+            if first_seen is None:
+                first_seen = (pos, uncovered)
+            if streak >= max(1, self.person_seed_patience):
+                return first_seen  # seed where she was first unaccounted for
+        return None
+
+    def _seed_late_arrivals(
+        self, tmp_dir: Path, images: list[np.ndarray], seed_masks: list[np.ndarray],
+        box_seeds: dict[int, list[np.ndarray]],
+        per_frame: dict[int, dict[int, np.ndarray]],
+    ) -> dict[int, dict[int, np.ndarray]]:
+        """Seed people who arrive after the keyframe, re-propagating between rounds.
+
+        Each round costs one propagation and seeds at least one person, so the loop is
+        bounded by ``person_seed_rounds``. When nothing arrives late -- the common case --
+        the first check finds nothing and no extra propagation happens at all.
+        """
+        for _ in range(max(0, self.person_seed_rounds)):
+            found = self._earliest_uncovered_people(images, per_frame)
+            if found is None:
+                break
+            pos, boxes = found
+            box_seeds.setdefault(pos, []).extend(boxes)
+            per_frame = self._propagate(tmp_dir, seed_masks, box_seeds)
+        return per_frame
+
     def _segment_stream(
         self, stream, stream_id: str, frames: list[FrameRef],
     ) -> tuple[list[InstanceObservation], dict[str, np.ndarray]]:
         images = self._decode_stream_frames(stream, frames)
         if not images:
             return [], {}
+        # Detections are cached by frame position, which only means anything within one
+        # stream's frame list.
+        self._person_box_cache = {}
         h, w = images[0].shape[:2]
         seed_masks = self._discover_keyframe_masks(images[0])
-        if not seed_masks:
+
+        # A person the automatic proposer missed on the keyframe is missed for the whole
+        # clip: nothing downstream can propose an entity, so re-id, tracking and the graph
+        # all inherit the omission. The detector is already being run on every frame to
+        # vote on `kind` -- on davis_lab-coat it finds all three people at confidence 1.00
+        # while the proposer masks two of them -- so let it seed as well as label.
+        box_seeds: dict[int, list[np.ndarray]] = {}
+        first_boxes = self._uncovered_person_boxes(
+            images[0], [(_mask_bbox_xyxy(m)) for m in seed_masks]
+        )
+        if first_boxes:
+            box_seeds[0] = first_boxes
+        if not seed_masks and not box_seeds:
             return [], {}
 
         # SAM 2's video predictor reads a directory of integer-named JPEGs.
@@ -144,24 +293,34 @@ class SAM2InstanceSegmenter:
             tmp_dir = Path(tmp)
             for i, img in enumerate(images):
                 Image.fromarray(img).save(tmp_dir / f"{i:05d}.jpg", quality=95)
-            state = self._video_predictor.init_state(str(tmp_dir))
-            for obj_id, mask in enumerate(seed_masks):
-                self._video_predictor.add_new_mask(state, frame_idx=0, obj_id=obj_id, mask=mask)
-            # frame position -> {obj_id: bool mask}
-            per_frame: dict[int, dict[int, np.ndarray]] = {}
-            for frame_pos, obj_ids, mask_logits in self._video_predictor.propagate_in_video(state):
-                masks = (mask_logits > 0.0).squeeze(1).detach().cpu().numpy()  # (num_obj, H, W)
-                per_frame[int(frame_pos)] = {int(o): masks[k].astype(bool) for k, o in enumerate(obj_ids)}
+
+            per_frame = self._propagate(tmp_dir, seed_masks, box_seeds)
+            # Second pass for anyone who arrives after the keyframe. Only run when the
+            # first pass actually left a detection unaccounted for, so the common case
+            # costs one propagation.
+            if self.person_seed_late:
+                per_frame = self._seed_late_arrivals(
+                    tmp_dir, images, seed_masks, box_seeds, per_frame
+                )
 
         # Person-tag tracks: an object is human if it overlaps a person box in a
         # majority of the frames it appears in (keeps the humans stage working).
-        human_votes: dict[int, int] = {o: 0 for o in range(len(seed_masks))}
-        present: dict[int, int] = {o: 0 for o in range(len(seed_masks))}
+        # Sized from the ids the propagation actually produced, not from the mask seeds:
+        # a box seed gets an id past the end of that range, and counting on the seed list
+        # made the whole rung raise a KeyError the moment one existed -- which the ladder
+        # then swallowed into a silent fall back to the detector floor.
+        all_ids = sorted({o for masks in per_frame.values() for o in masks})
+        human_votes: dict[int, int] = {o: 0 for o in all_ids}
+        present: dict[int, int] = {o: 0 for o in all_ids}
         for pos in range(len(images)):
             obj_masks = per_frame.get(pos, {})
             if not obj_masks:
                 continue
-            pboxes = self._person_boxes(images[pos])
+            # The late-arrival check already ran the detector on these frames; reuse it so
+            # looking for uncovered people costs nothing the kind vote was not paying.
+            if pos not in self._person_box_cache:
+                self._person_box_cache[pos] = self._person_boxes(images[pos])
+            pboxes = self._person_box_cache[pos]
             for obj_id, m in obj_masks.items():
                 if not m.any():
                     continue
@@ -171,7 +330,7 @@ class SAM2InstanceSegmenter:
                     human_votes[obj_id] += 1
         kind_of = {
             o: ("human" if present[o] and human_votes[o] >= (present[o] + 1) // 2 else "object")
-            for o in range(len(seed_masks))
+            for o in all_ids
         }
 
         observations: list[InstanceObservation] = []

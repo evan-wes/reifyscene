@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
-import shutil
+from typing import Any, ClassVar, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
 from rich.progress import track
 
 from reifyscene.common.backend_ladder import CapabilityManifest
+from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
-from reifyscene.common.types import BaseArtifact, CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.common.types import (
+    BaseArtifact,
+    CameraIntrinsics,
+    CameraPose,
+    FrameRef,
+    TimedCameraState,
+    camera_state_at,
+)
 
 
 @dataclass
@@ -30,6 +38,9 @@ class GeometryArtifact(BaseArtifact):
     - optional debug assets under ``images/``, ``depthmaps_png/``, ``pointclouds/``
       and ``debug_viewer.html``
     """
+
+    DEPTHMAPS: ClassVar[str] = "depthmaps"
+    POINTMAPS: ClassVar[str] = "pointmaps"
 
     backend_name: str = "unknown"
     selected_frames: list[FrameRef] = field(default_factory=list)
@@ -112,13 +123,13 @@ class GeometryArtifact(BaseArtifact):
 
     @staticmethod
     def _intrinsics_from_dict(raw: dict[str, Any]) -> CameraIntrinsics:
-        distortion_params = raw.get('distortion_params')
+        distortion_params = raw['distortion_params']
         return CameraIntrinsics(
             fx=float(raw['fx']),
             fy=float(raw['fy']),
             cx=float(raw['cx']),
             cy=float(raw['cy']),
-            distortion_model=str(raw.get('distortion_model', 'brown')),
+            distortion_model=str(raw['distortion_model']),
             distortion_params=None if distortion_params is None else np.asarray(distortion_params, dtype=float),
         )
 
@@ -126,7 +137,8 @@ class GeometryArtifact(BaseArtifact):
     def _camera_state_to_dict(state: TimedCameraState) -> dict[str, Any]:
         return {
             'stream_id': state.stream_id,
-            'time_sec': float(state.time_sec),
+            'frame_idx': int(state.frame_idx),
+            'time_sec': None if state.time_sec is None else float(state.time_sec),
             'intrinsics': GeometryArtifact._intrinsics_to_dict(state.intrinsics),
             'pose': np.asarray(state.pose.T_world_cam, dtype=float).tolist(),
         }
@@ -135,7 +147,8 @@ class GeometryArtifact(BaseArtifact):
     def _camera_state_from_dict(raw: dict[str, Any]) -> TimedCameraState:
         return TimedCameraState(
             stream_id=str(raw['stream_id']),
-            time_sec=float(raw['time_sec']),
+            frame_idx=int(raw['frame_idx']),
+            time_sec=None if raw['time_sec'] is None else float(raw['time_sec']),
             intrinsics=GeometryArtifact._intrinsics_from_dict(raw['intrinsics']),
             pose=CameraPose(T_world_cam=np.asarray(raw['pose'], dtype=float)),
         )
@@ -326,18 +339,8 @@ class GeometryArtifact(BaseArtifact):
         return copied
 
     def _find_state_for_frame(self, frame: FrameRef) -> TimedCameraState | None:
-        """Look up the saved camera state corresponding to a selected frame."""
-        states = self.camera_states_by_stream.get(frame.stream_id, [])
-        if not states:
-            return None
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        """The saved camera state of exactly this frame, or None."""
+        return camera_state_at(self.camera_states_by_stream, frame)
 
     def _world_frame_overlay_samples(self) -> list[FrameRef]:
         frames = list(self.selected_frames or [])
@@ -413,7 +416,7 @@ class GeometryArtifact(BaseArtifact):
         overlay_dir = ensure_dir(self.save_dir / 'world_frame_overlays')
         overlay_index: dict[str, str] = {}
         for frame in self._progress_iter(self._world_frame_overlay_samples(), total=len(self._world_frame_overlay_samples()), description='[cyan]Geometry · world-frame overlays'):
-            frame_key = f'{frame.stream_id}:{int(frame.frame_idx)}'
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             state = self._find_state_for_frame(frame)
             if image_name is None or state is None:
@@ -432,7 +435,7 @@ class GeometryArtifact(BaseArtifact):
             state = self._find_state_for_frame(frame)
             if state is None:
                 continue
-            frame_key = self._sanitize_key(f"{frame.stream_id}:{frame.frame_idx}")
+            frame_key = self._sanitize_key(make_frame_key(frame.stream_id, frame.frame_idx))
             records.append(
                 {
                     'frame_key': frame_key,
@@ -468,7 +471,7 @@ class GeometryArtifact(BaseArtifact):
             pointcloud_dir = ensure_dir(self.save_dir / 'pointclouds')
             max_points = int(self.metadata.get('debug_max_points', 5000))
             for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · exporting point clouds"):
-                frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 payload = self.pointmaps_by_frame.get(frame_key)
                 if not payload:
                     continue
@@ -528,7 +531,7 @@ class GeometryArtifact(BaseArtifact):
         frame_specs: list[dict[str, Any]] = []
         max_points = int(self.metadata.get('debug_max_points', 5000))
         for frame in self._progress_iter(self.selected_frames, total=len(self.selected_frames), description="[cyan]Geometry · building debug viewer"):
-            frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+            frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
             image_name = image_index.get(frame_key)
             depth_payload = self.depthmaps_by_frame.get(frame_key)
             point_payload = self.pointmaps_by_frame.get(frame_key)
@@ -568,7 +571,6 @@ class GeometryArtifact(BaseArtifact):
                     'points': pts,
                     'marker': marker,
                     'camera_state': None if state is None else {
-                        'time_sec': state.time_sec,
                         'T_world_cam': self._pose_to_debug_basis_instance(state.pose.T_world_cam).astype(float).tolist(),
                     },
                 }
@@ -594,7 +596,7 @@ class GeometryArtifact(BaseArtifact):
         for idx, spec in enumerate(frame_specs):
             visible = idx == 0
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
 
             fig.add_trace(go.Image(z=spec['rgb'], visible=visible, name=f"rgb:{name}"), row=1, col=1)
             fig.add_trace(go.Image(z=spec['depth_preview'], visible=visible, name=f"depth:{name}"), row=1, col=2)
@@ -615,13 +617,13 @@ class GeometryArtifact(BaseArtifact):
 
         for idx, spec in enumerate(frame_specs):
             fr = spec['frame_ref']
-            name = f"{fr.stream_id}:{fr.frame_idx}"
+            name = make_frame_key(fr.stream_id, fr.frame_idx)
             visible = [False] * total_traces
             base = 3 * idx
             visible[base:base+3] = [True, True, True]
             title = (
-                f"Keyframe {name} | t={fr.timestamp_sec:.3f}s"
-                + ('' if spec['camera_state'] is None else f" | camera_t={spec['camera_state']['time_sec']:.3f}s")
+                f"Keyframe {fr.describe()}"
+                + (' | no camera' if spec['camera_state'] is None else '')
             )
             slider_steps.append({
                 'method': 'update',
@@ -634,8 +636,8 @@ class GeometryArtifact(BaseArtifact):
 
         initial = frame_specs[0]
         initial_title = (
-            f"Keyframe {initial['frame_ref'].stream_id}:{initial['frame_ref'].frame_idx} | t={initial['frame_ref'].timestamp_sec:.3f}s"
-            + ('' if initial['camera_state'] is None else f" | camera_t={initial['camera_state']['time_sec']:.3f}s")
+            f"Keyframe {initial['frame_ref'].describe()}"
+            + (' | no camera' if initial['camera_state'] is None else '')
         )
 
         fig.update_layout(
@@ -665,8 +667,8 @@ class GeometryArtifact(BaseArtifact):
     def save(self) -> None:
         """Persist geometry metadata and heavy numpy outputs to disk."""
         ensure_dir(self.save_dir)
-        depth_dir = ensure_dir(self.save_dir / 'depthmaps')
-        point_dir = ensure_dir(self.save_dir / 'pointmaps')
+        depth_dir = ensure_dir(self.save_dir / self.DEPTHMAPS)
+        point_dir = ensure_dir(self.save_dir / self.POINTMAPS)
         debug_depth_dir = ensure_dir(self.save_dir / 'depthmaps_png') if self.metadata.get('save_depth_pngs', False) else None
 
         depth_index: dict[str, str] = {}
@@ -698,7 +700,6 @@ class GeometryArtifact(BaseArtifact):
         serializable = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': self.metadata,
             'backend_name': self.backend_name,
             'selected_frames': [GeometryArtifact._frame_ref_to_dict(frame) for frame in self.selected_frames],
@@ -719,20 +720,20 @@ class GeometryArtifact(BaseArtifact):
     @classmethod
     def load(cls, save_dir: Path) -> 'GeometryArtifact':
         """Load geometry metadata and associated numpy outputs from disk."""
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         depthmaps_by_frame: dict[str, Any] = {}
         pointmaps_by_frame: dict[str, Any] = {}
 
-        for frame_key, filename in raw.get('depth_index', {}).items():
-            payload = np.load(save_dir / 'depthmaps' / filename)
+        for frame_key, filename in raw['depth_index'].items():
+            payload = np.load(save_dir / cls.DEPTHMAPS / filename)
             confidence = payload['confidence']
             depthmaps_by_frame[frame_key] = {
                 'depth': payload['depth'],
                 'confidence': None if confidence.size == 0 else confidence,
             }
 
-        for frame_key, filename in raw.get('point_index', {}).items():
-            payload = np.load(save_dir / 'pointmaps' / filename)
+        for frame_key, filename in raw['point_index'].items():
+            payload = np.load(save_dir / cls.POINTMAPS / filename)
             confidence = payload['confidence']
             pointmaps_by_frame[frame_key] = {
                 'points': payload['points'],
@@ -743,19 +744,19 @@ class GeometryArtifact(BaseArtifact):
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
-            backend_name=raw.get('backend_name', 'unknown'),
-            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw.get('selected_frames', [])],
-            intrinsics_by_stream={k: cls._intrinsics_from_dict(v) for k, v in raw.get('intrinsics_by_stream', {}).items()},
+            metadata=raw['metadata'],
+            backend_name=raw['backend_name'],
+            selected_frames=[cls._frame_ref_from_dict(frame) for frame in raw['selected_frames']],
+            intrinsics_by_stream={k: cls._intrinsics_from_dict(v) for k, v in raw['intrinsics_by_stream'].items()},
             camera_states_by_stream={
                 k: [cls._camera_state_from_dict(state) for state in states]
-                for k, states in raw.get('camera_states_by_stream', {}).items()
+                for k, states in raw['camera_states_by_stream'].items()
             },
             pointmaps_by_frame=pointmaps_by_frame,
             depthmaps_by_frame=depthmaps_by_frame,
-            pairwise_matches=raw.get('pairwise_matches', {}),
-            view_graph_edges=raw.get('view_graph_edges', {}),
-            notes=raw.get('notes', []),
+            pairwise_matches=raw['pairwise_matches'],
+            view_graph_edges=raw['view_graph_edges'],
+            notes=raw['notes'],
         )
         return artifact
 

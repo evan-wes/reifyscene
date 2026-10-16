@@ -75,31 +75,10 @@ optimization:
 scene:
   kind: dynamic            # moving foreground + motion bases + static background (default: static)
   timeline_source: geometry
-  human_smpl_root_anchor: true
-  human_anchor_temporal_alpha: 0.6
-  human_ground_contact_strength: 1.0
-  human_anchor_search_radius_px: 10.0
-  human_foot_search_radius_px: 14.0
-  min_human_anchor_points: 6
-  min_human_foot_points: 4
 
 render:
   backend_name: gaussian4d
   device: cuda
-  width: 800
-  height: 450
-  point_limit: 10000
-  max_dynamic_entities_per_kind: 3
-  frame_stride: 1
-  max_frames_per_path: 32
-  debug_triptych: true
-  render_scale: 1
-  enabled_paths:
-    orbit: true
-    overhead: false
-    replay: false
-    follow_human: false
-    follow_object: false
 
 evaluation:
   reprojection_error_p90_px_max: 24.0

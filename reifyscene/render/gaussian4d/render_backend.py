@@ -16,15 +16,31 @@ import numpy as np
 import torch
 from PIL import Image
 
+from reifyscene.common.frame_keys import parse_key
 from reifyscene.common.paths import ensure_dir
 from reifyscene.common.types import CameraIntrinsics
 from reifyscene.render.base import RenderBackend
 from reifyscene.render.export import write_video
 from reifyscene.render.gaussian4d.densify import DensifyConfig
 from reifyscene.render.gaussian4d.gaussian_field import GaussianField
-from reifyscene.render.gaussian4d.gaussian_trainer import StaticGaussianTrainer, TrainConfig, image_psnr
+from reifyscene.render.gaussian4d.gaussian_trainer import (
+    StaticGaussianTrainer,
+    TrainConfig,
+    image_psnr,
+)
 from reifyscene.render.gaussian4d.rasterizer import GaussianCloud, RenderCamera, build_rasterizer
 from reifyscene.render.gaussian4d.render_artifact import RenderArtifact
+
+
+def _recipe(train_cfg, densify_cfg, identity: dict | None, scene_artifact) -> dict[str, Any]:
+    """A checkpoint's recipe as its render record keeps it (JSON: tuples become lists)."""
+    import json
+    from dataclasses import asdict
+
+    contract = (getattr(scene_artifact, "metadata", None) or {}).get("contract") or {}
+    recipe = {"trainer": asdict(train_cfg), "densify": asdict(densify_cfg),
+              "identity": identity, "scene": contract.get("digest")}
+    return json.loads(json.dumps(recipe, default=list))
 
 
 def _intrinsics_obj(intr: dict[str, Any]) -> CameraIntrinsics:
@@ -115,7 +131,7 @@ class GaussianRenderBackend(RenderBackend):
             rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
             path = frames_dir / f"frame_{i:04d}.png"
             Image.fromarray(rgb).save(path)
-            frame_paths.append(str(path))
+            frame_paths.append(str(path.relative_to(save_dir)))   # the run can move
             frames.append(rgb)
         try:
             write_video(frames, save_dir / "flythrough.mp4", fps=self.fps)
@@ -137,11 +153,13 @@ class GaussianRenderBackend(RenderBackend):
         return path.name
 
     # -- entry point ------------------------------------------------------
-    def fit(self, scene_artifact, *, save_dir=None, **kwargs) -> RenderArtifact:
-        save_dir = Path(save_dir) if save_dir is not None else Path(scene_artifact.save_dir).parent / "render"
-        ensure_dir(save_dir)
+    def fit(self, scene_artifact, *, save_dir, run=None, **kwargs) -> RenderArtifact:
+        """Train on ``scene_artifact`` and write the checkpoint into ``save_dir``. ``run``
+        (the ``RunOutputs`` the scene belongs to) is needed only to train identity, whose
+        targets are the run's id maps."""
+        save_dir = ensure_dir(Path(save_dir))
         if str(getattr(scene_artifact, "kind", "static")) == "dynamic":
-            return self._fit_dynamic(scene_artifact, save_dir)
+            return self._fit_dynamic(scene_artifact, save_dir, run=run)
 
         field = self._build_field(scene_artifact)
         train_views = self._train_views(scene_artifact)
@@ -170,6 +188,7 @@ class GaussianRenderBackend(RenderBackend):
         if "iters" in self.cfg:
             trainer_cfg["iters"] = int(self.cfg["iters"])
         train_cfg = TrainConfig.from_cfg(trainer_cfg)
+        recipe = _recipe(train_cfg, densify_cfg, None, scene_artifact)
         trainer = StaticGaussianTrainer(field, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
 
         logs: list[dict] = []
@@ -193,6 +212,7 @@ class GaussianRenderBackend(RenderBackend):
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
+                "recipe": recipe,
             },
             path_index=path_index,
         )
@@ -201,10 +221,45 @@ class GaussianRenderBackend(RenderBackend):
     def _dynamic_train_views(self, scene_artifact) -> list[tuple[RenderCamera, "torch.Tensor", int]]:
         """Train views for the dynamic trainer: (camera, gt[H,W,3], time_id)."""
         out: list[tuple[RenderCamera, torch.Tensor, int]] = []
+        self._train_frame_keys = []
         for view in scene_artifact.train_views:
             path = self._require_image_path(view)
-            out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view.get("time_id", 0))))
+            out.append((self._camera(view), self._load_gt(path, view["width"], view["height"]), int(view["time_id"])))
+            self._train_frame_keys.append(view.get("frame_key"))
         return out
+
+    def _attach_identity(
+        self, scene, train_views: list[tuple], run, ident_cfg: dict[str, Any]
+    ) -> tuple[list[tuple], dict[str, Any]]:
+        """Export fresh id maps for the run, enable identity, and pair each view with its map.
+
+        The maps are regenerated here rather than read from disk so they cannot be stale
+        against the graph they encode. A view whose frame has no map, or whose map is not
+        the camera's size, is refused: training on a misaligned target is silent damage.
+        """
+        from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+
+        manifest = export_id_maps(run)
+        _, maps = load_id_maps(run)
+        stream = manifest["stream_id"]
+        node_ids = [c["node_id"] for c in sorted(manifest["classes"], key=lambda c: c["index"])]
+        scene.enable_identity(int(ident_cfg.get("dim", 20)), node_ids,
+                              seed=int(ident_cfg.get("seed", 0)))
+        paired: list[tuple] = []
+        for (camera, gt, time_id), key in zip(train_views, self._train_frame_keys, strict=True):
+            sid, idx = parse_key(key)
+            if sid != stream or idx not in maps:
+                raise ValueError(f"train view {key} has no id map in {run.identity_dir}")
+            arr = maps[int(idx)]
+            if arr.shape != tuple(gt.shape[:2]):
+                raise ValueError(
+                    f"id map for {key} is {arr.shape}, its photo is {tuple(gt.shape[:2])}"
+                )
+            paired.append((camera, gt, time_id,
+                           torch.as_tensor(arr.astype(np.int64), device=self.device)))
+        summary = {"dim": scene.fg.identity_dim, "num_classes": manifest["num_classes"],
+                   "ignore_fraction": manifest["fractions"]["ignore"]}
+        return paired, summary
 
     def _render_dynamic_trajectory(self, scene_artifact, scene, rasterizer, save_dir: Path) -> dict[str, list[str]]:
         traj = scene_artifact.render_trajectory or []
@@ -215,12 +270,12 @@ class GaussianRenderBackend(RenderBackend):
         frames: list[np.ndarray] = []
         for i, spec in enumerate(traj):
             cam = self._camera(spec)
-            cloud = scene.cloud_at(int(spec.get("time_id", 0)))
+            cloud = scene.cloud_at(int(spec["time_id"]))
             out = rasterizer.rasterize(cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, cam)
             rgb = (out.rgb.clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8)
             path = frames_dir / f"frame_{i:04d}.png"
             Image.fromarray(rgb).save(path)
-            frame_paths.append(str(path))
+            frame_paths.append(str(path.relative_to(save_dir)))   # the run can move
             frames.append(rgb)
         try:
             write_video(frames, save_dir / "flythrough.mp4", fps=self.fps)
@@ -228,28 +283,100 @@ class GaussianRenderBackend(RenderBackend):
             pass
         return {"flythrough": frame_paths}
 
-    def _save_dynamic_checkpoint(self, scene, cams, source_bundle: dict, save_dir: Path) -> str:
+    def _save_dynamic_checkpoint(
+        self, scene, cams, source_bundle: dict, save_dir: Path, *, raster: tuple[int, int],
+        name: str = "trained_dynamic.npz",
+    ) -> str:
         """Persist the trained DynamicScene as a dump_bundle npz the scorer reloads.
 
         Carries forward the scene-norm (and any held-out val cameras) from the
-        source bundle so masked-NVS can place dataset cameras in the scene frame.
+        source bundle so masked-NVS can place dataset cameras in the scene frame, and
+        records the raster it was trained at (``train_raster_wh``): intrinsics do not say it.
         """
         from reifyscene.render.gaussian4d.motion_init import dump_bundle
 
         ckpt = dump_bundle(scene, cams, factor=1)
+        ckpt["train_raster_wh"] = np.asarray([int(raster[0]), int(raster[1])])
         for key in ("scene_norm_transfm", "scene_norm_scale"):
             if key in (source_bundle or {}):
                 ckpt[key] = np.asarray(source_bundle[key])
-        path = save_dir / "trained_dynamic.npz"
+        path = save_dir / name
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in ckpt.items()})
         return path.name
 
-    def _fit_dynamic(self, scene_artifact, save_dir: Path) -> RenderArtifact:
-        from reifyscene.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
+    def _train_targets(self, bundle) -> list[dict[str, torch.Tensor]]:
+        """Each training view's depth / validity / foreground targets, from the scene stage's
+        ``target_*`` arrays, matched by frame name (in the order of ``_train_frame_keys``)."""
+        names = [str(n) for n in np.asarray(bundle.get("target_frame_names", []))]
+        if not names:
+            raise ValueError("the scene carries no depth / mask targets; rebuild the scene "
+                             "stage, or train on photos alone (geometry weights 0)")
+        row = {n: i for i, n in enumerate(names)}
+        depths = np.asarray(bundle["target_depths"])
+        valid = np.asarray(bundle["target_depth_valid"])
+        fg = np.asarray(bundle["target_fg"])
+        out = []
+        for key in self._train_frame_keys:
+            if key not in row:
+                raise ValueError(f"training view {key} has no depth / mask target")
+            i = row[key]
+            out.append({
+                "depth": torch.as_tensor(depths[i].astype(np.float32), device=self.device),
+                "valid": torch.as_tensor(valid[i].astype(bool), device=self.device),
+                "fg": torch.as_tensor(fg[i].astype(np.float32), device=self.device),
+            })
+        return out
+
+    def _dynamic_configs(self, num_frames: int):
+        """``(DynamicTrainConfig, DensifyConfig, identity cfg)`` this backend's config gives a
+        scene of ``num_frames`` frames: every default resolved, every identity override applied."""
+        from reifyscene.render.gaussian4d.densify import DensifyConfig
+        from reifyscene.render.gaussian4d.dynamic_trainer import DynamicTrainConfig
+
+        dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
+        iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
+        train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
+        # A per-field cap, so a schedule can never run away again (a 40k-step run grew the
+        # background to 2.8M Gaussians and collapsed). 1M is above every loop scene at 8 views
+        # per step but two, which reach it; an explicit densify.max_gaussians wins.
+        densify_raw = {"max_gaussians": 1_000_000, **(self.cfg.get("densify") or {})}
+        densify_cfg = DensifyConfig.from_cfg(densify_raw, max_iters=iters, num_frames=num_frames)
+        ident_cfg = dict(dyn_cfg.get("identity") or {})
+        if ident_cfg.get("enabled"):
+            if "lambda" in ident_cfg:
+                train_cfg.lambda_identity = float(ident_cfg["lambda"])
+            if ident_cfg.get("reset_every"):
+                train_cfg.identity_reset_every = int(ident_cfg["reset_every"])
+                if ident_cfg.get("reset_until") is not None:
+                    train_cfg.identity_reset_until = int(ident_cfg["reset_until"])
+            if "lambda_3d" in ident_cfg:
+                train_cfg.lambda_identity_3d = float(ident_cfg["lambda_3d"])
+            if "detach_geometry" in ident_cfg:
+                train_cfg.identity_detach_geometry = bool(ident_cfg["detach_geometry"])
+        return train_cfg, densify_cfg, ident_cfg
+
+    def dynamic_recipe(self, num_frames: int, scene_artifact) -> dict[str, Any]:
+        """How a dynamic checkpoint is trained, as its render record keeps it: the trainer's and
+        densifier's settings with every default resolved, the identity settings (None when
+        identity is off), and the scene artifact it was trained from (its contract digest).
+        Two checkpoints with equal recipes were trained the same way; training itself is not
+        bit-deterministic (gsplat accumulates with atomics), so their weights still differ."""
+        train_cfg, densify_cfg, ident_cfg = self._dynamic_configs(num_frames)
+        return _recipe(train_cfg, densify_cfg, ident_cfg if ident_cfg.get("enabled") else None,
+                       scene_artifact)
+
+    def _fit_dynamic(self, scene_artifact, save_dir: Path, *, run=None) -> RenderArtifact:
+        from reifyscene.render.gaussian4d.dynamic_trainer import (
+            DynamicGaussianTrainer,
+        )
         from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
         bundle = scene_artifact.dynamic_bundle or {}
         train_views = self._dynamic_train_views(scene_artifact)
+        rasters = {(int(v["width"]), int(v["height"])) for v in scene_artifact.train_views}
+        if len(rasters) > 1:
+            raise ValueError(f"training views come in several rasters {sorted(rasters)}")
+        raster = next(iter(rasters), None)
         if not bundle or not train_views:
             return RenderArtifact(
                 run_id=getattr(scene_artifact, "run_id", "dev"),
@@ -266,23 +393,52 @@ class GaussianRenderBackend(RenderBackend):
 
         scene, cams = bundle_to_scene(bundle, device=self.device)
 
-        dyn_cfg = dict(self.cfg.get("dynamic", self.cfg.get("trainer", {})) or {})
-        iters = int(self.cfg.get("iters", dyn_cfg.get("iters", 5000)))
-        train_cfg = DynamicTrainConfig.from_cfg({**dyn_cfg, "iters": iters})
-        densify_cfg = DensifyConfig.from_cfg(self.cfg.get("densify"), max_iters=iters, num_frames=scene.num_frames)
+        train_cfg, densify_cfg, ident_cfg = self._dynamic_configs(scene.num_frames)
+        recipe = self.dynamic_recipe(scene.num_frames, scene_artifact)
         rasterizer = build_rasterizer({"device": self.device, "absgrad": densify_cfg.absgrad})
+        identity_summary = None
+        if ident_cfg.get("enabled"):
+            if run is None:
+                raise ValueError("identity training needs the run whose id maps it learns")
+            train_views, identity_summary = self._attach_identity(
+                scene, train_views, run, ident_cfg)
+            identity_summary["detach_geometry"] = train_cfg.identity_detach_geometry
+            identity_summary["lambda_3d"] = train_cfg.lambda_identity_3d
+            identity_summary["reset_every"] = train_cfg.identity_reset_every
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
+        geometry_on = (train_cfg.lambda_depth > 0 or train_cfg.lambda_depth_grad > 0
+                       or train_cfg.lambda_mask > 0)
+        targets = self._train_targets(bundle) if geometry_on else None
 
         logs: list[dict] = []
-        trained = trainer.fit(train_views, on_log=lambda record: logs.append(record))
+        on_trace = on_snapshot = None
+        if identity_summary is not None and int(ident_cfg.get("trace_every", 0)) > 0:
+            import json
+
+            trainer.cfg.identity_trace_every = int(ident_cfg["trace_every"])
+            trace_path = Path(save_dir) / "identity_trace.jsonl"
+            trace_path.write_text("")
+
+            def on_trace(record: dict) -> None:
+                with trace_path.open("a") as fh:
+                    fh.write(json.dumps(record) + "\n")
+        if ident_cfg.get("snapshot_steps"):
+            trainer.cfg.snapshot_steps = tuple(int(x) for x in ident_cfg["snapshot_steps"])
+
+            def on_snapshot(step: int, scene) -> None:
+                self._save_dynamic_checkpoint(scene, cams, bundle, Path(save_dir), raster=raster,
+                                              name=f"trained_dynamic_step{step}.npz")
+        trained = trainer.fit(train_views, targets=targets,
+                              on_log=lambda record: logs.append(record),
+                              on_trace=on_trace, on_snapshot=on_snapshot)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
-        checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir)
+        checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir, raster=raster)
         eval_n = min(len(train_views), 8)
         with torch.no_grad():
             psnrs = [
-                float(image_psnr(trainer.render_at(cam, t), gt))
-                for cam, gt, t in train_views[:eval_n]
+                float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
+                for v in train_views[:eval_n]
             ]
         train_view_psnr = float(np.mean(psnrs)) if psnrs else 0.0
 
@@ -301,6 +457,10 @@ class GaussianRenderBackend(RenderBackend):
                 "train_view_psnr": train_view_psnr,
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
+                "recipe": recipe,
+                **({"identity": {**identity_summary, "final_identity_loss": next(
+                    (r["identity_loss"] for r in reversed(logs) if "identity_loss" in r), None
+                )}} if identity_summary else {}),
             },
             path_index=path_index,
         )

@@ -1,0 +1,28 @@
+Resolve the bundled dinov2 repo against this file, not the process CWD.
+
+Upstream pin: VGGT-Long @ c160869d1d99c96bb227f414afb3bc68c29c9a76
+
+Upstream loads torch.hub from the relative path './LoopModels/dinov2', which resolves against the
+working directory. Under reifyscene, VGGT-Long is never run from its own directory, so loop
+closure breaks. Anchor the path to the module's own location instead.
+
+Without it: loop closure fails whenever VGGT-Long runs from anywhere but its own directory, which
+here is always.
+diff --git a/LoopModels/backbones/dinov2.py b/LoopModels/backbones/dinov2.py
+index d84e6cd..45f106e 100644
+--- a/LoopModels/backbones/dinov2.py
++++ b/LoopModels/backbones/dinov2.py
+@@ -32,7 +32,12 @@ class DINOv2(nn.Module):
+         assert model_name in DINOV2_ARCHS.keys(), f'Unknown model name {model_name}'
+         # self.model = torch.hub.load('facebookresearch/dinov2', model_name)
+         # self.model = torch.hub.load('facebookresearch/dinov2', model_name, pretrained=False)
+-        self.model = torch.hub.load('./LoopModels/dinov2', model_name, source='local', pretrained=False)
++        # reifyscene patch (third_party_patches/vggt-long/0001-dinov2-path-cwd.patch): the upstream './LoopModels/dinov2'
++        # path is resolved against the process CWD, so loop closure breaks whenever VGGT-Long
++        # runs from any directory but its own (always, under reifyscene). Anchor it to this file.
++        import os as _os
++        _dinov2_repo = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'dinov2')
++        self.model = torch.hub.load(_dinov2_repo, model_name, source='local', pretrained=False)
+         self.model.load_state_dict(torch.load(vggt_long_config['Weights']['DNIO']))
+         self.num_channels = DINOV2_ARCHS[model_name]
+         self.num_trainable_blocks = num_trainable_blocks

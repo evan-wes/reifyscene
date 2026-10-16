@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Export held-out views, a score and a replay video from a run's trained scene.
 
-Renders straight from the run's checkpoint -- ``<run_dir>/render/trained_dynamic.npz``
-for a dynamic scene, else ``<run_dir>/render/trained_gaussians.npz`` for a static
-one; nothing is retrained, so this works on old runs too, and the run's own records
-are never modified. Writes, under ``--out`` (default ``<run_dir>/render/exports``):
+Renders straight from one of the run's checkpoints (``--checkpoint``, the render stage's own
+by default) -- the weights and the scene kind its render record names; nothing is retrained,
+and the run's own records are never modified. Writes, under ``--out`` (default ``exports/``
+inside the checkpoint's folder):
 
     heldout/<n>_<frame>_{render,photo,mask}.png + heldout/index.json
         evenly spaced views from the benchmark's held-out split, each with its
@@ -21,10 +21,7 @@ pipeline does -- for a dynamic scene it reads the run's geometry backend from it
 manifest, ``none`` for the dataset (GT oracle) backend and ``sim3`` (fit on the
 training cameras) for self-reconstructed geometry; every static scene gets
 ``sim3``, since it lives in the ground-plane-canonicalized frame. A static scene's
-training cameras are read from ``<run_dir>/scene/artifact.json``.
-
-``--checkpoint`` reads another checkpoint; its kind comes from its contents (a
-dynamic bundle carries ``fg_means``, a static cloud does not).
+training cameras are read from the run's scene record.
 
 Held-out views and the score need the benchmark dataset (``--dataset-root``); the
 replay does not. Needs CUDA (the renderer is gsplat-only).
@@ -43,6 +40,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.api.run_outputs import Checkpoint, RunOutputs
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
     export_replay,
@@ -59,56 +57,42 @@ from reifyscene.render.eval.masked_nvs_benchmark import (
 from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 
-CHECKPOINTS = ("trained_dynamic.npz", "trained_gaussians.npz")
+
+def find_checkpoint(run: RunOutputs, name: str) -> Checkpoint:
+    """The checkpoint to render; its weights and kind are what its render record says."""
+    checkpoint = run.checkpoint(name)
+    if not checkpoint.exists():
+        sys.exit(f"{run.name}: no trained checkpoint {name!r}")
+    return checkpoint
 
 
-def checkpoint_kind(path: Path) -> str:
-    """``dynamic`` for a dynamic bundle (it carries ``fg_means``), else ``static``."""
-    with np.load(path, allow_pickle=True) as data:
-        return "dynamic" if "fg_means" in data.files else "static"
-
-
-def find_checkpoint(run_dir: Path, override: Path | None) -> tuple[Path, str]:
-    """The checkpoint to render and its kind: ``override``, else the run's own."""
-    candidates = [override] if override else [run_dir / "render" / name for name in CHECKPOINTS]
-    for path in candidates:
-        if path.exists():
-            return path, checkpoint_kind(path)
-    sys.exit(f"no trained scene at {' or '.join(str(p) for p in candidates)}")
-
-
-def read_train_views(run_dir: Path) -> list[dict[str, Any]]:
-    """A static scene's training cameras (frame, time, pose) from its scene artifact."""
-    path = run_dir / "scene" / "artifact.json"
-    if not path.exists():
-        sys.exit(f"a static scene's held-out cameras are placed through {path}, which is missing")
-    views = json.loads(path.read_text()).get("train_views") or []
+def read_train_views(run: RunOutputs) -> list[dict[str, Any]]:
+    """A static scene's training cameras (frame, time, pose) from its scene record."""
+    if not run.has("scene"):
+        sys.exit(f"{run.name}: a static scene's held-out cameras are placed through its scene "
+                 "record, which is missing")
+    views = run.record("scene")["train_views"]
     return [
         {"frame_key": v["frame_key"], "time_id": v["time_id"], "t_world_cam": v["t_world_cam"]}
         for v in views
     ]
 
 
-def resolve_alignment(run_dir: Path, requested: str, kind: str = "dynamic") -> str:
+def resolve_alignment(run: RunOutputs, requested: str, kind: str = "dynamic") -> str:
     """``requested`` unless ``auto``: then the pipeline's default for the run's scene."""
     if requested != "auto":
         return requested
     if kind == "static":
         return default_alignment(None, kind)  # every static scene, whatever its geometry
-    manifest = run_dir / "run_manifest.json"
-    if not manifest.exists():
-        sys.exit(f"--align auto needs {manifest} to read the geometry backend; pass --align")
-    cfg = json.loads(manifest.read_text()).get("config") or {}
-    return default_alignment((cfg.get("geometry") or {}).get("backend_name"))
+    return default_alignment((run.config.get("geometry") or {}).get("backend_name"))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument(
-        "--checkpoint", type=Path, help="default: RUN_DIR/render/trained_{dynamic,gaussians}.npz"
-    )
-    ap.add_argument("--out", type=Path, help="default: RUN_DIR/render/exports")
+    ap.add_argument("--checkpoint", default="render",
+                    help="the checkpoint to render: the render stage's own, or a named retrain")
+    ap.add_argument("--out", type=Path, help="default: exports/ in the checkpoint's folder")
     ap.add_argument("--dataset-root", help="benchmark sequence dir; omit to skip held-out views")
     ap.add_argument("--factor", type=int, default=2, help="dataset resolution factor (as scored)")
     ap.add_argument("--eval-split", default="val")
@@ -121,8 +105,10 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
 
-    checkpoint, kind = find_checkpoint(a.run_dir, a.checkpoint)
-    out = a.out or a.run_dir / "render" / "exports"
+    run = RunOutputs.open(a.run_dir)
+    ckpt = find_checkpoint(run, a.checkpoint)
+    checkpoint, kind = ckpt.weights, ckpt.kind
+    out = a.out or ckpt.dir / "exports"
     rasterizer = build_rasterizer({"device": a.device})
     if kind == "dynamic":
         data = np.load(checkpoint, allow_pickle=True)
@@ -135,10 +121,10 @@ def main() -> None:
             "dataset_root": a.dataset_root,
             "factor": a.factor,
             "eval_split": a.eval_split,
-            "align": resolve_alignment(a.run_dir, a.align, kind),
+            "align": resolve_alignment(run, a.align, kind),
         }
         backend = eval_dataset(eval_cfg)
-        train_views = read_train_views(a.run_dir) if kind == "static" else []
+        train_views = read_train_views(run) if kind == "static" else []
         print(f"{kind} scene: held-out cameras placed with align={eval_cfg['align']}")
         if not a.no_score:
             if kind == "dynamic":
@@ -187,6 +173,7 @@ def main() -> None:
         cams,
         out / "replay.mp4",
         rasterizer=rasterizer,
+        raster=tuple(int(v) for v in data["train_raster_wh"]),  # what it was trained at
         fps=a.replay_fps,
         stride=a.replay_stride,
     )

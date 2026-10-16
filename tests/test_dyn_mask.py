@@ -34,7 +34,7 @@ def _write_video(path, *, width=32, height=24, num_frames=2, value=100):
 def _ingest(tmp_path, num_frames=2):
     video = tmp_path / "in.mp4"
     _write_video(video, num_frames=num_frames)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / "ingest", streams=[stream],
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(num_frames)],
@@ -55,7 +55,8 @@ def _states(angles_deg, stream="cam_00"):
     cum = 0.0
     for i, d in enumerate(angles_deg):
         cum += d
-        out.append(TimedCameraState(stream_id=stream, time_sec=float(i) / 30.0, intrinsics=intr,
+        out.append(TimedCameraState(stream_id=stream, frame_idx=i, time_sec=float(i) / 30.0,
+                                    intrinsics=intr,
                                     pose=CameraPose(T_world_cam=_rot_z(cum))))
     return {stream: out}
 
@@ -199,7 +200,8 @@ def test_pipeline_dyn_mask_stage_all_static_default(tmp_path):
 def test_composer_downgrades_fidelity_on_suspect_pose_health():
     frames = [FrameRef("cam_00", i, float(i) / 30.0) for i in range(2)]
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=8.0, cy=8.0)
-    states = [TimedCameraState("cam_00", float(i) / 30.0, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32))) for i in range(2)]
+    states = [TimedCameraState("cam_00", i, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32)))
+              for i in range(2)]
     pose_art = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="colmap",
                                 selected_frames=frames, intrinsics_by_stream={"cam_00": intr},
                                 camera_states_by_stream={"cam_00": states})

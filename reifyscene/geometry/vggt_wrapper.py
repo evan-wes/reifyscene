@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
-
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,7 @@ import torch
 from PIL import Image
 from rich.progress import track
 
+from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
@@ -89,7 +89,7 @@ class VGGTInitializer(GeometryInitializer):
         self.frame_cache_dir = self.cfg.get("frame_cache_dir")
         self.debug_shapes = bool(self.cfg.get("debug_shapes", False))
         self.save_depth_pngs = bool(self.cfg.get("save_depth_pngs", False))
-        self.decoder = VideoDecoder(default_fps=float(self.cfg.get("default_fps", 30.0)))
+        self.decoder = VideoDecoder()
         resize_max_dim = self.cfg.get("resize_max_dim")
         self.resize_max_dim = None if resize_max_dim in (None, 0) else int(resize_max_dim)
         self.cpu_threads = self.cfg.get("cpu_threads")
@@ -135,9 +135,13 @@ class VGGTInitializer(GeometryInitializer):
     def _load_backend_components(self) -> None:
         """Import the official VGGT modules lazily."""
         from vggt.models.vggt import VGGT  # type: ignore[import-not-found]
+        from vggt.utils.geometry import (
+            unproject_depth_map_to_point_map,  # type: ignore[import-not-found]
+        )
         from vggt.utils.load_fn import load_and_preprocess_images  # type: ignore[import-not-found]
-        from vggt.utils.pose_enc import pose_encoding_to_extri_intri  # type: ignore[import-not-found]
-        from vggt.utils.geometry import unproject_depth_map_to_point_map  # type: ignore[import-not-found]
+        from vggt.utils.pose_enc import (
+            pose_encoding_to_extri_intri,  # type: ignore[import-not-found]
+        )
 
         self._VGGT = VGGT
         self._load_and_preprocess_images = load_and_preprocess_images
@@ -205,7 +209,7 @@ class VGGTInitializer(GeometryInitializer):
 
     def _frame_key(self, frame: FrameRef) -> str:
         """Return a stable key for per-frame artifact maps."""
-        return f"{frame.stream_id}:{frame.frame_idx}"
+        return frame_key(frame.stream_id, frame.frame_idx)
 
     def _select_frames(self, frames: list[FrameRef], ingest_artifact) -> list[FrameRef]:
         """Resolve explicit or ingest-provided frame selections."""
@@ -615,6 +619,7 @@ class VGGTInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
+                    frame_idx=int(frame.frame_idx),
                     time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=self._world_from_cam(frame_extrinsic)),
@@ -688,8 +693,10 @@ class VGGTInitializer(GeometryInitializer):
 
         for frame in frames:
             stream = stream_lookup.get(frame.stream_id)
-            width = float(stream.width if stream is not None and stream.width > 0 else 1920)
-            height = float(stream.height if stream is not None and stream.height > 0 else 1080)
+            if stream is None or not (stream.width > 0 and stream.height > 0):
+                raise ValueError(f"stream {frame.stream_id!r} records no frame size for the "
+                                 "heuristic geometry to frame its cameras on")
+            width, height = float(stream.width), float(stream.height)
             intrinsics = intrinsics_by_stream.setdefault(
                 frame.stream_id,
                 CameraIntrinsics(
@@ -704,6 +711,7 @@ class VGGTInitializer(GeometryInitializer):
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
+                    frame_idx=int(frame.frame_idx),
                     time_sec=frame.timestamp_sec,
                     intrinsics=intrinsics,
                     pose=CameraPose(T_world_cam=np.eye(4, dtype=float)),

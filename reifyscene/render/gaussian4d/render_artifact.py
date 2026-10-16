@@ -17,7 +17,7 @@ class RenderArtifact(BaseArtifact):
 
     scene_state: dict[str, Any] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
-    path_index: dict[str, list[str]] = field(default_factory=dict)
+    path_index: dict[str, list[str]] = field(default_factory=dict)   # frames, relative to save_dir
     layer_path_index: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     player_html: str | None = None
     debug_player_html: str | None = None
@@ -42,7 +42,6 @@ class RenderArtifact(BaseArtifact):
         write_json(self.artifact_path(), {
             "run_id": self.run_id,
             "stage_name": self.stage_name,
-            "save_dir": str(self.save_dir),
             "metadata": self.metadata,
             "scene_state": self.scene_state,
             "coverage": self.coverage,
@@ -54,16 +53,16 @@ class RenderArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> "RenderArtifact":
-        raw = read_json(save_dir / "artifact.json")
+        raw = read_json(save_dir / cls.FILE)
         return cls(
             run_id=raw["run_id"],
             stage_name=raw["stage_name"],
             save_dir=Path(save_dir),
-            metadata=raw.get("metadata", {}),
-            scene_state=raw.get("scene_state", {}),
-            coverage=raw.get("coverage", {}),
-            path_index=raw.get("path_index", {}),
-            layer_path_index=raw.get("layer_path_index", {}),
-            player_html=raw.get("player_html"),
-            debug_player_html=raw.get("debug_player_html"),
+            metadata=raw["metadata"],
+            scene_state=raw["scene_state"],
+            coverage=raw["coverage"],
+            path_index=raw["path_index"],
+            layer_path_index=raw["layer_path_index"],
+            player_html=raw["player_html"],
+            debug_player_html=raw["debug_player_html"],
         )

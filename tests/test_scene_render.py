@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 from reifyscene.render.gaussian4d.rasterizer import gsplat_available
 
 requires_gsplat = pytest.mark.skipif(
@@ -51,7 +52,7 @@ def _synthetic_geometry(tmp_path: Path) -> GeometryArtifact:
         depthmaps[key] = {"depth": np.full((H, W), 2.0, dtype=np.float32), "confidence": None}
     intr = CameraIntrinsics(60.0, 60.0, W / 2.0, H / 2.0)
     states = [
-        TimedCameraState("cam_00", float(fr.frame_idx) * 0.1, intr, CameraPose(np.eye(4, dtype=np.float32)))
+        TimedCameraState("cam_00", int(fr.frame_idx), intr, CameraPose(np.eye(4, dtype=np.float32)))
         for fr in frames
     ]
     return GeometryArtifact(
@@ -62,14 +63,27 @@ def _synthetic_geometry(tmp_path: Path) -> GeometryArtifact:
         intrinsics_by_stream={"cam_00": intr},
         camera_states_by_stream={"cam_00": states},
         depthmaps_by_frame=depthmaps,
-        metadata={"debug_image_paths": debug_image_paths},
+        metadata={"debug_image_paths": debug_image_paths, "image_transforms": {"cam_00": transform_record(
+            ImageTransform.identity((W, H)), recorded_by="test")}},
     )
+
+
+def _streams(geom: GeometryArtifact, tmp_path: Path):
+    """The fixture's frames as the run's ingest stream (where training photos come from)."""
+    from types import SimpleNamespace
+
+    from reifyscene.ingest.decoder import VideoDecoder
+    from reifyscene.ingest.streams import RunStreams
+
+    ingest = SimpleNamespace(streams=[VideoDecoder().decode(tmp_path / "gt", stream_id="cam_00")])
+    return RunStreams.from_artifacts(ingest, geom)
 
 
 def test_assembler_builds_self_contained_renderable_scene(tmp_path: Path) -> None:
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=6).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     assert scene.kind == "static"
     # both frames fully valid (depth 2.0 > near), pixel_stride 1 -> H*W per frame
@@ -83,15 +97,16 @@ def test_assembler_builds_self_contained_renderable_scene(tmp_path: Path) -> Non
     assert len(scene.render_trajectory) == 6
 
 
-def test_assembler_tolerates_legacy_scene_config_keys() -> None:
-    # legacy ``scene:`` config fields from the retired toy must not raise
-    SingleVideoSceneAssembler(max_static_points_per_frame=8, max_static_points_total=16, timeline_source="geometry")
+def test_the_assembler_refuses_a_setting_it_does_not_know() -> None:
+    with pytest.raises(TypeError, match="max_static_points_per_frame"):
+        SingleVideoSceneAssembler(max_static_points_per_frame=8)
 
 
 def test_scene_artifact_roundtrip_persists_gt_frames(tmp_path: Path) -> None:
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=4).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     scene.save()
     loaded = SceneArtifact.load(tmp_path / "scene")
@@ -217,7 +232,8 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=3).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     backend = GaussianRenderBackend(
         {"device": "cuda", "iters": 10, "trainer": {"log_every": 5}, "densify": {}}
@@ -227,8 +243,11 @@ def test_render_backend_trains_and_renders(tmp_path: Path) -> None:
     assert art.scene_state["num_train_views"] == 2
     assert art.scene_state["train_view_psnr"] > 0.0
     assert (Path(art.save_dir) / art.scene_state["checkpoint"]).exists()
+    recipe = art.scene_state["recipe"]
+    assert recipe["identity"] is None and "iters" in recipe["trainer"]
     flythrough = art.path_index.get("flythrough", [])
-    assert len(flythrough) == 3 and Path(flythrough[0]).exists()
+    assert len(flythrough) == 3 and not Path(flythrough[0]).is_absolute()
+    assert (Path(art.save_dir) / flythrough[0]).exists()       # relative to the checkpoint
 
 
 def test_render_backend_dynamic_empty_bundle_skips(tmp_path: Path) -> None:
@@ -237,7 +256,8 @@ def test_render_backend_dynamic_empty_bundle_skips(tmp_path: Path) -> None:
 
     geom = _synthetic_geometry(tmp_path)
     scene = SingleVideoSceneAssembler(num_render_cameras=2).assemble(
-        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom
+        run_id="scene", save_dir=tmp_path / "scene", geometry_artifact=geom,
+        streams=_streams(geom, tmp_path),
     )
     scene.kind = "dynamic"  # static-assembled -> empty dynamic_bundle, dispatch short-circuits
     art = GaussianRenderBackend({"device": "cpu"}).fit(scene, save_dir=tmp_path / "render")
@@ -292,12 +312,26 @@ def test_render_backend_dynamic_trains_and_checkpoints(tmp_path: Path) -> None:
             "width": W, "height": H, "image_path": _write_frame(gt_dir / f"{i}.png"),
         })
 
+    bundle = dump_bundle(scene, {"train": cams})
+    # the scene stage's geometry targets: a constant depth (the camera is 3 away), a centre
+    # foreground square
+    fg = np.zeros((t, H, W), np.uint8)
+    fg[:, H // 4: 3 * H // 4, W // 4: 3 * W // 4] = 1
+    bundle.update(target_frame_names=np.asarray([f"f{i}" for i in range(t)]),
+                  target_depths=np.full((t, H, W), 3.0, np.float16),
+                  target_depth_valid=np.ones((t, H, W), np.uint8), target_fg=fg)
     art = SceneArtifact(
         run_id="scene", stage_name="scene", save_dir=tmp_path / "scene",
-        kind="dynamic", dynamic_bundle=dump_bundle(scene, {"train": cams}), train_views=views,
+        kind="dynamic", dynamic_bundle=bundle, train_views=views,
     )
     backend = GaussianRenderBackend({"device": "cuda", "iters": 3, "dynamic": {"log_every": 2}, "densify": {"enabled": False}})
     out = backend.fit(art, save_dir=tmp_path / "render")
     assert out.scene_state["kind"] == "dynamic"
     assert out.scene_state["num_train_views"] == t and out.scene_state["num_fg"] == n_fg
     assert (Path(out.save_dir) / out.scene_state["checkpoint"]).exists()
+    # the recipe is what dynamic_recipe() says, so a record can be rebuilt from the config
+    recipe = out.scene_state["recipe"]
+    assert recipe == backend.dynamic_recipe(out.scene_state["num_frames"], art)
+    assert recipe["trainer"]["iters"] == 3 and recipe["densify"]["enabled"] is False
+    assert recipe["identity"] is None
+    assert recipe["trainer"]["lambda_depth"] == 0.5 and recipe["trainer"]["lambda_mask"] == 0.0

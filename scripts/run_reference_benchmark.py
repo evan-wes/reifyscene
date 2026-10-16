@@ -76,8 +76,7 @@ from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import 
 )
 # Written into the run dir by this wrapper after run_training exits 0. SoM
 # itself writes checkpoints/last.ckpt at epoch 0 and every 200 steps, so a
-# bare checkpoint does NOT prove training completed — only this sentinel
-# (or final-epoch video detection, for runs predating it) does.
+# bare checkpoint does NOT prove training completed — only this sentinel does.
 TRAINING_COMPLETE_SENTINEL = ".reifyscene_training_complete"
 
 # evaluate_iphone.py prints "mean <name>: <float>" lines; these patterns are
@@ -296,23 +295,17 @@ def completed_epochs(run_dir: Path) -> str | None:
     SoM writes checkpoints/last.ckpt at initialization and every 200 steps,
     so an interrupted run leaves a checkpoint plus stale results/ behind —
     reusing those would silently present a half-trained model as the
-    reference baseline. Completion is proven by either:
-    - the sentinel this wrapper writes after run_training exits 0 (its body
-      records the epoch schedule, so a 5-epoch smoke run can never be reused
-      as a full baseline), or
-    - (runs predating the sentinel) the final-epoch video dir existing, with
-      the epoch count read from the run's own cfg.yaml — reported as the
-      label of the schedule the run actually used.
+    reference baseline. Completion is proven only by the sentinel this wrapper
+    writes after run_training exits 0; its body records the epoch schedule, so a
+    5-epoch smoke run can never be reused as a full baseline.
     """
     sentinel = run_dir / TRAINING_COMPLETE_SENTINEL
-    if sentinel.exists():
-        return sentinel.read_text().strip() or "default"
-    epochs = trained_num_epochs(run_dir)
-    if epochs is not None and (run_dir / "videos" / f"epoch_{epochs - 1:04d}").is_dir():
-        # Label SoM's default schedule accordingly so reuse against a
-        # default-schedule request matches.
-        return "default" if epochs == SOM_DEFAULT_EPOCHS else str(epochs)
-    return None
+    if not sentinel.exists():
+        return None
+    label = sentinel.read_text().strip()
+    if not label:
+        raise ValueError(f"{sentinel} records no epoch schedule")
+    return label
 
 
 def clear_run_state(run_dir: Path) -> None:

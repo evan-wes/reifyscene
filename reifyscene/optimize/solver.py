@@ -8,7 +8,14 @@ from typing import Any
 
 import numpy as np
 
-from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.common.frame_keys import frame_key as make_frame_key
+from reifyscene.common.types import (
+    CameraIntrinsics,
+    CameraPose,
+    FrameRef,
+    TimedCameraState,
+    camera_state_at,
+)
 from reifyscene.geometry.image_transform import (
     ImageTransform,
     MissingImageTransform,
@@ -62,7 +69,8 @@ class JointSpatiotemporalSolver:
     def _copy_camera_state(cls, state: TimedCameraState) -> TimedCameraState:
         return TimedCameraState(
             stream_id=str(state.stream_id),
-            time_sec=float(state.time_sec),
+            frame_idx=int(state.frame_idx),
+            time_sec=state.time_sec,
             intrinsics=cls._copy_intrinsics(state.intrinsics),
             pose=CameraPose(T_world_cam=np.asarray(state.pose.T_world_cam, dtype=float).copy()),
         )
@@ -85,12 +93,10 @@ class JointSpatiotemporalSolver:
         """
         # Each stream's transform, or why it has none (raised only if a re-lift needs it).
         image_transforms: dict[str, dict[str, Any] | str] = {}
-        for stream_id, payload in track_artifact.track_payloads_by_stream.items():
-            original_wh = tuple(int(v) for v in payload.get("original_size_wh", [0, 0]))
+        for stream_id in track_artifact.track_payloads_by_stream:
             try:
                 image_transforms[str(stream_id)] = image_transform_for(
-                    geometry_artifact, str(stream_id), source_size=original_wh
-                ).to_dict()
+                    geometry_artifact, str(stream_id)).to_dict()
             except MissingImageTransform as exc:
                 image_transforms[str(stream_id)] = str(exc)
         lift_settings = dict((getattr(track_artifact, "metadata", {}) or {}).get("lift") or {})
@@ -159,14 +165,7 @@ class JointSpatiotemporalSolver:
 
     @staticmethod
     def _find_state_for_frame(states: list[TimedCameraState], frame: FrameRef) -> TimedCameraState | None:
-        best = None
-        best_dt = None
-        for state in states:
-            dt = abs(float(state.time_sec) - float(frame.timestamp_sec))
-            if best is None or dt < best_dt:
-                best = state
-                best_dt = dt
-        return best
+        return camera_state_at(states, frame)
 
     @staticmethod
     def _estimate_rigid_transform(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -300,7 +299,7 @@ class JointSpatiotemporalSolver:
                 if matches.size == 0 or transform is None:
                     continue
                 t = int(matches[0])
-                frame_key = f"{frame.stream_id}:{frame.frame_idx}"
+                frame_key = make_frame_key(frame.stream_id, frame.frame_idx)
                 depth_payload = depthmaps_by_frame.get(frame_key)
                 state_for_frame = self._find_state_for_frame(camera_states.get(stream_id, []), frame)
                 if depth_payload is None or state_for_frame is None:
@@ -402,7 +401,7 @@ class JointSpatiotemporalSolver:
                     accepted = bool(np.isfinite(after_med) and np.isfinite(before_med) and after_med <= before_med * self.static_track_cfg["accept_improvement_ratio"])
                     frame_updates.append({
                         "frame_idx": int(frame.frame_idx),
-                        "timestamp_sec": float(frame.timestamp_sec),
+                        "timestamp_sec": frame.timestamp_sec,
                         "num_static_tracks": int(idxs.size),
                         "median_error_before": before_med,
                         "median_error_after": after_med,

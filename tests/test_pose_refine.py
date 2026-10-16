@@ -46,7 +46,7 @@ def _pose(i: int) -> np.ndarray:
 def _geometry_artifact(tmp_path: Path, *, with_pointmaps: bool = True) -> GeometryArtifact:
     frames = [FrameRef(STREAM_ID, i, float(i)) for i in range(3)]
     states = [
-        TimedCameraState(stream_id=STREAM_ID, time_sec=float(i), intrinsics=_intr(), pose=CameraPose(T_world_cam=_pose(i)))
+        TimedCameraState(stream_id=STREAM_ID, frame_idx=i, intrinsics=_intr(), pose=CameraPose(T_world_cam=_pose(i)))
         for i in range(3)
     ]
     pointmaps: dict = {}
@@ -154,7 +154,7 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
     translation) to a seed pose set and assert the re-anchor inverts it, so the
     recovered poses land back on the seed (the relative geometry is preserved).
     """
-    from reifyscene.geometry.pose_refine import _apply_sim3_to_c2w, _sim3_src_to_dst
+    from reifyscene.geometry.similarity import apply_similarity_to_c2w, fit_similarity
 
     seed_c2w, seed_w2c = {}, {}
     for i in range(6):
@@ -179,10 +179,10 @@ def test_reanchor_sim3_recovers_gauge_drift() -> None:
         drift_w2c[k] = np.linalg.inv(d)
 
     keys = list(seed_w2c)
-    s, R, t = _sim3_src_to_dst(drift_w2c, seed_w2c, keys)
+    s, R, t = fit_similarity(drift_w2c, seed_w2c, keys)
     assert np.isclose(s, 1.0 / s_true, rtol=1e-6)
     for k in keys:
-        back = _apply_sim3_to_c2w(np.linalg.inv(drift_w2c[k]), s, R, t)
+        back = apply_similarity_to_c2w(np.linalg.inv(drift_w2c[k]), s, R, t)
         assert np.allclose(back, seed_c2w[k], atol=1e-6)
 
 
@@ -206,7 +206,7 @@ def test_refine_poses_applies_refined_poses(tmp_path: Path, monkeypatch) -> None
 
     work_dirs = []
 
-    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+    def fake_refine(self, geometry, *, ingest_artifact, work_dir=None):
         work_dirs.append(work_dir)
         return {STREAM_ID: fake}
 
@@ -235,7 +235,7 @@ def test_a_refused_refinement_keeps_the_seed_poses_and_says_why(tmp_path: Path, 
     geom = _geometry_artifact(tmp_path)
     ingest = _ingest_artifact(tmp_path)
 
-    def fake_refine(self, geometry, *, decoder, ingest_artifact, work_dir=None):
+    def fake_refine(self, geometry, *, ingest_artifact, work_dir=None):
         self.rejected[STREAM_ID] = "final mean reprojection error 6.2e+149 px exceeds 8 px"
         return {}
 
@@ -433,3 +433,39 @@ def test_the_reanchor_leaves_an_unrefined_camera_exactly_where_it_was() -> None:
     # The skipped camera is untouched, to the bit.
     assert np.array_equal(refined["4"], untouched_before)
     assert np.array_equal(refined["4"], seed_c2w["4"])
+
+
+def test_a_landscape_geometry_is_padded_square_without_moving_its_pixels() -> None:
+    """The tracker needs a square frame; padding must not move a real pixel."""
+    import torch
+
+    from reifyscene.geometry.pose_refine import _pad_to_square
+
+    images = torch.arange(2 * 3 * 4 * 7, dtype=torch.float32).reshape(2, 3, 4, 7)  # H=4, W=7
+    conf = np.arange(2 * 4 * 7, dtype=np.float32).reshape(2, 4, 7)
+    points = np.arange(2 * 4 * 7 * 3, dtype=np.float32).reshape(2, 4, 7, 3)
+
+    out_images, out_conf, out_points, pad_h, pad_w = _pad_to_square(images, conf, points)
+
+    assert (pad_h, pad_w) == (3, 0)
+    assert tuple(out_images.shape) == (2, 3, 7, 7)
+    assert out_conf.shape == (2, 7, 7) and out_points.shape == (2, 7, 7, 3)
+    # Every original pixel keeps its coordinates, so a track needs no unpadding.
+    assert torch.equal(out_images[:, :, :4, :7], images)
+    assert np.array_equal(out_conf[:, :4, :7], conf)
+    assert np.array_equal(out_points[:, :4, :7], points)
+    # The padding carries no confidence, so the tracker's own filter drops it.
+    assert not out_conf[:, 4:, :].any()
+
+
+def test_a_square_geometry_is_left_alone() -> None:
+    import torch
+
+    from reifyscene.geometry.pose_refine import _pad_to_square
+
+    images = torch.zeros(2, 3, 5, 5)
+    conf = np.zeros((2, 5, 5), dtype=np.float32)
+    points = np.zeros((2, 5, 5, 3), dtype=np.float32)
+    out_images, out_conf, out_points, pad_h, pad_w = _pad_to_square(images, conf, points)
+    assert (pad_h, pad_w) == (0, 0)
+    assert out_images is images and out_conf is conf and out_points is points

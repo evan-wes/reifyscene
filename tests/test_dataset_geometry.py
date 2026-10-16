@@ -33,6 +33,7 @@ def _write_sequence(root, *, orientation, position, depth_value=2.0, size=10) ->
     (root / "splits" / "train.json").write_text(
         json.dumps({"camera_ids": ["0"], "frame_names": ["0_00000"], "time_ids": [0]})
     )
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
 
 
 def test_load_camera_pose_convention(tmp_path) -> None:
@@ -123,18 +124,20 @@ def _write_frames(root, n: int, size: int = 10) -> None:
     (root / "splits" / "train.json").write_text(
         json.dumps({"camera_ids": ["0"] * n, "frame_names": names, "time_ids": list(range(n))})
     )
+    (root / "extra.json").write_text(json.dumps({"fps": 30.0}))  # as DyCheck ships
 
 
 def test_cameras_are_on_the_ingest_clock(tmp_path) -> None:
     """Frame 2 of a 30 fps stream is at 2/30 s, as every other stage has it (not at 2 s)."""
     from types import SimpleNamespace
 
-    from reifyscene.common.types import FrameRef
+    from reifyscene.common.types import FrameRef, VideoStreamRef
 
     _write_frames(tmp_path, 3)
     ingest = SimpleNamespace(
         run_id="r", keyframes=[],
-        streams=[SimpleNamespace(stream_id="0", fps=30.0, width=10, height=10, num_frames=3)],
+        streams=[VideoStreamRef(stream_id="0", video_path=tmp_path, fps=30.0, width=10,
+                                height=10, num_frames=3, has_audio=False)],
     )
     frames = [FrameRef("0", i, i / 30.0) for i in range(3)]
     art = DatasetGeometryInitializer({"dataset_root": str(tmp_path), "factor": 1}).initialize(

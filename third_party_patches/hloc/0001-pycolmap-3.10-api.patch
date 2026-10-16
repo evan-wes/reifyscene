@@ -1,0 +1,72 @@
+Track pycolmap >= 3.10 API drift.
+
+Upstream pin: Hierarchical-Localization @ v1.4 (80ccb7ee3bc048cb3a8ef221c5bc4d8ac25d5792)
+
+The pinned hloc tag predates pycolmap 3.10, which renamed and re-typed three call sites:
+import_images took image_list -> image_names and now requires an ImageReaderOptions instance;
+verify_matches moved its RANSAC keyword arguments into TwoViewGeometryOptions; incremental_mapping
+requires an IncrementalPipelineOptions. All three also require str paths rather than Path.
+
+Without it: calibration raises TypeError on the first reconstruction call.
+diff --git a/hloc/reconstruction.py b/hloc/reconstruction.py
+index 9439205..b3e5c07 100644
+--- a/hloc/reconstruction.py
++++ b/hloc/reconstruction.py
+@@ -35,9 +35,16 @@ def import_images(image_dir: Path,
+     if len(images) == 0:
+         raise IOError(f'No images found in {image_dir}.')
+     with pycolmap.ostream():
+-        pycolmap.import_images(database_path, image_dir, camera_mode,
+-                               image_list=image_list or [],
+-                               options=options)
++        # reifyscene patch (third_party_patches/hloc/0001-pycolmap-3.10-api.patch): pycolmap >= 3.10
++        # renamed the image_list kwarg to image_names and requires an
++        # ImageReaderOptions instance (dicts are no longer accepted); paths
++        # must be str.
++        reader_options = pycolmap.ImageReaderOptions()
++        for key, value in (options or {}).items():
++            setattr(reader_options, key, value)
++        pycolmap.import_images(str(database_path), str(image_dir), camera_mode,
++                               image_names=image_list or [],
++                               options=reader_options)
+ 
+ 
+ def get_image_ids(database_path: Path) -> Dict[str, int]:
+@@ -63,8 +70,14 @@ def run_reconstruction(sfm_dir: Path,
+     options = {'num_threads': min(multiprocessing.cpu_count(), 16), **options}
+     with OutputCapture(verbose):
+         with pycolmap.ostream():
++            # reifyscene patch (third_party_patches/hloc/0001-pycolmap-3.10-api.patch): pycolmap
++            # >= 3.10 requires IncrementalPipelineOptions and str paths.
++            mapper_options_obj = pycolmap.IncrementalPipelineOptions()
++            if options:
++                mapper_options_obj.mergedict(options)
+             reconstructions = pycolmap.incremental_mapping(
+-                database_path, image_dir, models_path, options=options)
++                str(database_path), str(image_dir), str(models_path),
++                options=mapper_options_obj)
+ 
+     if len(reconstructions) == 0:
+         logger.error('Could not reconstruct any model!')
+diff --git a/hloc/triangulation.py b/hloc/triangulation.py
+index 3dd0179..45e0cfa 100644
+--- a/hloc/triangulation.py
++++ b/hloc/triangulation.py
+@@ -106,9 +106,14 @@ def estimation_and_geometric_verification(database_path: Path,
+     logger.info('Performing geometric verification of the matches...')
+     with OutputCapture(verbose):
+         with pycolmap.ostream():
+-            pycolmap.verify_matches(
+-                database_path, pairs_path,
+-                max_num_trials=20000, min_inlier_ratio=0.1)
++            # reifyscene patch (third_party_patches/hloc/0001-pycolmap-3.10-api.patch): pycolmap
++            # >= 3.10 moved the RANSAC kwargs into TwoViewGeometryOptions
++            # and requires str paths.
++            options = pycolmap.TwoViewGeometryOptions()
++            options.ransac.max_num_trials = 20000
++            options.ransac.min_inlier_ratio = 0.1
++            pycolmap.verify_matches(str(database_path), str(pairs_path),
++                                    options=options)
+ 
+ 
+ def geometric_verification(image_ids: Dict[str, int],

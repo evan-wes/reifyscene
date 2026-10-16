@@ -66,17 +66,17 @@ class SemanticRecord:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> 'SemanticRecord':
-        topk = [(str(lbl), float(s)) for lbl, s in raw.get('category_topk', [])]
+        topk = [(str(lbl), float(s)) for lbl, s in raw['category_topk']]
         return cls(
-            category=str(raw.get('category', UNKNOWN_CATEGORY)),
-            score=float(raw.get('score', 0.0)),
+            category=str(raw['category']),
+            score=float(raw['score']),
             category_topk=topk,
-            margin=None if raw.get('margin') is None else float(raw['margin']),
-            margin_z=None if raw.get('margin_z') is None else float(raw['margin_z']),
-            abstained=bool(raw.get('abstained', False)),
-            abstain_reason=raw.get('abstain_reason'),
-            attributes=dict(raw.get('attributes', {})),
-            caption=raw.get('caption'),
+            margin=None if raw['margin'] is None else float(raw['margin']),
+            margin_z=None if raw['margin_z'] is None else float(raw['margin_z']),
+            abstained=bool(raw['abstained']),
+            abstain_reason=raw['abstain_reason'],
+            attributes=dict(raw['attributes']),
+            caption=raw['caption'],
         )
 
 
@@ -119,7 +119,6 @@ class SemanticsArtifact(BaseArtifact):
         payload = {
             'run_id': self.run_id,
             'stage_name': self.stage_name,
-            'save_dir': str(self.save_dir),
             'metadata': dict(self.metadata),
             'records': {tid: rec.to_dict() for tid, rec in self.records.items()},
             'embedding_index': emb_index,
@@ -129,21 +128,21 @@ class SemanticsArtifact(BaseArtifact):
 
     @classmethod
     def load(cls, save_dir: Path) -> 'SemanticsArtifact':
-        raw = read_json(save_dir / 'artifact.json')
+        raw = read_json(save_dir / cls.FILE)
         embeddings: dict[str, np.ndarray] = {}
-        for track_id, filename in raw.get('embedding_index', {}).items():
+        for track_id, filename in raw['embedding_index'].items():
             path = require_file(save_dir / 'embeddings' / filename, "semantics embedding")
             with np.load(path, allow_pickle=True) as npz:
                 embeddings[track_id] = np.asarray(npz['embedding'], dtype=np.float32)
-        records = {tid: SemanticRecord.from_dict(r) for tid, r in raw.get('records', {}).items()}
+        records = {tid: SemanticRecord.from_dict(r) for tid, r in raw['records'].items()}
         return cls(
             run_id=raw['run_id'],
             stage_name=raw['stage_name'],
             save_dir=Path(save_dir),
-            metadata=raw.get('metadata', {}),
+            metadata=raw['metadata'],
             records=records,
             embeddings=embeddings,
-            notes=raw.get('notes', []),
+            notes=raw['notes'],
         )
 
     def summary(self) -> dict[str, Any]:

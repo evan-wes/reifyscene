@@ -5,14 +5,7 @@ from __future__ import annotations
 from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
 
 
-# "gaussian_layered" and "offline_high_quality" are legacy names kept so older
-# run configs keep resolving; all aliases map to the one gsplat-backed renderer.
-_BACKENDS = {
-    "gaussian": GaussianRenderBackend,
-    "gaussian_layered": GaussianRenderBackend,
-    "gaussian4d": GaussianRenderBackend,
-    "offline_high_quality": GaussianRenderBackend,
-}
+_BACKENDS = {"gaussian4d": GaussianRenderBackend}
 
 
 def build_renderer(cfg: dict | None = None):

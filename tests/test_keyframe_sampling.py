@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from reifyscene.common.types import VideoStreamRef
 from reifyscene.data.dataset import MultiVideoDataset
 
 
-def _stream(stream_id: str = "0", num_frames: int = 100, fps: float = 30.0) -> VideoStreamRef:
+def _stream(stream_id: str = "0", num_frames: int = 100,
+            fps: float | None = 30.0) -> VideoStreamRef:
     return VideoStreamRef(stream_id, Path("clip.mp4"), fps, num_frames, 128, 128, False)
 
 
@@ -35,9 +38,26 @@ def test_all_frames_multi_stream() -> None:
     assert by_stream == {"0": [0, 1, 2, 3, 4], "1": [0, 1, 2]}
 
 
-def test_zero_frame_stream_still_emits_frame0() -> None:
+def test_a_stream_with_no_frames_is_refused_not_given_a_frame_0() -> None:
     ds = MultiVideoDataset([_stream(num_frames=0)])
-    assert [f.frame_idx for f in ds.sample_keyframes(all_frames=True)] == [0]
+    with pytest.raises(ValueError, match="no frames"):
+        ds.sample_keyframes(all_frames=True)
+
+
+def test_keyframes_are_the_streams_own_frame_numbers() -> None:
+    """A DyCheck folder's frames are numbered by their names, not 0..n-1."""
+    s = _stream(num_frames=3, fps=None)
+    s.metadata = {"frame_index": {"60": "a", "61": "b", "62": "c"}}
+    kf = MultiVideoDataset([s]).sample_keyframes(stride=2)
+    assert [f.frame_idx for f in kf] == [60, 62]
+    assert all(f.timestamp_sec is None for f in kf)
+
+
+def test_a_stride_in_seconds_needs_a_recorded_frame_rate() -> None:
+    from reifyscene.common.types import UnknownFrameRate
+
+    with pytest.raises(UnknownFrameRate, match="give it in frames"):
+        MultiVideoDataset([_stream(num_frames=10, fps=None)]).sample_keyframes(stride_sec=1.0)
 
 
 def test_keyframes_all_changes_the_ingest_fingerprint_only_when_on() -> None:

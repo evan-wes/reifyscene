@@ -93,6 +93,9 @@ UNLOCKED=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
+# Every reifyscene edit to third-party code goes through third_party_patches/ + this helper.
+# shellcheck source=scripts/lib/patch_series.sh
+source "${ROOT_DIR}/scripts/lib/patch_series.sh"
 SOM_DIR="${THIRD_PARTY_DIR}/shape-of-motion"
 LOCK_FILE="${ROOT_DIR}/scripts/locks/reifyscene_som_ref.lock"
 
@@ -410,59 +413,12 @@ install_som_requirements() {
   python -m pip install ${SOM_EXTRA_PIP}
 }
 
-require_patched() {
-  # sed -i exits 0 even when zero lines match, so every patch must be proven
-  # by its sentinel — otherwise a changed upstream (pin bump, dirty checkout)
-  # would ship unpatched code that fails late on GPU or, worse for a
-  # benchmark tool, runs subtly wrong. min_count matters when several edits
-  # share a sentinel string: requiring the exact occurrence count catches the
-  # case where only SOME of the edits landed.
-  local file="$1" sentinel="$2" what="$3" min_count="${4:-1}"
-  local found
-  found="$(grep -c "${sentinel}" "${file}" || true)"
-  if [[ "${found}" -lt "${min_count}" ]]; then
-    echo "PATCH FAILED: ${what} did not (fully) land in ${file} (${found}/${min_count} sentinels)." >&2
-    echo "The pinned SoM commit's code no longer matches the sed pattern —" >&2
-    echo "update apply_som_patches for the new pin before proceeding." >&2
-    exit 1
-  fi
-}
-
 apply_som_patches() {
-  # Shape of Motion targets torch 2.1; torch >=2.11 (needed for sm_120) is
-  # stricter about indexing a CUDA tensor with a CPU index. cuML returns cluster
-  # labels on CPU, but the points/centers are on CUDA. Put the label tensors on
-  # the points' device, which fixes the whole device-mismatch class in
-  # motion-basis init (the per-cluster center reduction AND the returned labels
-  # consumed by the caller). The sed patterns only match the UNPATCHED form, so
-  # re-running is a no-op (idempotent); require_patched proves each patch landed.
-  local f="${SOM_DIR}/flow3d/init_utils.py"
-  local t="${SOM_DIR}/flow3d/trainer.py"
-  for required in "${f}" "${t}"; do
-    if [[ ! -f "${required}" ]]; then
-      echo "Expected patch target missing: ${required}" >&2
-      echo "The SoM checkout at ${SOM_DIR} does not match the pinned commit layout." >&2
-      exit 1
-    fi
-  done
-
-  echo "Applying Shape of Motion torch-device patches to $(basename "${f}")..."
-  sed -i \
-    -e 's/means_canonical\[torch\.tensor(labels == i)\]/means_canonical[torch.tensor(labels == i, device=means_canonical.device)]/' \
-    -e 's/return sampled_centers, num_bases, torch\.tensor(labels)/return sampled_centers, num_bases, torch.tensor(labels, device=means_canonical.device)/' \
-    "${f}"
-  # Two independent sed edits share this sentinel — require BOTH occurrences
-  # so a partial landing (upstream drifted one line but not the other) fails.
-  require_patched "${f}" "device=means_canonical.device" "torch device-index patch" 2
-
-  # gsplat >=1.4 returns per-gaussian screen-space radii as (C, G, 2); SoM's
-  # densification expects a scalar radius (C, G). Collapse the trailing dim
-  # before it's used as a visibility mask.
-  if ! grep -q "_current_radii = _current_radii.amax" "${t}"; then
-    echo "Patching $(basename "${t}") for gsplat radii shape (C,G,2)->(C,G)..."
-    sed -i 's|^\( *\)sel = _current_radii > 0|\1if _current_radii.dim() == 3:  # gsplat>=1.4 radii (C,G,2) -> (C,G)\n\1    _current_radii = _current_radii.amax(dim=-1)\n\1sel = _current_radii > 0|' "${t}"
-  fi
-  require_patched "${t}" "_current_radii = _current_radii.amax" "gsplat radii patch"
+  # Two patches, both in third_party_patches/shape-of-motion/: cuML's CPU cluster labels moved
+  # onto the points' device (torch >= 2.11 refuses the cross-device index), and gsplat >= 1.4's
+  # (C, G, 2) radii collapsed to (C, G). See each patch's header for why.
+  echo "Applying Shape of Motion patches..."
+  apply_patch_series "${SOM_DIR}" "${ROOT_DIR}/third_party_patches/shape-of-motion" "Shape of Motion"
 }
 
 install_gsplat() {

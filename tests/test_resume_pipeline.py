@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import filecmp
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -12,17 +11,12 @@ import pytest
 
 from reifyscene.api.contracts import (
     CONTRACTS,
-    MISSING,
     contract_for,
     effective_settings,
-    input_identity,
-    recorded_setting,
 )
 from reifyscene.api.pipeline import ReifyScenePipeline
 from reifyscene.api.resume import (
     ResumeRejected,
-    _legacy_dir_signature,
-    _legacy_stage_config,
     check_resume,
     materialize_stage,
 )
@@ -32,7 +26,7 @@ from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact
 from reifyscene.sync.sync_artifact import SyncArtifact
-from tests.conftest import write_test_video
+from tests.conftest import write_manifest, write_test_video
 
 
 def _touch_video(path: Path) -> Path:
@@ -51,7 +45,7 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
         quality_by_stream={'cam_00': {'sharpness': 0.9}},
         sampled_windows={'cam_00': [(0.0, 1.0)]},
         warnings=['ok'],
-        metadata={'compatibility': {'stage_name': 'ingest'}},
+        metadata={},
     )
     ingest.save()
     loaded_ingest = IngestArtifact.load(ingest.save_dir)
@@ -68,7 +62,7 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
         confidence_by_pair={'cam_00|cam_01': 1.0},
         anchor_stream_id='cam_00',
         notes=['anchored'],
-        metadata={'compatibility': {'stage_name': 'sync'}},
+        metadata={},
     )
     sync.save()
     loaded_sync = SyncArtifact.load(sync.save_dir)
@@ -85,7 +79,7 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
         uncertainty={'n0': {'sigma': 0.1}},
         source_summary={'num_geometry_streams': 1},
         notes=['graph'],
-        metadata={'compatibility': {'stage_name': 'graph'}},
+        metadata={},
     )
     graph.save()
     loaded_graph = GraphArtifact.load(graph.save_dir)
@@ -94,14 +88,48 @@ def test_generic_artifact_roundtrip_for_ingest_sync_and_graph(tmp_path: Path) ->
     assert loaded_graph.node_histories['n0']['frames'] == [0, 1]
 
 
+def test_stage_order_is_a_topological_sort_of_the_declared_dependencies() -> None:
+    """Every stage must run after everything it declares, whatever the order becomes.
+
+    The hardcoded list is a record of the order we chose; this is the property that
+    makes any order correct. It is also the guard that was missing when `tracking`
+    declared `segment` and sat five stages further down than it needed to, with nothing
+    to notice that the placement bought nothing.
+    """
+    registry = build_stage_registry()
+    seen: set[str] = set()
+    for stage in STAGE_ORDER:
+        missing = [d for d in registry[stage].dependencies if d not in seen]
+        assert not missing, f"{stage} runs before its dependencies {missing}"
+        seen.add(stage)
+
+
+def test_every_declared_dependency_is_actually_passed() -> None:
+    """A dependency that is declared and never used is a lie the resume checker believes.
+
+    `tracking` declared `segment` from the start and was only ever handed `ingest` and
+    `pose_refine`, so the masks it needed to seed its query points were sitting one
+    stage upstream, unreachable, for the life of the stage.
+    """
+    import inspect
+
+    registry = build_stage_registry()
+    for stage, spec in registry.items():
+        if not spec.dependencies:
+            continue
+        source = inspect.getsource(spec.run_fn)
+        for dep in spec.dependencies:
+            assert f"'{dep}'" in source, f"{stage} declares {dep!r} but never passes it"
+
+
 def test_stage_registry_dependencies() -> None:
-    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking', 'graph', 'optimization', 'scene', 'render')
+    assert tuple(STAGE_ORDER) == ('ingest', 'sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'tracking', 'reid', 'semantics', 'objects', 'humans', 'graph', 'optimization', 'scene', 'render', 'handles')
     registry = build_stage_registry()
     assert registry['dyn_mask'].dependencies == ('ingest', 'sync')
     assert registry['geometry'].dependencies == ('ingest', 'sync', 'dyn_mask')
     assert registry['pose_refine'].dependencies == ('ingest', 'geometry')
     assert registry['segment'].dependencies == ('ingest', 'pose_refine')
-    assert registry['reid'].dependencies == ('ingest', 'segment')
+    assert registry['reid'].dependencies == ('ingest', 'segment', 'tracking', 'pose_refine')
     assert registry['semantics'].dependencies == ('ingest', 'segment', 'reid')
     assert registry['objects'].dependencies == ('ingest', 'segment', 'reid', 'semantics')
     assert registry['tracking'].dependencies == ('ingest', 'pose_refine', 'segment')
@@ -133,8 +161,9 @@ def test_settings_cover_other_sections_fill_defaults_and_drop_machine_keys() -> 
     # The solver's section is optimizer, not the debug-only optimization section.
     assert effective_settings('optimization', cfg) == {'optimizer': {'relabel_threshold': 0.1}}
     # An absent key and an explicit default fingerprint the same.
-    assert effective_settings('ingest', {}) == effective_settings('ingest', {'default_fps': 30.0})
-    assert effective_settings('ingest', {'default_fps': 25.0}) != effective_settings('ingest', {})
+    assert (effective_settings('ingest', {})
+            == effective_settings('ingest', {'keyframe_stride': None}))
+    assert effective_settings('ingest', {'keyframe_stride': 15}) != effective_settings('ingest', {})
 
 
 def test_settings_that_cannot_reach_the_output_are_excluded() -> None:
@@ -152,13 +181,6 @@ def test_settings_that_cannot_reach_the_output_are_excluded() -> None:
     assert vggt_long['geometry']['chunk_size'] == 16
 
 
-def test_recorded_setting_reads_inside_a_subtree_entry() -> None:
-    record = {'settings': {'tracking': {'max_frames': 96}, 'tracking.frame_stride': 2}}
-    assert recorded_setting(record, 'tracking.max_frames') == 96
-    assert recorded_setting(record, 'tracking.frame_stride') == 2
-    assert recorded_setting(record, 'tracking.window_size') is MISSING
-
-
 def test_a_stage_outside_the_pipeline_fingerprints_its_own_section() -> None:
     assert contract_for('calibration').settings == {'calibration': {}}
 
@@ -172,18 +194,14 @@ def _write_frames(folder: Path, names: list[str]) -> Path:
     return folder
 
 
-def test_input_identity_is_the_frames_read_not_the_folder(tmp_path: Path) -> None:
-    frames = _write_frames(tmp_path / 'a' / '1x', ['0_00000.png', '0_00001.png'])
-    before = input_identity([frames])
-    moved = tmp_path / 'b' / '1x'
-    moved.parent.mkdir()
-    shutil.move(str(frames), str(moved))
-    assert input_identity([moved]) == before  # moved / renamed project folder
-    _write_frames(moved, ['1_00000.png'])  # another camera's frame: not read
-    assert input_identity([moved]) == before
-    target = moved / '0_00001.png'
-    os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 10**9))
-    assert input_identity([moved]) != before  # a frame the decoder reads changed
+def test_a_folder_of_several_cameras_is_refused_without_a_choice(tmp_path: Path) -> None:
+    from reifyscene.ingest.decoder import VideoDecoder
+
+    frames = _write_frames(tmp_path / '1x', ['0_00000.png', '0_00001.png', '1_00000.png'])
+    with pytest.raises(ValueError, match="2 cameras"):
+        VideoDecoder().decode_many([frames])
+    stream = VideoDecoder().decode_many([frames], frames_camera='0')[0]
+    assert stream.stream_id == '0' and stream.num_frames == 2
 
 
 # ------------------------------------------------------------------ a real prior run
@@ -199,7 +217,8 @@ def _run(root: Path, name: str, videos: list[Path], **overrides) -> tuple[Path, 
     for path, value in overrides.items():
         section, key = path.split('.')
         cfg.setdefault(section, {})[key] = value
-    # Every stage, through the registry, as the run script drives them.
+    # Every stage, through the registry, as the run script drives them (manifest first).
+    write_manifest(root / name, cfg)
     pipeline = ReifyScenePipeline(copy.deepcopy(cfg))
     registry = pipeline.stage_registry()
     outputs: dict = {}
@@ -243,7 +262,7 @@ def test_the_same_invocation_resumes(prior, tmp_path) -> None:
     root, run_dir, cfg, video = prior
     plan = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
     assert plan.ok, plan.report()
-    assert all(v.action == 'load' and not v.derived for v in plan.verdicts.values())
+    assert all(v.action == 'load' and not v.notes for v in plan.verdicts.values())
     assert not (tmp_path / 'new').exists()  # the check writes nothing
 
 
@@ -306,19 +325,35 @@ def test_machine_picked_settings_are_pinned_to_the_prior_run(prior, tmp_path) ->
 
 def test_a_cheap_stage_built_from_a_different_upstream_is_rebuilt(prior, tmp_path) -> None:
     root, run_dir, cfg, video = prior
+    other, other_cfg = _run(tmp_path, 'other', [video], **{'humans.score_threshold': 0.6})
+    mixed = tmp_path / 'mixed'
+    shutil.copytree(run_dir, mixed)
+    shutil.rmtree(mixed / 'humans')
+    shutil.copytree(other / 'humans', mixed / 'humans')
+    plan = _check(mixed, tmp_path / 'new', 'scene', copy.deepcopy(other_cfg), [video])
+    assert plan.ok, plan.report()
+    assert plan.verdicts['humans'].action == 'load'
+    for stage in ('graph', 'optimization'):  # no model, pure functions of what is loaded
+        assert plan.verdicts[stage].action == 'rebuild'
+        assert 'built from a different humans artifact' in plan.verdicts[stage].notes[-1]
+    # The rebuilt graph's fingerprint names the loaded humans, so optimization follows it.
+    assert plan.records['graph']['upstream']['humans'] == plan.records['humans']['digest']
+
+
+def test_a_changed_upstream_is_never_followed_by_a_model_stage(prior, tmp_path) -> None:
+    """A tracking artifact from another run: reid, which reads its point tracks, is stale
+    and runs a model, so the resume is rejected -- it is not carried along."""
+    root, run_dir, cfg, video = prior
     other, other_cfg = _run(tmp_path, 'other', [video], **{'lifting.point_conf_threshold': 0.5})
     mixed = tmp_path / 'mixed'
     shutil.copytree(run_dir, mixed)
     shutil.rmtree(mixed / 'tracking')
     shutil.copytree(other / 'tracking', mixed / 'tracking')
     plan = _check(mixed, tmp_path / 'new', 'scene', copy.deepcopy(other_cfg), [video])
-    assert plan.ok, plan.report()
     assert plan.verdicts['tracking'].action == 'load'
-    for stage in ('graph', 'optimization'):  # no model, pure functions of what is loaded
-        assert plan.verdicts[stage].action == 'rebuild'
-        assert 'built from a different tracking artifact' in plan.verdicts[stage].derived[-1]
-    # The rebuilt graph's fingerprint names the loaded tracking, so optimization follows it.
-    assert plan.records['graph']['upstream']['tracking'] == plan.records['tracking']['digest']
+    assert plan.verdicts['reid'].action == 'reject'
+    assert 'built from a different tracking artifact' in plan.verdicts['reid'].problems[0]
+    assert plan.latest_start() == 'reid'
 
 
 def test_a_model_stage_built_from_a_different_upstream_is_rejected(prior, tmp_path) -> None:
@@ -328,11 +363,14 @@ def test_a_model_stage_built_from_a_different_upstream_is_rejected(prior, tmp_pa
     shutil.copytree(run_dir, mixed)
     shutil.rmtree(mixed / 'segment')
     shutil.copytree(other / 'segment', mixed / 'segment')
-    plan = _check(mixed, tmp_path / 'new', 'tracking', copy.deepcopy(other_cfg), [video])
+    plan = _check(mixed, tmp_path / 'new', 'graph', copy.deepcopy(other_cfg), [video])
     assert plan.verdicts['segment'].action == 'load'
-    assert plan.verdicts['reid'].action == 'reject'  # runs a model: not rebuilt behind your back
-    assert 'built from a different segment artifact' in plan.verdicts['reid'].problems[0]
-    assert plan.latest_start() == 'reid'
+    # `tracking` consumes segment now (it seeds its query points from the masks), so it
+    # is the earliest model stage the swap invalidates -- it used to be `reid`.
+    # runs a model: not rebuilt behind your back
+    assert plan.verdicts['tracking'].action == 'reject'
+    assert 'built from a different segment artifact' in plan.verdicts['tracking'].problems[0]
+    assert plan.latest_start() == 'tracking'
 
 
 def test_a_missing_cheap_stage_is_rebuilt(prior, tmp_path) -> None:
@@ -357,7 +395,7 @@ def test_checking_every_stage_reports_the_latest_start(prior, tmp_path) -> None:
     assert 'no humans stage' in plan.verdicts['humans'].problems[0]
     assert plan.latest_start() == 'humans'
     full = _check(run_dir, tmp_path / 'new', 'segment', copy.deepcopy(cfg), [video], stages=every)
-    assert full.latest_start() == 'render'
+    assert full.latest_start() == 'handles'
 
 
 def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> None:
@@ -368,7 +406,7 @@ def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> N
     tracking = materialize_stage(plan, registry['tracking'])
     assert tracking.save_dir == new / 'tracking'
     raw = json.loads((new / 'tracking' / 'artifact.json').read_text())
-    assert raw['save_dir'] == str(new / 'tracking')
+    assert 'save_dir' not in raw                   # a record names no folder: it is in one
     assert raw['metadata']['resume']['loaded_from'] == str(run_dir / 'tracking')
     assert raw['metadata']['contract'] == plan.records['tracking']
     # Everything but artifact.json is byte-for-byte the prior's: no save/load round trip.
@@ -381,77 +419,22 @@ def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> N
     assert changed == ['artifact.json']
 
 
-# ------------------------------------------------------------------ legacy prior runs
+def test_a_run_moved_and_renamed_loads_every_stage_and_names_no_old_path(prior, tmp_path) -> None:
+    """Records name no folder of their own, so a run can be moved or renamed whole."""
+    from reifyscene.api.run_outputs import RunOutputs
 
-def _make_legacy(
-    run_dir: Path, dst: Path, cfg: dict, video: Path, *,
-    stop: str = 'render', stage_cfg_override=None,
-) -> Path:
-    """A copy of a run as the pre-fingerprint code wrote it: compatibility blocks + a manifest."""
-    shutil.copytree(run_dir, dst)
-    signature = {**_legacy_dir_signature(video), 'path': str(video)}
+    root, run_dir, cfg, video = prior
+    moved = tmp_path / 'elsewhere' / 'renamed'
+    shutil.copytree(run_dir, moved)
+    run = RunOutputs.open(moved)
     for stage in STAGE_ORDER:
-        path = dst / stage / 'artifact.json'
-        raw = json.loads(path.read_text())
-        raw['metadata'].pop('contract', None)
-        stage_config = _legacy_stage_config(cfg, stage)
-        if stage_cfg_override and stage in stage_cfg_override:
-            stage_config = stage_cfg_override[stage]
-        raw['metadata']['compatibility'] = {
-            'stage_name': stage,
-            'video_signatures': [signature],
-            'stage_config': stage_config,
-        }
-        path.write_text(json.dumps(raw))
-    manifest = {'video_paths': [str(video)], 'run_dir': str(dst), 'prior_run_dir': None,
-                'start_stage': 'ingest', 'stop_stage': stop, 'config': cfg}
-    (dst / 'run_manifest.json').write_text(json.dumps(manifest))
-    return dst
+        if run.has(stage):
+            assert run.artifact(stage).save_dir == moved / stage
+    for record in moved.rglob('*.json'):
+        assert str(run_dir) not in record.read_text(), record
 
 
-def test_a_legacy_run_resumes_with_derived_fingerprints(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
-    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert plan.ok, plan.report()
-    for verdict in plan.verdicts.values():
-        assert any('fingerprint derived from' in d for d in verdict.derived)
-    # Derived records are the ones a fresh run would write: same digests.
-    for stage, record in plan.records.items():
-        fresh = json.loads((run_dir / stage / 'artifact.json').read_text())['metadata']['contract']
-        assert record['digest'] == fresh['digest'], stage
-
-
-def test_a_legacy_run_whose_project_folder_moved_still_resumes(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    old_input = tmp_path / 'old_project' / video.name
-    old_input.parent.mkdir()
-    shutil.copy2(video, old_input)
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, old_input)
-    renamed = tmp_path / 'new_project' / video.name
-    renamed.parent.mkdir()
-    shutil.move(str(old_input), str(renamed))
-    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [renamed])
-    assert plan.ok, plan.report()
-    assert any('input re-rooted' in d for d in plan.verdicts['ingest'].derived)
-
-
-def test_a_legacy_leftover_stage_is_rejected(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video, stop='graph')
-    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert not plan.ok
-    assert 'left over' in plan.verdicts['optimization'].problems[0]
-    assert plan.latest_start() == 'optimization'
-
-
-def test_a_legacy_stage_the_manifest_did_not_produce_is_rejected(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video,
-                          stage_cfg_override={'tracking': {'max_frames': 99}})
-    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert 'do not match' in plan.verdicts['tracking'].problems[0]
-
+# ------------------------------------------------------------------ legacy prior runs
 
 # ------------------------------------------------------------------ no silent losses
 
@@ -497,60 +480,6 @@ def test_object_embeddings_survive_a_reload(tmp_path: Path) -> None:
     np.testing.assert_array_equal(loaded.objects[0].embedding, vec)
 
 
-def test_a_legacy_dataset_root_that_no_longer_exists_is_matched_by_name(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    spin = tmp_path / 'new_project' / 'spin'
-    spin.mkdir(parents=True)
-    (spin / 'dataset.json').write_text('{}')
-    then = copy.deepcopy(cfg)
-    then['geometry']['dataset_root'] = str(tmp_path / 'old_project' / 'spin')  # gone
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', then, video)
-    now = copy.deepcopy(cfg)
-    now['geometry']['dataset_root'] = str(spin)
-    plan = _check(legacy, tmp_path / 'new', 'scene', now, [video])
-    assert plan.ok, plan.report()
-    assert any('re-rooted by name only' in d for d in plan.verdicts['geometry'].derived)
-    other = copy.deepcopy(now)
-    other['geometry']['dataset_root'] = str(tmp_path / 'elsewhere' / 'windmill')
-    (tmp_path / 'elsewhere' / 'windmill').mkdir(parents=True)
-    assert not _check(legacy, tmp_path / 'new', 'scene', other, [video]).ok
-
-
-def test_an_old_run_is_relifted_and_its_cheap_stages_rebuilt(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
-    plan = _check(legacy, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert plan.ok, plan.report()
-    tracking = plan.verdicts['tracking']
-    assert tracking.action == 'load' and tracking.resave
-    assert any('re-lifted' in d for d in tracking.derived)
-    assert plan.records['tracking']['version'] == contract_for('tracking').version
-    for stage in ('graph', 'optimization'):
-        assert plan.verdicts[stage].action == 'rebuild', stage
-
-
-def test_an_old_scene_is_rejected_with_what_changed(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    legacy = _make_legacy(run_dir, tmp_path / 'legacy', cfg, video)
-    plan = _check(legacy, tmp_path / 'new', 'render', copy.deepcopy(cfg), [video])
-    assert not plan.ok
-    problem = plan.verdicts['scene'].problems[0]
-    assert 'contract version 1 of scene' in problem and 'did not match the cameras' in problem
-    assert plan.latest_start() == 'scene'
-
-
-def test_a_setting_taken_out_of_a_fingerprint_does_not_reject_older_records(prior, tmp_path) -> None:
-    root, run_dir, cfg, video = prior
-    older = tmp_path / 'older'
-    shutil.copytree(run_dir, older)
-    path = older / 'geometry' / 'artifact.json'
-    raw = json.loads(path.read_text())
-    # An older record that still fingerprinted a key the contract now excludes.
-    raw['metadata']['contract']['settings']['geometry']['save_depth_pngs'] = True
-    path.write_text(json.dumps(raw))
-    assert _check(older, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video]).ok
-
-
 def test_vggt_long_scratch_outputs_are_per_run_and_removed(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
@@ -583,31 +512,3 @@ def test_a_run_tracked_under_a_frame_cap_resumes_with_that_cap(prior, tmp_path) 
     assert plan.pins == {'tracking.max_frames': 4}
 
 
-def test_a_revised_geometry_is_followed_downstream_not_rejected(prior, tmp_path, monkeypatch) -> None:
-    from reifyscene.api import requirements as req
-
-    root, run_dir, cfg, video = prior
-    # A content-changing derivation on geometry (as the camera re-timing of an old oracle is).
-    retimed = req.Requirement(
-        "stand-in for the camera clock", check=lambda ctx: "cameras off the ingest clock",
-        derive=lambda ctx: req.Derivation("re-timed", resave=True, revision="camera-clock"),
-    )
-    monkeypatch.setitem(req.REQUIREMENTS, "geometry", (*req.REQUIREMENTS["geometry"], retimed))
-    plan = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert plan.ok, plan.report()
-    assert plan.records['geometry']['revisions'] == ['camera-clock']
-    assert any('follows its geometry' in d for d in plan.verdicts['pose_refine'].derived)
-    assert any('re-lifted' in d for d in plan.verdicts['tracking'].derived)
-    for stage in ('graph', 'optimization'):
-        assert plan.verdicts[stage].action == 'rebuild', stage
-    # Every relinked record names the upstream it now matches.
-    assert plan.records['pose_refine']['upstream']['geometry'] == plan.records['geometry']['digest']
-    assert plan.records['tracking']['upstream']['pose_refine'] == plan.records['pose_refine']['digest']
-    # A revision it cannot follow is refused.
-    other = req.Requirement(
-        "an unfollowable revision", check=lambda ctx: "x",
-        derive=lambda ctx: req.Derivation("changed", resave=True, revision="something-else"),
-    )
-    monkeypatch.setitem(req.REQUIREMENTS, "geometry", (*req.REQUIREMENTS["geometry"][:-1], other))
-    refused = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
-    assert 'cannot follow' in refused.verdicts['pose_refine'].problems[0]
