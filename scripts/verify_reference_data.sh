@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validate a manually-downloaded reference dataset sequence for the room4d
+# Validate a manually-downloaded reference dataset sequence for the reifyscene
 # comparison tool. We deliberately do NOT auto-download: the Shape of Motion
 # datasets live in Google Drive folders that are simplest to grab in a browser.
 # This script just records WHERE to get the data and verifies that an extracted

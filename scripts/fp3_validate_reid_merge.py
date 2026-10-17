@@ -22,7 +22,7 @@ Method (synthetic occlusion on real tracks):
 
 Run (GPU; SAM 2 + DINOv2 are inference-only, light):
     python scripts/fp3_validate_reid_merge.py \
-        --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
+        --dataset-root dycheck_iphone/paper-windmill \
         --max-frames 24 --top-k 5 --threshold 0.6
 """
 
@@ -35,16 +35,17 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.perception.instance.instance_artifact import InstanceArtifact
-from room4d.perception.reid.dino_reid import DinoReid
+from reifyscene.common import data_dir
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.reid.dino_reid import DinoReid
 
 
 def _segment_windmill(rgbs_np: np.ndarray):
     """SAM 2 over the frames -> (observations, mask_arrays). Mirrors f0_validate."""
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     images = [rgbs_np[i] for i in range(rgbs_np.shape[0])]
 
@@ -101,7 +102,8 @@ def _split_long_tracks(observations, *, top_k: int, min_len: int):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset-root", required=True)
+    ap.add_argument("--dataset-root", required=True,
+                    help="the sequence's name in the data directory's datasets/")
     ap.add_argument("--max-frames", type=int, default=24)
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--min-len", type=int, default=8)
@@ -110,6 +112,7 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--model-id", default="facebook/dinov2-large")
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     # 1. Real windmill frames.
     provider = DyCheckGeometryProvider(args.dataset_root, factor=1, depth_type="depth_anything_colmap", camera_type="refined")
@@ -136,10 +139,10 @@ def main() -> None:
             return images[int(idx)]
 
     ingest = IngestArtifact(
-        run_id="fp3", stage_name="ingest", save_dir=Path("/tmp/fp3_validate"),
+        run_id="fp3", stage_name="ingest", save_dir=data_dir.path(data_dir.CACHE, "fp3_validate"),
         streams=[VideoStreamRef(stream_id="cam_00", video_path=Path("windmill"), fps=20.0, num_frames=n_frames, width=w, height=h, has_audio=False)],
     )
-    art = InstanceArtifact(run_id="fp3", stage_name="segment", save_dir=Path("/tmp/fp3_validate/seg"), observations=split_obs, mask_arrays=masks)
+    art = InstanceArtifact(run_id="fp3", stage_name="segment", save_dir=data_dir.path(data_dir.CACHE, "fp3_validate/seg"), observations=split_obs, mask_arrays=masks)
     art.rebuild_indices()
 
     print(f"[4] DINOv2 embed + merge (model={args.model_id}, tau={args.threshold})...")

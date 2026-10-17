@@ -1,13 +1,13 @@
 """FP6b step-1 validation: COLMAP-SfM pose rung as a native swap vs GT extrinsics.
 
-Productionizes the FP6b egomotion spike (`spike_fp6b_egomotion/`) through the shipped
+Productionizes the FP6b egomotion spike through the shipped
 `ColmapPoseInitializer.reconstruct`: monocular hloc+COLMAP with intrinsics fixed from the
 GT focal, scored vs the dataset GT camera poses. Reports registered-frame fraction +
 gauge-free pairwise-relative rotation (the M0 metric that caught the calibration arc's
 silent cam-12 miss) + Sim(3)-aligned APE (monocular SfM is up-to-scale).
 
-Run (GPU; hloc/pycolmap via setup_room4d.sh --with-calibration):
-    python scripts/fp6b_validate_colmap.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 60
+Run (GPU; hloc/pycolmap via setup_reifyscene.sh --with-calibration):
+    python scripts/fp6b_validate_colmap.py --dataset-root dycheck_iphone/spin --max-frames 60
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.common import data_dir
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 
 
 def geodesic_deg(Ra: np.ndarray, Rb: np.ndarray) -> float:
@@ -43,12 +44,15 @@ def umeyama(X: np.ndarray, Y: np.ndarray):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset-root", default="../data/shape_of_motion/iphone/spin")
+    ap.add_argument("--dataset-root", default="dycheck_iphone/spin",
+                    help="the sequence's name in the data directory's datasets/")
     ap.add_argument("--factor", type=int, default=1)
     ap.add_argument("--split", default="train")
     ap.add_argument("--max-frames", type=int, default=60)
-    ap.add_argument("--work-dir", default="/tmp/fp6b_colmap_validate")
+    ap.add_argument("--work-dir", default="fp6b_colmap_validate",
+                    help="a name in the data directory's cache/")
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     ds = DatasetGeometryInitializer({"dataset_root": args.dataset_root, "factor": args.factor, "split": args.split})
     specs = ds.split_frames()
@@ -62,7 +66,7 @@ def main() -> None:
     cam_params = f"{intr.fx},{intr.fy},{intr.cx},{intr.cy}"
 
     # materialize index-named frames for the shipped reconstruct() core
-    work = Path(args.work_dir)
+    work = data_dir.path(data_dir.CACHE, args.work_dir)
     img_dir = work / "images"
     if img_dir.exists():
         import shutil
@@ -72,7 +76,7 @@ def main() -> None:
         Image.fromarray(ds.load_rgb(name)).save(img_dir / f"{i:06d}.png")
 
     print(f"\n=== FP6b step-1 COLMAP pose rung vs GT ({Path(args.dataset_root).name}, {len(names)} frames, fixed intrinsics) ===")
-    rung = ColmapPoseInitializer({"camera_params": cam_params, "fix_intrinsics": True, "colmap_work_dir": str(work)})
+    rung = ColmapPoseInitializer({"camera_params": cam_params, "fix_intrinsics": True, "colmap_work_dir": args.work_dir})
     poses = rung.reconstruct(img_dir)  # {index: (T_world_cam, intr)}
 
     common = [i for i in range(len(names)) if i in poses]

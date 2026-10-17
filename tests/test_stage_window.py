@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from room4d.api.resume import resolve_stage_window
-from room4d.api.stages import STAGE_ORDER
+from reifyscene.api.resume import resolve_stage_window
+from reifyscene.api.stages import STAGE_ORDER
 
 
 def _window(start: str, stop: str) -> list[str]:
@@ -26,7 +26,7 @@ def test_single_stage_window() -> None:
 
 
 def test_mid_window_excludes_endpoints_outside_range() -> None:
-    assert _window('sync', 'tracking') == ['sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'reid', 'semantics', 'objects', 'humans', 'tracking']
+    assert _window('sync', 'tracking') == ['sync', 'dyn_mask', 'geometry', 'pose_refine', 'segment', 'tracking']
 
 
 def test_pose_refine_sits_between_geometry_and_tracking() -> None:

@@ -1,4 +1,4 @@
-"""Unit tests for room4d/calibration/gt_scoring.py (calibration arc M0-minimal).
+"""Unit tests for reifyscene/calibration/gt_scoring.py (calibration arc M0-minimal).
 
 Pose-math trust comes from tests (design decision D6): the Umeyama fixture
 below is pinned against an independent oracle — evo v1.36.5
@@ -12,20 +12,19 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-import room4d.calibration.gt_scoring as gs
-from room4d.calibration.model_io import ParsedColmapModel, qvec_to_rotmat
+import reifyscene.calibration.gt_scoring as gs
+from reifyscene.calibration.model_io import ParsedColmapModel, qvec_to_rotmat
+from tests.conftest import real_data
 
-# Real-data tests gate on the data root (overridable, matching the
-# env-gated optional-test convention); they skip cleanly elsewhere.
-_DATA = Path(os.environ.get("ROOM4D_DATA", "/path/to/data"))
-Z_NVIDIA = _DATA / "shape_of_motion" / "nvidia" / "Balloon1"
-Z_IPHONE = _DATA / "shape_of_motion" / "iphone" / "paper-windmill"
+# Real-data tests read datasets from the data directory the tests were started with; they
+# skip cleanly without one.
+Z_NVIDIA = real_data("datasets/nvidia_dynamic/Balloon1")
+Z_IPHONE = real_data("datasets/dycheck_iphone/paper-windmill")
 
 
 def _rotvec_to_rotmat(axis: np.ndarray, theta: float) -> np.ndarray:
@@ -615,17 +614,19 @@ def test_ensure_text_model_search_and_exit(tmp_path: Path) -> None:
     assert mod.ensure_text_model(empty, tmp_path / "out") == nested
 
 
-def test_cli_not_alignable_exit_and_output_override(tmp_path: Path) -> None:
+def test_cli_not_alignable_exit_and_output_override(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
     frames = [f"{c}_00000" for c in range(2)]  # only 2 cameras -> <3 matched
-    _write_synthetic_sequence(tmp_path / "seq", frames)
-    cams = gs.load_gt_cameras("nvidia", tmp_path / "seq", frames)
+    _write_synthetic_sequence(tmp_path / "datasets" / "seq", frames)
+    cams = gs.load_gt_cameras("nvidia", tmp_path / "datasets" / "seq", frames)
     rig = {c.image_name: (c.R_w2c, c.center) for c in cams}
     _write_colmap_text_model(tmp_path / "mock_model", rig)
     with pytest.raises(SystemExit) as exc:
         _run_cli([
             "--dataset", "nvidia",
-            "--data-dir", str(tmp_path / "seq"),
-            "--run-dir", str(tmp_path / "run"),
+            "--data-dir", "seq",
+            "--run-dir", "run",
             "--timesteps", "1",
             "--mock-sparse-model-dir", str(tmp_path / "mock_model"),
         ])
@@ -633,17 +634,17 @@ def test_cli_not_alignable_exit_and_output_override(tmp_path: Path) -> None:
 
     # --output override with an alignable 4-camera rig
     frames4 = [f"{c}_00000" for c in range(4)]
-    _write_synthetic_sequence(tmp_path / "seq4", frames4)
-    cams4 = gs.load_gt_cameras("nvidia", tmp_path / "seq4", frames4)
+    _write_synthetic_sequence(tmp_path / "datasets" / "seq4", frames4)
+    cams4 = gs.load_gt_cameras("nvidia", tmp_path / "datasets" / "seq4", frames4)
     rig4 = {c.image_name: (c.R_w2c, c.center) for c in cams4}
     _write_colmap_text_model(tmp_path / "mock4", rig4)
-    custom = tmp_path / "elsewhere" / "score.json"
+    custom = tmp_path / "runs" / "elsewhere" / "score.json"
     _run_cli([
         "--dataset", "nvidia",
-        "--data-dir", str(tmp_path / "seq4"),
-        "--run-dir", str(tmp_path / "run4"),
+        "--data-dir", "seq4",
+        "--run-dir", "run4",
         "--timesteps", "1",
-        "--output", str(custom),
+        "--output", "elsewhere/score.json",
         "--mock-sparse-model-dir", str(tmp_path / "mock4"),
     ])
     assert json.loads(custom.read_text())["alignable"] is True
@@ -655,7 +656,7 @@ def test_cli_not_alignable_exit_and_output_override(tmp_path: Path) -> None:
 
 
 def test_runner_image_options_injection() -> None:
-    from room4d.calibration.hloc_colmap import HlocColmapSfMRunner
+    from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
 
     # no cfg -> empty (existing video path unchanged: run() passes
     # `image_options or None`, so {} still becomes None downstream)
@@ -710,11 +711,14 @@ def _run_cli(argv: list[str]) -> None:
         _sys.argv = old
 
 
-def test_cli_end_to_end_with_mock_model(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_end_to_end_with_mock_model(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
     frames = [f"{c}_{t:05d}" for c in range(4) for t in range(3)]
-    _write_synthetic_sequence(tmp_path / "seq", frames)
+    _write_synthetic_sequence(tmp_path / "datasets" / "seq", frames)
     cams = gs.load_gt_cameras(
-        "nvidia", tmp_path / "seq", gs.select_frames("nvidia", frames, timesteps=1)
+        "nvidia", tmp_path / "datasets" / "seq", gs.select_frames("nvidia", frames, timesteps=1)
     )
     # the mock SfM "recovers" a gauge-transformed version of GT
     gt_rig = {c.image_name: (c.R_w2c, c.center) for c in cams}
@@ -722,11 +726,11 @@ def test_cli_end_to_end_with_mock_model(tmp_path: Path, capsys: pytest.CaptureFi
     est = _gauge_transform(gt_rig, 1.8, G, np.array([2.0, -1.0, 0.5]))
     _write_colmap_text_model(tmp_path / "mock_model", est)
 
-    run_dir = tmp_path / "run"
+    run_dir = tmp_path / "runs" / "run"
     _run_cli([
         "--dataset", "nvidia",
-        "--data-dir", str(tmp_path / "seq"),
-        "--run-dir", str(run_dir),
+        "--data-dir", "seq",
+        "--run-dir", "run",
         "--timesteps", "1",
         "--mock-sparse-model-dir", str(tmp_path / "mock_model"),
     ])
@@ -741,27 +745,28 @@ def test_cli_end_to_end_with_mock_model(tmp_path: Path, capsys: pytest.CaptureFi
     assert result["metrics"]["sim3_ape"]["scale"] == pytest.approx(1 / 1.8, rel=1e-6)
 
 
-def test_cli_fix_intrinsics_modes(tmp_path: Path) -> None:
+def test_cli_fix_intrinsics_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
     frames = [f"{c}_{t:05d}" for c in range(4) for t in range(1)]
-    _write_synthetic_sequence(tmp_path / "seq", frames)
-    cams = gs.load_gt_cameras("nvidia", tmp_path / "seq", frames)
+    _write_synthetic_sequence(tmp_path / "datasets" / "seq", frames)
+    cams = gs.load_gt_cameras("nvidia", tmp_path / "datasets" / "seq", frames)
     gt_rig = {c.image_name: (c.R_w2c, c.center) for c in cams}
     _write_colmap_text_model(tmp_path / "mock_model", gt_rig)
 
     # shared intrinsics -> fixed-gt mode recorded in the result
     _run_cli([
         "--dataset", "nvidia",
-        "--data-dir", str(tmp_path / "seq"),
-        "--run-dir", str(tmp_path / "run-fixed"),
+        "--data-dir", "seq",
+        "--run-dir", "run-fixed",
         "--timesteps", "1",
         "--fix-intrinsics",
         "--mock-sparse-model-dir", str(tmp_path / "mock_model"),
     ])
-    result = json.loads((tmp_path / "run-fixed" / "calibration_gt_score.json").read_text())
+    result = json.loads((tmp_path / "runs" / "run-fixed" / "calibration_gt_score.json").read_text())
     assert result["intrinsics_mode"] == "fixed-gt"
 
     # per-frame intrinsics (iphone-style drift) -> --fix-intrinsics refuses
-    drift = tmp_path / "drift"
+    drift = tmp_path / "datasets" / "drift"
     _write_synthetic_sequence(drift, ["0_00000"], focal=500.0)
     (drift / "camera" / "0_00001.json").write_text(
         (drift / "camera" / "0_00000.json").read_text().replace("500.0", "555.0")
@@ -770,8 +775,8 @@ def test_cli_fix_intrinsics_modes(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         _run_cli([
             "--dataset", "iphone",
-            "--data-dir", str(drift),
-            "--run-dir", str(tmp_path / "run-refuse"),
+            "--data-dir", "drift",
+            "--run-dir", "run-refuse",
             "--num-frames", "2",
             "--fix-intrinsics",
             "--mock-sparse-model-dir", str(tmp_path / "mock_model"),
@@ -779,12 +784,13 @@ def test_cli_fix_intrinsics_modes(tmp_path: Path) -> None:
     assert "shared intrinsics" in str(exc.value)
 
 
-def test_cli_rejects_bad_dataset_dir(tmp_path: Path) -> None:
+def test_cli_rejects_bad_dataset_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
         _run_cli([
             "--dataset", "nvidia",
-            "--data-dir", str(tmp_path / "nope"),
-            "--run-dir", str(tmp_path / "run"),
+            "--data-dir", "nope",
+            "--run-dir", "run",
         ])
     assert "GT collection failed" in str(exc.value)
 
@@ -794,7 +800,7 @@ def test_cli_rejects_bad_dataset_dir(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not Z_NVIDIA.exists(), reason="Balloon1 not on disk")
+@pytest.mark.skipif(Z_NVIDIA is None, reason="Balloon1 not in the data directory")
 def test_real_balloon1_adapter() -> None:
     frames = gs.enumerate_frames("nvidia", Z_NVIDIA)
     assert {f.split("_")[0] for f in frames} == {"0", "1", "2", "3"}
@@ -805,7 +811,7 @@ def test_real_balloon1_adapter() -> None:
     assert rep is not None and rep.focal == pytest.approx(804.5333, abs=1e-3)
 
 
-@pytest.mark.skipif(not Z_IPHONE.exists(), reason="paper-windmill not on disk")
+@pytest.mark.skipif(Z_IPHONE is None, reason="paper-windmill not in the data directory")
 def test_real_paper_windmill_adapter() -> None:
     frames = gs.enumerate_frames("iphone", Z_IPHONE)
     selected = gs.select_frames("iphone", frames, num_frames=6)

@@ -1,6 +1,6 @@
 """Validate the native 3D-track lift against SoM's cached lifted tracks.
 
-Runs room4d's native lift (``room4d.lifting.native_track_lift``) on a DyCheck
+Runs reifyscene's native lift (``reifyscene.lifting.native_track_lift``) on a DyCheck
 sequence and compares the foreground trajectories + scene normalization to the
 Shape-of-Motion cache that produced the *borrowed* init bundle
 (``flow3d_preprocessed/cache/tracks_3d_40000.pth`` + ``scene_norm_dict.pth``).
@@ -11,21 +11,22 @@ come from a random track subsample, so they're checked for agreement within a
 tolerance rather than equality. This is the PR-A acceptance check; the full
 mPSNR≈20.7 validation lands with the initializer in PR-B.
 
-Example (room4d env):
+Example (reifyscene env):
     python scripts/check_native_lift.py \
-        --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
+        --dataset-root dycheck_iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --seed 0
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import numpy as np
 import torch
 
-from room4d.lifting.native_track_lift import build_native_init_inputs
+from reifyscene.common import data_dir
+from reifyscene.ingest.datasets import DyCheckSequence
+from reifyscene.lifting.native_track_lift import build_native_init_inputs
 
 
 def _bbox(xyz: torch.Tensor) -> str:
@@ -36,7 +37,8 @@ def _bbox(xyz: torch.Tensor) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Validate native track lift vs SoM cache")
-    ap.add_argument("--dataset-root", required=True)
+    ap.add_argument("--dataset-root", required=True,
+                    help="the DyCheck sequence, by its name in the data directory's datasets/")
     ap.add_argument("--factor", type=int, default=1)
     ap.add_argument("--num-fg", type=int, default=40_000)
     ap.add_argument("--num-bg", type=int, default=100_000)
@@ -44,6 +46,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     print(f"native lift: {args.dataset_root} (factor={args.factor}, num_fg={args.num_fg}, camera={args.camera_type})")
     tracks, bg, cameras, norm = build_native_init_inputs(
@@ -60,7 +63,7 @@ def main() -> None:
     print(f"  fg xyz    : {_bbox(tracks.xyz)}")
     print(f"  train cams: {len(cameras['train'].frame_names)}  val cams: {len(cameras['val'].frame_names)}")
 
-    cache_dir = Path(args.dataset_root) / "flow3d_preprocessed" / "cache"
+    cache_dir = DyCheckSequence(args.dataset_root).preprocessed / "cache"
     snd_path = cache_dir / "scene_norm_dict.pth"
     trk_path = cache_dir / f"tracks_3d_{args.num_fg}.pth"
     if not (snd_path.exists() and trk_path.exists()):

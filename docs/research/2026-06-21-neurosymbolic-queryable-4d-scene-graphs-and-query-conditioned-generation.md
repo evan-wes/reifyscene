@@ -15,7 +15,7 @@ The literature splits into two mature halves that **do not meet**:
 
 The specific intersection — *answer an NL query about a reconstructed **dynamic** scene by **generating a novel view/video**, driven by a **queryable temporal scene graph*** — is **essentially undemonstrated end-to-end**; it is only assemblable from parts. (Confidence: **medium** — this is an absence-of-evidence synthesis over the surveyed set, not a directly cited negative result.)
 
-The unclaimed ground is the **conditioning interface**: turning a symbolic/temporal query plan into a *faithful* generated rendering, plus an **evaluation** for query-conditioned generation. This aligns directly with room4d's "render-as-answer" thesis.
+The unclaimed ground is the **conditioning interface**: turning a symbolic/temporal query plan into a *faithful* generated rendering, plus an **evaluation** for query-conditioned generation. This aligns directly with reifyscene's "render-as-answer" thesis.
 
 ---
 
@@ -95,9 +95,9 @@ All four are about **the conditioning interface**:
 
 ---
 
-## Relevance to room4d
+## Relevance to reifyscene
 
-The conditioning interface (symbolic 4D query plan → *faithful* 4D generation) and its evaluation are the un-claimed ground, and they line up with room4d's render-as-answer thesis. The proven reconstruction/render chain (geometry → tracking/lifting → motion init → static/dynamic Gaussian training) is the assembly backbone; the **graph (queryable substrate) + query (neurosymbolic plan → conditioned render) stages** are where a genuine contribution would sit. This review is the input to the full-pipeline architecture design for those stages.
+The conditioning interface (symbolic 4D query plan → *faithful* 4D generation) and its evaluation are the un-claimed ground, and they line up with reifyscene's render-as-answer thesis. The proven reconstruction/render chain (geometry → tracking/lifting → motion init → static/dynamic Gaussian training) is the assembly backbone; the **graph (queryable substrate) + query (neurosymbolic plan → conditioned render) stages** are where a genuine contribution would sit. This review is the input to the full-pipeline architecture design for those stages.
 
 ---
 
@@ -161,7 +161,7 @@ The foundations pass made the field look near-empty at the intersection; it isn'
 ## The gap, sharpened — and the wedge
 Every component exists, but the halves are **disjoint**: generation conditions on geometry; reasoning outputs text/actions; language-4D does querying/editing, not generation-as-answer. **No 2024–2026 system closes** query → temporal/4D scene graph + neurosymbolic reasoning → generated novel-view video answer.
 
-**The missing piece is a graph→geometry compiler:** converting a 4D scene graph (4D-PSG / DyGEnc-style temporal graphs) into the explicit geometric control signals (point-cloud caches, per-object 3D-Gaussian trajectories, camera trajectories) that the 2026 world models (VerseCrafter / LiveWorld / GEN3C / Vista4D) already consume. **Nobody does this** — it is the clearest room4d wedge candidate. A second, lighter wedge: **language-condition the world model's control adapter** (VerseCrafter's GeoAdapter / LiveWorld's state adapter) instead of feeding only geometry, combined with 4D LangSplat's MLLM-caption open-vocab semantics.
+**The missing piece is a graph→geometry compiler:** converting a 4D scene graph (4D-PSG / DyGEnc-style temporal graphs) into the explicit geometric control signals (point-cloud caches, per-object 3D-Gaussian trajectories, camera trajectories) that the 2026 world models (VerseCrafter / LiveWorld / GEN3C / Vista4D) already consume. **Nobody does this** — it is the clearest reifyscene wedge candidate. A second, lighter wedge: **language-condition the world model's control adapter** (VerseCrafter's GeoAdapter / LiveWorld's state adapter) instead of feeding only geometry, combined with 4D LangSplat's MLLM-caption open-vocab semantics.
 
 **Evaluation gap (still open):** no 2024–2026 benchmark jointly scores *correctness w.r.t. the query* AND *fidelity to the reconstructed scene* of a generated answer (text-QA benchmarks score answers; PSNR/SSIM/LPIPS/TSED score pixels — neither scores both). Recent benchmark/eval candidates to dig into: [arXiv:2511.13704](https://arxiv.org/abs/2511.13704), [2601.00092](https://arxiv.org/pdf/2601.00092), [2602.08971](https://arxiv.org/html/2602.08971), [2603.00515](https://arxiv.org/pdf/2603.00515), [2512.05513](https://arxiv.org/pdf/2512.05513), [2503.11094](https://arxiv.org/html/2503.11094v4).
 

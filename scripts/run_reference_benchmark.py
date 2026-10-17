@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run a reference 4D reconstruction benchmark and emit a normalized result.
 
-This is the room4d-side wrapper around the vendored Shape of Motion repo
+This is the reifyscene-side wrapper around the vendored Shape of Motion repo
 (third_party/shape-of-motion, installed into an isolated conda env by
 scripts/setup_reference_tool.sh). It turns a processed dataset sequence into a
-normalized ``reference_benchmark.json`` that room4d's own renderer results can
+normalized ``reference_benchmark.json`` that reifyscene's own renderer results can
 be compared against.
 
 Pipeline:
@@ -23,26 +23,32 @@ Pipeline:
   4. write ``reference_benchmark.json`` into the run directory
 
 The JSON schema (``reference_benchmark_v1``) is the comparison contract:
-room4d's renderer evaluation should emit the same shape so that
+reifyscene's renderer evaluation should emit the same shape so that
 ``--compare a.json b.json`` can score any two methods on the same sequence.
 
 This script needs only the Python stdlib and may run from any environment;
 all heavy work happens in the reference conda env via ``conda run``.
 
+Names are inside the data directory ($REIFYSCENE_DATA_DIR): --data-dir in datasets/,
+--run-dir and --output in reference/, and --compare's files by their path in the data
+directory itself.
+
 Examples:
   # benchmark (reuses an existing trained run when present)
   python scripts/run_reference_benchmark.py \
-    --data-dir .../iphone/paper-windmill \
-    --run-dir  .../runs/paper-windmill-full
+    --data-dir dycheck_iphone/paper-windmill \
+    --run-dir  som_runs/paper-windmill-full
 
   # NVIDIA Dynamic Scenes sequence (monocular protocol: trains on camera 0,
   # scores novel views on held-out cameras 1-3)
   python scripts/run_reference_benchmark.py --dataset nvidia \
-    --data-dir .../nvidia/Balloon1 \
-    --run-dir  .../runs/balloon1-full
+    --data-dir nvidia_dynamic/Balloon1 \
+    --run-dir  som_runs/balloon1-full
 
-  # compare two results (e.g. room4d vs the reference)
-  python scripts/run_reference_benchmark.py --compare room4d.json reference.json
+  # compare two results (e.g. reifyscene vs the reference)
+  python scripts/run_reference_benchmark.py --compare \
+    runs/<run>/render/reference_benchmark.json \
+    reference/som_runs/paper-windmill-full/reference_benchmark.json
 """
 
 from __future__ import annotations
@@ -63,22 +69,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOM_DIR = REPO_ROOT / "third_party" / "shape-of-motion"
 # Must match the CONDA_ENV_NAME default in scripts/setup_reference_tool.sh.
-DEFAULT_CONDA_ENV = "room4d_som_ref"
+DEFAULT_CONDA_ENV = "reifyscene_som_ref"
 
 # The reference_benchmark_v1 contract (schema id, metric directions, compare)
-# lives in room4d so this Shape-of-Motion emitter and room4d's own renderer eval
+# lives in reifyscene so this Shape-of-Motion emitter and reifyscene's own renderer eval
 # share one source of truth.
 sys.path.insert(0, str(REPO_ROOT))
-from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  # noqa: E402
+from reifyscene.common.data_dir import DATASETS, REFERENCE, from_record  # noqa: E402
+from reifyscene.common.data_dir import path as data_path  # noqa: E402
+from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import (  # noqa: E402
     HIGHER_IS_BETTER,
     SCHEMA,
     compare,
 )
 # Written into the run dir by this wrapper after run_training exits 0. SoM
 # itself writes checkpoints/last.ckpt at epoch 0 and every 200 steps, so a
-# bare checkpoint does NOT prove training completed — only this sentinel
-# (or final-epoch video detection, for runs predating it) does.
-TRAINING_COMPLETE_SENTINEL = ".room4d_training_complete"
+# bare checkpoint does NOT prove training completed — only this sentinel does.
+TRAINING_COMPLETE_SENTINEL = ".reifyscene_training_complete"
 
 # evaluate_iphone.py prints "mean <name>: <float>" lines; these patterns are
 # stable at the pinned SoM commit (see setup_reference_tool.sh SOM_COMMIT).
@@ -181,10 +188,7 @@ def find_conda() -> str:
     found = shutil.which("conda")
     if found:
         return found
-    fallback = Path.home() / "miniconda3" / "condabin" / "conda"
-    if fallback.is_file():
-        return str(fallback)
-    sys.exit("conda executable not found (checked CONDA_EXE, PATH, $HOME/miniconda3).")
+    sys.exit("conda executable not found (checked CONDA_EXE and PATH).")
 
 
 def conda_run_cmd(conda: str, env: str, *args: str) -> list[str]:
@@ -296,23 +300,17 @@ def completed_epochs(run_dir: Path) -> str | None:
     SoM writes checkpoints/last.ckpt at initialization and every 200 steps,
     so an interrupted run leaves a checkpoint plus stale results/ behind —
     reusing those would silently present a half-trained model as the
-    reference baseline. Completion is proven by either:
-    - the sentinel this wrapper writes after run_training exits 0 (its body
-      records the epoch schedule, so a 5-epoch smoke run can never be reused
-      as a full baseline), or
-    - (runs predating the sentinel) the final-epoch video dir existing, with
-      the epoch count read from the run's own cfg.yaml — reported as the
-      label of the schedule the run actually used.
+    reference baseline. Completion is proven only by the sentinel this wrapper
+    writes after run_training exits 0; its body records the epoch schedule, so a
+    5-epoch smoke run can never be reused as a full baseline.
     """
     sentinel = run_dir / TRAINING_COMPLETE_SENTINEL
-    if sentinel.exists():
-        return sentinel.read_text().strip() or "default"
-    epochs = trained_num_epochs(run_dir)
-    if epochs is not None and (run_dir / "videos" / f"epoch_{epochs - 1:04d}").is_dir():
-        # Label SoM's default schedule accordingly so reuse against a
-        # default-schedule request matches.
-        return "default" if epochs == SOM_DEFAULT_EPOCHS else str(epochs)
-    return None
+    if not sentinel.exists():
+        return None
+    label = sentinel.read_text().strip()
+    if not label:
+        raise ValueError(f"{sentinel} records no epoch schedule")
+    return label
 
 
 def clear_run_state(run_dir: Path) -> None:
@@ -346,7 +344,7 @@ def clear_run_state(run_dir: Path) -> None:
         event_file.unlink()
 
 
-RUN_LOCK_NAME = ".room4d_benchmark.lock"
+RUN_LOCK_NAME = ".reifyscene_benchmark.lock"
 
 
 def acquire_run_lock(run_dir: Path) -> int:
@@ -644,8 +642,8 @@ def som_pinned_commit(som_dir: Path) -> str:
 
 
 def benchmark(args: argparse.Namespace) -> None:
-    data_dir = Path(args.data_dir).expanduser().resolve()
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    data_dir = data_path(DATASETS, args.data_dir)
+    run_dir = data_path(REFERENCE, args.run_dir)
     som_dir = Path(args.som_dir).expanduser().resolve()
     seq_name = args.seq_name or data_dir.name
 
@@ -808,8 +806,9 @@ def _locked_benchmark(
             if args.dataset == "nvidia"
             else {"source": "evaluate_iphone", "resolution_factor": 1}
         ),
-        "data_dir": str(data_dir),
-        "run_dir": str(run_dir),
+        # by their names in the data directory: a result never names a path on a machine
+        "data_dir": args.data_dir,
+        "run_dir": args.run_dir,
         "epochs": completed_epochs(run_dir) or requested,
         "metrics": metrics,
         "videos": {"rgb": latest_rgb_video(run_dir)},
@@ -822,7 +821,7 @@ def _locked_benchmark(
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     out_path = (
-        Path(args.output).expanduser().resolve()
+        data_path(REFERENCE, args.output)
         if args.output
         else run_dir / "reference_benchmark.json"
     )
@@ -842,12 +841,15 @@ def _locked_benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--data-dir", help="Processed sequence dir (see --dataset for the expected format)")
+    parser.add_argument("--data-dir",
+                        help="Processed sequence, by name in datasets/ "
+                        "(see --dataset for the format)")
     parser.add_argument(
         "--dataset", choices=sorted(DATASET_LAYOUTS), default="iphone",
         help="Processed dataset format of --data-dir (default: iphone)",
     )
-    parser.add_argument("--run-dir", help="Training/eval output dir (reused when training completed there)")
+    parser.add_argument("--run-dir", help="Training/eval output, by name in reference/ "
+                        "(reused when training completed there)")
     parser.add_argument("--seq-name", help="Sequence name (default: data-dir basename)")
     parser.add_argument("--som-dir", default=str(DEFAULT_SOM_DIR), help="Shape of Motion checkout")
     parser.add_argument("--conda-env", default=DEFAULT_CONDA_ENV, help="Reference conda env name")
@@ -857,15 +859,17 @@ def main() -> None:
         help="Clear checkpoints/results/videos and train from scratch (a plain "
         "re-run RESUMES an incomplete run instead)",
     )
-    parser.add_argument("--output", help="Write the result JSON here instead of run-dir")
+    parser.add_argument("--output", help="Write the result JSON here (a name in reference/) "
+                        "instead of run-dir")
     parser.add_argument(
         "--compare", nargs=2, metavar=("A.json", "B.json"),
-        help="Compare two benchmark JSONs and exit (no training/eval)",
+        help="Compare two benchmark JSONs (by their path in the data directory) and exit "
+        "(no training/eval)",
     )
     args = parser.parse_args()
 
     if args.compare:
-        compare(*args.compare)
+        compare(*(str(from_record(p)) for p in args.compare))
         return
     if not args.data_dir or not args.run_dir:
         parser.error("--data-dir and --run-dir are required (unless using --compare)")

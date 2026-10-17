@@ -1,0 +1,90 @@
+# DAVIS inventory benchmark: build the entity inventory for every sequence, then score
+# it against the ground-truth masks (scripts/benchmark_inventory.py).
+#
+# Differs from davis_graph_loop.yaml in one setting and one stage window. Sapiens dense is
+# off: it is 48% of a run's time -- 137 s of a 47-frame clip -- and the graph reads a
+# single boolean from it, because entity positions come from the geometry's pointmaps.
+# Dropping to the keypoint rung keeps the human/object split, which the inventory needs.
+# Runs stop at `graph`; scene and render are a further 27% and answer a different
+# question. benchmarks/README.md has the command that builds them.
+
+run:
+  name: reifyscene_dev
+
+dataset:
+  keyframe_stride: 15
+
+humans:
+  use_sapiens: false   # keypoint rung; see the header
+
+models:
+  geometry_backend: vggt
+  tracker_backend: cotracker
+  use_densepose: true
+  use_smpl: true
+  detect_objects: true
+
+
+geometry:
+  ground_plane:
+    enabled: true
+    max_frames: 24
+    max_points_per_frame: 3000
+    ransac_iterations: 160
+    distance_threshold: 0.035
+    min_inlier_ratio: 0.06
+    min_alignment_cos: 0.45
+    alignment_weight: 0.18
+    camera_up_axis: -y
+    random_seed: 7
+    manual_up_vector: null
+    lock_gravity_vector: false
+    floor_height_quantile: 0.06
+    max_saved_candidates: 12
+
+
+calibration:
+  sampling:
+    sample_spacing_sec: 0.75
+    max_frames_per_stream: 48
+    image_max_dim: 960
+    prefer_static_frames: true
+    static_diff_threshold: 16.0
+    min_sharpness: 8.0
+  hloc_colmap:
+    retrieval_conf: netvlad
+    feature_conf: superpoint_aachen
+    matcher_conf: superglue
+    retrieval_top_k: 20
+    camera_mode: PER_FOLDER
+    camera_model: SIMPLE_RADIAL
+    fix_intrinsics: false
+    verbose: false
+
+graph:
+  # A point track is evidence for the person or object whose mask it sits inside: on at
+  # least this fraction of the frames the two share, over at least this many frames.
+  track_membership_min_ratio: 0.5
+  track_membership_min_frames: 2
+
+optimization:
+  schedule: stage1_sync_pose
+  max_iterations: 100
+
+scene:
+  kind: dynamic            # moving foreground + motion bases + static background
+  timeline_source: geometry
+
+render:
+  backend_name: gaussian4d
+  device: cuda
+
+evaluation:
+  reprojection_error_p90_px_max: 24.0
+  mean_human_fragments_max: 1.5
+  height_abs_p90_max: 0.40
+  heldout_psnr_mean_min: 11.0
+  geometry: {}
+  tracking: {}
+  rendering:
+    max_views: 4

@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-import sys
 
 import cv2
-import pytest
 import numpy as np
+import pytest
 import torch
 
-from room4d.common.types import FrameRef
-from room4d.geometry.vggt_wrapper import VGGTInitializer
-from room4d.geometry.vggt_long_wrapper import VGGTLongInitializer
-from room4d.api.pipeline import Room4DPipeline
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.ingest.decoder import VideoDecoder
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import FrameRef
+from reifyscene.geometry.vggt_derived import load_and_preprocess_images_without_upscale
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer, input_cache_root
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 def _write_test_video(path: Path, *, width: int = 32, height: int = 24, num_frames: int = 2, fps: float = 5.0) -> None:
@@ -75,7 +76,7 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
     video_path = tmp_path / "sample.mp4"
     _write_test_video(video_path)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="test",
@@ -85,7 +86,7 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": str(tmp_path / "cache")})
+    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": f"{tmp_path.name}/cache"})
     artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
 
     assert artifact.backend_name == "vggt"
@@ -95,14 +96,14 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
     assert artifact.depthmaps_by_frame["cam_00:0"]["depth"].shape == (4, 4, 1)
 
 
-from room4d.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
 
 
 def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_roundtrip.mp4"
     _write_test_video(video_path)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="roundtrip",
@@ -112,7 +113,7 @@ def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": str(tmp_path / "cache")})
+    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": f"{tmp_path.name}/cache"})
     artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
     artifact.save_dir = tmp_path / "geometry"
     artifact.save()
@@ -157,7 +158,7 @@ def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
     video_path = tmp_path / "sample_long.mp4"
     _write_test_video(video_path, num_frames=2)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="test_long",
@@ -181,7 +182,7 @@ def test_vggt_long_initializer_real_adapter_contract(tmp_path: Path) -> None:
 
 
 def test_pipeline_selects_vggt_long_initializer(tmp_path: Path) -> None:
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "vggt-long", "backend_mode": "heuristic"}})
     assert isinstance(pipe.geometry_init, VGGTLongInitializer)
 
 
@@ -226,7 +227,7 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         if not self._is_loaded:
             self.load_checkpoint()
         selected_frames = self._select_frames(frames, ingest_artifact)
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path('.room4d_cache') / 'vggt_long_inputs'
+        cache_root = input_cache_root(self.frame_cache_dir)
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
         backend_output_root = cache_root.parent / 'vggt_long_run'
         backend_output_root.mkdir(parents=True, exist_ok=True)
@@ -246,14 +247,12 @@ class _AutoTuneVGGTLong(VGGTLongInitializer):
         self._is_loaded = True
 
     def _create_runner(self, image_dir: Path, output_dir: Path):
-        resize_max_dim = None
-        name = image_dir.name
-        if name.startswith("maxdim_"):
-            resize_max_dim = int(name.split("_", 1)[1])
+        # Auto-tune sets resize_max_dim for the attempt before creating its runner; the
+        # images live in that setting's content-keyed cache directory.
         runner = type("_Runner", (), {})()
         runner.image_dir = image_dir
         runner.output_dir = output_dir
-        runner.resize_max_dim = resize_max_dim
+        runner.resize_max_dim = self.resize_max_dim
         return runner
 
     def _run_runner(self, runner) -> None:
@@ -279,7 +278,7 @@ def test_vggt_long_auto_tune_backs_off_chunk_and_resize_on_oom(tmp_path: Path, c
     video_path = tmp_path / "sample_auto_tune.mp4"
     _write_test_video(video_path, width=320, height=240, num_frames=8)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(8)]
     ingest = IngestArtifact(
@@ -366,7 +365,7 @@ def test_vggt_long_cpu_enforcement_patches_torch_cuda_during_runner_lifecycle(tm
     video_path = tmp_path / "sample_cpu_probe.mp4"
     _write_test_video(video_path, num_frames=1)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="cpu_probe",
@@ -392,7 +391,7 @@ def test_pipeline_dense_camera_interpolation_matches_tracking_timeline(tmp_path:
     video_path = tmp_path / "sample_dense_interp.mp4"
     _write_test_video(video_path, num_frames=5, fps=10.0)
 
-    decoder = VideoDecoder(default_fps=10.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="dense_interp",
@@ -405,7 +404,7 @@ def test_pipeline_dense_camera_interpolation_matches_tracking_timeline(tmp_path:
         ],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_dense",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "keyframes"},
@@ -425,7 +424,7 @@ def test_pipeline_geometry_frame_source_tracking_uses_tracker_timeline(tmp_path:
     video_path = tmp_path / "sample_tracking_source.mp4"
     _write_test_video(video_path, num_frames=6, fps=10.0)
 
-    decoder = VideoDecoder(default_fps=10.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="tracking_source",
@@ -438,7 +437,7 @@ def test_pipeline_geometry_frame_source_tracking_uses_tracker_timeline(tmp_path:
         ],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_tracking",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "tracking"},
@@ -457,7 +456,7 @@ def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) ->
     video_path = tmp_path / "sample_all_source.mp4"
     _write_test_video(video_path, num_frames=4, fps=8.0)
 
-    decoder = VideoDecoder(default_fps=8.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     ingest = IngestArtifact(
         run_id="all_source",
@@ -467,7 +466,7 @@ def test_pipeline_geometry_frame_source_all_uses_entire_video(tmp_path: Path) ->
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    pipe = Room4DPipeline(
+    pipe = ReifyScenePipeline(
         {
             "run_dir": tmp_path / "run_all",
             "geometry": {"backend_name": "vggt", "backend_mode": "heuristic", "frame_source": "all"},
@@ -491,7 +490,7 @@ def test_vggt_long_auto_tune_exhaustion_reports_attempt_summary(tmp_path: Path) 
     video_path = tmp_path / "sample_auto_tune_fail.mp4"
     _write_test_video(video_path, width=320, height=240, num_frames=4)
 
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id="cam_00")
     frames = [FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(4)]
     ingest = IngestArtifact(
@@ -524,7 +523,7 @@ def test_vggt_long_auto_tune_exhaustion_reports_attempt_summary(tmp_path: Path) 
     assert "status=oom" in message
 
 
-def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
+def test_vggt_long_auto_tune_cleanup_logs_memory(tmp_path, monkeypatch, capsys):
     initializer = VGGTLongInitializer({
         "backend_mode": "real",
         "device": "cuda",
@@ -539,19 +538,19 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
     ingest = IngestArtifact(
         run_id="cleanup-test",
         stage_name="ingest",
-        save_dir=Path("/tmp/ingest"),
+        save_dir=Path("unsaved"),
         streams=[SimpleNamespace(stream_id="cam_00", width=854, height=480)],
         keyframes=[frame],
     )
 
     monkeypatch.setattr(initializer, "_current_system_report", lambda: {"memory": {}, "gpus": []})
     monkeypatch.setattr(initializer, "_frame_source_max_dim", lambda frames, ingest_artifact: 854)
-    monkeypatch.setattr(initializer, "_materialize_images", lambda *args, **kwargs: ([Path("/tmp/f0.png")], []))
+    monkeypatch.setattr(initializer, "_materialize_images", lambda *args, **kwargs: ([tmp_path / "f0.png"], []))
     monkeypatch.setattr(initializer, "_create_runner", lambda *args, **kwargs: SimpleNamespace(img_list=[], model=SimpleNamespace(model=None)))
     monkeypatch.setattr(initializer, "_run_runner", lambda runner: (_ for _ in ()).throw(RuntimeError("CUDA out of memory")))
     monkeypatch.setattr(initializer, "_release_runner_references", lambda runner: None)
     monkeypatch.setattr(
-        "room4d.geometry.vggt_long_wrapper.process_memory_snapshot",
+        "reifyscene.geometry.vggt_long_wrapper.process_memory_snapshot",
         lambda: {
             "rss_bytes": 3 * 1024 ** 3,
             "swap_bytes": 1024 ** 3,
@@ -559,14 +558,14 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
             "cuda_reserved_bytes": 4 * 1024 ** 3,
         },
     )
-    monkeypatch.setattr("room4d.geometry.vggt_long_wrapper.release_memory", lambda: None)
+    monkeypatch.setattr("reifyscene.geometry.vggt_long_wrapper.release_memory", lambda: None)
 
     with pytest.raises(RuntimeError):
         initializer._run_auto_tuned(
             [frame],
             ingest_artifact=ingest,
-            cache_root=Path("/tmp/cache"),
-            backend_output_root=Path("/tmp/out"),
+            cache_root=tmp_path / "cache",
+            backend_output_root=tmp_path / "out",
         )
 
     captured = capsys.readouterr().out
@@ -582,7 +581,7 @@ def test_vggt_long_bounded_preprocess_avoids_reinflating_small_inputs(tmp_path: 
 
     init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda", "resize_max_dim": 320})
     target_size = init._effective_vggt_input_target_size(320)
-    batch = init._load_and_preprocess_images_without_upscale([str(image_path)], target_size=target_size)
+    batch = load_and_preprocess_images_without_upscale([str(image_path)], target_size=target_size)
 
     assert batch.shape[0] == 1
     assert batch.shape[-1] == target_size
@@ -655,3 +654,24 @@ def test_vggt_promotes_camera_predictions_before_pose_decoding() -> None:
     assert promoted["extrinsic"].dtype == torch.float32
     assert promoted["intrinsic"].dtype == torch.float32
     assert promoted["depth"].dtype == torch.bfloat16
+
+
+def test_geometry_asked_for_as_real_fails_instead_of_going_empty(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from reifyscene.api.pipeline import ReifyScenePipeline
+    from reifyscene.common.backend_ladder import BackendRequired
+
+    class Crashing:
+        backend_name = "vggt-long"
+
+        def initialize(self, frames, **kwargs):
+            raise RuntimeError("VGGT-Long produced no readable chunk predictions.")
+
+    ingest = SimpleNamespace(run_id="r", streams=[])
+    real = ReifyScenePipeline({"run_dir": str(tmp_path / "a"), "geometry": {"backend_mode": "real"}})
+    with pytest.raises(BackendRequired, match="no readable chunk predictions"):
+        real._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    auto = ReifyScenePipeline({"run_dir": str(tmp_path / "b"), "geometry": {"backend_mode": "auto"}})
+    artifact, manifest = auto._geometry_ladder("geometry", Crashing(), "vggt-long", [], ingest, None)
+    assert manifest.backend_used == "empty" and manifest.rungs[0].status == "failed"

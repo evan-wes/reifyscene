@@ -1,6 +1,6 @@
 """Basic tests for sync scaffolding."""
 
-from room4d.sync.audio_sync import AudioSyncEstimator
+from reifyscene.sync.audio_sync import AudioSyncEstimator
 
 
 def test_audio_sync_placeholder() -> None:

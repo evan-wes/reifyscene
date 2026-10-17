@@ -13,13 +13,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.humans.smpl_fitter import SMPLFitter
-from room4d.perception.humans.densepose_wrapper import DensePoseEstimator
-from room4d.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, _frame_loop
-from room4d.perception.humans.sapiens_wrapper import SapiensEstimator
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.humans.smpl_fitter import SMPLFitter
+from reifyscene.perception.humans.densepose_wrapper import DensePoseEstimator
+from reifyscene.perception.humans.dense_ladder import BboxOnlyRung, KeypointRcnnRung, _frame_loop
+from reifyscene.perception.humans.sapiens_wrapper import SapiensEstimator
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 
 
 # --- honest wrappers (F3 de-fabrication) ------------------------------------

@@ -10,12 +10,12 @@ import cv2
 import numpy as np
 import torch
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import FrameRef
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.moge_wrapper import MoGeInitializer
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import FrameRef
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 class _FakeMoGe:
@@ -51,7 +51,7 @@ def _write_test_video(path, *, width=32, height=24, num_frames=2, fps=5.0) -> No
 def _ingest_for(tmp_path, name="ingest"):
     video = tmp_path / f"{name}.mp4"
     _write_test_video(video)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / name,
         streams=[stream],
@@ -95,7 +95,7 @@ def test_moge_initialize_fills_depth_but_no_poses(tmp_path):
 def test_geometry_ladder_selects_moge_and_stamps_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(MoGeInitializer, "_load_model", lambda self: _FakeMoGe())
     ingest = _ingest_for(tmp_path)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "moge", "device": "cpu"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "moge", "device": "cpu"}})
     assert isinstance(pipe.geometry_init, MoGeInitializer)
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)
@@ -113,7 +113,7 @@ def test_geometry_ladder_degrades_to_empty_when_rung_fails(tmp_path, monkeypatch
 
     monkeypatch.setattr(MoGeInitializer, "_load_model", _boom)
     ingest = _ingest_for(tmp_path)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "moge", "device": "cpu"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "moge", "device": "cpu"}})
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)  # must NOT crash (§4A invariant 3)
     cap = art.capability

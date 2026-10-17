@@ -1,0 +1,59 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
+"""Loss functions for the dynamic renderer: robust losses for the geometry terms of training.
+
+Ported from Shape-of-Motion (``flow3d/loss_utils.py``, MIT, Copyright (c) 2024 Vickie Ye) so
+the depth and mask terms behave exactly as they do there: an L1 that ignores the worst
+``1 - quantile`` of pixels (a monocular depth prior is wrong somewhere in every frame, and a
+trimmed loss lets it be), and the same on spatial gradients.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+
+def trimmed_l1_loss(pred: torch.Tensor, gt: torch.Tensor, quantile: float = 0.9) -> torch.Tensor:
+    loss = F.l1_loss(pred, gt, reduction="none").mean(dim=-1)
+    loss_at_quantile = torch.quantile(loss, quantile)
+    return loss[loss < loss_at_quantile].mean()
+
+
+def masked_l1_loss(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None,
+                   normalize: bool = True, quantile: float = 1.0) -> torch.Tensor:
+    """Mean L1 over ``mask`` (weights), leaving out values above the ``quantile`` of the error.
+    ``pred``/``gt`` (..., D); ``mask`` (..., 1)."""
+    if mask is None:
+        return trimmed_l1_loss(pred, gt, quantile)
+    sum_loss = F.l1_loss(pred, gt, reduction="none").mean(dim=-1, keepdim=True)
+    if quantile < 1:
+        num = sum_loss.numel()
+        if num < 16_000_000:
+            threshold = torch.quantile(sum_loss, quantile)
+        else:                                  # torch.quantile refuses very large inputs
+            ordered, _ = torch.sort(sum_loss.reshape(-1))
+            idxf = quantile * num
+            idxi = int(idxf)
+            threshold = ordered[idxi] + (ordered[idxi + 1] - ordered[idxi]) * (idxf - idxi)
+        quantile_mask = (sum_loss < threshold).squeeze(-1)
+    else:
+        quantile_mask = torch.ones_like(sum_loss, dtype=torch.bool).squeeze(-1)
+    ndim = sum_loss.shape[-1]
+    if normalize:
+        return torch.sum((sum_loss * mask)[quantile_mask]) / (
+            ndim * torch.sum(mask[quantile_mask]) + 1e-8)
+    return torch.mean((sum_loss * mask)[quantile_mask])
+
+
+def gradient_loss(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor,
+                  quantile: float = 0.98) -> torch.Tensor:
+    """Trimmed L1 between the spatial gradients of ``pred`` and ``gt`` (B, H, W), over pixel
+    pairs both inside ``mask`` (B, H, W)."""
+    mask_x = mask[:, :, 1:] * mask[:, :, :-1]
+    mask_y = mask[:, 1:, :] * mask[:, :-1, :]
+    pred_x, pred_y = pred[:, :, 1:] - pred[:, :, :-1], pred[:, 1:, :] - pred[:, :-1, :]
+    gt_x, gt_y = gt[:, :, 1:] - gt[:, :, :-1], gt[:, 1:, :] - gt[:, :-1, :]
+    return (masked_l1_loss(pred_x[mask_x][..., None], gt_x[mask_x][..., None], quantile=quantile)
+            + masked_l1_loss(pred_y[mask_y][..., None], gt_y[mask_y][..., None],
+                             quantile=quantile))

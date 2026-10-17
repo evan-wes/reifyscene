@@ -10,12 +10,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from room4d.lifting.native_track_lift import rotvec_to_rotmat
-from room4d.lifting.tracks_3d import StaticPoints3D, Tracks3D
-from room4d.render.gaussian4d.dynamic_field import DynamicGaussianField
-from room4d.render.gaussian4d.gaussian_field import GaussianField
-from room4d.render.gaussian4d.motion import MotionBases
-from room4d.render.gaussian4d.procrustes_init import (
+from reifyscene.lifting.native_track_lift import rotvec_to_rotmat
+from reifyscene.lifting.tracks_3d import StaticPoints3D, Tracks3D
+from reifyscene.render.gaussian4d.dynamic_field import DynamicGaussianField
+from reifyscene.render.gaussian4d.gaussian_field import GaussianField
+from reifyscene.render.gaussian4d.motion import MotionBases
+from reifyscene.render.gaussian4d.procrustes_init import (
     _interp_masked_tracks,
     _rotvec_to_unitquat,
     init_bg,
@@ -25,7 +25,7 @@ from room4d.render.gaussian4d.procrustes_init import (
     sample_initial_bases_centers,
     solve_procrustes,
 )
-from room4d.render.gaussian4d.transforms import cont_6d_to_rmat
+from reifyscene.render.gaussian4d.transforms import cont_6d_to_rmat
 
 
 def test_solve_procrustes_recovers_known_se3() -> None:

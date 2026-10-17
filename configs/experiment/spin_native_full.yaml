@@ -1,0 +1,95 @@
+# The README's headline native run: VGGT-Long + pose refinement on every frame of DyCheck
+# "spin", scored on all 722 held-out views (masked mPSNR 13.97 at v0.3.0.0, held-out
+# cameras aligned through the training cameras; median rotation residual 0.60 deg).
+#
+# base.yaml plus `scene.kind: dynamic` (base.yaml builds a STATIC scene; the headline is
+# the dynamic 4D one) and an `evaluation.masked_nvs` block. --config replaces base.yaml,
+# it does not merge onto it. Run from the repo root (the clip and the run are named inside
+# the data directory, $REIFYSCENE_DATA_DIR):
+#
+#   python scripts/run_single_video_reifyscene.py \
+#     --frames-dir dycheck_iphone/spin/rgb/1x \
+#     --geometry-backend-name vggt-long --geometry-device cuda \
+#     --keyframes-all --pose-refine-enable \
+#     --config configs/experiment/spin_native_full.yaml \
+#     --run-dir spin_native_full
+#
+# dataset_root names DyCheck "spin" inside the data directory's datasets/.
+
+run:
+  name: reifyscene_dev
+
+dataset:
+  keyframe_stride: 15
+
+models:
+  geometry_backend: vggt
+  tracker_backend: cotracker
+  use_densepose: true
+  use_smpl: true
+  detect_objects: true
+
+
+geometry:
+  ground_plane:
+    enabled: true
+    max_frames: 24
+    max_points_per_frame: 3000
+    ransac_iterations: 160
+    distance_threshold: 0.035
+    min_inlier_ratio: 0.06
+    min_alignment_cos: 0.45
+    alignment_weight: 0.18
+    camera_up_axis: -y
+    random_seed: 7
+    manual_up_vector: null
+    lock_gravity_vector: false
+    floor_height_quantile: 0.06
+    max_saved_candidates: 12
+
+
+calibration:
+  sampling:
+    sample_spacing_sec: 0.75
+    max_frames_per_stream: 48
+    image_max_dim: 960
+    prefer_static_frames: true
+    static_diff_threshold: 16.0
+    min_sharpness: 8.0
+  hloc_colmap:
+    retrieval_conf: netvlad
+    feature_conf: superpoint_aachen
+    matcher_conf: superglue
+    retrieval_top_k: 20
+    camera_mode: PER_FOLDER
+    camera_model: SIMPLE_RADIAL
+    fix_intrinsics: false
+    verbose: false
+
+optimization:
+  schedule: stage1_sync_pose
+  max_iterations: 100
+
+scene:
+  kind: dynamic            # moving foreground + motion bases + static background (default: static)
+  timeline_source: geometry
+
+render:
+  backend_name: gaussian4d
+  device: cuda
+
+evaluation:
+  reprojection_error_p90_px_max: 24.0
+  mean_human_fragments_max: 1.5
+  height_abs_p90_max: 0.40
+  heldout_psnr_mean_min: 11.0
+  geometry: {}
+  tracking: {}
+  rendering:
+    max_views: 4
+  masked_nvs:
+    dataset_root: dycheck_iphone/spin
+    factor: 2              # score at the 2x (360x480) resolution, as Shape of Motion does
+    split: train
+    eval_split: val
+    max_eval_frames: null  # null = every held-out view

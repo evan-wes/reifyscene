@@ -9,12 +9,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, FrameRef
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, FrameRef
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 def _fake_poses(indices):
@@ -36,7 +36,7 @@ def _write_test_video(path, *, width=32, height=24, num_frames=2, fps=5.0) -> No
 def _ingest_for(tmp_path, name="ingest", num_frames=2):
     video = tmp_path / f"{name}.mp4"
     _write_test_video(video, num_frames=num_frames)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / name,
         streams=[stream],
@@ -54,7 +54,7 @@ def test_colmap_initialize_empty_in_empty_out():
 
 def test_colmap_initialize_fills_poses_not_depth(tmp_path, monkeypatch):
     ingest = _ingest_for(tmp_path, num_frames=2)
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     # mock the SfM core: both frames registered
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0, 1]))
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
@@ -68,7 +68,7 @@ def test_colmap_initialize_fills_poses_not_depth(tmp_path, monkeypatch):
 
 def test_colmap_partial_registration(tmp_path, monkeypatch):
     ingest = _ingest_for(tmp_path, num_frames=2)
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0]))  # only frame 0
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
     assert len(art.camera_states_by_stream["cam_00"]) == 1
@@ -78,7 +78,7 @@ def test_colmap_partial_registration(tmp_path, monkeypatch):
 def test_geometry_ladder_selects_colmap_and_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0]))
     ingest = _ingest_for(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
     assert isinstance(pipe.geometry_init, ColmapPoseInitializer)
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)
@@ -96,7 +96,7 @@ def test_geometry_ladder_colmap_degrades_to_empty(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", _boom)
     ingest = _ingest_for(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
 
     art = pipe.initialize_geometry(ingest, sync_artifact=None)  # must not crash
     cap = art.capability

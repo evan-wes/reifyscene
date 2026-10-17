@@ -5,14 +5,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.backproject import TrackLifter3D
-from room4d.lifting.static_dynamic import StaticDynamicPartitioner
-from room4d.tracking.cotracker_wrapper import CoTrackerWrapper
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.common.data_dir import record_name
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.lifting.backproject import TrackLifter3D
+from reifyscene.lifting.static_dynamic import StaticDynamicPartitioner
+from reifyscene.tracking.cotracker_wrapper import CoTrackerWrapper
+from reifyscene.tracking.track_artifact import TrackArtifact
 from tests.conftest import write_test_video
 
 
@@ -39,7 +40,11 @@ class _FakeCoTrackerWrapper(CoTrackerWrapper):
             video[i, ..., 2] = 100
         return video, np.asarray(frame_indices, dtype=np.int32), (w, h), (model_w, model_h)
 
-    def _run_real_backend_single(self, video_rgb: np.ndarray):
+    def _run_real_backend_single(self, video_rgb: np.ndarray, queries=None):
+        # `queries` is what mask seeding passes; this fake emits a fixed pair of
+        # trajectories either way, so the seeding path is exercised for plumbing
+        # without the fake having to imitate CoTracker's query semantics.
+        del queries
         t, h, w, _ = video_rgb.shape
         # Recover exact absolute frame indices from the synthetic video so
         # overlapping windows produce globally consistent trajectories.
@@ -61,8 +66,8 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
     ]
     intr = CameraIntrinsics(fx=40.0, fy=40.0, cx=width / 2, cy=height / 2)
     states = [
-        TimedCameraState(stream_id=stream_id, time_sec=0.0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.4, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=4, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
     ]
     yy, xx = np.meshgrid(np.linspace(0.0, 1.0, height), np.linspace(0.0, 1.0, width), indexing='ij')
     points = np.stack([xx, np.zeros_like(xx), yy], axis=-1).astype(np.float32)
@@ -73,7 +78,7 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
         rgb = np.zeros((height, width, 3), dtype=np.uint8)
         rgb[..., 0] = 255
         Image.fromarray(rgb).save(img_path)
-        image_paths[f'{frame.stream_id}:{frame.frame_idx}'] = str(img_path)
+        image_paths[f'{frame.stream_id}:{frame.frame_idx}'] = record_name(img_path)
     return GeometryArtifact(
         run_id='test',
         stage_name='geometry',
@@ -84,14 +89,15 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
         camera_states_by_stream={stream_id: states},
         depthmaps_by_frame={f'{frame.stream_id}:{frame.frame_idx}': {'depth': depth, 'confidence': np.ones((height, width), dtype=np.float32)} for frame in frames},
         pointmaps_by_frame={f'{frame.stream_id}:{frame.frame_idx}': {'points': points, 'confidence': np.ones((height, width), dtype=np.float32)} for frame in frames},
-        metadata={'debug_image_paths': image_paths},
+        metadata={'debug_image_paths': image_paths, 'image_transforms': {stream_id: transform_record(
+            ImageTransform.identity((width, height)), recorded_by='test')}},
     )
 
 
 def test_cotracker_real_wrapper_contract(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
@@ -106,20 +112,13 @@ def test_cotracker_real_wrapper_contract(tmp_path: Path) -> None:
 def test_track_lifting_partition_and_debug_export(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
-    ingest = IngestArtifact(
-        run_id='test',
-        stage_name='ingest',
-        save_dir=tmp_path / 'ingest',
-        streams=[stream],
-        keyframes=[FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0), FrameRef(stream_id='cam_00', frame_idx=4, timestamp_sec=0.4)],
-    )
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
     track_artifact = tracker.track(stream)
     geometry = _make_geometry_artifact(tmp_path, 'cam_00', width=64, height=48)
 
-    lifted = TrackLifter3D().lift(track_artifact, geometry, ingest)
+    lifted = TrackLifter3D().lift(track_artifact, geometry)
     StaticDynamicPartitioner(static_threshold_world=0.01, min_lifted_frames=2).partition(lifted, geometry)
     payload = lifted.track_payloads_by_stream['cam_00']
     labels = payload['static_labels'].tolist()
@@ -149,7 +148,7 @@ def test_track_lifting_partition_and_debug_export(tmp_path: Path) -> None:
 def test_cotracker_windowed_tracking_contract(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip_windowed.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=8, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({
@@ -177,7 +176,7 @@ def test_cotracker_windowed_tracking_contract(tmp_path: Path) -> None:
 def test_cotracker_windowed_tracking_without_stitching(tmp_path: Path) -> None:
     video_path = tmp_path / 'clip_windowed_no_stitch.mp4'
     write_test_video(video_path, width=64, height=48, num_frames=8, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
 
     tracker = _FakeCoTrackerWrapper({
@@ -199,38 +198,15 @@ def test_cotracker_windowed_tracking_without_stitching(tmp_path: Path) -> None:
 def test_track_lifting_preserves_tracking_timeline(tmp_path: Path) -> None:
     video_path = tmp_path / "clip_preserve.mp4"
     write_test_video(video_path, width=64, height=48, num_frames=5, fps=10.0)
-    decoder = VideoDecoder(default_fps=30.0)
+    decoder = VideoDecoder()
     stream = decoder.decode(video_path, stream_id='cam_00')
-    ingest = IngestArtifact(
-        run_id='test',
-        stage_name='ingest',
-        save_dir=tmp_path / "ingest",
-        streams=[stream],
-        keyframes=[FrameRef(stream_id='cam_00', frame_idx=0, timestamp_sec=0.0), FrameRef(stream_id='cam_00', frame_idx=4, timestamp_sec=0.4)],
-    )
     tracker = _FakeCoTrackerWrapper({'backend_mode': 'real', 'device': 'cpu', 'grid_size': 2})
     track_artifact = tracker.track(stream)
     tracking_timeline = list(track_artifact.selected_frames)
     geometry = _make_geometry_artifact(tmp_path, 'cam_00', width=64, height=48)
 
-    lifted = TrackLifter3D().lift(track_artifact, geometry, ingest)
+    lifted = TrackLifter3D().lift(track_artifact, geometry)
 
     assert [fr.frame_idx for fr in lifted.selected_frames] == [fr.frame_idx for fr in tracking_timeline]
     assert lifted.metadata['geometry_selected_frames'][0]['frame_idx'] == 0
     assert lifted.metadata['geometry_selected_frames'][1]['frame_idx'] == 4
-
-
-def test_tracking_debug_sampler_fallback_when_geometry_sampler_signature_changes(tmp_path: Path, monkeypatch) -> None:
-    geometry = _make_geometry_artifact(tmp_path, 'cam_00', width=16, height=12)
-    payload = geometry.pointmaps_by_frame['cam_00:0']
-    rgb = np.zeros((12, 16, 3), dtype=np.uint8)
-
-    def _broken_sampler(*args, **kwargs):
-        raise TypeError("GeometryArtifact._sample_point_cloud() missing 1 required positional argument: 'points'")
-
-    monkeypatch.setattr(GeometryArtifact, '_sample_point_cloud', _broken_sampler)
-    pts, cols = TrackArtifact._sample_geometry_debug_cloud(payload, rgb=rgb, max_points=32)
-    assert pts.shape[1] == 3
-    assert cols is not None
-    assert cols.shape[1] == 3
-

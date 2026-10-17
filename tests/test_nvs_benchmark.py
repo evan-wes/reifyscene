@@ -3,14 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from room4d.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
+from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
     SCHEMA,
     build_record,
     compare,
     load_record,
     write_record,
 )
-from room4d.eval.metrics.image import MaskedSSIM, masked_psnr
+from reifyscene.eval.metrics.image import MaskedSSIM, masked_psnr
 
 
 # -- masked metrics -------------------------------------------------------
@@ -43,20 +43,20 @@ def test_masked_ssim_identical_near_one() -> None:
 
 def test_build_record_sets_schema_and_drops_none() -> None:
     record = build_record(
-        method="room4d",
+        method="reifyscene",
         sequence="paper-windmill",
         dataset_format="iphone",
         metrics={"masked_mpsnr": 20.0, "masked_mssim": None},
-        eval={"source": "room4d_render_proof", "resolution_factor": 2},
+        eval={"source": "reifyscene_render_proof", "resolution_factor": 2},
     )
     assert record["schema"] == SCHEMA
-    assert record["method"] == "room4d"
+    assert record["method"] == "reifyscene"
     assert record["metrics"] == {"masked_mpsnr": 20.0}  # None dropped
 
 
 def test_write_and_load_record_roundtrip(tmp_path) -> None:
     record = build_record(
-        method="room4d", sequence="x", dataset_format="iphone", metrics={"masked_mpsnr": 19.0}
+        method="reifyscene", sequence="x", dataset_format="iphone", metrics={"masked_mpsnr": 19.0}
     )
     path = write_record(record, tmp_path / "r.json")
     loaded = load_record(path)

@@ -1,0 +1,29 @@
+Put cuML's CPU cluster labels on the points' device.
+
+Upstream pin: shape-of-motion @ 579753e1c7ba96f60cd7690e5b835627bd1935e9
+
+Shape of Motion targets torch 2.1. torch >= 2.11, which we need for sm_120, is stricter about
+indexing a CUDA tensor with a CPU index. cuML returns cluster labels on CPU while the points and
+centers are on CUDA, so motion-basis init raises. Both edits are needed: the per-cluster centre
+reduction AND the labels returned to the caller.
+
+Without it: motion-basis initialisation fails on every run.
+diff --git a/flow3d/init_utils.py b/flow3d/init_utils.py
+index 9790b36..db72848 100644
+--- a/flow3d/init_utils.py
++++ b/flow3d/init_utils.py
+@@ -581,12 +581,12 @@ def sample_initial_bases_centers(
+     num_bases = labels.max().item() + 1
+     sampled_centers = torch.stack(
+         [
+-            means_canonical[torch.tensor(labels == i)].median(dim=0).values
++            means_canonical[torch.tensor(labels == i, device=means_canonical.device)].median(dim=0).values
+             for i in range(num_bases)
+         ]
+     )[None]
+     print("number of {} clusters: ".format(mode), num_bases)
+-    return sampled_centers, num_bases, torch.tensor(labels)
++    return sampled_centers, num_bases, torch.tensor(labels, device=means_canonical.device)
+ 
+ 
+ def interp_masked(vals: cp.ndarray, mask: cp.ndarray, pad: int = 1) -> cp.ndarray:

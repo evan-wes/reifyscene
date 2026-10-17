@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-import room4d.lifting.native_track_lift as ntl
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider, GeometryProvider
+import reifyscene.lifting.native_track_lift as ntl
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider, GeometryProvider
 
 
 def test_geometry_provider_is_abstract() -> None:

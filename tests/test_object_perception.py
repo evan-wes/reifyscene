@@ -6,13 +6,14 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import FrameRef, ObjectState, VideoStreamRef
-from room4d.perception.objects.object_artifact import ObjectArtifact
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.perception.reid.reid_artifact import ReidArtifact
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.common.data_dir import record_name
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import FrameRef, ObjectState, VideoStreamRef
+from reifyscene.perception.objects.object_artifact import ObjectArtifact
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.reid.reid_artifact import ReidArtifact
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.tracking.track_artifact import TrackArtifact
 
 
 def _make_obj(det_id: str, global_id: str, frame_idx: int, bbox, category='dog', embedding=None, track_ids=None, confidence=0.9):
@@ -49,7 +50,7 @@ def _ingest(save_dir, video) -> IngestArtifact:
 
 def test_perceive_objects_consumes_instance_and_reid(tmp_path: Path) -> None:
     """objects = non-human tracklets, ids canonicalized via the reid merge_map."""
-    pipeline = Room4DPipeline({'run_dir': str(tmp_path)})
+    pipeline = ReifyScenePipeline({'run_dir': str(tmp_path)})
     inst = InstanceArtifact(
         run_id='dev', stage_name='segment', save_dir=tmp_path / 'segment',
         observations=[
@@ -95,7 +96,7 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
         from PIL import Image
         img_path = image_dir / f'cam_00__{idx}.png'
         Image.fromarray(rgb).save(img_path)
-        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = str(img_path)
+        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = record_name(img_path)
     artifact.objects = [
         _make_obj('det:0', 'obj_0000', 0, [1, 1, 8, 8], track_ids=[1, 2]),
         _make_obj('det:1', 'obj_0000', 1, [2, 1, 9, 8], category='cat', track_ids=[1, 2]),
@@ -144,7 +145,7 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
 
 def test_pipeline_select_frames_falls_back_to_keyframes_without_tracks() -> None:
     """`_select_perception_frames` (used by `segment`) strides keyframes when no tracks exist."""
-    pipeline = Room4DPipeline({'objects': {'frame_stride': 1}})
+    pipeline = ReifyScenePipeline({'objects': {'frame_stride': 1}})
     ingest = IngestArtifact(
         run_id='dev',
         stage_name='ingest',

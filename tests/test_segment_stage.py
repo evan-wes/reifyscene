@@ -6,9 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.instance.segment import FloorInstanceSegmenter, assign_greedy_iou_tracks
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.instance.segment import FloorInstanceSegmenter, assign_greedy_iou_tracks
 
 
 def _fr(idx: int, stream: str = 'cam0') -> FrameRef:

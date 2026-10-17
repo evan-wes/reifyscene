@@ -12,16 +12,16 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry import compose as compose_mod
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.compose import GeometryComposer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.moge_wrapper import MoGeInitializer
-from room4d.geometry.scale_reconcile import solve_global_scale
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry import compose as compose_mod
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.compose import GeometryComposer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.moge_wrapper import MoGeInitializer
+from reifyscene.geometry.scale_reconcile import solve_global_scale
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 # --------------------------------------------------------------------------- #
@@ -73,17 +73,17 @@ def _frames(n=2, stream="cam_00"):
     return [FrameRef(stream_id=stream, frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(n)]
 
 
-def _pose_state(stream, t, center):
+def _pose_state(stream, frame, center):
     T = np.eye(4, dtype=np.float32)
     T[:3, 3] = np.asarray(center, dtype=np.float32)
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=8.0, cy=8.0)
-    return TimedCameraState(stream_id=stream, time_sec=float(t), intrinsics=intr, pose=CameraPose(T_world_cam=T))
+    return TimedCameraState(stream_id=stream, frame_idx=int(frame), intrinsics=intr, pose=CameraPose(T_world_cam=T))
 
 
 def _pose_artifact(frames, centers, *, model_dir="dummy"):
-    states = [_pose_state(f.stream_id, f.timestamp_sec, c) for f, c in zip(frames, centers)]
+    states = [_pose_state(f.stream_id, f.frame_idx, c) for f, c in zip(frames, centers)]
     art = GeometryArtifact(
-        run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="colmap",
+        run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="colmap",
         selected_frames=list(frames),
         intrinsics_by_stream={frames[0].stream_id: states[0].intrinsics},
         camera_states_by_stream={frames[0].stream_id: states},
@@ -102,7 +102,7 @@ def _depth_artifact(frames, *, depth_val=2.0, cam_point=(0.0, 0.0, 3.0), h=8, w=
         pts[..., :] = np.asarray(cam_point, np.float32)
         pm[key] = {"points": pts, "confidence": np.ones((h, w), np.float32)}
     return GeometryArtifact(
-        run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="moge-2",
+        run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="moge-2",
         selected_frames=list(frames),
         intrinsics_by_stream={frames[0].stream_id: CameraIntrinsics(fx=90.0, fy=90.0, cx=4.0, cy=4.0)},
         depthmaps_by_frame=dm, pointmaps_by_frame=pm,
@@ -122,7 +122,7 @@ def test_compose_full_fusion_reconciles_scale(monkeypatch):
     monkeypatch.setattr(compose_mod, "extract_colmap_observations", _fake_extract)
     res = GeometryComposer({"scale_min_obs": 4}).compose(
         pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
 
     assert res.fidelity == "fused_metric"
     assert res.artifact.backend_name == "colmap+moge-2"
@@ -149,7 +149,7 @@ def test_compose_identity_fallback_without_model(monkeypatch):
     depth_art = _depth_artifact(frames)
     res = GeometryComposer().compose(
         pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "fused_metric"
     assert res.reconcile.status == "identity_fallback" and res.reconcile.scale == 1.0
     # unscaled poses, world points = cam + unscaled center
@@ -158,11 +158,11 @@ def test_compose_identity_fallback_without_model(monkeypatch):
 
 def test_compose_depth_only_when_pose_channel_empty():
     frames = _frames(2)
-    empty_pose = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty_pose = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     depth_art = _depth_artifact(frames)
     res = GeometryComposer().compose(
         pose_artifact=empty_pose, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "depth_only"
     assert res.artifact.backend_name == "colmap+moge-2"
     assert res.artifact.depthmaps_by_frame and not res.artifact.camera_states_by_stream
@@ -171,20 +171,20 @@ def test_compose_depth_only_when_pose_channel_empty():
 def test_compose_poses_only_when_depth_channel_empty():
     frames = _frames(2)
     pose_art = _pose_artifact(frames, [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
-    empty_depth = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty_depth = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     res = GeometryComposer().compose(
         pose_artifact=pose_art, depth_artifact=empty_depth, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "poses_only"
     assert res.artifact.camera_states_by_stream and not res.artifact.depthmaps_by_frame
 
 
 def test_compose_empty_when_both_channels_empty():
     frames = _frames(2)
-    empty = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     res = GeometryComposer().compose(
         pose_artifact=empty, depth_artifact=empty, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "empty" and res.artifact.backend_name == "empty"
 
 
@@ -205,7 +205,7 @@ def _write_video(path, *, width=32, height=24, num_frames=2, fps=5.0):
 def _ingest(tmp_path, num_frames=2):
     video = tmp_path / "in.mp4"
     _write_video(video, num_frames=num_frames)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / "ingest", streams=[stream],
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(num_frames)],
@@ -236,7 +236,7 @@ def test_pipeline_fused_mode_composes_and_manifests(tmp_path, monkeypatch):
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_colmap_poses([0, 1]))
     monkeypatch.setattr(MoGeInitializer, "infer_frame", _fake_moge_infer)
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({
+    pipe = ReifyScenePipeline({
         "run_dir": tmp_path / "run",
         "geometry": {"pose_backend": "colmap", "depth_backend": "moge", "compose": {"scale_min_obs": 1}},
     })
@@ -264,7 +264,7 @@ def test_pipeline_fused_pose_failure_degrades_to_depth_only(tmp_path, monkeypatc
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", _boom)
     monkeypatch.setattr(MoGeInitializer, "infer_frame", _fake_moge_infer)
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({
+    pipe = ReifyScenePipeline({
         "run_dir": tmp_path / "run",
         "geometry": {"pose_backend": "colmap", "depth_backend": "moge"},
     })
@@ -279,7 +279,7 @@ def test_single_backend_path_not_fused(tmp_path, monkeypatch):
     # back-compat: a lone backend_name still selects the single pose-only path.
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_colmap_poses([0, 1]))
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run", "geometry": {"backend_name": "colmap"}})
     assert not pipe.geometry_fused
     art = pipe.initialize_geometry(ingest, sync_artifact=None)
     assert art.backend_name == "colmap" and art.capability.backend_used == "colmap"

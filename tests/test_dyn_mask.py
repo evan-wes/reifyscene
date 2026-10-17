@@ -7,16 +7,17 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
-from room4d.geometry.colmap_wrapper import ColmapPoseInitializer
-from room4d.geometry.compose import GeometryComposer
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.geometry.reconstruction_health import assess_pose_health
-from room4d.ingest.decoder import VideoDecoder
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
-from room4d.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
+from reifyscene.common import data_dir
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
+from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
+from reifyscene.geometry.compose import GeometryComposer
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.geometry.reconstruction_health import assess_pose_health
+from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.perception.dyn_mask.dyn_mask_artifact import DynMaskArtifact
+from reifyscene.perception.dyn_mask.rungs import AllStaticDynMask, DetectorDynMask
 
 
 # --------------------------------------------------------------------------- #
@@ -34,7 +35,7 @@ def _write_video(path, *, width=32, height=24, num_frames=2, value=100):
 def _ingest(tmp_path, num_frames=2):
     video = tmp_path / "in.mp4"
     _write_video(video, num_frames=num_frames)
-    stream = VideoDecoder(default_fps=30.0).decode(video, stream_id="cam_00")
+    stream = VideoDecoder().decode(video, stream_id="cam_00")
     return IngestArtifact(
         run_id="t", stage_name="ingest", save_dir=tmp_path / "ingest", streams=[stream],
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=i, timestamp_sec=float(i) / 30.0) for i in range(num_frames)],
@@ -55,7 +56,8 @@ def _states(angles_deg, stream="cam_00"):
     cum = 0.0
     for i, d in enumerate(angles_deg):
         cum += d
-        out.append(TimedCameraState(stream_id=stream, time_sec=float(i) / 30.0, intrinsics=intr,
+        out.append(TimedCameraState(stream_id=stream, frame_idx=i, time_sec=float(i) / 30.0,
+                                    intrinsics=intr,
                                     pose=CameraPose(T_world_cam=_rot_z(cum))))
     return {stream: out}
 
@@ -141,39 +143,41 @@ def _dyn_mask_for(ingest, fraction, *, h=24, w=32):
         m.flat[:n] = 1
         masks[f"{f.stream_id}:{f.frame_idx}"] = m
         fracs[f"{f.stream_id}:{f.frame_idx}"] = float(m.mean())
-    return DynMaskArtifact(run_id="t", stage_name="dyn_mask", save_dir="/tmp/x",
+    return DynMaskArtifact(run_id="t", stage_name="dyn_mask", save_dir="unsaved",
                            backend_name="detector", masks_by_frame=masks, dynamic_fraction_by_frame=fracs)
 
 
 def test_colmap_masks_when_dynamic_fraction_large(tmp_path, monkeypatch):
     ingest = _ingest(tmp_path, num_frames=2)  # frames are solid value 100
     dyn = _dyn_mask_for(ingest, 0.5)          # 50% dynamic ≥ gate 0.10 → mask
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=16.0, cy=12.0)
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct",
                         lambda self, img_dir: {0: (np.eye(4, dtype=np.float32), intr)})
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, dyn_mask_artifact=dyn)
     assert art.metadata["dyn_mask_applied"] is True
-    saved = cv2.imread(str(tmp_path / "cw" / "images" / "000000.png"))
+    work = data_dir.path(data_dir.CACHE, f"{tmp_path.name}/cw")
+    saved = cv2.imread(str(work / "images" / "000000.png"))
     assert (saved == 0).any() and (saved > 0).any()   # masked pixels blacked out, rest kept
 
 
 def test_colmap_skips_mask_when_dynamic_fraction_small(tmp_path, monkeypatch):
     ingest = _ingest(tmp_path, num_frames=2)
     dyn = _dyn_mask_for(ingest, 0.02)         # 2% dynamic < gate 0.10 → unmasked
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=16.0, cy=12.0)
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct",
                         lambda self, img_dir: {0: (np.eye(4, dtype=np.float32), intr)})
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, dyn_mask_artifact=dyn)
     assert art.metadata["dyn_mask_applied"] is False
-    saved = cv2.imread(str(tmp_path / "cw" / "images" / "000000.png"))
+    work = data_dir.path(data_dir.CACHE, f"{tmp_path.name}/cw")
+    saved = cv2.imread(str(work / "images" / "000000.png"))
     assert not (saved == 0).any()             # nothing blacked out
 
 
 def test_colmap_stamps_pose_health(tmp_path, monkeypatch):
     ingest = _ingest(tmp_path, num_frames=5)
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=16.0, cy=12.0)
     # a degenerate draw: frame 2 jumps 40°
     poses = {i: (_rot_z(0 if i < 2 else 40), intr) for i in range(5)}
@@ -189,7 +193,7 @@ def test_colmap_stamps_pose_health(tmp_path, monkeypatch):
 
 def test_pipeline_dyn_mask_stage_all_static_default(tmp_path):
     ingest = _ingest(tmp_path, num_frames=2)
-    pipe = Room4DPipeline({"run_dir": tmp_path / "run"})  # default → all-static
+    pipe = ReifyScenePipeline({"run_dir": tmp_path / "run"})  # default → all-static
     art = pipe.compute_dyn_mask(ingest, sync_artifact=None)
     assert art.backend_name == "all-static"
     assert art.capability is not None and art.capability.backend_used == "all-static"
@@ -199,8 +203,9 @@ def test_pipeline_dyn_mask_stage_all_static_default(tmp_path):
 def test_composer_downgrades_fidelity_on_suspect_pose_health():
     frames = [FrameRef("cam_00", i, float(i) / 30.0) for i in range(2)]
     intr = CameraIntrinsics(fx=100.0, fy=100.0, cx=8.0, cy=8.0)
-    states = [TimedCameraState("cam_00", float(i) / 30.0, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32))) for i in range(2)]
-    pose_art = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="colmap",
+    states = [TimedCameraState("cam_00", i, intr, CameraPose(T_world_cam=np.eye(4, dtype=np.float32)))
+              for i in range(2)]
+    pose_art = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="colmap",
                                 selected_frames=frames, intrinsics_by_stream={"cam_00": intr},
                                 camera_states_by_stream={"cam_00": states})
     pose_art.metadata["pose_health"] = {"healthy": False, "reason": "cam_00: max pairwise rot 40° > bound 30°"}
@@ -210,11 +215,11 @@ def test_composer_downgrades_fidelity_on_suspect_pose_health():
         dm[k] = {"depth": np.full((8, 8), 2.0, np.float32), "confidence": np.ones((8, 8), np.float32)}
         pts = np.zeros((8, 8, 3), np.float32); pts[..., 2] = 3.0
         pm[k] = {"points": pts, "confidence": np.ones((8, 8), np.float32)}
-    depth_art = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="moge-2",
+    depth_art = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="moge-2",
                                  selected_frames=frames, intrinsics_by_stream={"cam_00": intr},
                                  depthmaps_by_frame=dm, pointmaps_by_frame=pm)
     res = GeometryComposer({"scale_min_obs": 1}).compose(
         pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "fused_metric_suspect"
     assert res.artifact.metadata["pose_health"]["healthy"] is False

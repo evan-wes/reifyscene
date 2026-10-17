@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from room4d.lifting.native_track_lift import (
+from reifyscene.lifting.native_track_lift import (
     compute_scene_norm,
     normal_from_depth,
     normalize_coords,
@@ -18,7 +18,7 @@ from room4d.lifting.native_track_lift import (
     rotvec_to_rotmat,
     rt_to_mat4,
 )
-from room4d.lifting.tracks_3d import StaticPoints3D, Tracks3D
+from reifyscene.lifting.tracks_3d import StaticPoints3D, Tracks3D
 
 
 def test_parse_tapir_track_info_buckets() -> None:

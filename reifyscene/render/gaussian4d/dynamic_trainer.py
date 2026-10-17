@@ -1,0 +1,472 @@
+"""Dynamic Gaussian trainer (Shape-of-Motion-style deformation).
+
+Trains a :class:`DynamicScene` (fg deformed by motion bases + static bg) against
+posed RGB frames sampled across time: photometric L1 + D-SSIM plus a temporal
+motion-smoothness regularizer. Both fields get standard 3DGS adaptive density
+control, driven by the combined cloud's screen-space gradients. When the scene
+carries identity (:meth:`DynamicScene.enable_identity`) and a view carries an id
+map, a cross-entropy term supervises the rasterized identity features through the
+scene's linear classifier (Gaussian Grouping's 2D loss).
+
+By default identity **reads** the geometry and never writes it: the features are
+rendered in a second pass with every geometric input detached, so the identity loss
+reaches only the identity vectors and the classifier. The photometric loss matches
+measured pixels; the id maps are pseudo-labels (SAM 2 masks through reid and the
+graph), and letting their errors move geometry cost 1.2 dB on lab-coat. Densification
+then also sees photometric gradients only. ``identity_detach_geometry=False`` is the
+coupled single-pass variant, kept for comparison.
+
+A 3D consistency term (Gaussian Grouping's ``loss_cls_3d``) pulls each sampled
+Gaussian's class distribution toward its k nearest neighbours' -- canonical means for
+the foreground, which stay neighbours on a typical frame across all ten loop scenes,
+and 3D means for the static background. Positions are detached: identity only.
+
+**Identity reset** (off by default) is opacity reset's counterpart: every
+``identity_reset_every`` steps, until ``identity_reset_until``, every Gaussian's identity
+vector is set to zero -- the classifier's bias alone, no opinion -- and its Adam state
+cleared. A Gaussian the 2D loss reaches earns its identity back; one it never reaches
+(hidden in every training view) stays unassigned, below any selection threshold, instead
+of keeping a label it was never checked against. It also clears labels picked up early,
+while the geometry was still blobby, from Gaussians that sharper geometry later hid.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+import math
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from reifyscene.graph.id_maps import IGNORE
+from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig, compute_scene_extent
+from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES, DynamicScene
+from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM, PARAM_NAMES
+from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_bchw
+from reifyscene.render.gaussian4d.losses import gradient_loss, masked_l1_loss
+from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
+
+
+def knn_indices(
+    query: torch.Tensor, points: torch.Tensor, k: int, *,
+    exclude: torch.Tensor | None = None, chunk: int = 65536,
+) -> torch.Tensor:
+    """(M, k) indices of each query's k nearest ``points``, chunked over ``points``.
+
+    Chunked so a 400k-point background never materialises an (M, N) distance matrix.
+    ``exclude[i]`` is query i's own index in ``points``, skipped so a point is never its
+    own neighbour.
+    """
+    best_d = torch.full((query.shape[0], 0), float("inf"), device=query.device)
+    best_i = torch.zeros((query.shape[0], 0), dtype=torch.long, device=query.device)
+    for s in range(0, points.shape[0], chunk):
+        d = torch.cdist(query, points[s:s + chunk])
+        if exclude is not None:
+            own = exclude - s
+            hit = (own >= 0) & (own < d.shape[1])
+            d[hit.nonzero(as_tuple=True)[0], own[hit]] = float("inf")
+        kk = min(k, d.shape[1])
+        dv, di = d.topk(kk, dim=1, largest=False)
+        best_d = torch.cat([best_d, dv], dim=1)
+        best_i = torch.cat([best_i, di + s], dim=1)
+        best_d, order = best_d.topk(min(k, best_d.shape[1]), dim=1, largest=False)
+        best_i = best_i.gather(1, order)
+    return best_i
+
+
+@dataclass
+class DynamicTrainConfig:
+    iters: int = 5000
+    lambda_l1: float = 0.8
+    lambda_ssim: float = 0.2
+    lambda_smooth: float = 1.0
+    # Shape-of-Motion's geometry terms (flow3d/configs.py): disparity against the depth prior
+    # (its weight, 0.5), its spatial gradient (theirs 1.0) and the mask term (theirs 1.0: total
+    # opacity driven to 1, the rendered foreground share against the foreground mask).
+    # Measured on lab-coat (2026-10-01, 47 frames, same geometry): depth alone +0.1 dB over
+    # photos only; + gradient -0.2 dB; the mask term -1.9 dB -- our "foreground" is every
+    # segmented instance, theirs the moving part, so it pushes static objects into the moving
+    # field. Gradient and mask are off until that is reconciled.
+    lambda_depth: float = 0.5
+    lambda_depth_grad: float = 0.0
+    lambda_mask: float = 0.0
+    lr_means: float = 1.6e-4
+    lr_scales: float = 5.0e-3
+    lr_quats: float = 1.0e-3
+    lr_opacities: float = 5.0e-2
+    lr_colors: float = 2.5e-3
+    lr_motion_coefs: float = 1.0e-2
+    lr_motion_bases: float = 1.6e-4
+    lambda_identity: float = 1.0
+    identity_detach_geometry: bool = True
+    lambda_identity_3d: float = 2.0
+    identity_3d_every: int = 2
+    identity_3d_k: int = 5
+    identity_3d_samples: int = 800
+    # Gaussian Grouping divides the 3D KL by num_classes, which is 200 in their setup. Ours
+    # is 4-24 per scene, so dividing by ours made lambda=2 8-50x stronger than theirs and
+    # flattened identity to buy agreement. A fixed divisor reproduces their strength and
+    # stops scenes with fewer classes being smoothed harder.
+    identity_3d_norm: float = 200.0
+    # Training-time diagnostics (identity_trace.IdentityTracer), off by default.
+    # Training signal (Shape-of-Motion trains batches of 8 views). 8 views per step against 1,
+    # same 5k-step schedule, on lab-coat / gold-fish / judo: +5.6 to +7.4 dB PSNR over every
+    # training frame and 1.4-3.4x the sharpness -- the difference between scenes too soft to
+    # judge an edit on and scenes that are not. It costs ~5x render-stage time.
+    views_per_step: int = 8
+    # SoM also decays the scales' learning rate to 0.1x; measured here it made scenes softer
+    # alone and with batching, so it is off (1.0 = constant).
+    lr_scales_final_ratio: float = 1.0
+    identity_reset_every: int = 0
+    identity_reset_until: int | None = None     # None: iters - 2 * identity_reset_every
+    identity_trace_every: int = 0
+    identity_trace_views: int = 8
+    snapshot_steps: tuple[int, ...] = ()
+    lr_identity: float = 2.5e-3
+    lr_identity_classifier: float = 5.0e-4
+    random_seed: int = 0
+    log_every: int = 250
+
+    @classmethod
+    def from_cfg(cls, cfg: dict | None) -> "DynamicTrainConfig":
+        cfg = cfg or {}
+        fields = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in cfg.items() if k in fields})
+
+
+class DynamicGaussianTrainer:
+    """Optimize a DynamicScene against (camera, time, gt) views."""
+
+    def __init__(
+        self,
+        scene: DynamicScene,
+        cfg: DynamicTrainConfig,
+        densify_cfg: DensifyConfig | None = None,
+        *,
+        device: str = "cuda",
+        rasterizer=None,
+    ) -> None:
+        self.cfg = cfg
+        self.device = device
+        self.scene = scene.to(device)
+        self.rasterizer = rasterizer or build_rasterizer({"device": device, "absgrad": (densify_cfg or DensifyConfig()).absgrad})
+        self.optimizer = self._build_optimizer()
+        self.last_identity_reset: int | None = None
+
+        # One densification controller per field (foreground grows motion_coefs
+        # too), both driven by the same combined-cloud telemetry. Standard 3DGS
+        # adaptive density control, applied to fg + bg as in Shape-of-Motion.
+        self.densify_cfg = densify_cfg or DensifyConfig(enabled=False)
+        scene_extent = compute_scene_extent(scene.cloud_at(0).means.detach())
+        # Identity rides densification like any other per-Gaussian param: a split
+        # child inherits its parent's vector, a pruned Gaussian takes its vector along.
+        extra = (IDENTITY_PARAM,) if self.scene.has_identity else ()
+        self.fg_ctrl = DensificationController(
+            self.scene.fg, self.optimizer, self.densify_cfg, scene_extent,
+            param_names=FG_PARAM_NAMES + extra, group_prefix="fg.",
+        )
+        self.bg_ctrl = (
+            DensificationController(
+                self.scene.bg, self.optimizer, self.densify_cfg, scene_extent,
+                param_names=PARAM_NAMES + extra, group_prefix="bg.",
+            )
+            if self.scene.bg is not None
+            else None
+        )
+
+    def _build_optimizer(self) -> torch.optim.Optimizer:
+        c = self.cfg
+        fg = self.scene.fg
+        groups = [
+            {"params": [fg.means], "lr": c.lr_means, "name": "fg.means"},
+            {"params": [fg.log_scales], "lr": c.lr_scales, "name": "fg.log_scales"},
+            {"params": [fg.quats], "lr": c.lr_quats, "name": "fg.quats"},
+            {"params": [fg.logit_opacities], "lr": c.lr_opacities, "name": "fg.logit_opacities"},
+            {"params": [fg.colors_logit], "lr": c.lr_colors, "name": "fg.colors_logit"},
+            {"params": [fg.motion_coefs], "lr": c.lr_motion_coefs, "name": "fg.motion_coefs"},
+            {"params": [self.scene.motion_bases.rots], "lr": c.lr_motion_bases, "name": "bases.rots"},
+            {"params": [self.scene.motion_bases.transls], "lr": c.lr_motion_bases, "name": "bases.transls"},
+        ]
+        if self.scene.bg is not None:
+            bg = self.scene.bg
+            groups += [
+                {"params": [bg.means], "lr": c.lr_means, "name": "bg.means"},
+                {"params": [bg.log_scales], "lr": c.lr_scales, "name": "bg.log_scales"},
+                {"params": [bg.quats], "lr": c.lr_quats, "name": "bg.quats"},
+                {"params": [bg.logit_opacities], "lr": c.lr_opacities, "name": "bg.logit_opacities"},
+                {"params": [bg.colors_logit], "lr": c.lr_colors, "name": "bg.colors_logit"},
+            ]
+        if self.scene.has_identity:
+            groups.append({"params": [fg.identity], "lr": c.lr_identity, "name": "fg.identity"})
+            if self.scene.bg is not None:
+                groups.append(
+                    {"params": [self.scene.bg.identity], "lr": c.lr_identity, "name": "bg.identity"}
+                )
+            groups.append({
+                "params": list(self.scene.identity_classifier.parameters()),
+                "lr": c.lr_identity_classifier, "name": "identity_classifier",
+            })
+        return torch.optim.Adam(groups, eps=1e-15)
+
+    @torch.no_grad()
+    def reset_identity(self, step: int) -> None:
+        """Zero every Gaussian's identity vector and its optimizer momentum; keep the head.
+
+        The momentum must go too: Adam would otherwise push each vector straight back to
+        the label it just lost, which is the reset not happening.
+        """
+        names = {"fg.identity": self.scene.fg}
+        if self.scene.bg is not None:
+            names["bg.identity"] = self.scene.bg
+        for group in self.optimizer.param_groups:
+            field = names.get(group.get("name"))
+            if field is None:
+                continue
+            field.identity.zero_()
+            state = self.optimizer.state.get(group["params"][0])
+            if state:
+                state["exp_avg"].zero_()
+                state["exp_avg_sq"].zero_()
+        self.last_identity_reset = int(step)
+
+    def _identity_reset_due(self, step: int) -> bool:
+        every = self.cfg.identity_reset_every
+        if not self.scene.has_identity or every <= 0 or step % every:
+            return False
+        until = self.cfg.identity_reset_until
+        until = self.cfg.iters - 2 * every if until is None else until
+        return step <= until
+
+    def identity_loss(self, features: torch.Tensor, id_map: torch.Tensor) -> torch.Tensor | None:
+        """Cross-entropy of rendered identity against an id map, normalised to ~(0, 1).
+
+        Pixels marked ignore (overlaps, dropped tracklets, padding) contribute nothing.
+        Divided by ``log(num_classes)`` as Gaussian Grouping does, so the weight means
+        the same across scenes with 4 classes and with 24. None when no pixel is labelled.
+        """
+        target = id_map.reshape(-1).long()
+        labelled = target != IGNORE
+        if not bool(labelled.any()):
+            return None
+        head = self.scene.identity_classifier
+        logits = head(features.reshape(-1, features.shape[-1]))
+        ce = F.cross_entropy(logits[labelled], target[labelled])
+        return ce / math.log(head.out_features)
+
+    def _photometric(self, pred: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, float]:
+        l1 = (pred - gt).abs().mean()
+        dssim = 1.0 - ssim(_to_bchw(pred), _to_bchw(gt))
+        return self.cfg.lambda_l1 * l1 + self.cfg.lambda_ssim * dssim, float(l1.detach())
+
+    def identity_consistency_loss(self, generator: torch.Generator | None = None) -> torch.Tensor:
+        """KL from each sampled Gaussian's class distribution to its k nearest neighbours'.
+
+        Per field, in that field's own space: canonical means for the foreground, means for
+        the background -- fg and bg are never each other's neighbours, since one is a
+        deformable cloud in its canonical pose and the other is static in the world.
+        Divided by a fixed ``identity_3d_norm`` (200, Gaussian Grouping's class count) rather
+        than our per-scene class count, so their lambda means the same here.
+        """
+        head = self.scene.identity_classifier
+        fields = [self.scene.fg] + ([self.scene.bg] if self.scene.bg is not None else [])
+        terms = []
+        for field in fields:
+            n = field.num_gaussians
+            k = min(self.cfg.identity_3d_k, n - 1)
+            if k < 1:
+                continue
+            probs = torch.softmax(head(field.identity), dim=-1)
+            pts = field.means.detach()
+            m = min(self.cfg.identity_3d_samples, n)
+            idx = torch.randperm(n, generator=generator)[:m].to(pts.device)
+            nn = knn_indices(pts[idx], pts, k, exclude=idx)
+            p = probs[idx].unsqueeze(1)                           # (m, 1, C)
+            q = probs[nn]                                         # (m, k, C)
+            kl = (p * (torch.log(p + 1e-10) - torch.log(q + 1e-10))).sum(-1).mean()
+            terms.append(kl / self.cfg.identity_3d_norm)
+        if not terms:
+            return torch.zeros((), device=self.scene.fg.means.device)
+        return torch.stack(terms).mean()
+
+    def identity_term(self, cloud, camera: RenderCamera, id_map, out) -> torch.Tensor | None:
+        """The weighted identity loss for one view, or None when nothing is labelled.
+
+        Detached (default): a second, feature-only pass over a geometry-detached cloud, so
+        gradients reach the identity vectors and classifier and nothing else. Coupled:
+        reuses ``out``, whose features were rendered with live geometry.
+        """
+        if self.cfg.identity_detach_geometry:
+            feat = self.rasterizer.rasterize(
+                cloud.means.detach(), cloud.quats.detach(), cloud.scales.detach(),
+                cloud.opacities.detach(), cloud.colors.detach(), camera,
+                features=cloud.features,
+            ).features
+        else:
+            feat = out.features
+        loss = self.identity_loss(feat, id_map)
+        return None if loss is None else self.cfg.lambda_identity * loss
+
+    def geometry_terms(self, out, fg_share, target) -> tuple[torch.Tensor, dict[str, float]]:
+        """The depth, depth-gradient and mask losses of one view against its ``target``
+        (``depth`` (H, W) in scene units, ``valid`` (H, W) bool, ``fg`` (H, W) float);
+        ``fg_share`` is the rendered foreground share, rendered only while the mask term is on."""
+        stats: dict[str, float] = {}
+        loss = torch.zeros((), device=out.depth.device)
+        valid = target["valid"]
+        if (self.cfg.lambda_depth > 0 or self.cfg.lambda_depth_grad > 0) and bool(valid.any()):
+            pred_disp = 1.0 / (out.depth + 1e-5)
+            tgt_disp = 1.0 / (target["depth"] + 1e-5)
+            weights = valid.to(pred_disp.dtype)[..., None]
+            depth = masked_l1_loss(pred_disp[..., None], tgt_disp[..., None], mask=weights,
+                                   quantile=0.98)
+            loss = loss + self.cfg.lambda_depth * depth
+            stats["depth_loss"] = float(depth.detach())
+            if self.cfg.lambda_depth_grad > 0:
+                grad = gradient_loss(pred_disp[None], tgt_disp[None], mask=valid[None],
+                                     quantile=0.95)
+                loss = loss + self.cfg.lambda_depth_grad * grad
+                stats["depth_grad_loss"] = float(grad.detach())
+        if self.cfg.lambda_mask > 0:
+            mask = F.mse_loss(out.alpha, torch.ones_like(out.alpha)) + masked_l1_loss(
+                fg_share[..., None], target["fg"][..., None], quantile=0.98)
+            loss = loss + self.cfg.lambda_mask * mask
+            stats["mask_loss"] = float(mask.detach())
+        return loss, stats
+
+    def fit(
+        self,
+        train_views: list[tuple],
+        *,
+        targets: list[dict] | None = None,
+        on_log: Callable[[dict], None] | None = None,
+        on_trace: Callable[[dict], None] | None = None,
+        on_snapshot: Callable[[int, DynamicScene], None] | None = None,
+    ) -> DynamicScene:
+        """``train_views`` are ``(camera, gt, time_id)`` or, for identity training,
+        ``(camera, gt, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor.
+        ``targets``, one per view, carry its geometry supervision (:meth:`geometry_terms`);
+        they are required while any geometry weight is on.
+
+        ``on_trace`` receives an identity trace record every ``identity_trace_every`` steps
+        (and at step 1); ``on_snapshot`` receives the scene at each of ``snapshot_steps``.
+        """
+        if not train_views:
+            raise ValueError("DynamicGaussianTrainer.fit got no training views.")
+        geometry_on = (self.cfg.lambda_depth > 0 or self.cfg.lambda_depth_grad > 0
+                       or self.cfg.lambda_mask > 0)
+        if geometry_on and (targets is None or len(targets) != len(train_views)
+                            or any(t is None for t in targets)):
+            raise ValueError("the geometry terms are on but not every training view has "
+                             "depth / mask targets (set lambda_depth, lambda_depth_grad and "
+                             "lambda_mask to 0 to train on photos alone)")
+        geo_stats: dict[str, float] = {}
+        mask_on = self.cfg.lambda_mask > 0
+        torch.manual_seed(self.cfg.random_seed)
+        gen = torch.Generator(device="cpu").manual_seed(self.cfg.random_seed)
+        n = len(train_views)
+        tracer = None
+        if on_trace is not None and self.cfg.identity_trace_every > 0 and self.scene.has_identity:
+            from reifyscene.render.gaussian4d.identity_trace import IdentityTracer
+
+            tracer = IdentityTracer.from_train_views(train_views, n=self.cfg.identity_trace_views)
+        snapshots = set(int(s) for s in self.cfg.snapshot_steps)
+
+        if self.scene.has_identity and not any(len(v) > 3 and v[3] is not None
+                                               for v in train_views):
+            raise ValueError("the scene carries identity but no training view has an id map")
+        id_loss_value = float("nan")
+        id3d_value = float("nan")
+        gen3d = torch.Generator(device="cpu").manual_seed(self.cfg.random_seed + 1)
+        batch = max(1, min(int(self.cfg.views_per_step), n))
+        scale_groups = [g for g in self.optimizer.param_groups
+                        if g.get("name") in ("fg.log_scales", "bg.log_scales")]
+        for step in range(1, self.cfg.iters + 1):
+            if self.cfg.lr_scales_final_ratio != 1.0:
+                t = min(step / max(self.cfg.iters, 1), 1.0)
+                for g in scale_groups:
+                    g["lr"] = self.cfg.lr_scales * self.cfg.lr_scales_final_ratio ** t
+            picks = torch.randperm(n, generator=gen)[:batch].tolist() if batch > 1 else \
+                [int(torch.randint(n, (1,), generator=gen).item())]
+            n_fg = self.scene.fg.num_gaussians
+            n_bg = self.scene.bg.num_gaussians if self.scene.bg is not None else 0
+            coupled = not self.cfg.identity_detach_geometry
+            loss = self.cfg.lambda_smooth * self.scene.motion_smoothness()
+            outs, l1s = [], []
+            for idx in picks:
+                view = train_views[idx]
+                camera, gt, time_id = view[:3]
+                id_map = view[3] if len(view) > 3 else None
+                cloud = self.scene.cloud_at(time_id)
+                feats = cloud.features if coupled else None
+                if mask_on:              # the foreground share rides as the last feature channel
+                    fg_ind = torch.zeros((n_fg + n_bg, 1), device=cloud.means.device)
+                    fg_ind[:n_fg] = 1.0
+                    feats = fg_ind if feats is None else torch.cat([feats, fg_ind], dim=-1)
+                out = self.rasterizer.rasterize(
+                    cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera,
+                    with_telemetry=self.densify_cfg.enabled, features=feats,
+                )
+                photo, l1 = self._photometric(out.rgb, gt)
+                loss = loss + photo / batch
+                if geometry_on:
+                    fg_share = None
+                    if mask_on:
+                        fg_share = out.features[..., -1]
+                        out.features = out.features[..., :-1] if coupled else None
+                    geo, geo_stats = self.geometry_terms(out, fg_share, targets[idx])
+                    loss = loss + geo / batch
+                if cloud.features is not None and id_map is not None:
+                    id_term = self.identity_term(cloud, camera, id_map, out)
+                    if id_term is not None:
+                        loss = loss + id_term / batch
+                        id_loss_value = (float(id_term.detach())
+                                         / max(self.cfg.lambda_identity, 1e-12))
+                outs.append(out)
+                l1s.append(l1)
+            l1 = float(np.mean(l1s))
+            if (self.scene.has_identity and self.cfg.lambda_identity_3d > 0
+                    and step % max(self.cfg.identity_3d_every, 1) == 0):
+                id3d = self.identity_consistency_loss(gen3d)
+                loss = loss + self.cfg.lambda_identity_3d * id3d
+                id3d_value = float(id3d.detach())
+
+            loss.backward()
+            for out in outs:
+                self.fg_ctrl.after_backward(out, (0, n_fg), grad_scale=batch)
+                if self.bg_ctrl is not None:
+                    self.bg_ctrl.after_backward(out, (n_fg, n_fg + n_bg), grad_scale=batch)
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.fg_ctrl.after_step(step)
+            if self.bg_ctrl is not None:
+                self.bg_ctrl.after_step(step)
+            if self._identity_reset_due(step):
+                self.reset_identity(step)
+
+            if on_log is not None and (step % self.cfg.log_every == 0 or step == 1):
+                with torch.no_grad():
+                    psnr = image_psnr(out.rgb.detach().clamp(0, 1), gt)
+                record = {"step": step, "loss": float(loss.detach()), "l1": l1, "psnr": psnr,
+                          "num_gaussians": self.scene.num_gaussians, **geo_stats}
+                if self.scene.has_identity:
+                    record["identity_loss"] = id_loss_value
+                    record["identity_3d_loss"] = id3d_value
+                on_log(record)
+            if tracer is not None and (step == 1 or step % self.cfg.identity_trace_every == 0
+                                       or step == self.cfg.iters):
+                on_trace(tracer.record(self, step))
+            if on_snapshot is not None and step in snapshots:
+                on_snapshot(step, self.scene)
+
+        return self.scene
+
+    @torch.no_grad()
+    def render_at(self, camera: RenderCamera, time_id: int) -> torch.Tensor:
+        cloud = self.scene.cloud_at(time_id)
+        out = self.rasterizer.rasterize(
+            cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors, camera
+        )
+        return out.rgb.clamp(0, 1)

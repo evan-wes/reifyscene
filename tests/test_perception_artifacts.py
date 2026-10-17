@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from room4d.common.backend_ladder import CapabilityManifest, RungStatus
-from room4d.common.types import FrameRef
-from room4d.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
-from room4d.perception.reid.reid_artifact import ReidArtifact
+from reifyscene.common.backend_ladder import CapabilityManifest, RungStatus
+from reifyscene.common.types import FrameRef
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
+from reifyscene.perception.reid.reid_artifact import ReidArtifact
 
 
 def _frame(idx: int) -> FrameRef:
@@ -106,7 +106,7 @@ def test_reid_artifact_roundtrip(tmp_path):
 
 
 def test_reid_canonical_follows_chain_and_is_cycle_safe():
-    art = ReidArtifact(run_id='r', stage_name='reid', save_dir='/tmp/x', merge_map={'c': 'b', 'b': 'a'})
+    art = ReidArtifact(run_id='r', stage_name='reid', save_dir='unsaved', merge_map={'c': 'b', 'b': 'a'})
     assert art.canonical('c') == 'a'
     assert art.canonical('a') == 'a'  # not in map -> itself
     art.merge_map = {'x': 'y', 'y': 'x'}  # malformed cycle must not hang

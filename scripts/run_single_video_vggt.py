@@ -22,11 +22,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from room4d.api.pipeline import Room4DPipeline
-from room4d.common.io import read_yaml
-from room4d.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
-from room4d.common.memory import release_memory
-from room4d.common.system_report import collect_system_report, recommend_vggt_long_profile, save_system_report
+from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common import data_dir
+from reifyscene.common.io import read_yaml
+from reifyscene.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
+from reifyscene.common.memory import release_memory
+from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile, save_system_report
 
 
 def build_config(args: argparse.Namespace, *, system_report: dict | None = None) -> dict:
@@ -58,6 +59,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
 
     if args.max_keyframes is not None:
         cfg["max_keyframes_per_stream"] = args.max_keyframes
+    if args.keyframe_stride is not None:
+        cfg["keyframe_stride"] = args.keyframe_stride
     if args.keyframe_stride_sec is not None:
         cfg["keyframe_stride_sec"] = args.keyframe_stride_sec
 
@@ -158,7 +161,7 @@ def _print_run_header(console: Console, args: argparse.Namespace, geometry_recom
         f"geometry backend: {args.geometry_backend_name}  mode: {args.backend_mode}  frame_source: {args.geometry_frame_source}  device: {args.device or 'auto'}\n"
     )
     body.append(
-        f"max_keyframes: {args.max_keyframes}  keyframe_stride_sec: {args.keyframe_stride_sec}  cpu_threads: {args.cpu_threads}\n"
+        f"max_keyframes: {args.max_keyframes}  keyframe_stride: {args.keyframe_stride}  keyframe_stride_sec: {args.keyframe_stride_sec}  cpu_threads: {args.cpu_threads}\n"
     )
     body.append(f"geometry_resize_max_dim: {args.geometry_resize_max_dim}\n")
     if args.geometry_backend_name == "vggt-long":
@@ -173,7 +176,7 @@ def _print_run_header(console: Console, args: argparse.Namespace, geometry_recom
             body.append(
                 f"recommended seed: chunk={geometry_recommendation.get('initial_chunk_size')} overlap={geometry_recommendation.get('initial_overlap')} resize={geometry_recommendation.get('initial_resize_max_dim')}  ladder=[{resize_preview}]"
             )
-    console.print(Panel(body, title="room4d single-video geometry run", expand=False))
+    console.print(Panel(body, title="reifyscene single-video geometry run", expand=False))
 
 
 def _print_stage_summary(console: Console, ingest, sync, geometry) -> None:
@@ -189,8 +192,10 @@ def _print_stage_summary(console: Console, ingest, sync, geometry) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", required=True, help="Path to a single RGB video file.")
-    parser.add_argument("--run-dir", required=True, help="Directory where artifacts will be written.")
+    parser.add_argument("--video", required=True,
+                        help="A single RGB video, by name in the data directory's datasets/.")
+    parser.add_argument("--run-dir", required=True,
+                        help="Where artifacts are written, by name in runs/.")
     parser.add_argument("--config", default=None, help="Optional YAML config path.")
     parser.add_argument("--debug-config", default=None, help="Optional YAML debug-export config path.")
 
@@ -228,7 +233,10 @@ def main() -> None:
     parser.add_argument("--geometry-resize-max-dim", type=int, default=None, help="Optionally downscale materialized geometry frames before backend execution.")
 
     parser.add_argument("--max-keyframes", type=int, default=8)
-    parser.add_argument("--keyframe-stride-sec", type=float, default=1.0)
+    parser.add_argument("--keyframe-stride", type=int, default=None,
+                        help="Keyframe spacing in frames (30 when neither stride is given).")
+    parser.add_argument("--keyframe-stride-sec", type=float, default=None,
+                        help="Keyframe spacing in seconds; needs a source that records its fps.")
 
     # VGGT-Long-specific flags
     parser.add_argument("--vggt-long-chunk-size", type=int, default=None)
@@ -275,6 +283,8 @@ def main() -> None:
         help="Maximum point-cloud samples per keyframe in debug exports.",
     )
     args = parser.parse_args()
+    args.video = str(data_dir.path(data_dir.DATASETS, args.video))
+    args.run_dir = str(data_dir.path(data_dir.RUNS, args.run_dir))
 
     console = Console()
     system_report = collect_system_report()
@@ -298,7 +308,7 @@ def main() -> None:
             f"delete_temp_files={args.vggt_long_delete_temp_files}  output_cache_dir={args.vggt_long_output_cache_dir}"
         )
 
-    pipeline = Room4DPipeline(build_config(args, system_report=system_report))
+    pipeline = ReifyScenePipeline(build_config(args, system_report=system_report))
 
     started = _debug_stage(console, args.debug, "Stage 1/3 · Ingest / preprocess")
     ingest = pipeline.preprocess([args.video])

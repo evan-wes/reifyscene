@@ -11,7 +11,7 @@ Two scene sources (the only thing that differs from the reference):
 * ``borrowed-init`` -- load the pre-dumped SoM init bundle (no TAPIR; a fast
   smoke of the serialize -> reload -> render -> score wiring).
 * ``own-tracker`` -- the gate (A): oracle ``DyCheckGeometryProvider`` geometry +
-  in-memory packed all-pairs tracks (room4d's own tapnet tracker) ->
+  in-memory packed all-pairs tracks (reifyscene's own tapnet tracker) ->
   ``NativeMotionInitializer``. Reproduces the native+own-tracker number through
   the F0b artifact seam.
 
@@ -20,32 +20,35 @@ Everything downstream (factor-2 training views, k_scale, masked-NVS) mirrors
 
 Example (gate):
     python scripts/f0_validate_windmill.py \
-        --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
+        --dataset-root dycheck_iphone/paper-windmill \
         --config configs/render/render_proof_windmill_dynamic.yaml \
-        --source own-tracker --out-dir /tmp/f0_validate/windmill_gate
+        --source own-tracker --out-dir f0_validate/windmill_gate
+
+Names are inside the data directory ($REIFYSCENE_DATA_DIR): the sequence in datasets/, a
+borrowed init in reference/, the output in runs/.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
 
-from room4d.geometry.dataset_wrapper import DatasetGeometryInitializer
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
-from room4d.render.gaussian4d.motion_init import (
+from reifyscene.common import data_dir
+from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.render.eval.masked_nvs_benchmark import score_render_artifact_masked_nvs_dynamic
+from reifyscene.render.gaussian4d.motion_init import (
     NativeMotionInitializer,
     dump_bundle,
     load_borrowed_init,
 )
-from room4d.render.gaussian4d.render_backend import GaussianRenderBackend
-from room4d.scene.scene_artifact import SceneArtifact
-from room4d.tracking.tapir_wrapper import TAPIRWrapper
+from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
+from reifyscene.scene.scene_artifact import SceneArtifact
+from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
 
 
 def _build_borrowed(init_npz: str, device: str):
@@ -55,12 +58,12 @@ def _build_borrowed(init_npz: str, device: str):
 
 
 def _slice_cameras(c, n: int):
-    from room4d.lifting.native_track_lift import CameraRecords
+    from reifyscene.lifting.native_track_lift import CameraRecords
     return CameraRecords(frame_names=c.frame_names[:n], time_ids=c.time_ids[:n], w2cs=c.w2cs[:n], Ks=c.Ks[:n])
 
 
 def _slice_stack(s, n: int):
-    from room4d.lifting.native_track_lift import FrameStack
+    from reifyscene.lifting.native_track_lift import FrameStack
     return FrameStack(cameras=_slice_cameras(s.cameras, n), depths=s.depths[:n], rgbs=s.rgbs[:n], fg=s.fg[:n], valid=s.valid[:n])
 
 
@@ -87,8 +90,8 @@ class _WindmillProvider:
 
 def _sam2_fg(rgbs_np: np.ndarray, device: str) -> "torch.Tensor":
     """Run the SAM 2 segmenter over the frames -> per-frame union foreground (N, H, W)."""
-    from room4d.common.types import FrameRef
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.common.types import FrameRef
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     images = [rgbs_np[i] for i in range(rgbs_np.shape[0])]
 
@@ -173,18 +176,20 @@ def _train_views_factor2(cams_train, dataset_root: str, factor: int):
             "intrinsics": {"fx": float(K[0, 0]), "fy": float(K[1, 1]), "cx": float(K[0, 2]), "cy": float(K[1, 2])},
             "width": int(width),
             "height": int(height),
-            "image_path": str(backend.rgb_dir / f"{cam.frame_name}.png"),
+            "image_path": str(backend.sequence.rgb_path(cam.frame_name, backend.factor)),
         })
     return views
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="F0b in-pipeline dynamic render validation (paper-windmill).")
-    ap.add_argument("--dataset-root", required=True)
+    ap.add_argument("--dataset-root", required=True, help="the sequence's name in datasets/")
     ap.add_argument("--config", default="configs/render/render_proof_windmill_dynamic.yaml")
     ap.add_argument("--source", choices=["borrowed-init", "own-tracker"], default="own-tracker")
-    ap.add_argument("--init", default=None, help="borrowed-init bundle npz (for --source borrowed-init)")
-    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--init", default=None,
+                    help="borrowed-init bundle npz, by its name in reference/ (for --source "
+                         "borrowed-init; default borrowed_init/<sequence>.npz)")
+    ap.add_argument("--out-dir", required=True, help="the output's name in runs/")
     ap.add_argument("--iters", type=int, default=None, help="override training iters (else config)")
     ap.add_argument("--num-fg", type=int, default=40_000)
     ap.add_argument("--num-bg", type=int, default=100_000)
@@ -210,18 +215,19 @@ def main() -> None:
     device = args.device or cfg.get("device", "cuda")
     factor = int(cfg["dataset"]["factor"])
     iters = args.iters or int(cfg["dynamic"]["iters"])
-    out_dir = Path(args.out_dir)
+    root = data_dir.path(data_dir.DATASETS, args.dataset_root)
+    out_dir = data_dir.path(data_dir.RUNS, args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Build the DynamicScene + cameras (the only source-specific step).
     if args.source == "borrowed-init":
-        init = args.init or str(Path(args.dataset_root).parent.parent / "borrowed_init" / f"{Path(args.dataset_root).name}.npz")
-        print(f"source=borrowed-init  init={init}")
+        init = str(data_dir.path(data_dir.REFERENCE, args.init or f"borrowed_init/{root.name}.npz"))
+        print(f"source=borrowed-init  init={data_dir.record_name(init)}")
         scene, cams, norm = _build_borrowed(init, device)
     else:
         print(f"source=own-tracker  (oracle geometry + in-memory all-pairs, fg={args.fg_source})")
         scene, cams, norm = _build_own_tracker(
-            args.dataset_root, device, num_fg=args.num_fg, num_bg=args.num_bg,
+            str(root), device, num_fg=args.num_fg, num_bg=args.num_bg,
             num_bases=args.num_bases, seed=args.seed,
             fg_source=args.fg_source, max_frames=args.max_frames, motion_gate=motion_gate,
             grid_size=args.tracker_grid_size,
@@ -233,7 +239,7 @@ def main() -> None:
 
     # 2. Serialize into a SceneArtifact and reload (exercises piece (a) on disk).
     bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
-    train_views = _train_views_factor2(cams["train"], args.dataset_root, factor)
+    train_views = _train_views_factor2(cams["train"], str(root), factor)
     art = SceneArtifact(
         run_id="f0_validate", stage_name="scene", save_dir=out_dir / "scene",
         kind="dynamic", render_seed={}, train_views=train_views, render_trajectory=[],

@@ -6,13 +6,15 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, TrackObservation
-from room4d.geometry.geometry_artifact import GeometryArtifact
-from room4d.optimize.factors.reprojection import ReprojectionFactor
-from room4d.optimize.optimization_artifact import OptimizationArtifact
-from room4d.optimize.solver import JointSpatiotemporalSolver
-from room4d.sync.sync_artifact import SyncArtifact
-from room4d.tracking.track_artifact import TrackArtifact
+from reifyscene.common.data_dir import record_name
+from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, TrackObservation
+from reifyscene.geometry.geometry_artifact import GeometryArtifact
+from reifyscene.optimize.factors.reprojection import ReprojectionFactor
+from reifyscene.optimize.optimization_artifact import OptimizationArtifact
+from reifyscene.optimize.solver import JointSpatiotemporalSolver
+from reifyscene.sync.sync_artifact import SyncArtifact
+from reifyscene.tracking.track_artifact import TrackArtifact
+from reifyscene.geometry.image_transform import ImageTransform, transform_record
 
 
 def test_reprojection_factor_placeholder() -> None:
@@ -30,14 +32,14 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
     ]
     intr = CameraIntrinsics(fx=40.0, fy=40.0, cx=32.0, cy=24.0)
     states = [
-        TimedCameraState(stream_id=stream_id, time_sec=0.0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.1, intrinsics=intr, pose=CameraPose(T_world_cam=np.asarray([
+        TimedCameraState(stream_id=stream_id, frame_idx=0, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=1, intrinsics=intr, pose=CameraPose(T_world_cam=np.asarray([
             [1.0, 0.0, 0.0, 0.2],
             [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ], dtype=np.float32))),
-        TimedCameraState(stream_id=stream_id, time_sec=0.2, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
+        TimedCameraState(stream_id=stream_id, frame_idx=2, intrinsics=intr, pose=CameraPose(T_world_cam=np.eye(4, dtype=np.float32))),
     ]
     depthmaps = {}
     pointmaps = {}
@@ -54,7 +56,7 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         img_path = tmp_path / f'{frame_key.replace(":", "__")}.png'
         from PIL import Image
         Image.fromarray(img).save(img_path)
-        image_paths[frame_key] = str(img_path)
+        image_paths[frame_key] = record_name(img_path)
     return GeometryArtifact(
         run_id='test',
         stage_name='geometry',
@@ -64,7 +66,8 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         camera_states_by_stream={stream_id: states},
         depthmaps_by_frame=depthmaps,
         pointmaps_by_frame=pointmaps,
-        metadata={'debug_image_paths': image_paths},
+        metadata={'debug_image_paths': image_paths, 'image_transforms': {'cam_00': transform_record(
+            ImageTransform.identity((64, 48)), recorded_by='test')}},
     )
 
 
@@ -85,9 +88,11 @@ def _make_track_artifact(tmp_path: Path) -> TrackArtifact:
     lifted_valid = np.ones((3, 4), dtype=bool)
     payload = {
         'frame_indices': np.asarray([0, 1, 2], dtype=np.int32),
-        'timestamps_sec': np.asarray([0.0, 0.1, 0.2], dtype=np.float32),
         'track_ids': track_ids,
         'points_xy': np.zeros((3, 4, 2), dtype=np.float32),
+        # the frame the track positions are measured in (the tracker always records it);
+        # here the geometry's own 64x48 pixels
+        'original_size_wh': [64, 48],
         'visibility': np.ones((3, 4), dtype=bool),
         'confidence': np.ones((3, 4), dtype=np.float32),
         'backend_used': 'test',

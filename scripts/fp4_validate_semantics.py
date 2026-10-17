@@ -16,8 +16,8 @@ mPSNR gate; the bar is intrinsic label quality, measured two ways:
 
 Run (GPU; Mask R-CNN / SAM 2 / SigLIP2 are inference-only):
     python scripts/fp4_validate_semantics.py --mode both \
-        --coco-root ../data/shape_of_motion/iphone/spin \
-        --windmill-root ../data/shape_of_motion/iphone/paper-windmill --max-frames 16
+        --coco-root dycheck_iphone/spin \
+        --windmill-root dycheck_iphone/paper-windmill --max-frames 16
 """
 
 from __future__ import annotations
@@ -28,11 +28,12 @@ from pathlib import Path
 
 import numpy as np
 
-from room4d.common.types import FrameRef, VideoStreamRef
-from room4d.ingest.ingest_artifact import IngestArtifact
-from room4d.lifting.geometry_provider import DyCheckGeometryProvider
-from room4d.perception.instance.instance_artifact import InstanceArtifact
-from room4d.perception.semantics.siglip_semantics import DEFAULT_VOCAB, FloorSemantics, SiglipSemantics
+from reifyscene.common import data_dir
+from reifyscene.common.types import FrameRef, VideoStreamRef
+from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
+from reifyscene.perception.instance.instance_artifact import InstanceArtifact
+from reifyscene.perception.semantics.siglip_semantics import DEFAULT_VOCAB, FloorSemantics, SiglipSemantics
 
 WINDMILL_EXTRA_VOCAB = [
     'pinwheel', 'windmill', 'paper windmill', 'toy', 'fan', 'flower', 'star', 'origami', 'umbrella', 'kite',
@@ -56,7 +57,7 @@ def _ingest_and_decoder(rgbs: np.ndarray):
             return images[int(idx)]
 
     ingest = IngestArtifact(
-        run_id='fp4', stage_name='ingest', save_dir=Path('/tmp/fp4_validate'),
+        run_id='fp4', stage_name='ingest', save_dir=data_dir.path(data_dir.CACHE, 'fp4_validate'),
         streams=[VideoStreamRef(stream_id='cam_00', video_path=Path('clip'), fps=20.0, num_frames=n, width=w, height=h, has_audio=False)],
     )
     refs = [FrameRef(stream_id='cam_00', frame_idx=i, timestamp_sec=float(i) * 0.05) for i in range(n)]
@@ -64,9 +65,9 @@ def _ingest_and_decoder(rgbs: np.ndarray):
 
 
 def coco_agreement(args) -> None:
-    from room4d.perception.instance.segment import FloorInstanceSegmenter
-    from room4d.perception.objects.detector import ObjectDetector
-    from room4d.perception.objects.segmenter import ObjectSegmenter
+    from reifyscene.perception.instance.segment import FloorInstanceSegmenter
+    from reifyscene.perception.objects.detector import ObjectDetector
+    from reifyscene.perception.objects.segmenter import ObjectSegmenter
 
     print(f"[coco] loading {args.max_frames} frames from {args.coco_root}")
     rgbs = _load_frames(args.coco_root, args.max_frames)
@@ -75,7 +76,7 @@ def coco_agreement(args) -> None:
     print("[coco] Mask R-CNN floor segment (detect + IoU tracks)...")
     floor_seg = FloorInstanceSegmenter(decoder, ObjectDetector({}), ObjectSegmenter({}), {})
     obs, masks = floor_seg.run(ingest, refs)
-    art = InstanceArtifact(run_id='fp4', stage_name='segment', save_dir=Path('/tmp/fp4/seg'), observations=obs, mask_arrays=masks)
+    art = InstanceArtifact(run_id='fp4', stage_name='segment', save_dir=data_dir.path(data_dir.CACHE, 'fp4_validate/seg'), observations=obs, mask_arrays=masks)
     art.rebuild_indices()
     # detector "ground truth" per track = majority COCO concept
     gt_records, _ = FloorSemantics().run(ingest, art)
@@ -108,7 +109,7 @@ def coco_agreement(args) -> None:
 
 
 def windmill_qualitative(args) -> None:
-    from room4d.perception.instance.sam2_segment import SAM2InstanceSegmenter
+    from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
 
     print(f"\n[windmill] loading {args.max_frames} frames from {args.windmill_root}")
     rgbs = _load_frames(args.windmill_root, args.max_frames)
@@ -121,7 +122,7 @@ def windmill_qualitative(args) -> None:
 
     print("[windmill] SAM 2 class-agnostic segment...")
     obs, masks = SAM2InstanceSegmenter(decoder, _Det(), {}).run(ingest, refs)
-    art = InstanceArtifact(run_id='fp4', stage_name='segment', save_dir=Path('/tmp/fp4/seg2'), observations=obs, mask_arrays=masks)
+    art = InstanceArtifact(run_id='fp4', stage_name='segment', save_dir=data_dir.path(data_dir.CACHE, 'fp4_validate/seg2'), observations=obs, mask_arrays=masks)
     art.rebuild_indices()
     n_tracks = len({o.track_id for o in obs})
     print(f"    -> {len(obs)} obs across {n_tracks} class-agnostic tracks")
@@ -140,11 +141,15 @@ def windmill_qualitative(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--mode', choices=['both', 'coco', 'windmill'], default='both')
-    ap.add_argument('--coco-root', default='../data/shape_of_motion/iphone/spin')
-    ap.add_argument('--windmill-root', default='../data/shape_of_motion/iphone/paper-windmill')
+    ap.add_argument('--coco-root', default='dycheck_iphone/spin',
+                    help='a sequence name in datasets/')
+    ap.add_argument('--windmill-root', default='dycheck_iphone/paper-windmill',
+                    help='a sequence name in datasets/')
     ap.add_argument('--max-frames', type=int, default=16)
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
+    args.coco_root = str(data_dir.path(data_dir.DATASETS, args.coco_root))
+    args.windmill_root = str(data_dir.path(data_dir.DATASETS, args.windmill_root))
     if args.mode in ('both', 'coco'):
         coco_agreement(args)
     if args.mode in ('both', 'windmill'):

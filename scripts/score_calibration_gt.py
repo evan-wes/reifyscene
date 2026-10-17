@@ -4,17 +4,17 @@
 M0-minimal of the calibration arc (design doc D2–D12): collect dataset
 frames with their GT poses, run the existing static SfM, and report
 pairwise-relative pose errors (primary) plus guarded Sim(3) APE
-(secondary). Runs in the ``room4d`` env (numpy + calibration module — this
+(secondary). Runs in the ``reifyscene`` env (numpy + calibration module — this
 script is NOT stdlib-only, unlike run_reference_benchmark.py).
 
 Examples:
   # NVIDIA static rig: 4 cameras x 5 timesteps, free intrinsics
   python scripts/score_calibration_gt.py --dataset nvidia \
-    --data-dir .../nvidia/Balloon1 --run-dir .../runs/balloon1-calib
+    --data-dir nvidia_dynamic/Balloon1 --run-dir balloon1-calib
 
   # Known-intrinsics protocol (shared-intrinsics datasets only)
   python scripts/score_calibration_gt.py --dataset nvidia --fix-intrinsics \
-    --data-dir .../nvidia/Balloon1 --run-dir .../runs/balloon1-calib-fixed
+    --data-dir nvidia_dynamic/Balloon1 --run-dir balloon1-calib-fixed
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from room4d.calibration.gt_scoring import (
+from reifyscene.common import data_dir
+from reifyscene.calibration.gt_scoring import (
     DATASETS,
     DEFAULT_NUM_FRAMES,
     DEFAULT_TIMESTEPS,
@@ -40,8 +41,8 @@ from room4d.calibration.gt_scoring import (
     select_frames,
     shared_intrinsics,
 )
-from room4d.calibration.hloc_colmap import HlocColmapSfMRunner
-from room4d.calibration.model_io import parse_colmap_text_model
+from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
+from reifyscene.calibration.model_io import parse_colmap_text_model
 
 
 def ensure_text_model(sparse_dir: Path, out_dir: Path) -> Path:
@@ -101,8 +102,10 @@ def build_sfm_cfg(fix_intrinsics: bool, cameras: list[GTCamera]) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dataset", choices=DATASETS, required=True)
-    parser.add_argument("--data-dir", required=True, help="Processed sequence dir")
-    parser.add_argument("--run-dir", required=True, help="Output dir (images/, work/, score json)")
+    parser.add_argument("--data-dir", required=True,
+                        help="Processed sequence, by name in the data directory's datasets/")
+    parser.add_argument("--run-dir", required=True,
+                        help="Output (images/, work/, score json), by name in runs/")
     parser.add_argument("--timesteps", type=int, default=None,
                         help=f"nvidia: timesteps per camera (default {DEFAULT_TIMESTEPS})")
     parser.add_argument("--num-frames", type=int, default=None,
@@ -112,14 +115,16 @@ def main() -> None:
         help="Known-intrinsics protocol: inject shared GT intrinsics into "
         "COLMAP and disable refinement (aborts if intrinsics differ per camera)",
     )
-    parser.add_argument("--output", help="Score JSON path (default: run-dir/calibration_gt_score.json)")
+    parser.add_argument("--output",
+                        help="Score JSON, by name in runs/ "
+                             "(default: <run-dir>/calibration_gt_score.json)")
     # test hook: routes the SfM runner through its existing mock path so the
     # CLI is exercisable without hloc/GPU (mirrors CalibrationRunner tests)
     parser.add_argument("--mock-sparse-model-dir", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir).expanduser().resolve()
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    seq_dir = data_dir.path(data_dir.DATASETS, args.data_dir)
+    run_dir = data_dir.path(data_dir.RUNS, args.run_dir)
 
     # The selection knobs are dataset-specific; a silently ignored flag
     # would misdescribe the run. Validate bounds while we're at it.
@@ -137,11 +142,11 @@ def main() -> None:
     num_frames = args.num_frames if args.num_frames is not None else DEFAULT_NUM_FRAMES
 
     try:
-        frames = enumerate_frames(args.dataset, data_dir)
+        frames = enumerate_frames(args.dataset, seq_dir)
         selected = select_frames(
             args.dataset, frames, timesteps=timesteps, num_frames=num_frames
         )
-        cameras = load_gt_cameras(args.dataset, data_dir, selected)
+        cameras = load_gt_cameras(args.dataset, seq_dir, selected)
         image_dir = run_dir / "images"
         manifest_path = collect_frames(cameras, image_dir)
     except GTSchemaError as exc:
@@ -155,7 +160,7 @@ def main() -> None:
         sfm_cfg["mock_sparse_model_dir"] = args.mock_sparse_model_dir
 
     print(
-        f"[collect] {len(cameras)} frames from {args.dataset}:{data_dir.name} "
+        f"[collect] {len(cameras)} frames from {args.dataset}:{seq_dir.name} "
         f"-> {image_dir}",
         flush=True,
     )
@@ -192,18 +197,19 @@ def main() -> None:
     result = {
         "schema": SCORE_SCHEMA,
         "dataset": args.dataset,
-        "data_dir": str(data_dir),
-        "run_dir": str(run_dir),
+        "data_dir": args.data_dir,
+        "run_dir": args.run_dir,
         "frames": [c.source_frame for c in cameras],
         "intrinsics_mode": "fixed-gt" if args.fix_intrinsics else "free",
         "intrinsics_match_injected": intrinsics_match,
         "camera_mode": sfm_cfg.get("camera_mode", "PER_FOLDER"),
         "recovered_intrinsics": recovered,
-        "colmap_model_dir": str(text_dir),
+        "colmap_model_dir": data_dir.record_name(text_dir),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **result,
     }
-    out_path = Path(args.output).expanduser().resolve() if args.output else run_dir / "calibration_gt_score.json"
+    out_path = (data_dir.path(data_dir.RUNS, args.output) if args.output
+                else run_dir / "calibration_gt_score.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nCalibration GT score written to: {out_path}\n")
