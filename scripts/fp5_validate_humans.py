@@ -8,7 +8,7 @@ depth/normals are well-formed. Runs the actual dense-ladder rung over Mask R-CNN
 human instances.
 
 Run (GPU; weights via setup_reifyscene.sh --with-sapiens):
-    python scripts/fp5_validate_humans.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 8
+    python scripts/fp5_validate_humans.py --dataset-root dycheck_iphone/spin --max-frames 8
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.common.types import FrameRef, VideoStreamRef
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.lifting.geometry_provider import DyCheckGeometryProvider
@@ -30,10 +31,12 @@ from reifyscene.perception.objects.segmenter import ObjectSegmenter
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--dataset-root', default='../data/shape_of_motion/iphone/spin')
+    ap.add_argument('--dataset-root', default='dycheck_iphone/spin',
+                    help='a sequence name in datasets/')
     ap.add_argument('--max-frames', type=int, default=8)
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     prov = DyCheckGeometryProvider(args.dataset_root, factor=1, depth_type='depth_anything_colmap', camera_type='refined')
     rgbs = prov.frame_stack('train', device='cpu').rgbs.cpu().numpy()[: args.max_frames]
@@ -47,7 +50,7 @@ def main() -> None:
             return images[int(idx)]
 
     ingest = IngestArtifact(
-        run_id='fp5', stage_name='ingest', save_dir=Path('/tmp/fp5'),
+        run_id='fp5', stage_name='ingest', save_dir=data_dir.path(data_dir.CACHE, 'fp5_validate'),
         streams=[VideoStreamRef(stream_id='cam_00', video_path=Path('spin'), fps=20.0, num_frames=n, width=w, height=h, has_audio=False)],
     )
     refs = [FrameRef(stream_id='cam_00', frame_idx=i, timestamp_sec=float(i) * 0.05) for i in range(n)]
@@ -56,7 +59,7 @@ def main() -> None:
     floor = FloorInstanceSegmenter(_Decoder(), ObjectDetector({}), ObjectSegmenter({}), {})
     obs, masks = floor.run(ingest, refs)
     human_obs = [o for o in obs if o.kind == 'human']
-    art = InstanceArtifact(run_id='fp5', stage_name='segment', save_dir=Path('/tmp/fp5/seg'), observations=obs, mask_arrays=masks)
+    art = InstanceArtifact(run_id='fp5', stage_name='segment', save_dir=data_dir.path(data_dir.CACHE, 'fp5_validate/seg'), observations=obs, mask_arrays=masks)
     art.rebuild_indices()
     print(f"    -> {len(human_obs)} human instances across {len({o.track_id for o in human_obs})} tracks")
 

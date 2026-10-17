@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from scripts.run_single_video_vggt import build_config
@@ -93,7 +94,7 @@ def test_geometry_artifact_writes_camera_json_ply_and_html(tmp_path: Path) -> No
             "save_pointcloud_plys": True,
             "save_debug_html": True,
             "debug_max_points": 16,
-            "debug_image_paths": {"cam_00:0": str(src_image)},
+            "debug_image_paths": {"cam_00:0": record_name(src_image)},
         },
     )
     artifact.save()
@@ -138,7 +139,7 @@ def test_geometry_artifact_resizes_rgb_for_pointcloud_debug_export(tmp_path: Pat
             "save_pointcloud_plys": True,
             "save_debug_html": True,
             "debug_max_points": 16,
-            "debug_image_paths": {"cam_00:0": str(src_image)},
+            "debug_image_paths": {"cam_00:0": record_name(src_image)},
         },
     )
     artifact.save()

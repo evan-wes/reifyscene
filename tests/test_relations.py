@@ -41,7 +41,7 @@ def _node(nid: str, category: str, boxes: dict[int, tuple[list, list]]) -> Graph
 
 
 def _graph(nodes, gravity=True) -> GraphArtifact:
-    return GraphArtifact(run_id="t", stage_name="graph", save_dir="/tmp/x", nodes=nodes,
+    return GraphArtifact(run_id="t", stage_name="graph", save_dir="unsaved", nodes=nodes,
                          metadata={"world_frame": {"gravity_aligned": gravity}})
 
 

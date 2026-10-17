@@ -6,15 +6,12 @@
 # single boolean from it, because entity positions come from the geometry's pointmaps.
 # Dropping to the keypoint rung keeps the human/object split, which the inventory needs.
 # Runs stop at `graph`; scene and render are a further 27% and answer a different
-# question. See scan_clips_inventory.sh.
+# question. benchmarks/README.md has the command that builds them.
 
 run:
   name: reifyscene_dev
-  output_dir: artifacts/runs/reifyscene_dev
 
 dataset:
-  input_dir: data/raw
-  cache_dir: artifacts/cache
   keyframe_stride: 15
 
 humans:

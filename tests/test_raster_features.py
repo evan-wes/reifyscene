@@ -8,8 +8,6 @@ shapes that would otherwise misalign silently (a cloud half with features, half 
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
@@ -21,13 +19,13 @@ from reifyscene.render.gaussian4d.rasterizer import (
     RenderCamera,
     gsplat_available,
 )
+from tests.conftest import real_data
 
 requires_gsplat = pytest.mark.skipif(
     not gsplat_available(), reason="rasterizer tests need gsplat and a CUDA device"
 )
 
-REPO = Path(__file__).resolve().parents[1]
-BLACKSWAN = REPO.parent / "runs" / "slice_blackswan"     # a real trained run, if on disk
+BLACKSWAN = real_data("runs/slice_blackswan")     # a real trained run, if there is one
 
 
 def _cpu_cloud(n: int, d: int | None) -> GaussianCloud:
@@ -161,8 +159,9 @@ def test_an_empty_cloud_with_features_returns_blank_features() -> None:
 
 
 @requires_gsplat
-@pytest.mark.skipif(not RunOutputs.is_run(BLACKSWAN), reason="needs the slice_blackswan run")
-def test_rgb_is_unchanged_for_an_existing_checkpoint() -> None:
+@pytest.mark.skipif(BLACKSWAN is None or not RunOutputs.is_run(BLACKSWAN),
+                    reason="needs the slice_blackswan run")
+def test_rgb_is_unchanged_for_an_existing_checkpoint(real_data_dir) -> None:
     """The done-when for I1: a real trained scene renders identically with a feature attached."""
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 

@@ -99,8 +99,9 @@ def _normalize_w2c(w2c: np.ndarray, transfm: np.ndarray, scale: float) -> np.nda
 
 
 def eval_dataset(eval_cfg: dict[str, Any]) -> DatasetGeometryInitializer:
-    """The benchmark dataset reader the held-out views are loaded from."""
-    return DatasetGeometryInitializer({
+    """The benchmark dataset reader the held-out views are loaded from (``dataset_root`` is
+    the sequence's name in the data directory's datasets/)."""
+    return DatasetGeometryInitializer.from_config({
         "dataset_root": str(eval_cfg["dataset_root"]),
         "factor": int(eval_cfg.get("factor", 2)),
         "split": str(eval_cfg.get("split", "train")),

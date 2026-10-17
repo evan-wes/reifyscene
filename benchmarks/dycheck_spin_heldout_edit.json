@@ -2,7 +2,7 @@
  "benchmark": "dycheck_spin_heldout_edit",
  "generated": "2026-10-01",
  "commit": "63eb00f",
- "command": "python scripts/heldout_edit_damage.py ../runs/slice_spin",
+ "command": "python scripts/heldout_edit_damage.py slice_spin",
  "run": "slice_spin",
  "entity": "human:0:sam2:0:1",
  "label": "person",

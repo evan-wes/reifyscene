@@ -3,7 +3,7 @@
 
     python scripts/bench_raster_channels.py                                  # synthetic cloud
     python scripts/bench_raster_channels.py \
-        --checkpoint ../runs/loop_blackswan/render/trained_dynamic.npz
+        --checkpoint loop_blackswan/render/trained_dynamic.npz
     python scripts/bench_raster_channels.py --dims 0 13 16 20 28
 
 Why this exists: the identity feature's width is a cost choice, and gsplat 1.5.3 only has
@@ -79,7 +79,9 @@ def _from_checkpoint(path: Path):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, help="trained_dynamic.npz; default synthetic")
+    ap.add_argument("--checkpoint", default=None,
+                    help="a trained_dynamic.npz by its name in runs/ (<run>/<sub>/...); "
+                         "default synthetic")
     ap.add_argument("--gaussians", type=int, default=80_000, help="synthetic cloud size")
     ap.add_argument("--size", type=int, nargs=2, default=(518, 294), metavar=("W", "H"))
     ap.add_argument("--dims", type=int, nargs="+", default=[0, 13, 16, 19, 20, 28])
@@ -93,8 +95,11 @@ def main() -> int:
 
     require_gsplat()
     if args.checkpoint:
-        means, quats, scales, opac, colors, cam = _from_checkpoint(args.checkpoint)
-        source = args.checkpoint.parent.parent.name
+        from reifyscene.common import data_dir
+
+        checkpoint = data_dir.path(data_dir.RUNS, args.checkpoint)
+        means, quats, scales, opac, colors, cam = _from_checkpoint(checkpoint)
+        source = checkpoint.parent.parent.name
     else:
         means, quats, scales, opac, colors, cam = _synthetic(args.gaussians, *args.size)
         source = "synthetic"

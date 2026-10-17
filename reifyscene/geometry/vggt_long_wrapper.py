@@ -15,12 +15,13 @@ from typing import Any
 import numpy as np
 import torch
 
+from reifyscene.common import data_dir
 from reifyscene.common.memory import format_memory_snapshot, process_memory_snapshot, release_memory
 from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile
 from reifyscene.common.types import FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.image_transform import vggt_input_transform
-from reifyscene.geometry.vggt_wrapper import DEFAULT_INPUT_CACHE_ROOT, VGGTInitializer
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer, input_cache_root
 
 
 
@@ -1088,9 +1089,7 @@ class VGGTLongInitializer(VGGTInitializer):
 
         # Content-keyed input cache shared with VGGT (never an ingest-folder-named
         # directory another run would empty and rewrite).
-        cache_root = (
-            Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
-        )
+        cache_root = input_cache_root(self.frame_cache_dir)
         cache_root.mkdir(parents=True, exist_ok=True)
         # VGGT-Long pads each chunk's mixed-size images up to that chunk's largest, so a
         # frame's pixel mapping would depend on which chunk it fell in: refuse up front.
@@ -1173,7 +1172,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 for stream_id, size in source_sizes.items()
             })
             artifact.metadata["vggt_long_outputs"] = {
-                "dir": str(backend_output_root), "kept": keep_outputs,
+                "dir": data_dir.record_name(backend_output_root), "kept": keep_outputs,
             }
             return artifact
 
@@ -1186,18 +1185,19 @@ class VGGTLongInitializer(VGGTInitializer):
         the same input (``vggt_long_run/<input folder>``) could be written by two runs
         at once, so each invocation gets its own, and it is removed afterwards (about
         11 GB for 426 frames) unless ``keep_backend_outputs`` is set. An explicit
-        ``output_cache_dir`` is the caller's and is always kept.
+        ``output_cache_dir`` (a name in the data directory's cache) is the caller's and is
+        always kept.
         """
         import shutil
         import tempfile
 
         if self.output_cache_dir:
-            root = Path(self.output_cache_dir)
+            root = data_dir.path(data_dir.CACHE, self.output_cache_dir)
             root.mkdir(parents=True, exist_ok=True)
             yield root, True
             return
         keep = bool(self.cfg.get("keep_backend_outputs", False))
-        parent = DEFAULT_INPUT_CACHE_ROOT.parent / "vggt_long_run"
+        parent = data_dir.path(data_dir.CACHE, "vggt_long_run")
         parent.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix=f"{ingest_artifact.run_id}-", dir=parent))
         try:

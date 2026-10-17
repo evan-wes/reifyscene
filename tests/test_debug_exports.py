@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.api.pipeline import ReifyScenePipeline
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, VideoStreamRef
 from reifyscene.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
@@ -37,7 +38,7 @@ def test_deferred_geometry_debug_export(tmp_path: Path) -> None:
     img = tmp_path / 'rgb.png'
     Image.fromarray(np.zeros((4,4,3), dtype=np.uint8)).save(img)
     cfg = {'enabled': True, 'geometry': {'enabled': True, 'depth_pngs': True, 'viewer': True, 'debug_assets': True, 'max_points': 10}}
-    export_debug_artifacts(tmp_path, cfg, {'cam_00:0': str(img)})
+    export_debug_artifacts(tmp_path, cfg, {'cam_00:0': record_name(img)})
     assert (save_dir / 'depthmaps_png' / 'cam_00__0.png').exists()
     assert (save_dir / 'debug_viewer.html').exists()
 

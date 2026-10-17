@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Measure how coherent trained per-Gaussian identity is in 3D, and how rigid the motion is.
 
-    python scripts/measure_identity_coherence.py ../runs/slice_lab-coat ../runs/slice_judo
-    python scripts/measure_identity_coherence.py ../runs/slice_lab-coat --sub render_identity
+    python scripts/measure_identity_coherence.py slice_lab-coat slice_judo
+    python scripts/measure_identity_coherence.py slice_lab-coat --sub render_identity
 
 Reads ``<run>/<sub>/trained_dynamic.npz`` (a checkpoint trained with identity, see
 ``scripts/retrain_with_identity.py``) and writes ``<run>/<sub>/identity_coherence.json``.
@@ -133,19 +133,20 @@ def measure(checkpoint, *, k: int, traj_frames: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dirs", type=Path, nargs="+")
+    ap.add_argument("runs", nargs="+", help="runs, by name in the data directory's runs/")
     ap.add_argument("--sub", default="render_identity", help="checkpoint dir inside each run")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--traj-frames", type=int, default=8)
     args = ap.parse_args()
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
 
     head = (f"{'run':<22} {'psnr':>6} {'ctrl':>6} {'fg':>7} {'bg agr':>7} {'fg can':>7} "
             f"{'fg traj':>7} {'stretch':>8} {'opaque':>7} {'<=2x':>6} {'H fg':>5} {'H bg':>5}")
     print(head)
     print("-" * len(head))
-    for run in args.run_dirs:
-        checkpoint = RunOutputs.open(run.resolve()).checkpoint(args.sub)
+    for run in args.runs:
+        checkpoint = RunOutputs.open(data_dir.path(data_dir.RUNS, run)).checkpoint(args.sub)
         r = measure(checkpoint, k=args.k, traj_frames=args.traj_frames)
         (checkpoint.dir / "identity_coherence.json").write_text(json.dumps(r, indent=2) + "\n")
 

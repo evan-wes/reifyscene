@@ -1,7 +1,7 @@
 """Score recovered calibration extrinsics against dataset ground truth.
 
-Design: a private design note
-(eng-review decisions D3–D12). M0-minimal scope.
+Design: the calibration-arc design document, kept outside the repository (eng-review decisions
+D3–D12). M0-minimal scope.
 
     dataset seq ──adapter──► GTCamera[] ──collector──► image_dir/ + gt_manifest.json
                                                             │

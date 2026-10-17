@@ -39,7 +39,7 @@ separate mode (§7).
 
 ### As built: the demo in five beats (`lab-coat`)
 
-Run `reifyscene serve ../runs`, open http://127.0.0.1:8765, pick **lab-coat**. Each beat is
+Run `reifyscene serve`, open http://127.0.0.1:8765, pick **lab-coat**. Each beat is
 one claim of *interpret, query, edit, re-render*, shown and not told.
 
 1. **The scene is a graph over time.** Frame 0: the photo beside the graph, three people joined
@@ -77,7 +77,7 @@ relations among street objects) are the next cleanest. Avoid `blackswan`, `gold-
 ## 2. Shape
 
 ```
-reifyscene serve ../runs            (one process, one port, started for a demo)
+reifyscene serve                        (one process, one port, started for a demo)
  ├─ FastAPI backend   reifyscene/api/web/
  │    reads runs  →  GraphArtifact, presence, relations        (library calls, §4)
  │    queries     →  reifyscene.query.SceneQuery               (the same code as the CLI)
@@ -130,7 +130,7 @@ app and the evidence pages read as one project. Both themes.
   frame, under a minute on the 5k-step scenes). It is cached per checkpoint, so every later edit
   on that run is an assignment, a filter and a few renders: seconds.
 - **One edit at a time on the GPU.** Edits queue; the UI shows the queue. The GPU power cap is
-  checked at startup (the server refuses to start above 400 W, as `gpu_guard.sh` does) and the
+  checked at startup (the server refuses to start above 400 W) and the
   process holds one CUDA context for its lifetime.
 - **Results are written under `<run>/edits/<id>/`** (edited checkpoint optional, renders, the
   measures), never into the pipeline's own stage directories. An edit is a view on a run.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Remove an entity from a trained scene and render before/after -- the spike's step-1 gate.
 
-    python scripts/render_entity_edit.py ../runs/slice_blackswan --node auto
+    python scripts/render_entity_edit.py slice_blackswan --node auto
 
 The gate the spike sets is *"is the removed region the entity, and is what remains intact?"*
 This answers both, and measures rather than only shows them:
@@ -34,11 +34,11 @@ REPO = Path(__file__).resolve().parents[1]
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("run", help="a run, by name in the data directory's runs/")
     ap.add_argument("--node", default="auto",
                     help="node id, a label, or 'auto' for the largest claim")
     ap.add_argument("--frames", type=int, default=3, help="how many training frames to render")
-    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--out", default="entity_edit", help="output folder name inside the run")
     ap.add_argument("--changed-threshold", type=int, default=12,
                     help="per-pixel L1 over 0-255 channels above which a pixel counts as changed")
     ap.add_argument("--device", default="cuda")
@@ -48,6 +48,7 @@ def main() -> None:
     from PIL import Image
 
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.common.frame_keys import parse_key
     from reifyscene.graph.renderable_handle import (
         compute_renderable_handles,
@@ -58,9 +59,9 @@ def main() -> None:
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
     from reifyscene.render.gaussian4d.rasterizer import build_rasterizer
 
-    run = RunOutputs.open(args.run_dir.resolve())
+    run = RunOutputs.open(data_dir.path(data_dir.RUNS, args.run))
     checkpoint = run.checkpoint()
-    out_dir = args.out or run.output_dir("entity_edit")
+    out_dir = run.output_dir(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     handles = compute_renderable_handles(checkpoint)

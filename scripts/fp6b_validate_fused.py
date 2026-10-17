@@ -18,7 +18,7 @@ Reuses the shipped `ColmapPoseInitializer.reconstruct`, `MoGeInitializer.infer_f
 `reifyscene.geometry.scale_reconcile` so it exercises production code, not a re-implementation.
 
 Run (GPU; hloc/pycolmap + MoGe via setup_reifyscene.sh --with-calibration --with-moge):
-    python scripts/fp6b_validate_fused.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 60
+    python scripts/fp6b_validate_fused.py --dataset-root dycheck_iphone/spin --max-frames 60
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from reifyscene.common import data_dir
 from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 from reifyscene.geometry.moge_wrapper import MoGeInitializer
@@ -73,14 +74,17 @@ def R_and_C(T_world_cam: np.ndarray):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset-root", default="../data/shape_of_motion/iphone/spin")
+    ap.add_argument("--dataset-root", default="dycheck_iphone/spin",
+                    help="the sequence's name in the data directory's datasets/")
     ap.add_argument("--factor", type=int, default=1)
     ap.add_argument("--split", default="train")
     ap.add_argument("--max-frames", type=int, default=60)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--min-obs", type=int, default=64)
-    ap.add_argument("--work-dir", default="/tmp/fp6b_fused_validate")
+    ap.add_argument("--work-dir", default="fp6b_fused_validate",
+                    help="a name in the data directory's cache/")
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     ds = DatasetGeometryInitializer({"dataset_root": args.dataset_root, "factor": args.factor, "split": args.split})
     specs = ds.split_frames()
@@ -92,7 +96,7 @@ def main() -> None:
     intr_gt0, _, _ = ds.load_camera(names[0])
     cam_params = f"{intr_gt0.fx},{intr_gt0.fy},{intr_gt0.cx},{intr_gt0.cy}"
 
-    work = Path(args.work_dir)
+    work = data_dir.path(data_dir.CACHE, args.work_dir)
     img_dir = work / "images"
     if img_dir.exists():
         import shutil
@@ -105,7 +109,7 @@ def main() -> None:
           f"({Path(args.dataset_root).name}, {len(names)} frames) ===")
 
     # ---- pose channel: COLMAP with fixed intrinsics -------------------------
-    rung = ColmapPoseInitializer({"camera_params": cam_params, "fix_intrinsics": True, "colmap_work_dir": str(work)})
+    rung = ColmapPoseInitializer({"camera_params": cam_params, "fix_intrinsics": True, "colmap_work_dir": args.work_dir})
     poses = rung.reconstruct(img_dir)                 # {index: (T_world_cam, intr)}
     model_dir = rung._last_model_dir
     common = sorted(i for i in range(len(names)) if i in poses)

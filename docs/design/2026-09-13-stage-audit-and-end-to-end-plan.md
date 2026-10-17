@@ -2,7 +2,7 @@
 
 **Status:** PROPOSED
 **Date:** 2026-09-13
-**Evidence run:** `../runs/davis_lab-coat_full` (47 frames, all 15 stages, VGGT-Long top rung)
+**Evidence run:** `davis_lab-coat_full` (47 frames, all 15 stages, VGGT-Long top rung)
 **Supersedes in part:** `docs/design/2026-09-12-back-half-ladders-and-graph-contract.md` (see §5)
 **Grounding survey:** `docs/research/2026-09-12-third-party-components-for-the-back-half.md`
 **Graph plan + reference verdict:** `docs/design/2026-09-20-conceptgraphs-verdict-and-graph-plan.md` — what ConceptGraphs taught us, what we
@@ -235,8 +235,8 @@ continuity as well as appearance.
 real foreground masks"). Placing it five stages later, after `reid`/`semantics`/`objects`/`humans`,
 buys nothing and is what costs us track-informed identity.
 
-**Cost to weigh:** `STAGE_ORDER` defines what counts as upstream for resume, and every run in
-`../runs/` was produced under the old order. A migration decision, not a blocker.
+**Cost to weigh:** `STAGE_ORDER` defines what counts as upstream for resume, and every existing
+run was produced under the old order. A migration decision, not a blocker.
 
 **The cycle this does not resolve.** Using tracks to catch mask errors needs tracks *before*
 `segment`, and tracks want masks to be seeded well. Genuinely circular. The repo already has the

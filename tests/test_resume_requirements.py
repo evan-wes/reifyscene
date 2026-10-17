@@ -15,6 +15,7 @@ import pytest
 
 from reifyscene.api.contracts import effective_settings, path_identity
 from reifyscene.api.requirements import REQUIREMENTS, ResumeContext
+from reifyscene.common.data_dir import record_name
 
 
 def _ctx(stage, artifact, *, cfg=None, artifacts=None):
@@ -45,8 +46,8 @@ def _png(path: Path) -> Path:
 def test_photos_that_do_not_exist_reject(tmp_path) -> None:
     there = _png(tmp_path / "a.png")
     req = _requirement("geometry", "its photos exist")
-    assert req.check(_ctx("geometry", _geometry({"0:0": str(there)}))) is None
-    gone = _geometry({"0:0": str(there), "0:1": str(tmp_path / "nowhere.png")})
+    assert req.check(_ctx("geometry", _geometry({"0:0": record_name(there)}))) is None
+    gone = _geometry({"0:0": record_name(there), "0:1": record_name(tmp_path / "nowhere.png")})
     assert "1 of its 2 photos do not exist" in req.check(_ctx("geometry", gone))
 
 
@@ -122,21 +123,24 @@ def test_a_crop_box_must_be_recorded_for_every_stream_and_land_on_the_depth() ->
     assert "lands on (5, 3)" in req.check(_ctx("geometry", geo))
 
 
-def test_a_dataset_root_is_fingerprinted_by_content_not_location(tmp_path) -> None:
-    root = tmp_path / "a" / "spin"
+def test_a_dataset_root_is_fingerprinted_by_content_not_location(tmp_path, monkeypatch) -> None:
+    """A config names a dataset inside the data directory's datasets/; moving it keeps its
+    fingerprint, editing a file in it does not."""
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
+    datasets = tmp_path / "datasets"
+    root = datasets / "a" / "spin"
     root.mkdir(parents=True)
     (root / "dataset.json").write_text("{}")
-    before = path_identity(root)
-    moved = tmp_path / "b" / "spin"
-    moved.parent.mkdir()
-    shutil.move(str(root), str(moved))
-    assert path_identity(moved) == before
-    target = moved / "dataset.json"
+    before = path_identity("a/spin")
+    (datasets / "b").mkdir()
+    shutil.move(str(root), str(datasets / "b" / "spin"))
+    assert path_identity("b/spin") == before
+    target = datasets / "b" / "spin" / "dataset.json"
     os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 10**9))
-    assert path_identity(moved) != before
-    cfg = {"geometry": {"backend_name": "dataset", "dataset_root": str(moved)}}
+    assert path_identity("b/spin") != before
+    cfg = {"geometry": {"backend_name": "dataset", "dataset_root": "b/spin"}}
     settings = effective_settings("geometry", cfg)
-    assert settings["geometry"]["dataset_root"] == path_identity(moved)
+    assert settings["geometry"]["dataset_root"] == path_identity("b/spin")
 
 
 def test_a_diverged_bundle_adjustment_is_refused() -> None:

@@ -18,9 +18,9 @@ every stage declares a :class:`StageContract`:
   they are not given explicitly. A resume takes them from the prior run instead of
   re-picking them, so a busy GPU does not change what "the same run" means.
 - ``upstream``: the stages whose artifacts it actually consumes (lineage).
-- ``paths``: settings that name a folder or file (a dataset root). They are
-  fingerprinted by what is there -- the name and the files' names, sizes and
-  modification times -- not by where it is, so moving the project keeps them.
+- ``paths``: settings that name a dataset (its name in the data directory's
+  ``datasets/``). They are fingerprinted by what is there -- the name and the files'
+  names, sizes and modification times -- not by where it is, so moving the data keeps them.
 - ``rebuildable``: the stage is cheap, runs no model, and is a pure function of its
   upstream artifacts and settings, so a resume that finds it stale re-runs it
   instead of rejecting.
@@ -42,6 +42,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from reifyscene.common import data_dir
 
 MISSING = object()
 
@@ -133,7 +135,7 @@ def _prune(value: Any, prefix: str, patterns: tuple[str, ...]) -> Any:
 
 
 def path_identity(value: Any) -> Any:
-    """A folder or file named in the settings, as what it is rather than where it is.
+    """A dataset named in the settings, as what it is rather than where it is.
 
     ``{"name", "content"}``: the base name and a digest of the (top-level) files'
     names, sizes and modification times -- which moving or renaming a parent folder
@@ -141,7 +143,7 @@ def path_identity(value: Any) -> Any:
     """
     if value in (None, ""):
         return value
-    path = Path(str(value)).expanduser()
+    path = data_dir.path(data_dir.DATASETS, str(value))
     identity: dict[str, Any] = {"name": path.name}
     if path.exists():
         entries = [path] if path.is_file() else sorted(p for p in path.iterdir() if p.is_file())
@@ -204,12 +206,11 @@ def input_identity(video_paths: Iterable[str | Path], *,
 
     items = []
     for idx, raw in enumerate(video_paths):
-        path = Path(raw).expanduser().resolve()
+        path = Path(os.path.abspath(Path(raw).expanduser()))
         if path.is_dir():
             stream = VideoDecoder().decode(
                 path, stream_id=VideoDecoder.requested_stream_id(idx, frames_camera))
-            index = stream.metadata["frame_index"]
-            files = [Path(index[k]) for k in sorted(index, key=lambda k: int(k))]
+            files = [stream.frame_file(n) for n in stream.frame_numbers]
             kind = "frames"
         else:
             files = [path]
@@ -453,7 +454,7 @@ CONTRACTS: dict[str, StageContract] = {
             "scene",
             # 5: the dynamic bundle carries per-frame depth / mask targets for the render stage
             version=5,
-            settings={"scene": {}, "env:TAPNET_CKPT_DIR": None},
+            settings={"scene": {}},
             # timeline_source is only a metadata label.
             exclude=("scene.timeline_source",),
             # its training photos are the ingest streams' own frames
@@ -472,8 +473,8 @@ CONTRACTS: dict[str, StageContract] = {
             # FlashSplat assignment over the render's checkpoint, written onto the graph. Cheap
             # (seconds of GPU), a pure function of graph + checkpoint: rebuilt when stale.
             "handles",
-            # 2: people are bounded by their body volume (handles.body_bound, on by default),
-            #    and every entity records its view coverage
+            # 2: people can be bounded by their body volume (handles.body_bound, off by
+            #    default), and every entity records its view coverage
             version=2,
             settings={"handles": {}},
             upstream=("graph", "render"),

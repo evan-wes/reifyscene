@@ -13,7 +13,7 @@ mPSNR≈20.7 validation lands with the initializer in PR-B.
 
 Example (reifyscene env):
     python scripts/check_native_lift.py \
-        --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
+        --dataset-root dycheck_iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --seed 0
 """
 
@@ -24,6 +24,7 @@ import argparse
 import numpy as np
 import torch
 
+from reifyscene.common import data_dir
 from reifyscene.ingest.datasets import DyCheckSequence
 from reifyscene.lifting.native_track_lift import build_native_init_inputs
 
@@ -36,7 +37,8 @@ def _bbox(xyz: torch.Tensor) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Validate native track lift vs SoM cache")
-    ap.add_argument("--dataset-root", required=True)
+    ap.add_argument("--dataset-root", required=True,
+                    help="the DyCheck sequence, by its name in the data directory's datasets/")
     ap.add_argument("--factor", type=int, default=1)
     ap.add_argument("--num-fg", type=int, default=40_000)
     ap.add_argument("--num-bg", type=int, default=100_000)
@@ -44,6 +46,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     print(f"native lift: {args.dataset_root} (factor={args.factor}, num_fg={args.num_fg}, camera={args.camera_type})")
     tracks, bg, cameras, norm = build_native_init_inputs(

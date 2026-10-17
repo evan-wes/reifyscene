@@ -20,6 +20,7 @@ anything else rejects the resume. Nothing is upgraded, relinked, re-rooted or de
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ from reifyscene.api.contracts import (
 from reifyscene.api.requirements import REQUIREMENTS, ResumeContext
 from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.api.stages import STAGE_ORDER, StageSpec
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.types import BaseArtifact
 
@@ -296,9 +298,9 @@ def check_resume(
     values. Raises :class:`ResumeRejected` only for a request that cannot be checked
     at all (the prior run and the new run are the same folder).
     """
-    prior = Path(prior_run_dir).expanduser().resolve()
+    prior = Path(os.path.abspath(prior_run_dir))
     prior_outputs = RunOutputs.open(prior)
-    run = Path(run_dir).expanduser().resolve()
+    run = Path(os.path.abspath(run_dir))
     if prior == run:
         raise ResumeRejected(
             f"--prior-run-dir and --run-dir are the same folder ({prior}): a resume copies the "
@@ -426,7 +428,8 @@ def materialize_stage(plan: ResumePlan, spec: StageSpec) -> Any:
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
-    patch = {"contract": plan.records[spec.name], "resume": {"loaded_from": str(src)}}
+    patch = {"contract": plan.records[spec.name],
+             "resume": {"loaded_from": data_dir.record_name(src)}}
     artifact = plan.artifacts[spec.name]
     artifact.save_dir = dst
     artifact.metadata = {**artifact.metadata, **patch}

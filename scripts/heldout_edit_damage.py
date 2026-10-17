@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Judge a removal against photos, from the training cameras and from cameras it never saw.
 
-    python scripts/heldout_edit_damage.py ../runs/slice_spin [--entity 1] [--views 60]
+    python scripts/heldout_edit_damage.py slice_spin [--entity 1] [--views 60]
 
 G4 part 3 of docs/design/2026-09-20-conceptgraphs-verdict-and-graph-plan.md. The DAVIS benchmark
 (``benchmarks/davis_edit_damage.json``) scores training views only. A DyCheck run also has
@@ -55,7 +55,7 @@ def _med(rows, key):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run", type=Path)
+    ap.add_argument("run", help="a run, by name in the data directory's runs/")
     ap.add_argument("--entity", default=None,
                     help="node id or tracklet number (default: the grounded person with the "
                          "most Gaussians)")
@@ -78,6 +78,7 @@ def main() -> int:
     from PIL import Image
 
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.edit.remove import RemoveEditor
     from reifyscene.edit.renderer import outline
     from reifyscene.eval.benchmarks.edit_damage import dilate, rest_psnr
@@ -93,7 +94,7 @@ def main() -> int:
     )
     from reifyscene.render.gaussian4d.motion_init import bundle_to_scene
 
-    run = RunOutputs.open(args.run)
+    run = RunOutputs.open(data_dir.path(data_dir.RUNS, args.run))
     cfg = run.config
     eval_cfg = dict((cfg.get("evaluation") or {}).get("masked_nvs") or {})
     if not eval_cfg.get("dataset_root"):

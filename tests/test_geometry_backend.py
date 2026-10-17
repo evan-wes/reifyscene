@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-import sys
 
 import cv2
-import pytest
 import numpy as np
+import pytest
 import torch
 
-from reifyscene.common.types import FrameRef
-from reifyscene.geometry.vggt_wrapper import VGGTInitializer
-from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
 from reifyscene.api.pipeline import ReifyScenePipeline
-from reifyscene.ingest.ingest_artifact import IngestArtifact
+from reifyscene.common.types import FrameRef
+from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer, input_cache_root
 from reifyscene.ingest.decoder import VideoDecoder
+from reifyscene.ingest.ingest_artifact import IngestArtifact
 
 
 def _write_test_video(path: Path, *, width: int = 32, height: int = 24, num_frames: int = 2, fps: float = 5.0) -> None:
@@ -85,7 +85,7 @@ def test_vggt_initializer_real_adapter_contract(tmp_path: Path) -> None:
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": str(tmp_path / "cache")})
+    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": f"{tmp_path.name}/cache"})
     artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
 
     assert artifact.backend_name == "vggt"
@@ -112,7 +112,7 @@ def test_geometry_artifact_save_load_roundtrip(tmp_path: Path) -> None:
         keyframes=[FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=0.0)],
     )
 
-    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": str(tmp_path / "cache")})
+    init = _FakeVGGTInitializer({"backend_mode": "real", "device": "cpu", "frame_cache_dir": f"{tmp_path.name}/cache"})
     artifact = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
     artifact.save_dir = tmp_path / "geometry"
     artifact.save()
@@ -226,7 +226,7 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         if not self._is_loaded:
             self.load_checkpoint()
         selected_frames = self._select_frames(frames, ingest_artifact)
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else Path('.reifyscene_cache') / 'vggt_long_inputs'
+        cache_root = input_cache_root(self.frame_cache_dir)
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
         backend_output_root = cache_root.parent / 'vggt_long_run'
         backend_output_root.mkdir(parents=True, exist_ok=True)
@@ -522,7 +522,7 @@ def test_vggt_long_auto_tune_exhaustion_reports_attempt_summary(tmp_path: Path) 
     assert "status=oom" in message
 
 
-def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
+def test_vggt_long_auto_tune_cleanup_logs_memory(tmp_path, monkeypatch, capsys):
     initializer = VGGTLongInitializer({
         "backend_mode": "real",
         "device": "cuda",
@@ -537,14 +537,14 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
     ingest = IngestArtifact(
         run_id="cleanup-test",
         stage_name="ingest",
-        save_dir=Path("/tmp/ingest"),
+        save_dir=Path("unsaved"),
         streams=[SimpleNamespace(stream_id="cam_00", width=854, height=480)],
         keyframes=[frame],
     )
 
     monkeypatch.setattr(initializer, "_current_system_report", lambda: {"memory": {}, "gpus": []})
     monkeypatch.setattr(initializer, "_frame_source_max_dim", lambda frames, ingest_artifact: 854)
-    monkeypatch.setattr(initializer, "_materialize_images", lambda *args, **kwargs: ([Path("/tmp/f0.png")], []))
+    monkeypatch.setattr(initializer, "_materialize_images", lambda *args, **kwargs: ([tmp_path / "f0.png"], []))
     monkeypatch.setattr(initializer, "_create_runner", lambda *args, **kwargs: SimpleNamespace(img_list=[], model=SimpleNamespace(model=None)))
     monkeypatch.setattr(initializer, "_run_runner", lambda runner: (_ for _ in ()).throw(RuntimeError("CUDA out of memory")))
     monkeypatch.setattr(initializer, "_release_runner_references", lambda runner: None)
@@ -563,8 +563,8 @@ def test_vggt_long_auto_tune_cleanup_logs_memory(monkeypatch, capsys):
         initializer._run_auto_tuned(
             [frame],
             ingest_artifact=ingest,
-            cache_root=Path("/tmp/cache"),
-            backend_output_root=Path("/tmp/out"),
+            cache_root=tmp_path / "cache",
+            backend_output_root=tmp_path / "out",
         )
 
     captured = capsys.readouterr().out

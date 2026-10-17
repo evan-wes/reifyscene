@@ -1,7 +1,7 @@
 """Score a ConceptGraphs run against DAVIS with the same scorer the inventory uses.
 
     python scripts/benchmark_conceptgraphs.py \
-        --export ../runs/cg_export --out benchmarks/davis_conceptgraphs.json
+        --out benchmarks/davis_conceptgraphs.json
 
 Reads each sequence's fused objects (``pcd_saves/full_pcd_*.pkl.gz``), turns them back
 into per-frame instance masks, and puts them through ``score_masks_by_frame`` -- the same
@@ -27,9 +27,6 @@ import numpy as np
 
 from reifyscene.eval.benchmarks.inventory.score import score_masks_by_frame
 from reifyscene.eval.reference.conceptgraphs import masks_by_frame
-
-REPO = Path(__file__).resolve().parents[1]
-RUNS = REPO.parent / "runs"
 
 
 def _objects_file(sequence_dir: Path) -> Path | None:
@@ -103,27 +100,28 @@ def _gt_motion(run, frames: list[int], stream_id: str | None = None
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--export", type=Path, required=True, help="the export_for_conceptgraphs dir")
+    ap.add_argument("--export", default="conceptgraphs",
+                    help="the export_for_conceptgraphs folder: a name in the data directory's "
+                         "reference/")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--match-iou", type=float, default=0.5)
     ap.add_argument("--min-detections", type=int, default=3,
                     help="ConceptGraphs' own obj_min_detections default")
     ap.add_argument("--split-by-motion", action="store_true", default=True)
-    ap.add_argument("--runs", type=Path, default=RUNS,
-                    help="where the exported runs live: each export's sequence is matched to "
-                         "the run whose input is that DAVIS sequence, for its ground truth and "
-                         "world geometry")
     ap.add_argument("--motion-threshold", type=float, default=1.0,
                     help="world travel, in the object's own 3D extents, above which it is "
                          "'moving'. One extent means it moved its own length.")
     args = ap.parse_args()
 
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.eval.benchmarks.inventory.score import stream_ground_truth
     from reifyscene.ingest.streams import StreamError
 
     candidates: dict[str, list[RunOutputs]] = {}   # DAVIS sequence -> runs built from it
-    for r in RunOutputs.discover(args.runs):
+    # each export's sequence is matched to the run whose input is that DAVIS sequence, for its
+    # ground truth and world geometry
+    for r in RunOutputs.discover(data_dir.area(data_dir.RUNS)):
         if not (r.has("ingest") and r.has("geometry")):
             continue
         try:
@@ -137,12 +135,13 @@ def main() -> None:
         """The run an export came from: as its manifest records, else the one run built from
         that sequence -- never a pick among several."""
         if manifest.get("run_dir"):
-            return RunOutputs.open(manifest["run_dir"])
+            return RunOutputs.open(data_dir.from_record(manifest["run_dir"]))
         found = candidates.get(sequence, [])
         return found[0] if len(found) == 1 else None
 
     rows: list[dict[str, Any]] = []
-    for manifest_path in sorted(args.export.glob("*/manifest.json")):
+    export = data_dir.path(data_dir.REFERENCE, args.export)
+    for manifest_path in sorted(export.glob("*/manifest.json")):
         sequence_dir = manifest_path.parent
         sequence = sequence_dir.name
         objects_path = _objects_file(sequence_dir)

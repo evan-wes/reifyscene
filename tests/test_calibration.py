@@ -52,7 +52,7 @@ def test_calibration_artifact_roundtrip(tmp_path: Path) -> None:
         run_id="demo",
         stage_name="calibration",
         save_dir=save_dir,
-        streams=[VideoStreamRef("cam_00", Path("/tmp/a.mp4"), 30.0, 10, 640, 480, False)],
+        streams=[VideoStreamRef("cam_00", tmp_path / "a.mp4", 30.0, 10, 640, 480, False)],
         sampled_frames=[FrameRef("cam_00", 0, 0.0)],
         sampled_image_index={"cam_00:0": "cam_00/frame_000000.png"},
         intrinsics_by_stream={"cam_00": CameraIntrinsics(500.0, 500.0, 320.0, 240.0)},
@@ -92,8 +92,8 @@ def test_calibration_runner_exports_report_and_viewer(tmp_path: Path) -> None:
     )
     runner = CalibrationRunner({})
     streams = [
-        VideoStreamRef("cam_00", Path("/tmp/a.mp4"), 30.0, 1, 640, 480, False),
-        VideoStreamRef("cam_01", Path("/tmp/b.mp4"), 30.0, 1, 640, 480, False),
+        VideoStreamRef("cam_00", tmp_path / "a.mp4", 30.0, 1, 640, 480, False),
+        VideoStreamRef("cam_01", tmp_path / "b.mp4", 30.0, 1, 640, 480, False),
     ]
     refs = [FrameRef("cam_00", 0, 0.0), FrameRef("cam_01", 0, 0.0)]
     runner.sampler.sample = lambda videos: (streams, refs)

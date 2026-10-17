@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.image_transform import ImageTransform, transform_record
@@ -77,7 +78,7 @@ def _make_geometry_artifact(tmp_path: Path, stream_id: str, width: int, height: 
         rgb = np.zeros((height, width, 3), dtype=np.uint8)
         rgb[..., 0] = 255
         Image.fromarray(rgb).save(img_path)
-        image_paths[f'{frame.stream_id}:{frame.frame_idx}'] = str(img_path)
+        image_paths[f'{frame.stream_id}:{frame.frame_idx}'] = record_name(img_path)
     return GeometryArtifact(
         run_id='test',
         stage_name='geometry',

@@ -84,8 +84,8 @@ EntityNode( id = canonical entity )
 **Edges = physical relations between entity nodes, each with a validity interval**, recomputed per
 frame from trajectories + masks so edges appear and disappear over time. Rung-1 vocabulary:
 `near`, `above`/`below`, `left-of`/`right-of`, `in-front-of`/`behind`, `on-top-of`,
-`supported-by`, `contains`, `overlaps`. *(None built. The pre-flight in
-`../spike_graph_definition/` produced two `near` edges on one clip and was never audited.)*
+`supported-by`, `contains`, `overlaps`. *(None built. The pre-flight, a throwaway workspace
+outside the repository, produced two `near` edges on one clip and was never audited.)*
 
 **Presence = existence, handled honestly.** Presence spans first-to-last observation; interior
 gaps are flagged **occlusion candidates**, not the entity ceasing to exist. Object permanence
@@ -281,7 +281,7 @@ baselined), planned separately, after the definition lands.
   presence (step 2). These are deterministic, cheap, rebuildable functions of stages that already
   exist — the same shape as the `graph` stage, which is exactly why it was landed properly rather
   than spiked. A second throwaway node model is what this plan exists to avoid.
-- **Throwaway first, in `../spike_graph_definition/`:** the query parser and DSL, the render-plan
+- **Throwaway first, in a workspace outside the repository:** the query parser and DSL, the render-plan
   IR, the re-perception diff, the audit viewer. They land once their shapes settle.
 
 ---
@@ -313,9 +313,8 @@ conclusion from one clip**; a short written rubric so "a human agrees" is a chec
 ## 11. Cost, logistics, risks
 
 - **GPU:** a full `Jumping` run (geometry → scene → render) is the main cost, ~1/4 of spin's frame
-  count. The DAVIS audit needs geometry per sequence. Every GPU job goes through
-  `gpu_guard.sh --detach` with the 400 W cap verified first; heavy CPU
-  work runs under a `systemd-run --scope` memory cap.
+  count. The DAVIS audit needs geometry per sequence. Every GPU job runs detached, with the GPU's
+  400 W power cap verified first; heavy CPU work runs under a `systemd-run --scope` memory cap.
 - **Risks:**
   - **The bridge is noisy for small or heavily occluded entities** → report assigned fraction per
     entity; fall back to a mask-centroid neighbourhood; flag entities that cannot be assigned.

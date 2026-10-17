@@ -11,18 +11,21 @@ env, no cuML): the only borrowed input is the 2D point tracker output.
 
 Example (reifyscene env):
     python scripts/native_motion_init.py \
-        --dataset-root ../data/shape_of_motion/iphone/paper-windmill \
+        --dataset-root dycheck_iphone/paper-windmill \
         --num-fg 40000 --num-bg 100000 --num-bases 10 --seed 0 \
-        --out ../data/shape_of_motion/native_init/paper-windmill.npz
+        --out native_init/paper-windmill.npz
+
+Names are inside the data directory ($REIFYSCENE_DATA_DIR): the sequence in datasets/, the
+dump in reference/.
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.render.gaussian4d.motion_init import NativeMotionInitializer
 
 
@@ -43,7 +46,8 @@ def main() -> None:
 
     # Build on CPU (the lift holds all full-res frames; KMeans/kNN are CPU anyway).
     scene, cams = NativeMotionInitializer(
-        dataset_root=args.dataset_root, factor=1, num_fg=args.num_fg, num_bg=args.num_bg,
+        dataset_root=str(data_dir.path(data_dir.DATASETS, args.dataset_root)), factor=1,
+        num_fg=args.num_fg, num_bg=args.num_bg,
         num_bases=args.num_bases, camera_type=args.camera_type, seed=args.seed,
     ).build(device="cpu")
 
@@ -74,7 +78,7 @@ def main() -> None:
         dump[f"{split}_time_ids"] = np.asarray([c.time_id for c in cameras])
         dump[f"{split}_frame_names"] = np.asarray([c.frame_name for c in cameras])
 
-    out = Path(args.out)
+    out = data_dir.path(data_dir.REFERENCE, args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, **dump)
     print(

@@ -13,12 +13,15 @@ Two modes:
 
 Examples:
     python scripts/run_render_proof.py checkpoint0 \
-        --dataset-root .../Balloon1 --factor 2 \
+        --dataset-root nvidia_dynamic/Balloon1 --factor 2 \
         --seed-frames 0:0 --render-targets 0:0,1:0,2:0,3:0 --out-dir ck0
 
     python scripts/run_render_proof.py train \
-        --dataset-root .../Balloon1 --config configs/render/render_proof.yaml \
+        --dataset-root nvidia_dynamic/Balloon1 --config configs/render/render_proof.yaml \
         --iters 7000 --out-dir ck1_balloon1
+
+Names are inside the data directory ($REIFYSCENE_DATA_DIR): the sequence in datasets/, the
+output in runs/, a borrowed init, generated tracks and a reference score in reference/.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_yaml
 from reifyscene.common.types import FrameRef
 from reifyscene.eval.benchmarks.covisibility_masked_novel_view_synthesis import (
@@ -491,6 +495,11 @@ def main() -> None:
     dy.set_defaults(func=cmd_dynamic)
 
     args = parser.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
+    args.out_dir = str(data_dir.path(data_dir.RUNS, args.out_dir))
+    for key in ("init", "own_tracks_dir", "compare_to"):
+        if getattr(args, key, None):
+            setattr(args, key, str(data_dir.path(data_dir.REFERENCE, getattr(args, key))))
     args.func(args)
 
 

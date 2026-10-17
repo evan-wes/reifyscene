@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.vggt_wrapper import VGGTInitializer
@@ -100,7 +101,8 @@ def test_geometry_debug_exports_world_frame_diagnostics(tmp_path: Path) -> None:
         camera_states_by_stream={'cam_00': [TimedCameraState('cam_00', 0, CameraIntrinsics(200, 200, 12, 12), CameraPose(np.eye(4, dtype=np.float32)))]},
         pointmaps_by_frame={'cam_00:0': {'points': pts, 'confidence': np.ones((24, 24), dtype=np.float32)}},
         depthmaps_by_frame={},
-        metadata={'debug_image_paths': {'cam_00:0': str(rgb_path)}, 'save_debug_assets': True},
+        metadata={'debug_image_paths': {'cam_00:0': record_name(rgb_path)},
+                  'save_debug_assets': True},
         notes=[],
     )
     canonicalizer = GroundPlaneCanonicalizer({'camera_up_axis': 'z', 'ransac_iterations': 64})

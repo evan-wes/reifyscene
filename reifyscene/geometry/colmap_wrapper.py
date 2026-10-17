@@ -7,7 +7,7 @@ NetVLAD) over **dense** frames with **fixed intrinsics**, then fills the
 `GeometryArtifact`'s ``camera_states_by_stream`` (poses) + ``intrinsics_by_stream`` and
 leaves ``depthmaps``/``pointmaps`` empty (depth comes from MoGe on the depth ladder).
 
-The FP6b spike (`spike_fp6b_egomotion/`, 2026-07-01) validated this on spin+windmill:
+The FP6b egomotion spike (2026-07-01) validated this on spin+windmill:
 monocular COLMAP recovers **sub-degree egomotion** (100% registered, <1% translation)
 at sufficient frame density — with intrinsics fixed from the focal prior (free
 intrinsics gave a ~13-16% scale bias, per the calibration arc). Frame **density is
@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.calibration.hloc_colmap import HlocColmapSfMRunner
+from reifyscene.common import data_dir
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
@@ -50,7 +51,9 @@ class ColmapPoseInitializer(GeometryInitializer):
         self.cfg = cfg or {}
         self.run_id = str(self.cfg.get("run_id", "colmap"))
         self.save_dir = Path(self.cfg.get("geometry_save_dir", "artifacts/geometry_colmap"))
-        self.work_dir = Path(self.cfg.get("colmap_work_dir", ".reifyscene_cache/colmap_pose"))
+        # its working folder, by name in the data directory's cache
+        self.work_dir = data_dir.path(data_dir.CACHE,
+                                      self.cfg.get("colmap_work_dir", "colmap_pose"))
         # Populated by ``reconstruct`` so the FP6b fused path (scale reconciliation) can
         # re-read the sparse model's 3D points + reprojections. None until a run lands.
         self._last_model_dir: Path | None = None

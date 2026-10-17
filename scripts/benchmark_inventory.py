@@ -2,9 +2,10 @@
 
     python scripts/benchmark_inventory.py --out benchmarks/davis_inventory.json
 
-Reads the runs ``scan_clips_inventory.sh`` builds: the run folders given, or by default every
-run under ``--runs`` whose input is a DAVIS sequence (recognised from what ingest recorded, not
-the folder name) and whose manifest records it stopped at ``graph``, as that script's runs do.
+Reads the inventory runs (``benchmarks/README.md`` says how they are built): the runs named, or
+by default every run in the data directory's runs/ whose input is a DAVIS sequence (recognised
+from what ingest recorded, not the folder name) and whose manifest records it stopped at
+``graph``, as the inventory runs do.
 Writes one row per sequence: how many annotated objects there are, how many the inventory
 recovered, what it missed, and how many nodes matched nothing. Covariates come along --
 frame count, annotated-object count, and each stage's capability manifest -- so a change
@@ -28,7 +29,6 @@ from typing import Any
 from reifyscene.eval.benchmarks.inventory import score_run
 
 REPO = Path(__file__).resolve().parents[1]
-RUNS = REPO.parent / "runs"
 
 
 def _capabilities(run) -> dict[str, Any]:
@@ -61,18 +61,19 @@ def _git_head() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("run_dirs", type=Path, nargs="*", help="runs to score (default: see above)")
-    ap.add_argument("--runs", type=Path, default=RUNS, help="where the inventory runs live")
+    ap.add_argument("runs", nargs="*",
+                    help="runs to score, by name in runs/ (default: see above)")
     ap.add_argument("--out", type=Path, default=REPO / "benchmarks/davis_inventory.json")
     ap.add_argument("--match-iou", type=float, default=0.5)
     args = ap.parse_args()
 
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.ingest.streams import StreamError
 
     rows: list[dict[str, Any]] = []
-    runs = ([RunOutputs.open(r) for r in args.run_dirs] if args.run_dirs
-            else RunOutputs.discover(args.runs))
+    runs = ([RunOutputs.open(data_dir.path(data_dir.RUNS, r)) for r in args.runs] if args.runs
+            else RunOutputs.discover(data_dir.area(data_dir.RUNS)))
     for run in runs:
         if not run.has("ingest"):
             continue
@@ -82,7 +83,7 @@ def main() -> None:
             continue
         if stream.source.kind != "davis":
             continue
-        if not args.run_dirs and run.manifest.get("stop_stage") != "graph":
+        if not args.runs and run.manifest.get("stop_stage") != "graph":
             continue
         score = score_run(run, match_iou=args.match_iou)
         row = score.to_dict()

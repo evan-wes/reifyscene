@@ -36,7 +36,7 @@ def _node(nid: str, ntype: str, category: str, frames: list[int], topk=None) -> 
 
 
 def _graph() -> GraphArtifact:
-    return GraphArtifact(run_id="t", stage_name="graph", save_dir="/tmp/x", nodes=[
+    return GraphArtifact(run_id="t", stage_name="graph", save_dir="unsaved", nodes=[
         GraphNode(node_id="cam_00", node_type="camera", label="camera", confidence=1.0),
         _node("human:cam_00:sam2:cam_00:2", "human", "person", list(range(10)),
               topk=[["person", 0.3], ["toothbrush", 0.1]]),

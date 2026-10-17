@@ -3,15 +3,52 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The data directory the test run was started with, if any. Tests only ever read from it
+# (``real_data_dir``); everything else runs in a temporary data directory of its own.
+REAL_DATA_DIR = (Path(os.environ["REIFYSCENE_DATA_DIR"])
+                 if os.environ.get("REIFYSCENE_DATA_DIR") else None)
+
+
+def real_data(name: str) -> Path | None:
+    """``name`` (e.g. ``datasets/nvidia_dynamic/Balloon1``) inside the real data directory, or
+    None when there is no real data directory or nothing is there."""
+    if REAL_DATA_DIR is None:
+        return None
+    path = REAL_DATA_DIR / name
+    return path if path.exists() else None
+
+
+@pytest.fixture(autouse=True, scope="session")
+def isolated_data_dir(tmp_path_factory: pytest.TempPathFactory):
+    """The tests' data directory: pytest's temporary folder for this session, which holds every
+    test's ``tmp_path``. Whatever a test records names a place inside it, and nothing is written
+    into a real data directory."""
+    root = tmp_path_factory.getbasetemp()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("REIFYSCENE_DATA_DIR", str(root))
+        yield root
+
+
+@pytest.fixture
+def real_data_dir(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The real data directory, for the few tests that read real data or a real run (they
+    skip without one). Such a test must only read."""
+    if REAL_DATA_DIR is None:
+        pytest.skip("REIFYSCENE_DATA_DIR is not set")
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(REAL_DATA_DIR))
+    return REAL_DATA_DIR
 
 
 def write_test_video(

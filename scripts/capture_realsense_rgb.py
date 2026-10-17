@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 import cv2
+
+from reifyscene.common import data_dir
 
 try:
     import pyrealsense2 as rs
@@ -23,7 +24,8 @@ except ImportError as exc:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True, help="Output .mp4 path")
+    parser.add_argument("--output", required=True,
+                        help="the .mp4 to write, by its name in the data directory's datasets/")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -34,6 +36,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.output = data_dir.path(data_dir.DATASETS, args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     pipeline = rs.pipeline()

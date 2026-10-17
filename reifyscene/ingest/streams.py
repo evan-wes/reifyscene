@@ -151,7 +151,7 @@ class FrameStream(Dataset):
             raise StreamError(f"stream {self.id!r} is a video: its frames are not files")
         if int(frame) not in self._index:
             raise StreamError(f"stream {self.id!r} has no frame {frame}")
-        path = Path(self._index[int(frame)])
+        path = self.ref.frame_file(int(frame))
         if not path.is_file():
             raise StreamError(f"stream {self.id!r}: frame {frame} is not at {path}, where "
                               "ingest recorded it")

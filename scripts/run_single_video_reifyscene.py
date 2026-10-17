@@ -19,6 +19,7 @@ from rich.table import Table
 from reifyscene.api.pipeline import ReifyScenePipeline
 from reifyscene.api.resume import ResumeRejected, check_resume, materialize_stage, resolve_stage_window
 from reifyscene.api.stages import STAGE_ORDER, build_stage_registry, write_run_manifest
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_yaml
 from reifyscene.debug_exports import apply_debug_config_to_runtime_cfg, export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from reifyscene.common.backend_ladder import fallbacks_of
@@ -50,7 +51,8 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     cfg = read_yaml(args.config) if args.config else {}
     cfg.setdefault('run_id', Path(args.video).stem)
     cfg['run_dir'] = str(Path(args.run_dir))
-    cfg['_resume_video_paths'] = [str(Path(args.video).expanduser().resolve())]
+    # the input, by its name in the data directory (a record never names a path on a machine)
+    cfg['_resume_video_paths'] = [data_dir.record_name(args.video)]
     if args.max_keyframes is not None:
         cfg['max_keyframes_per_stream'] = int(args.max_keyframes)
     if args.keyframe_stride is not None:
@@ -402,22 +404,27 @@ def _check_resume_only(args: argparse.Namespace, system_report: dict, debug_cfg:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--video', default=None, help='Path to a single RGB video file.')
+    parser.add_argument('--video', default=None,
+                        help="A single RGB video file, by its name in the data directory's datasets/.")
     parser.add_argument('--frames-camera', default=None,
                         help='Which camera of a --frames-dir that holds several (the prefix in '
                              'file names like 0_00060.png). Required for such a folder.')
     parser.add_argument('--frames-dir', default=None,
-                        help='Path to a directory of RGB frames (ingested losslessly, no re-encode). '
-                             'Alternative to --video; exactly one is required. Camera id + frame indices '
-                             'are parsed from filenames (e.g. 0_00060.png), so dataset ground-truth aligns.')
-    parser.add_argument('--run-dir', required=True, help='Directory where artifacts will be written.')
-    parser.add_argument('--prior-run-dir', default=None, help='Optional prior run directory to load earlier stage artifacts from.')
+                        help="A directory of RGB frames, by its name in the data directory's datasets/ "
+                             '(ingested losslessly, no re-encode). Alternative to --video; exactly one is '
+                             'required. Camera id + frame indices are parsed from filenames (e.g. '
+                             '0_00060.png), so dataset ground-truth aligns.')
+    parser.add_argument('--run-dir', required=True,
+                        help="The run's name in the data directory's runs/, where its artifacts are written.")
+    parser.add_argument('--prior-run-dir', default=None,
+                        help="Optional prior run (its name in runs/) to load earlier stage artifacts from.")
     parser.add_argument('--start-stage', default='ingest', choices=list(STAGE_ORDER), help='Stage to start running in the current invocation. Earlier stages are loaded from --prior-run-dir.')
     parser.add_argument('--stop-stage', default=STAGE_ORDER[-1], choices=list(STAGE_ORDER), help='Last stage to run, inclusive. Stages after it are skipped. Default: the final stage (full pipeline).')
     parser.add_argument('--check-resume', action='store_true', help='Check --prior-run-dir read-only: print, for every stage it has, whether a resume could load it (and why not), the latest --start-stage it supports, and whether --start-stage works. Writes nothing; exits 1 if --start-stage is not resumable.')
     parser.add_argument('--config', default=None, help='Optional YAML config path.')
     parser.add_argument('--debug-config', default=None, help='Optional YAML debug-export config path.')
-    parser.add_argument('--frame-cache-dir', default=None)
+    parser.add_argument('--frame-cache-dir', default=None,
+                        help="Where VGGT inputs are materialized: a name in the data directory's cache/.")
     parser.add_argument('--max-keyframes', type=int, default=4)
     parser.add_argument('--keyframe-stride', type=int, default=None,
                         help='Keyframe spacing in frames (30 when neither stride is given).')
@@ -501,7 +508,11 @@ def main() -> None:
     # (the decoder ingests a directory as a lossless frame sequence, a file as a video).
     if bool(args.video) == bool(args.frames_dir):
         parser.error('provide exactly one of --video or --frames-dir')
-    args.video = args.video or args.frames_dir
+    # Everything is named inside the data directory: the input in datasets/, runs in runs/.
+    args.video = str(data_dir.path(data_dir.DATASETS, args.video or args.frames_dir))
+    args.run_dir = str(data_dir.path(data_dir.RUNS, args.run_dir))
+    if args.prior_run_dir is not None:
+        args.prior_run_dir = str(data_dir.path(data_dir.RUNS, args.prior_run_dir))
 
     start_idx, stop_idx = resolve_stage_window(args.start_stage, args.stop_stage)
     console = Console()
@@ -585,14 +596,16 @@ def main() -> None:
     _save_preflight_report()
 
     manifest = {
-            'video_paths': cfg.get('_resume_video_paths', [str(Path(args.video).expanduser().resolve())]),
-            # no run_dir: where the run is is where its manifest is (runs can be moved)
-            'prior_run_dir': None if args.prior_run_dir is None else str(Path(args.prior_run_dir).expanduser().resolve()),
+            # inputs and the prior run by their names in the data directory; no run_dir: where
+            # the run is is where its manifest is (runs can be moved)
+            'video_paths': cfg['_resume_video_paths'],
+            'prior_run_dir': (None if args.prior_run_dir is None
+                              else data_dir.record_name(args.prior_run_dir)),
             'start_stage': args.start_stage,
             'stop_stage': args.stop_stage,
-            # which experiment config built this run: its path and exact content
+            # which experiment config built this run: its file name and exact content
             'config_file': None if not args.config else {
-                'path': str(Path(args.config).expanduser().resolve()),
+                'name': Path(args.config).name,
                 'sha256': hashlib.sha256(Path(args.config).expanduser().read_bytes()).hexdigest(),
             },
             'config': {k: v for k, v in cfg.items() if k != 'run_dir'},

@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Optional, get_args, get_origin, get_type_hints
 
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_json, write_json
 from reifyscene.common.paths import ensure_dir
 
@@ -22,8 +23,8 @@ class VideoStreamRef:
 
     ``fps`` is what the source records (a video container, a dataset's own record) or None;
     it is never a default. Frames are identified by their number, not by a time: a frame
-    folder's numbers are the ones its file names carry (``metadata["frame_index"]``), a
-    video's are ``0..num_frames-1``.
+    folder's numbers are the ones its file names carry (``metadata["frame_index"]`` maps each
+    number to its file's name inside ``video_path``), a video's are ``0..num_frames-1``.
     """
 
     stream_id: str
@@ -42,6 +43,16 @@ class VideoStreamRef:
         if index is not None:
             return sorted(int(k) for k in index)
         return list(range(int(self.num_frames)))
+
+    def frame_file(self, frame_idx: int) -> Path:
+        """The image file of one frame of a frame-folder stream."""
+        index = self.metadata.get("frame_index")
+        if index is None:
+            raise ValueError(f"stream {self.stream_id!r} is a video: its frames are not files")
+        name = index.get(str(int(frame_idx)))
+        if name is None:
+            raise IndexError(f"stream {self.stream_id!r} has no frame {int(frame_idx)}")
+        return Path(self.video_path) / name
 
     def seconds(self, frame_idx: int) -> float:
         """Time of a frame from the stream's start; raises when the frame rate is unknown."""
@@ -262,7 +273,8 @@ class BaseArtifact:
     @classmethod
     def _serialize_value(cls, value: Any) -> Any:
         if isinstance(value, Path):
-            return {"__type__": "path", "value": str(value)}
+            # a record names a place inside the data directory, never a path on this machine
+            return {"__type__": "path", "value": data_dir.record_name(value)}
         if isinstance(value, np.ndarray):
             return {
                 "__type__": "ndarray",
@@ -327,8 +339,8 @@ class BaseArtifact:
 
         if annotation is Path:
             if isinstance(raw, dict) and raw.get("__type__") == "path":
-                return Path(raw["value"])
-            return Path(raw)
+                return data_dir.from_record(raw["value"])
+            raise TypeError(f"a path field holds {raw!r}, not a recorded path")
         if annotation is np.ndarray:
             if isinstance(raw, dict) and raw.get("__type__") == "ndarray":
                 return np.asarray(raw["value"], dtype=np.dtype(raw["dtype"]))
@@ -349,7 +361,7 @@ class BaseArtifact:
         if isinstance(raw, dict):
             tag = raw.get("__type__")
             if tag == "path":
-                return Path(raw["value"])
+                return data_dir.from_record(raw["value"])
             if tag == "ndarray":
                 return np.asarray(raw["value"], dtype=np.dtype(raw["dtype"]))
             if tag == "tuple":

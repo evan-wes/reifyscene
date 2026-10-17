@@ -50,9 +50,10 @@ jobs:
           #   - "Title goes here (#N)" (Squash and merge)
           # Rebase-and-merge / unrecognized subjects fall through to
           # empty PR_NUMBER → bare-SHA tag annotation + minimal
-          # release-body fallback below. See "Why merge-subject
-          # parsing?" in the private repo-setup notes for the design
-          # rationale.
+          # release-body fallback below. Parsing the merge subject
+          # reads git data directly: the API-based PR lookups that
+          # were tried first raced GitHub's index and tagged without
+          # a PR.
           # `gh pr view` by ID is used below for the PR body — that's
           # a direct lookup keyed on a number that exists from the
           # moment the PR is opened, no indexing required.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """How well does a trained scene reproduce its own footage, and how sharp is it?
 
-    python scripts/eval_train_views.py ../runs/slice_lab-coat --sub render_control
+    python scripts/eval_train_views.py slice_lab-coat --sub render_control
 
 Renders every training frame of ``<run>/<sub>/trained_dynamic.npz`` and compares it with the
 photo the scene stage trained on. Reports, averaged over all frames:
@@ -81,16 +81,18 @@ def evaluate(checkpoint, stills: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dirs", type=Path, nargs="+")
+    ap.add_argument("runs", nargs="+", help="runs, by name in the data directory's runs/")
     ap.add_argument("--sub", default="render")
     ap.add_argument("--stills", type=int, default=3)
     args = ap.parse_args()
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
 
     print(f"{'run':<22} {'sub':<28} {'frames':>6} {'PSNR':>6} {'SSIM':>6} {'sharp':>6} "
           f"{'Gaussians':>10}")
-    for run in args.run_dirs:
-        r = evaluate(RunOutputs.open(run.resolve()).checkpoint(args.sub), args.stills)
+    for run in args.runs:
+        r = evaluate(RunOutputs.open(data_dir.path(data_dir.RUNS, run)).checkpoint(args.sub),
+                     args.stills)
         print(f"{r['run']:<22} {r['sub']:<28} {r['frames']:>6} {r['psnr']:>6.2f} {r['ssim']:>6.3f} "
               f"{r['sharpness']:>6.3f} {r['num_gaussians']:>10}")
     return 0

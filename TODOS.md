@@ -68,9 +68,8 @@ feature/dataset-backends; deferred when the run-dir lock shipped.
 with pairwise-relative errors (primary) + guarded Sim(3) APE (secondary). Turns
 the calibration stage's correctness into a number.
 
-**S1 spike — RAN 2026-06-13/14, verdict CONTINUE (qualified).** Standalone
-workspace `spike_s1_calibration/` (record
-`RESULTS_flute1.md`; design doc D15). On CMU Panoptic `161029_flute1`
+**S1 spike — RAN 2026-06-13/14, verdict CONTINUE (qualified).** A standalone
+workspace outside the repository (design doc D15). On CMU Panoptic `161029_flute1`
 (cams 3/12/18/22) kyotovision reproduces (1.48° median pairwise rot), but static
 hloc+COLMAP MATCHES it (1.03°) — on wide-baseline shared-subject plain SfM already
 solves it, so "person beats SfM" was the wrong kill-gate. D15 reframed the thesis
@@ -85,15 +84,13 @@ to **person COMPLEMENTS SfM**, fixing two blind spots, both then validated:
 
 Net: the arc cleared its concept-proof gates → M2/M3 (real joint-opt fusion) is a
 justified build, to weigh against the renderer (Track 2) priority — user's
-per-session call (see the M2/M3 entry above). Full record (D2–D15):
-`a private design note`;
-memory a private note. Disjoint-FOV (the arc's real endpoint) still
+per-session call (see the M2/M3 entry above). The full record (D2–D15) is a
+design document kept outside the repository. Disjoint-FOV (the arc's real endpoint) still
 needs own-rig captures — no public GT exists for that regime.
 
 ## Renderer (Track 2)
 
-Action plan / decision record: `evan-renderer-track-completion-design-20260614-2256.md`
-(gstack project docs). Sequence: PR 1 (dataset geometry backend + Rasterizer
+The action plan and decision record are kept outside the repository. Sequence: PR 1 (dataset geometry backend + Rasterizer
 ABC + Checkpoint 0) → PR 2 (static Gaussian trainer + Checkpoints 1–2) → PR 3
 (reference_benchmark_v1 eval, below) → PR 4 (dynamic branch + Checkpoint 3) →
 PR 5 (CLI flythrough). Step 12 (own VGGT/CoTracker swap-in) is out of scope.
@@ -186,7 +183,7 @@ own VGGT-Long reconstruction, scored against the DyCheck-GT oracle (masked mPSNR
   Byte-identical to the old direct path (lossless refactor).
 - **Pose rung — DONE (diagnosed + fix productionized).** Native VGGT-Long poses
   (GT depth) scored **17.01** vs oracle **20.75** — a −3.7 dB gap diagnosed as a
-  POSE problem (spike R0/R1 ladder, memory a private note).
+  POSE problem (spike R0/R1 ladder).
   VGGT-Long itself was fixed first — global pose alignment (v0.1.15.2,
   chunk-local→`camera_poses.txt`, 20.5°→1.73°) + loop closure (v0.1.15.3).
   Photometric pose-opt (Path A) failed; COLMAP-BA pose refinement (Path B)

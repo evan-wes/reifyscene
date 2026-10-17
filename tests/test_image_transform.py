@@ -322,7 +322,7 @@ def test_vggt_long_records_the_loader_it_ran(tmp_path: Path) -> None:
             "resize_max_dim": 256,
             "min_resize_max_dim": 128,
             "min_chunk_size": 2,
-            "frame_cache_dir": str(tmp_path / "cache"),
+            "frame_cache_dir": f"{tmp_path.name}/cache",
             "system_report": {
                 "memory": {"available_gib": 64.0},
                 "gpus": [{"memory_free_mb": 8192}],

@@ -1,22 +1,20 @@
 """CLI subcommand for `serve`: the local demo web app."""
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
 
-app = typer.Typer(help="Serve the local web app over a directory of runs.")
+app = typer.Typer(help="Serve the local web app over the data directory's runs.")
 
 
 @app.callback(invoke_without_command=True)
 def main(
-    runs_root: Annotated[Path, typer.Argument(help="directory holding runs, e.g. ../runs")],
     port: Annotated[int, typer.Option()] = 8765,
     checkpoint: Annotated[str, typer.Option(
         help="the checkpoint to serve: the render stage's own, or a named retrain beside it "
              "(a run without it is not served)")] = "render",
     runs: Annotated[list[str] | None,
-                    typer.Option(help="only these runs (default: every run under runs_root)")
+                    typer.Option(help="only these runs, by name (default: every run in runs/)")
                     ] = None,
     device: Annotated[str, typer.Option()] = "cuda",
 ) -> None:
@@ -26,6 +24,7 @@ def main(
     import uvicorn
 
     from reifyscene.api.web.app import create_app, gpu_power_ok
+    from reifyscene.common import data_dir
 
     with socket.socket() as s:
         if s.connect_ex(("127.0.0.1", port)) == 0:
@@ -34,5 +33,5 @@ def main(
     if not ok:
         raise typer.BadParameter(msg)
     typer.echo(msg)
-    app_ = create_app(runs_root, checkpoint=checkpoint, only=runs, device=device)
+    app_ = create_app(data_dir.area(data_dir.RUNS), checkpoint=checkpoint, only=runs, device=device)
     uvicorn.run(app_, host="127.0.0.1", port=port, log_level="info")

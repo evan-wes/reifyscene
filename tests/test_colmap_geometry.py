@@ -54,7 +54,7 @@ def test_colmap_initialize_empty_in_empty_out():
 
 def test_colmap_initialize_fills_poses_not_depth(tmp_path, monkeypatch):
     ingest = _ingest_for(tmp_path, num_frames=2)
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     # mock the SfM core: both frames registered
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0, 1]))
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
@@ -68,7 +68,7 @@ def test_colmap_initialize_fills_poses_not_depth(tmp_path, monkeypatch):
 
 def test_colmap_partial_registration(tmp_path, monkeypatch):
     ingest = _ingest_for(tmp_path, num_frames=2)
-    init = ColmapPoseInitializer({"colmap_work_dir": str(tmp_path / "cw")})
+    init = ColmapPoseInitializer({"colmap_work_dir": f"{tmp_path.name}/cw"})
     monkeypatch.setattr(ColmapPoseInitializer, "reconstruct", lambda self, img_dir: _fake_poses([0]))  # only frame 0
     art = init.initialize(ingest.keyframes, ingest_artifact=ingest, sync_artifact=None)
     assert len(art.camera_states_by_stream["cam_00"]) == 1

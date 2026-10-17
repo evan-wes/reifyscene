@@ -11,7 +11,7 @@ Reuses `DatasetGeometryInitializer`'s loaders for GT rgb/depth/camera and the ac
 `MoGeInitializer.infer_frame` inference core, so it exercises the shipped rung.
 
 Run (GPU; weights via `setup_reifyscene.sh --with-moge`):
-    python scripts/fp6_validate_moge.py --dataset-root ../data/shape_of_motion/iphone/spin --max-frames 12
+    python scripts/fp6_validate_moge.py --dataset-root dycheck_iphone/spin --max-frames 12
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
 from reifyscene.geometry.moge_wrapper import MoGeInitializer
 
@@ -38,15 +39,19 @@ def _depth_metrics(pred: np.ndarray, gt: np.ndarray, valid: np.ndarray) -> tuple
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--dataset-root', default='../data/shape_of_motion/iphone/spin')
+    ap.add_argument('--dataset-root', default='dycheck_iphone/spin',
+                    help='a sequence name in datasets/')
     ap.add_argument('--factor', type=int, default=1)
     ap.add_argument('--split', default='train')
     ap.add_argument('--camera', default=None, help='restrict to one camera id (e.g. 0)')
     ap.add_argument('--max-frames', type=int, default=12)
     ap.add_argument('--stride', type=int, default=1)
     ap.add_argument('--device', default='cuda')
-    ap.add_argument('--out', default=None, help='optional JSON path for per-frame + aggregate results')
+    ap.add_argument('--out', default=None,
+                    help='optional JSON for per-frame + aggregate results: a name in runs/')
     args = ap.parse_args()
+    dataset = args.dataset_root
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, dataset))
 
     ds = DatasetGeometryInitializer({'dataset_root': args.dataset_root, 'factor': args.factor, 'split': args.split})
     specs = ds.split_frames()
@@ -101,7 +106,8 @@ def main() -> None:
     print(f"median metric scale = {agg['scale']:.3f} (->1.0 = MoGe metric ~ GT); focal ratio = {agg['focal_ratio']:.3f}")
 
     if args.out:
-        Path(args.out).write_text(json.dumps({'dataset': args.dataset_root, 'per_frame': per_frame, 'aggregate': agg}, indent=2))
+        data_dir.path(data_dir.RUNS, args.out).write_text(
+            json.dumps({'dataset': dataset, 'per_frame': per_frame, 'aggregate': agg}, indent=2))
         print(f"wrote {args.out}")
 
 

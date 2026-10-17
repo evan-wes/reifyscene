@@ -4,24 +4,22 @@
 #
 # base.yaml plus `scene.kind: dynamic` (base.yaml builds a STATIC scene; the headline is
 # the dynamic 4D one) and an `evaluation.masked_nvs` block. --config replaces base.yaml,
-# it does not merge onto it. Run from the repo root:
+# it does not merge onto it. Run from the repo root (the clip and the run are named inside
+# the data directory, $REIFYSCENE_DATA_DIR):
 #
 #   python scripts/run_single_video_reifyscene.py \
-#     --frames-dir ../data/shape_of_motion/iphone/spin/rgb/1x \
+#     --frames-dir dycheck_iphone/spin/rgb/1x \
 #     --geometry-backend-name vggt-long --geometry-device cuda \
 #     --keyframes-all --pose-refine-enable \
 #     --config configs/experiment/spin_native_full.yaml \
-#     --run-dir ../runs/spin_native_full
+#     --run-dir spin_native_full
 #
-# dataset_root is relative to the repo root; point it at your DyCheck "spin" copy.
+# dataset_root names DyCheck "spin" inside the data directory's datasets/.
 
 run:
   name: reifyscene_dev
-  output_dir: artifacts/runs/reifyscene_dev
 
 dataset:
-  input_dir: data/raw
-  cache_dir: artifacts/cache
   keyframe_stride: 15
 
 models:
@@ -90,7 +88,7 @@ evaluation:
   rendering:
     max_views: 4
   masked_nvs:
-    dataset_root: ../data/shape_of_motion/iphone/spin
+    dataset_root: dycheck_iphone/spin
     factor: 2              # score at the 2x (360x480) resolution, as Shape of Motion does
     split: train
     eval_split: val

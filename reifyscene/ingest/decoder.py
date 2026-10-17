@@ -5,6 +5,7 @@ This module provides a real OpenCV-backed decoder for local video files.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Iterator
@@ -99,9 +100,10 @@ class VideoDecoder:
             Optional explicit stream identifier (a frame directory prefers the camera id
             parsed from filenames; this is the fallback when filenames carry no camera).
         """
-        # Absolute, so the stream (and every frame path in it) still resolves when a later
-        # stage or a resume runs from another working directory.
-        path = Path(video_path).expanduser().resolve()
+        # Absolute, so the stream still resolves when a later stage or a resume runs from
+        # another working directory. Links are not followed: the input is where it sits in
+        # the data directory, which is what its record names.
+        path = Path(os.path.abspath(Path(video_path).expanduser()))
         if path.is_dir():
             return self._decode_frame_dir(path, stream_id)
         meta = self._probe_capture(path)
@@ -147,9 +149,9 @@ class VideoDecoder:
             target = cams[0]
         else:
             target = stream_id or "0"  # no camera prefix in filenames
-        frame_index: dict[str, str] = {}
+        frame_index: dict[str, str] = {}   # frame number -> its file's name inside the folder
         for pos, (_, idx, f) in enumerate(sorted(parsed, key=lambda t: (t[1] if t[1] is not None else 0, t[2].name))):
-            frame_index[str(idx if idx is not None else pos)] = str(f)
+            frame_index[str(idx if idx is not None else pos)] = f.name
         probe = cv2.imread(str(files[0]))
         if probe is None:
             raise RuntimeError(f"OpenCV could not read frame '{files[0]}'.")
@@ -230,10 +232,7 @@ class VideoDecoder:
 
     def _read_frame_file(self, stream: VideoStreamRef, frame_idx: int) -> np.ndarray:
         """Load one frame of a frame-sequence stream (lossless) as RGB."""
-        frame_index = (stream.metadata or {}).get("frame_index", {})
-        file_path = frame_index.get(str(frame_idx))
-        if file_path is None:
-            raise IndexError(f"Frame {frame_idx} is not present in frame-sequence stream '{stream.stream_id}'.")
+        file_path = stream.frame_file(frame_idx)
         img = cv2.imread(str(file_path))
         if img is None:
             raise IndexError(f"Unable to read frame file '{file_path}' for stream '{stream.stream_id}'.")

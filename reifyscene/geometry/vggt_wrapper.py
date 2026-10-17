@@ -19,6 +19,7 @@ import torch
 from PIL import Image
 from rich.progress import track
 
+from reifyscene.common import data_dir
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState
 from reifyscene.geometry.base import GeometryInitializer
@@ -32,10 +33,16 @@ from reifyscene.geometry.image_transform import (
 )
 from reifyscene.ingest.decoder import VideoDecoder
 
-# Default root of the materialized-input cache shared by VGGT and VGGT-Long. Each
-# materialization lives in its own subdirectory keyed by what decides its pixels
-# (see ``VGGTInitializer._input_cache_identity``), so runs never overwrite each other.
-DEFAULT_INPUT_CACHE_ROOT = Path(".reifyscene_cache") / "vggt_inputs"
+# The materialized-input cache shared by VGGT and VGGT-Long, by its name in the data
+# directory's cache. Each materialization lives in its own subdirectory keyed by what decides
+# its pixels (see ``VGGTInitializer._input_cache_identity``), so runs never overwrite each other.
+INPUT_CACHE = "vggt_inputs"
+
+
+def input_cache_root(name: str | None = None) -> Path:
+    """The materialized-input cache: ``name`` (default :data:`INPUT_CACHE`) in the data
+    directory's cache."""
+    return data_dir.path(data_dir.CACHE, name or INPUT_CACHE)
 
 
 def _file_identity(path: str | Path) -> dict[str, Any]:
@@ -75,10 +82,10 @@ class VGGTInitializer(GeometryInitializer):
         use_autocast:
             Enable autocast during inference.
         frame_cache_dir:
-            Optional root under which selected frames are materialized before
-            being passed into the official VGGT preprocessing helper (default
-            ``.reifyscene_cache/vggt_inputs``); each materialization gets its own
-            content-keyed subdirectory.
+            Optional name, inside the data directory's cache, of the folder under which
+            selected frames are materialized before being passed into the official VGGT
+            preprocessing helper (default :data:`INPUT_CACHE`); each materialization gets
+            its own content-keyed subdirectory.
         """
         self.cfg = cfg or {}
         self.backend_mode = str(self.cfg.get("backend_mode", "auto"))
@@ -241,7 +248,7 @@ class VGGTInitializer(GeometryInitializer):
                     raise IndexError(f"frames {missing[:5]} are not in frame-sequence stream '{stream_id}'")
                 streams[stream_id] = {
                     "kind": "frames",
-                    "frames": {str(idx): _file_identity(frame_index[str(idx)]) for idx in used},
+                    "frames": {str(idx): _file_identity(stream.frame_file(idx)) for idx in used},
                 }
             else:
                 streams[stream_id] = {"kind": "video", **_file_identity(stream.video_path)}
@@ -281,7 +288,7 @@ class VGGTInitializer(GeometryInitializer):
         identity = self._input_cache_identity(frames, ingest_artifact, applied_resize)
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         tag = "orig" if applied_resize is None else f"maxdim_{applied_resize}"
-        target_dir = (Path(target_root) / f"{tag}-{key}").resolve()
+        target_dir = Path(os.path.abspath(Path(target_root) / f"{tag}-{key}"))
         target_dir.mkdir(parents=True, exist_ok=True)
         identity_path = target_dir / "identity.json"
         if not identity_path.exists():
@@ -318,13 +325,14 @@ class VGGTInitializer(GeometryInitializer):
             written += 1
 
         self._last_input_cache = {
-            "root": str(Path(target_root).resolve()),
+            "root": data_dir.record_name(target_root),
             "key": key,
-            "dir": str(target_dir),
+            "dir": data_dir.record_name(target_dir),
             "identity": identity,
         }
         notes.append(
-            f"Materialized VGGT inputs under cache: {target_dir} ({written} written, {reused} reused)."
+            f"Materialized VGGT inputs under {data_dir.record_name(target_dir)} "
+            f"({written} written, {reused} reused)."
         )
         if applied_resize is not None:
             if resized:
@@ -676,7 +684,7 @@ class VGGTInitializer(GeometryInitializer):
                 "debug_max_points": int(self.cfg.get('debug_max_points', 5000)),
                 "debug_image_paths": {}
                 if not image_paths else {
-                    self._frame_key(frame): str(path)
+                    self._frame_key(frame): data_dir.record_name(path)
                     for frame, path in zip(frames, image_paths)
                 },
             },
@@ -792,7 +800,7 @@ class VGGTInitializer(GeometryInitializer):
         if self._model is None:
             return self._initialize_heuristic(selected_frames, ingest_artifact, sync_artifact)
 
-        cache_root = Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
+        cache_root = input_cache_root(self.frame_cache_dir)
         image_paths, notes = self._materialize_images(selected_frames, ingest_artifact, cache_root)
         transforms = self._input_transforms(selected_frames, ingest_artifact)
         images = self._load_and_preprocess_images([str(path) for path in image_paths]).to(self.device)
