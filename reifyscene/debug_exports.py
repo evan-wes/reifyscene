@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.api.run_outputs import RunOutputs
+from reifyscene.common import data_dir
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.io import read_yaml, write_json
 from reifyscene.common.paths import ensure_dir
@@ -131,7 +132,7 @@ def materialize_shared_debug_frames(
         if not dst.exists():
             frame = pipeline.decoder.get_frame(stream_lookup[fr.stream_id], fr.frame_idx)
             Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(dst)
-        index[key] = str(dst)
+        index[key] = data_dir.record_name(dst)
 
     write_json(root / 'index.json', {'frame_index': index})
     return index

@@ -39,11 +39,10 @@ def _git_head() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dirs", type=Path, nargs="*",
-                    help="runs to score (default: the runs --out already lists, so a re-score "
-                         "measures the same set; with no --out file yet, every run under "
-                         "--runs-root with a DAVIS input and a checkpoint)")
-    ap.add_argument("--runs-root", type=Path, default=REPO.parent / "runs")
+    ap.add_argument("runs", nargs="*",
+                    help="runs to score, by name in runs/ (default: the runs --out already "
+                         "lists, so a re-score measures the same set; with no --out file yet, "
+                         "every run in runs/ with a DAVIS input and a checkpoint)")
     ap.add_argument("--out", type=Path, default=REPO / "benchmarks" / "davis_edit_damage.json")
     ap.add_argument("--checkpoint", default="render",
                     help="the checkpoint scored: the render stage's own, or a named retrain")
@@ -58,6 +57,7 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.common.memory import release_memory
     from reifyscene.eval.benchmarks.edit_damage import score_run, summarize
     from reifyscene.ingest.streams import StreamError
@@ -68,13 +68,13 @@ def main() -> int:
         except StreamError:             # several streams: not one DAVIS sequence
             return False
 
-    if args.run_dirs:
-        runs = [RunOutputs.open(r) for r in args.run_dirs]
+    if args.runs:
+        runs = [RunOutputs.open(data_dir.path(data_dir.RUNS, r)) for r in args.runs]
     elif args.out.is_file():            # the benchmark's own record of what it measures
-        runs = [RunOutputs.open(args.runs_root / r["run"])
+        runs = [RunOutputs.open(data_dir.path(data_dir.RUNS, r["run"]))
                 for r in json.loads(args.out.read_text())["runs"]]
     else:
-        runs = [r for r in RunOutputs.discover(args.runs_root)
+        runs = [r for r in RunOutputs.discover(data_dir.area(data_dir.RUNS))
                 if r.checkpoint(args.checkpoint).exists() and davis_input(r)]
 
     rows = []

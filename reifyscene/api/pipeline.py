@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from reifyscene.api.contracts import input_identity, stage_fingerprint
 from reifyscene.api.run_outputs import RunOutputs
 from reifyscene.api.stages import build_stage_registry
 from reifyscene.calibration.runner import CalibrationRunner
+from reifyscene.common import data_dir
 from reifyscene.common.backend_ladder import (
     BackendLadder,
     BackendRung,
@@ -143,7 +145,7 @@ class ReifyScenePipeline:
         self._stage_digests: dict[str, str | None] = {}
         self._input_identities: dict[tuple[str, ...], dict[str, Any]] = {}
         self._run_video_paths: list[str] = []
-        self.run_dir = ensure_dir(self.cfg.get('run_dir', Path('artifacts/runs/dev')))
+        self.run_dir = ensure_dir(self.cfg.get('run_dir') or data_dir.path(data_dir.RUNS, 'dev'))
         self.outputs = RunOutputs.create(self.run_dir)
         self.decoder = VideoDecoder()
         self.quality = ClipQualityAssessor()
@@ -210,7 +212,7 @@ class ReifyScenePipeline:
         if name == 'vggt-long':
             return VGGTLongInitializer(geometry_cfg)
         if name == 'dataset':
-            return DatasetGeometryInitializer(geometry_cfg)
+            return DatasetGeometryInitializer.from_config(geometry_cfg)
         if name == 'moge':
             # FP6a: MoGe-2 metric-depth rung (native swap; depth-only, no poses).
             return MoGeInitializer(geometry_cfg)
@@ -234,12 +236,14 @@ class ReifyScenePipeline:
 
     @staticmethod
     def _video_paths_from_ingest(ingest_artifact: IngestArtifact) -> list[str]:
-        return [str(Path(stream.video_path).expanduser().resolve()) for stream in ingest_artifact.streams]
+        return [str(stream.video_path) for stream in ingest_artifact.streams]
 
     def _video_paths_for_stage(self, ingest_artifact: IngestArtifact | None = None) -> list[str]:
         if ingest_artifact is not None:
             return self._video_paths_from_ingest(ingest_artifact)
-        resume_paths = [str(Path(p).expanduser().resolve()) for p in self.cfg.get('_resume_video_paths', [])]
+        # the run script records its inputs by their names in the data directory
+        resume_paths = [str(data_dir.from_record(p))
+                        for p in self.cfg.get('_resume_video_paths', [])]
         # Every stage fingerprints the same input: without the run script's explicit
         # list, use the one ingest read (run or loaded) rather than none.
         return resume_paths or list(self._run_video_paths)
@@ -277,7 +281,8 @@ class ReifyScenePipeline:
             save_dir=ensure_dir(self.outputs.calibration_dir),
             video_paths=video_paths,
         )
-        self._stamp_stage_metadata(artifact, 'calibration', video_paths=[str(Path(p).expanduser().resolve()) for p in video_paths])
+        self._stamp_stage_metadata(artifact, 'calibration',
+                                   video_paths=[os.path.abspath(p) for p in video_paths])
         artifact.save()
         return artifact
 

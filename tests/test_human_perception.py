@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common.data_dir import record_name
 from reifyscene.common.types import FrameRef, HumanState, VideoStreamRef
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 from reifyscene.perception.humans.human_artifact import HumanArtifact
@@ -109,7 +110,7 @@ def test_human_artifact_debug_viewer_roundtrip(tmp_path: Path) -> None:
         rgb[..., 0] = 50 + idx * 20
         img_path = image_dir / f'cam_00__{idx}.png'
         Image.fromarray(rgb).save(img_path)
-        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = str(img_path)
+        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = record_name(img_path)
     raw0 = _make_human('hum:0', 0, [5, 5, 15, 25], track_ids=[1, 2, 3], human_id='human_000')
     raw1 = _make_human('hum:1', 1, [6, 5, 16, 25], track_ids=[1, 2, 3], human_id='human_000')
     clean0 = _make_human('hum:0', 0, [5.5, 5, 15.5, 25], track_ids=[1, 2, 3], human_id='human_000')

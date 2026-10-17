@@ -4,8 +4,8 @@
 **Status:** DRAFT — for review (not yet eng-reviewed; not yet built)
 **Framing source:** the 2026-06-21 reframe (reifyscene = research/learning vehicle) + the lit-review
 `docs/research/2026-06-21-neurosymbolic-queryable-4d-scene-graphs-and-query-conditioned-generation.md`.
-**Supersedes:** the renderer-productionization design as a standalone effort
-(`a private design note`) — folded in here as F0.
+**Supersedes:** the renderer-productionization design as a standalone effort (a design document
+kept outside the repository) — folded in here as F0.
 
 ---
 
@@ -39,11 +39,11 @@
    back-half (graph/query/compiler/eval) work begins. **Real temporal sync** is built and **validated
    on the fixed rig** (must recover the known ~0 offset) even though synced rigs don't strictly need
    it — it proves the sync impl before unsynced streams depend on it. The real multi-stream joint
-   optimizer is the **calibration arc's M2/M3** (`a private note`), not abstract "learning
+   optimizer is the **calibration arc's M2/M3** (`TODOS.md`), not abstract "learning
    value": multi-stream high-fidelity reconstruction lowers the eval's noise floor (§5e/§8), so it is
    foundation, de-risked first.
 9. **Front-half perception redesign — foundation-model stack + degradable ladders (2026-06-26).**
-   Two adversarial deep-research passes (`a private note`) verified a modern
+   Two adversarial deep-research passes verified a modern
    stack that **replaces the hand-tuned 2D associator front-half**. This *evolves* §0.2/§0.6 ("keep
    the proven front-half as-is"): **perception is now explicit redesign scope**; the rest of the
    front-half spine (geometry / pose_refine / sync / optimization) is still kept + built-out. Core
@@ -120,7 +120,7 @@ Net-new (not in the registry today): the **query** stage (`reifyscene/query/` is
 eval**. Also net-new from the perception redesign (§4A): the **`segment`** (SAM 3) and **`reid`**
 (DINOv3) stages + their `InstanceArtifact` / `ReidArtifact`.
 
-**Trust tiers (verified 2026-06-24 — `a private note`).** The
+**Trust tiers (verified against the code, 2026-06-24).** The
 "front-half" is not uniformly proven. Read the table's status column as three tiers: **proven**
 (geometry / pose_refine / tracking / objects, and the render *trainers*), **stub** (`sync`,
 `optimization` — both no-ops today), and **fabrication-capable** (`humans` via `pose2d`). The
@@ -172,7 +172,7 @@ dominant) and associated in 2D with ~6 magic weights — a *motion* cue doing an
 (a person + carried bag share tracks → false merge; same object across an occlusion gap shares none →
 false fragment). The redesign **decouples motion from identity**, rebuilds identity on
 mask-propagation + appearance + 3D, and makes every stage **degradable by contract**. Verified by two
-adversarial deep-research passes (`a private note`).
+adversarial deep-research passes.
 
 ### Verified stack (per capability)
 
@@ -313,8 +313,8 @@ all-static), never *completeness*. Worked traces:
 
 Gating means **register-to-download only** — models run **fully offline locally, no data egress**.
 **Request `facebook/sam3` + `facebook/dinov3` access early** (manual approval, reported days-to-weeks
-wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_reifyscene.sh`
-(`a private note`, `a private note`); the gated weights need
+wait); Sapiens / GVHMR / MoGe-2 are ungated. All vendored via `setup_reifyscene.sh` (patched, not
+symlinked; scripted, not set up by hand); the gated weights need
 a pre-authorized HF token — the one step that isn't fully scriptable.
 
 ## 4B. Sync & cross-stream fusion — two-tier sync, per-stream-until-fusion (2026-06-27)
@@ -650,7 +650,7 @@ BLOCK 1 — FOUNDATION (no stubs). GATE G1-single (single stream, dynamic 4D) un
                                     frame-intrinsics handling for MoGe depth. Static-superset reorder.
                                     F2's NON-overlapping role (vs COLMAP's own joint BA + pose_refine's
                                     BA) = person-anchored metric scale + Tier-2 sync + dense per-frame.
-                                    SPIKE CLEARED 2026-07-01 (spike_fp6b_egomotion/): monocular COLMAP
+                                    SPIKE CLEARED 2026-07-01 (the FP6b egomotion spike): monocular COLMAP
                                     recovers sub-degree egomotion (100% reg, <1% trans) on spin+windmill;
                                     frame DENSITY is load-bearing (dense sampler FIRST), dyn_mask is a
                                     size-gated ROBUSTNESS rung (not a hard gate), fixed intrinsics OK.
@@ -679,7 +679,7 @@ BLOCK 1 — FOUNDATION (no stubs). GATE G1-single (single stream, dynamic 4D) un
                                     the fixed rig (recover ~0 — necessary, NOT sufficient) AND on
                                     unsynced data with a known injected offset (the real Tier-1 test).
                                     Fine alignment is F2, not here.
-  F2  Real joint-opt fusion         = calibration-arc M2/M3 (a private note; eng-reviewed
+  F2  Real joint-opt fusion         = calibration-arc M2/M3 (TODOS.md; eng-reviewed
        (+ Tier-2 fine sync, §4B)    design + S1 spikes cleared the robustness + scale gates). Real
                                     factors / multi-stream BA over poses+states; metric scale
                                     (person-anchored; intrinsics a named dep). ALSO estimates the
@@ -816,7 +816,7 @@ sequencing, not a go/no-go.
 
 - **Lit-review:** `docs/research/2026-06-21-neurosymbolic-queryable-4d-scene-graphs-and-query-conditioned-generation.md`
   (grounds §2 and §6; the eval-paper IDs there feed the §6 targeted scan).
-- **Superseded render design:** `a private design note`
+- **Superseded render design:** a design document kept outside the repository
   (its findings — train-supervision masks, dataset-coupled motion init, world-frame trap — feed F0/F2).
 - **Proven baselines:** SoM reference benchmark (masked NVS mPSNR 19.53 on paper-windmill);
   reifyscene-dynamic beats it (20.7) via `run_render_proof.py`. The render stage must reproduce this

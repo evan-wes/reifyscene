@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Native 3D-track lifting — reifyscene's own port of Shape-of-Motion's track lift.
 
 The only thing borrowed here is the 2D point tracker output

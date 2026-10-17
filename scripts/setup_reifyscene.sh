@@ -1244,8 +1244,8 @@ if [[ $INSTALL_DETECTRON2 -eq 1 ]]; then
   # and the temp tree leaked because nothing removed it.
   echo "Installing detectron2 from main @ ${DETECTRON2_COMMIT:0:12}..."
   # Installed straight from the pinned tag rather than a local clone: a
-  # `mktemp -d` clone left the module resolving into /tmp (editable) or recorded
-  # a dead file:///tmp/... direct_url (non-editable, which then leaked into the
+  # `mktemp -d` clone left the module resolving into a temporary folder (editable)
+  # or recorded a dead file:// direct_url (non-editable, which then leaked into the
   # lockfile and made it unportable), and the temp tree leaked either way.
   # Like gsplat, detectron2 is excluded from the lock — it is owned by this
   # script, pinned to a tag, and needs --no-build-isolation.

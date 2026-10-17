@@ -52,12 +52,20 @@ regenerating it.
 
 ## Current inventory
 
-| Tool | Pin | Patches |
-|---|---|---|
-| `shape-of-motion` | `579753e1` | torch device index; gsplat radii shape |
-| `hloc` | `v1.4` (`80ccb7ee`) | pycolmap ≥ 3.10 API drift |
-| `vggt-long` | `c160869d` | dinov2 CWD path; Hugging Face CLI rename |
-| `concept-graphs` | `93277a02` | ConceptGraphs-Detect imports made optional |
+| Tool | Pin | Patches | Licence of the patches |
+|---|---|---|---|
+| `shape-of-motion` | `579753e1` | torch device index; gsplat radii shape | MIT |
+| `hloc` | `v1.4` (`80ccb7ee`) | pycolmap ≥ 3.10 API drift | Apache-2.0 |
+| `vggt-long` | `c160869d` | dinov2 CWD path; Hugging Face CLI rename | VGGT License |
+| `concept-graphs` | `93277a02` | ConceptGraphs-Detect imports made optional; supervision ≥ 0.22 annotator API | MIT |
+| `vla-3d` | `a0c023c9` | `relate_near` corner test; colour-naming import made optional | MIT |
 
 Four other checkouts — `co-tracker`, `MoGe`, `sam2` and `vggt` — need no patches and have no
 directory here.
+
+## Licensing
+
+A patch is a change to someone else's code and contains lines of it, so each directory here is
+under its upstream project's licence (the table above; the texts are in `LICENSES/`), not under
+reifyscene's own. `THIRD_PARTY_NOTICES.md` has the details, including the one file
+`vggt-long/0001` touches that VGGT-Long took from SALAD.

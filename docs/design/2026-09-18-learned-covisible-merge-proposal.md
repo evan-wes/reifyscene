@@ -85,7 +85,7 @@ spurious node, which is noise. The rule's precision of 1.00 is therefore a bar t
 a free parameter. The headline metric is **recall at precision ≥ 0.98**, not accuracy or F1 —
 and choosing that operating point deliberately is part of the exercise.
 
-Numbers produced by `count_covisible_pairs.py`, over the same runs
+Numbers produced by a one-off counting script kept outside the repository, over the same runs
 `benchmarks/davis_inventory.json` scores (stamped `d0bf1c4`).
 
 ---

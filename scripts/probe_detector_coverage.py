@@ -35,7 +35,6 @@ from typing import Any
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 MODEL = "IDEA-Research/grounding-dino-base"
 
 GENERIC = ["object", "animal", "person", "vehicle", "thing"]
@@ -143,7 +142,10 @@ def main() -> None:
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
     if not args.report:
-        build(DAVIS, args.cache)
+        from reifyscene.common import data_dir
+        from reifyscene.ingest.datasets import DavisSequence
+
+        build(data_dir.path(data_dir.DATASETS, DavisSequence.TRAINVAL_480P), args.cache)
         return
     report(
         json.loads(args.cache.read_text()),

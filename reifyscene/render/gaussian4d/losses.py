@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Loss functions for the dynamic renderer: robust losses for the geometry terms of training.
 
 Ported from Shape-of-Motion (``flow3d/loss_utils.py``, MIT, Copyright (c) 2024 Vickie Ye) so

@@ -17,8 +17,8 @@ set -euo pipefail
 #   setup_reference_tool.sh; a pip-resolved gsplat would NOT be that build.
 # - detectron2: installed from a pinned tag with --no-build-isolation by
 #   setup_reifyscene.sh. Freezing it emits an unportable direct-URL line
-#   (or, if built from a temp clone, a file:///tmp/... path that is already
-#   dead), and reinstalling from the lock would rebuild it WITH build
+#   (or, if built from a temp clone, a file:// URL to a temporary folder that
+#   is already gone), and reinstalling from the lock would rebuild it WITH build
 #   isolation — not the build the setup script produced.
 # - the conda layer (cuda-toolkit, compilers): pinned via conda channels in
 #   the setup scripts; pip freeze cannot see it.
@@ -42,10 +42,8 @@ find_conda() {
     echo "${CONDA_EXE}"
   elif command -v conda >/dev/null 2>&1; then
     command -v conda
-  elif [[ -x "${HOME}/miniconda3/condabin/conda" ]]; then
-    echo "${HOME}/miniconda3/condabin/conda"
   else
-    echo "conda executable not found (checked CONDA_EXE, PATH, $HOME/miniconda3)." >&2
+    echo "conda executable not found (checked CONDA_EXE and PATH)." >&2
     exit 1
   fi
 }
@@ -100,8 +98,8 @@ for entry in "${ENVS[@]}"; do
   # state, and it happily emits unportable direct-URL lines for anything installed
   # from a local path. Both have shipped here: a lock pinning mypy==2.3.1 next to
   # pathspec==0.12.1 (mypy needs pathspec>=1) that pip could not resolve at all,
-  # and a `detectron2 @ file:///tmp/...` line pointing at an already-deleted build
-  # directory. Neither is visible until the next fresh install fails. Resolve the
+  # and a `detectron2 @ file://` line pointing at an already-deleted temporary
+  # build directory. Neither is visible until the next fresh install fails. Resolve the
   # lock here and refuse to write one that cannot be installed.
   if grep -qE '@ file://' "${lock_path}"; then
     echo "ERROR: ${lock_path} contains a local file:// path — not portable." >&2

@@ -12,9 +12,9 @@ every frame.
 
 Rebuild the runs, then rescore:
 
-    # ~5 hours on one GPU, resumable, ~45 GB under ../runs/inv_*
-    gpu_guard.sh --unit inventory --log-dir DIR --detach -- \
-        bash scan_clips_inventory.sh $(ls .../JPEGImages/480p)
+    # ~5 hours on one GPU, resumable, ~45 GB as runs/inv_* in the data directory
+    CONFIG=configs/experiment/davis_inventory.yaml PREFIX=inv_ STOP_STAGE=graph \
+        scripts/run_graph_loop_set.sh $(ls "$REIFYSCENE_DATA_DIR"/datasets/davis2017/DAVIS-2017-trainval-480p/DAVIS/JPEGImages/480p)
     python scripts/benchmark_inventory.py
 
 Each row carries the covariates a change has to be attributed against -- frame count,
@@ -82,7 +82,7 @@ The same questions from cameras the scene never trained on. DyCheck `spin` has h
 at other positions with real photos; the person is removed (graph `gaussians` layer) and judged
 on 60 held-out and 20 training views.
 
-    python scripts/heldout_edit_damage.py ../runs/slice_spin   # GPU, ~20 s
+    python scripts/heldout_edit_damage.py slice_spin   # GPU, ~20 s
 
 Where the person *is* in each view comes from the photo, not from the removal: SAM 2 prompted
 by the person detector segments every person, and the one overlapping where the entity renders

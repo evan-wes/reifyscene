@@ -91,6 +91,12 @@ EXPECTED_NVIDIA_METRICS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _data_dir_is_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The script names everything inside the data directory; each test's is its own tmp_path."""
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
+
+
 def _make_sequence(root: Path, dataset: str) -> Path:
     """Create the minimal layout both validators accept for a dataset.
 
@@ -433,12 +439,12 @@ def test_main_rejects_non_positive_num_epochs(
 ) -> None:
     # SoM would accept 0/negative, pay the full dataset-load cost, train an
     # empty epoch range, and get stamped complete.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     for bad in ("0", "-3"):
         monkeypatch.setattr(
             rb.sys, "argv",
-            ["run_reference_benchmark.py", "--data-dir", str(seq),
-             "--run-dir", str(tmp_path / "run"), "--num-epochs", bad],
+            ["run_reference_benchmark.py", "--data-dir", seq.name,
+             "--run-dir", "run", "--num-epochs", bad],
         )
         with pytest.raises(SystemExit) as exc:
             rb.main()
@@ -452,10 +458,10 @@ def test_benchmark_reuse_rejects_mismatched_data_dir(
     # A run dir only proves metrics for the sequence it was trained on; the
     # nvidia harvest reads only the run dir, so reusing it with the wrong
     # --data-dir would silently relabel old metrics as the new sequence.
-    seq = _make_sequence(tmp_path / "Jumping", "nvidia")
+    seq = _make_sequence(tmp_path / "datasets" / "Jumping", "nvidia")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
-    run_dir = _make_completed_run(tmp_path / "run")
+    run_dir = _make_completed_run(tmp_path / "reference" / "run")
     (run_dir / "results").mkdir()
     (run_dir / "cfg.yaml").write_text(
         "work_dir: /elsewhere\ndata:\n  data_dir: /trained/on/Balloon1\nnum_epochs: 500\n"
@@ -526,14 +532,14 @@ def test_main_accepts_dataset_nvidia_and_rejects_unknown(
     # Through REAL argv (not a Namespace): --dataset nvidia must parse and
     # dispatch benchmark() with the nvidia validator — proven by reaching the
     # SoM-checkout guard with a layout only the nvidia validator accepts.
-    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    seq = _make_sequence(tmp_path / "datasets" / "Balloon1", "nvidia")
     monkeypatch.setattr(
         rb.sys, "argv",
         [
             "run_reference_benchmark.py",
             "--dataset", "nvidia",
-            "--data-dir", str(seq),
-            "--run-dir", str(tmp_path / "run"),
+            "--data-dir", seq.name,
+            "--run-dir", "run",
             "--som-dir", str(tmp_path / "no-such-checkout"),
         ],
     )
@@ -545,7 +551,7 @@ def test_main_accepts_dataset_nvidia_and_rejects_unknown(
     monkeypatch.setattr(
         rb.sys, "argv",
         ["run_reference_benchmark.py", "--dataset", "bogus",
-         "--data-dir", str(seq), "--run-dir", str(tmp_path / "run")],
+         "--data-dir", seq.name, "--run-dir", "run"],
     )
     with pytest.raises(SystemExit) as exc:
         rb.main()
@@ -556,10 +562,10 @@ def test_main_accepts_dataset_nvidia_and_rejects_unknown(
 def test_benchmark_nvidia_happy_path_writes_contract_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seq = _make_sequence(tmp_path / "Balloon1", "nvidia")
+    seq = _make_sequence(tmp_path / "datasets" / "Balloon1", "nvidia")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
-    run_dir = _make_completed_run(tmp_path / "run")
+    run_dir = _make_completed_run(tmp_path / "reference" / "run")
     (run_dir / "results").mkdir()
     video = run_dir / "videos" / "epoch_0499"
     video.mkdir(parents=True)
@@ -571,8 +577,8 @@ def test_benchmark_nvidia_happy_path_writes_contract_json(
     monkeypatch.setattr(rb, "som_pinned_commit", lambda p: "deadbeef")
     monkeypatch.setattr(rb, "capture_env_versions", lambda c, e: {})
 
-    out_path = tmp_path / "out.json"
-    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, dataset="nvidia", output=str(out_path)))
+    out_path = tmp_path / "reference" / "out.json"
+    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, dataset="nvidia", output=out_path.name))
 
     result = json.loads(out_path.read_text())
     assert result["schema"] == rb.SCHEMA
@@ -616,7 +622,7 @@ def test_compare_via_main_direction_tie_and_missing_values(
         "paper-windmill",
         {"masked_mpsnr": 19.53, "masked_mssim": 0.559, "masked_mlpips": 0.198},
     )
-    monkeypatch.setattr(rb.sys, "argv", ["run_reference_benchmark.py", "--compare", str(a), str(b)])
+    monkeypatch.setattr(rb.sys, "argv", ["run_reference_benchmark.py", "--compare", a.name, b.name])
     rb.main()
     out = capsys.readouterr().out
     rows = {
@@ -706,15 +712,10 @@ def test_find_conda_resolution_order_and_failure(tmp_path: Path, monkeypatch: py
     path_conda = path_dir / "conda"
     path_conda.write_text("#!/bin/sh\n")
     path_conda.chmod(0o755)
-    home = tmp_path / "home"
-    home_conda = home / "miniconda3" / "condabin" / "conda"
-    home_conda.parent.mkdir(parents=True)
-    home_conda.write_text("")
     empty = tmp_path / "empty"
     empty.mkdir()
 
     # 1) CONDA_EXE wins when it points at a real file
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", str(path_dir))
     monkeypatch.setenv("CONDA_EXE", str(conda_exe))
     assert rb.find_conda() == str(conda_exe)
@@ -723,13 +724,10 @@ def test_find_conda_resolution_order_and_failure(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("CONDA_EXE", str(tmp_path / "missing-conda"))
     assert rb.find_conda() == str(path_conda)
 
-    # 3) no CONDA_EXE, nothing on PATH -> $HOME/miniconda3 fallback
+    # 3) no CONDA_EXE, nothing on PATH -> SystemExit with the places checked (no guessing
+    #    at an install folder)
     monkeypatch.delenv("CONDA_EXE")
     monkeypatch.setenv("PATH", str(empty))
-    assert rb.find_conda() == str(home_conda)
-
-    # 4) nothing anywhere -> SystemExit with the locations checked
-    monkeypatch.setenv("HOME", str(empty))
     with pytest.raises(SystemExit) as exc:
         rb.find_conda()
     assert "conda executable not found" in str(exc.value)
@@ -746,14 +744,14 @@ def test_main_guards_missing_args_and_missing_som_dir(
     assert "--data-dir and --run-dir are required" in capsys.readouterr().err
 
     # benchmark dispatch with a missing Shape of Motion checkout -> setup hint
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     monkeypatch.setattr(
         rb.sys,
         "argv",
         [
             "run_reference_benchmark.py",
-            "--data-dir", str(seq),
-            "--run-dir", str(tmp_path / "run"),
+            "--data-dir", seq.name,
+            "--run-dir", "run",
             "--som-dir", str(tmp_path / "no-such-checkout"),
         ],
     )
@@ -765,8 +763,8 @@ def test_main_guards_missing_args_and_missing_som_dir(
 
 def _benchmark_args(seq: Path, run_dir: Path, som_dir: Path, **overrides) -> Namespace:
     base = dict(
-        data_dir=str(seq),
-        run_dir=str(run_dir),
+        data_dir=seq.name,           # names in the data directory, as the command line takes them
+        run_dir=run_dir.name,
         som_dir=str(som_dir),
         seq_name=None,
         conda_env="ref_env",
@@ -782,10 +780,10 @@ def _benchmark_args(seq: Path, run_dir: Path, som_dir: Path, **overrides) -> Nam
 def test_benchmark_reuses_completed_run_and_requires_results_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
-    run_dir = _make_completed_run(tmp_path / "run")
+    run_dir = _make_completed_run(tmp_path / "reference" / "run")
     fake_conda = tmp_path / "conda"
     fake_conda.write_text("")
     monkeypatch.setenv("CONDA_EXE", str(fake_conda))
@@ -849,7 +847,7 @@ def test_resume_recalls_recorded_schedule(
     # SoM never re-reads cfg.yaml, so the wrapper must pass the recorded
     # schedule back explicitly — a plain resume of an interrupted 1000-epoch
     # run previously retargeted to the default 500.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -858,7 +856,7 @@ def test_resume_recalls_recorded_schedule(
     calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
     monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 300)
 
-    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=1000)
+    run_dir = _make_interrupted_run(tmp_path / "reference" / "run", cfg_epochs=1000)
     with pytest.raises(SystemExit):  # fake training produces no results/
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
     train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
@@ -871,7 +869,8 @@ def test_resume_recalls_recorded_schedule(
     # a recorded default schedule resumes WITHOUT --num-epochs so the
     # sentinel label stays 'default' and later default-reuse matches
     calls.clear()
-    run_dir2 = _make_interrupted_run(tmp_path / "run2", cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
+    run_dir2 = _make_interrupted_run(tmp_path / "reference" / "run2",
+                                     cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir2, som_dir))
     train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
@@ -885,7 +884,7 @@ def test_resume_refuses_zero_epoch_stamp(
     # Checkpoint epoch >= recorded schedule -> range(ckpt, schedule) is empty:
     # SoM would exit 0 having trained nothing and the run would be stamped
     # complete with mid-training metrics. Must abort BEFORE training.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -894,7 +893,7 @@ def test_resume_refuses_zero_epoch_stamp(
     calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
     monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 700)
 
-    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=500)
+    run_dir = _make_interrupted_run(tmp_path / "reference" / "run", cfg_epochs=500)
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
     assert "already >= its recorded 500-epoch schedule" in str(exc.value)
@@ -906,14 +905,14 @@ def test_resume_refuses_zero_epoch_stamp(
     # equality boundary: the "finished but died before being stamped" case
     # the error message itself names — a >= -> > regression must not slip
     monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 500)
-    run_dir2 = _make_interrupted_run(tmp_path / "run2", cfg_epochs=500)
+    run_dir2 = _make_interrupted_run(tmp_path / "reference" / "run2", cfg_epochs=500)
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, run_dir2, som_dir))
     assert "already >= its recorded 500-epoch schedule" in str(exc.value)
 
     # one epoch left -> resumes (training invoked)
     monkeypatch.setattr(rb, "checkpoint_epoch", lambda *a: 499)
-    run_dir3 = _make_interrupted_run(tmp_path / "run3", cfg_epochs=500)
+    run_dir3 = _make_interrupted_run(tmp_path / "reference" / "run3", cfg_epochs=500)
     with pytest.raises(SystemExit):  # fake training -> no results/
         rb.benchmark(_benchmark_args(seq, run_dir3, som_dir))
     assert any("run_training.py" in " ".join(c) for c in calls)
@@ -960,14 +959,14 @@ def test_benchmark_aborts_on_held_lock_without_breaking_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Contention abort must leave the HOLDER's flock fully intact.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
     fake_conda.write_text("")
     monkeypatch.setenv("CONDA_EXE", str(fake_conda))
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    run_dir = tmp_path / "reference" / "run"
+    run_dir.mkdir(parents=True)
     holder_fd = os.open(run_dir / rb.RUN_LOCK_NAME, os.O_CREAT | os.O_RDWR)
     fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
@@ -992,18 +991,18 @@ def test_epochs_label_canonicalizes_explicit_default(
     assert rb._epochs_label(5) == "5"
 
     # end to end: a 'default' sentinel satisfies an explicit-500 request
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
     fake_conda.write_text("")
     monkeypatch.setenv("CONDA_EXE", str(fake_conda))
     _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
-    run_dir = _make_completed_run(tmp_path / "run")  # sentinel 'default'
+    run_dir = _make_completed_run(tmp_path / "reference" / "run")  # sentinel 'default'
     (run_dir / "results").mkdir()
-    out_path = tmp_path / "out.json"
+    out_path = tmp_path / "reference" / "out.json"
     rb.benchmark(_benchmark_args(
-        seq, run_dir, som_dir, num_epochs=rb.SOM_DEFAULT_EPOCHS, output=str(out_path)
+        seq, run_dir, som_dir, num_epochs=rb.SOM_DEFAULT_EPOCHS, output=out_path.name
     ))
     assert "reusing completed run" in capsys.readouterr().out
     assert json.loads(out_path.read_text())["epochs"] == "default"
@@ -1014,7 +1013,7 @@ def test_resumed_run_records_provenance_in_result(
 ) -> None:
     # train_minutes on a resumed run covers only the final segment; the
     # resume fields keep the artifact honest about that.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -1025,10 +1024,10 @@ def test_resumed_run_records_provenance_in_result(
     monkeypatch.setattr(rb, "som_pinned_commit", lambda p: "deadbeef")
     monkeypatch.setattr(rb, "capture_env_versions", lambda c, e: {})
 
-    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=500)
+    run_dir = _make_interrupted_run(tmp_path / "reference" / "run", cfg_epochs=500)
     (run_dir / "results").mkdir()  # renders from the dead segment persist
-    out_path = tmp_path / "out.json"
-    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, output=str(out_path)))
+    out_path = tmp_path / "reference" / "out.json"
+    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, output=out_path.name))
     result = json.loads(out_path.read_text())
     assert result["resumed"] is True
     assert result["resumed_from_epoch"] == 300
@@ -1040,7 +1039,7 @@ def test_benchmark_fresh_run_dir_trains_with_requested_epochs(
 ) -> None:
     # No checkpoint at all -> the resume machinery stays out of the way and
     # the requested schedule passes straight through to training.
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -1048,7 +1047,7 @@ def test_benchmark_fresh_run_dir_trains_with_requested_epochs(
     monkeypatch.setenv("CONDA_EXE", str(fake_conda))
     calls = _patch_eval_subprocess(monkeypatch, SAMPLE_EVAL_OUTPUT)
 
-    run_dir = tmp_path / "fresh"
+    run_dir = tmp_path / "reference" / "fresh"
     with pytest.raises(SystemExit):  # fake training -> no results/
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir, num_epochs=5))
     train_cmd = next(c for c in calls if "run_training.py" in " ".join(c))
@@ -1081,7 +1080,7 @@ def test_completed_epochs_requires_proof_and_records_schedule(tmp_path: Path) ->
 def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -1091,7 +1090,8 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
 
     # Interrupted run (checkpoint, no completion proof) -> training RESUMES
     # rather than being skipped; fake training produces no results/ -> exit.
-    run_dir = _make_interrupted_run(tmp_path / "run", cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
+    run_dir = _make_interrupted_run(tmp_path / "reference" / "run",
+                                    cfg_epochs=rb.SOM_DEFAULT_EPOCHS)
     with pytest.raises(SystemExit):
         rb.benchmark(_benchmark_args(seq, run_dir, som_dir))
     out = capsys.readouterr().out
@@ -1109,7 +1109,7 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     # an interrupted run with NO recorded schedule fails CLOSED — guessing
     # could silently retarget the run toward the wrong schedule
     calls.clear()
-    run_dir_nocfg = _make_interrupted_run(tmp_path / "run-nocfg", cfg_epochs=None)
+    run_dir_nocfg = _make_interrupted_run(tmp_path / "reference" / "run-nocfg", cfg_epochs=None)
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, run_dir_nocfg, som_dir))
     assert "missing or records no schedule" in str(exc.value)
@@ -1118,7 +1118,7 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
     # --retrain clears prior outputs before training (SoM would otherwise
     # auto-resume and train ~0 epochs against a finished run) — including the
     # previous run's result artifacts, which must not survive a retrain.
-    run_dir2 = _make_completed_run(tmp_path / "run2")
+    run_dir2 = _make_completed_run(tmp_path / "reference" / "run2")
     (run_dir2 / "results").mkdir()
     (run_dir2 / "videos" / "epoch_0499").mkdir(parents=True)
     stale = run_dir2 / "results" / "stale.txt"
@@ -1148,7 +1148,7 @@ def test_benchmark_resumes_incomplete_run_and_retrain_clears_state(
 def test_benchmark_epoch_schedule_guards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seq = _make_iphone_sequence(tmp_path / "seq")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "seq")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
     fake_conda = tmp_path / "conda"
@@ -1159,7 +1159,7 @@ def test_benchmark_epoch_schedule_guards(
     # Reuse with a DIFFERENT schedule than the run completed with -> abort
     # (a 5-epoch smoke result must never be published as a full baseline,
     # and vice versa).
-    full_run = _make_completed_run(tmp_path / "full")
+    full_run = _make_completed_run(tmp_path / "reference" / "full")
     (full_run / "results").mkdir()
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, full_run, som_dir, num_epochs=5))
@@ -1171,7 +1171,7 @@ def test_benchmark_epoch_schedule_guards(
     # resume recalls the recorded schedule from cfg.yaml, so an explicit
     # value is ambiguous (zero-epoch stamping is prevented separately by
     # the checkpoint-epoch pre-check).
-    interrupted = _make_interrupted_run(tmp_path / "interrupted", cfg_epochs=None)
+    interrupted = _make_interrupted_run(tmp_path / "reference" / "interrupted", cfg_epochs=None)
     with pytest.raises(SystemExit) as exc:
         rb.benchmark(_benchmark_args(seq, interrupted, som_dir, num_epochs=50))
     assert "--retrain" in str(exc.value)
@@ -1203,10 +1203,10 @@ def test_run_training_sentinel_not_written_on_failure(
 def test_benchmark_happy_path_writes_contract_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seq = _make_iphone_sequence(tmp_path / "paper-windmill")
+    seq = _make_iphone_sequence(tmp_path / "datasets" / "paper-windmill")
     som_dir = tmp_path / "som"
     som_dir.mkdir()
-    run_dir = _make_completed_run(tmp_path / "run")
+    run_dir = _make_completed_run(tmp_path / "reference" / "run")
     (run_dir / "results").mkdir()
     video = run_dir / "videos" / "epoch_0499"
     video.mkdir(parents=True)
@@ -1218,8 +1218,8 @@ def test_benchmark_happy_path_writes_contract_json(
     monkeypatch.setattr(rb, "som_pinned_commit", lambda p: "deadbeef+dirty")
     monkeypatch.setattr(rb, "capture_env_versions", lambda c, e: {"torch": "2.11.0+cu128"})
 
-    out_path = tmp_path / "out.json"
-    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, output=str(out_path)))
+    out_path = tmp_path / "reference" / "out.json"
+    rb.benchmark(_benchmark_args(seq, run_dir, som_dir, output=out_path.name))
 
     result = json.loads(out_path.read_text())
     assert result["schema"] == rb.SCHEMA

@@ -4,7 +4,7 @@
 Renders straight from one of the run's checkpoints (``--checkpoint``, the render stage's own
 by default) -- the weights and the scene kind its render record names; nothing is retrained,
 and the run's own records are never modified. Writes, under ``--out`` (default ``exports/``
-inside the checkpoint's folder):
+inside the checkpoint's folder; a folder name there):
 
     heldout/<n>_<frame>_{render,photo,mask}.png + heldout/index.json
         evenly spaced views from the benchmark's held-out split, each with its
@@ -35,12 +35,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from reifyscene.api.run_outputs import Checkpoint, RunOutputs
+from reifyscene.common import data_dir
 from reifyscene.render.eval.checkpoint_views import (
     export_heldout_views,
     export_replay,
@@ -89,11 +89,13 @@ def resolve_alignment(run: RunOutputs, requested: str, kind: str = "dynamic") ->
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("run", help="a run, by name in the data directory's runs/")
     ap.add_argument("--checkpoint", default="render",
                     help="the checkpoint to render: the render stage's own, or a named retrain")
-    ap.add_argument("--out", type=Path, help="default: exports/ in the checkpoint's folder")
-    ap.add_argument("--dataset-root", help="benchmark sequence dir; omit to skip held-out views")
+    ap.add_argument("--out", default="exports", help="a folder name in the checkpoint's folder")
+    ap.add_argument("--dataset-root",
+                    help="the benchmark sequence, by name in datasets/; omit to skip held-out "
+                         "views")
     ap.add_argument("--factor", type=int, default=2, help="dataset resolution factor (as scored)")
     ap.add_argument("--eval-split", default="val")
     ap.add_argument("--align", choices=["auto", "none", "sim3"], default="auto")
@@ -105,10 +107,10 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
 
-    run = RunOutputs.open(a.run_dir)
+    run = RunOutputs.open(data_dir.path(data_dir.RUNS, a.run))
     ckpt = find_checkpoint(run, a.checkpoint)
     checkpoint, kind = ckpt.weights, ckpt.kind
-    out = a.out or ckpt.dir / "exports"
+    out = ckpt.dir / a.out
     rasterizer = build_rasterizer({"device": a.device})
     if kind == "dynamic":
         data = np.load(checkpoint, allow_pickle=True)

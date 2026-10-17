@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Align a frame's depth map to sparse, multi-view-consistent 3D points.
 
 The geometry backend's depth is consistent within a chunk of frames but drifts in scale across

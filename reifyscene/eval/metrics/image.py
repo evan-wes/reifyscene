@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Co-visibility-masked image-quality metrics (mPSNR / mSSIM / mLPIPS).
 
 This is the DyCheck masked novel-view-synthesis metric suite — score only the

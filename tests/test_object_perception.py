@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.api.pipeline import ReifyScenePipeline
 from reifyscene.common.types import FrameRef, ObjectState, VideoStreamRef
 from reifyscene.perception.objects.object_artifact import ObjectArtifact
@@ -95,7 +96,7 @@ def test_object_artifact_roundtrip_and_debug_export(tmp_path: Path) -> None:
         from PIL import Image
         img_path = image_dir / f'cam_00__{idx}.png'
         Image.fromarray(rgb).save(img_path)
-        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = str(img_path)
+        artifact.metadata['debug_image_paths'][f'cam_00:{idx}'] = record_name(img_path)
     artifact.objects = [
         _make_obj('det:0', 'obj_0000', 0, [1, 1, 8, 8], track_ids=[1, 2]),
         _make_obj('det:1', 'obj_0000', 1, [2, 1, 9, 8], category='cat', track_ids=[1, 2]),

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from reifyscene.api.contracts import get_path
+from reifyscene.common import data_dir
 from reifyscene.common.frame_keys import parse_key
 
 
@@ -54,7 +55,8 @@ def _ingest_frames_exist(ctx: ResumeContext) -> str | None:
             missing.append(str(path))
             continue
         index = (stream.metadata or {}).get("frame_index") or {}
-        missing.extend(f for f in index.values() if not Path(f).exists())
+        missing.extend(str(stream.frame_file(int(k))) for k in index
+                       if not stream.frame_file(int(k)).exists())
     if missing:
         return f"{len(missing)} input path(s) it records do not exist (e.g. {missing[0]})"
     return None
@@ -94,7 +96,7 @@ def _global_poses(ctx: ResumeContext) -> str | None:
 
 def _photos_exist(ctx: ResumeContext) -> str | None:
     paths = _metadata(ctx.artifact).get("debug_image_paths") or {}
-    missing = [k for k, p in paths.items() if not Path(p).is_file()]
+    missing = [k for k, p in paths.items() if not data_dir.from_record(p).is_file()]
     if missing:
         return (f"{len(missing)} of its {len(paths)} photos do not exist "
                 f"(e.g. {missing[0]} -> {paths[missing[0]]})")

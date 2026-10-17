@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Export per-frame entity id maps for finished runs, and verify each round trip.
 
-    python scripts/export_id_maps.py ../runs/slice_lab-coat ../runs/slice_judo
+    python scripts/export_id_maps.py slice_lab-coat slice_judo
 
 Writes ``<run>/identity/frame_NNNNN.png`` (uint16) and ``manifest.json`` -- the targets the
 per-Gaussian identity loss trains against (I0 of the identity scope). See
@@ -24,6 +24,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from reifyscene.api.run_outputs import RunOutputs  # noqa: E402
+from reifyscene.common import data_dir  # noqa: E402
 from reifyscene.graph.id_maps import (  # noqa: E402
     export_id_maps,
     load_id_maps,
@@ -35,7 +36,7 @@ from reifyscene.graph.renderable_handle import render_pixel_masks  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dirs", type=Path, nargs="+")
+    ap.add_argument("runs", nargs="+", help="runs, by name in the data directory's runs/")
     ap.add_argument("--stream", default=None, help="stream id (default: the run's only one)")
     args = ap.parse_args()
 
@@ -44,8 +45,8 @@ def main() -> int:
     print(header)
     print("-" * len(header))
     failed = 0
-    for run_dir in args.run_dirs:
-        run = RunOutputs.open(run_dir)
+    for name in args.runs:
+        run = RunOutputs.open(data_dir.path(data_dir.RUNS, name))
         manifest = export_id_maps(run, stream_id=args.stream)
         loaded, maps = load_id_maps(run)
         source = render_pixel_masks(run, stream_id=args.stream).by_frame

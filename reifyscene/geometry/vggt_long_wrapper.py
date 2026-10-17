@@ -7,22 +7,25 @@ initializer.
 
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
 import traceback
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
+from reifyscene.common import data_dir
 from reifyscene.common.memory import format_memory_snapshot, process_memory_snapshot, release_memory
 from reifyscene.common.system_report import collect_system_report, recommend_vggt_long_profile
 from reifyscene.common.types import FrameRef
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.geometry.image_transform import vggt_input_transform
-from reifyscene.geometry.vggt_wrapper import DEFAULT_INPUT_CACHE_ROOT, VGGTInitializer
-
-
+from reifyscene.geometry.vggt_derived import (
+    forward_mixed_precision,
+    load_and_preprocess_images_without_upscale,
+)
+from reifyscene.geometry.vggt_wrapper import VGGTInitializer, input_cache_root
 
 
 @contextmanager
@@ -573,76 +576,6 @@ class VGGTLongInitializer(VGGTInitializer):
         finally:
             torch.load = original_torch_load
 
-    def _load_and_preprocess_images_without_upscale(
-        self,
-        image_path_list: list[str],
-        *,
-        mode: str = "crop",
-        target_size: int,
-    ) -> torch.Tensor:
-        from PIL import Image
-
-        if len(image_path_list) == 0:
-            raise ValueError("At least 1 image is required")
-        if mode not in {"crop", "pad"}:
-            raise ValueError("Mode must be either 'crop' or 'pad'")
-
-        target_size = max(14, int(target_size))
-        images: list[torch.Tensor] = []
-        shapes: set[tuple[int, int]] = set()
-
-        for image_path in image_path_list:
-            img = Image.open(image_path)
-            if img.mode == "RGBA":
-                background = Image.new("RGBA", img.size, (255, 255, 255, 255))
-                img = Image.alpha_composite(background, img)
-            img = img.convert("RGB")
-
-            width, height = img.size
-            if mode == "crop":
-                # Width to the target (never up), in whole 14-pixel patches, height kept in
-                # proportion and cropped below. It used to scale by a float ratio (720 at 252
-                # floored to 238) and clamp the height to the target, squashing portrait frames.
-                new_width = max(14, (min(target_size, width) // 14) * 14)
-                new_height = max(14, int(np.floor(height * new_width / width / 14.0)) * 14)
-            else:
-                scale = min(1.0, float(target_size) / float(max(width, height)))
-                new_width = min(target_size, max(14, int(np.floor((width * scale) / 14.0)) * 14))
-                new_height = min(target_size, max(14, int(np.floor((height * scale) / 14.0)) * 14))
-
-            img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-            tensor = torch.from_numpy(np.asarray(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
-
-            if mode == "crop" and tensor.shape[1] > target_size:
-                start_y = (tensor.shape[1] - target_size) // 2
-                tensor = tensor[:, start_y : start_y + target_size, :]
-
-            shapes.add((tensor.shape[1], tensor.shape[2]))
-            images.append(tensor)
-
-        if len(shapes) > 1:
-            max_height = max(shape[0] for shape in shapes)
-            max_width = max(shape[1] for shape in shapes)
-            padded_images: list[torch.Tensor] = []
-            for img in images:
-                h_padding = max_height - img.shape[1]
-                w_padding = max_width - img.shape[2]
-                if h_padding > 0 or w_padding > 0:
-                    pad_top = h_padding // 2
-                    pad_bottom = h_padding - pad_top
-                    pad_left = w_padding // 2
-                    pad_right = w_padding - pad_left
-                    img = torch.nn.functional.pad(
-                        img,
-                        (pad_left, pad_right, pad_top, pad_bottom),
-                        mode="constant",
-                        value=1.0,
-                    )
-                padded_images.append(img)
-            images = padded_images
-
-        return torch.stack(images)
-
     @contextmanager
     def _patched_vggt_long_preprocess(self):
         if not self.prevent_input_upscale:
@@ -663,7 +596,7 @@ class VGGTLongInitializer(VGGTInitializer):
         original_loader = load_fn_module.load_and_preprocess_images
 
         def _bounded_loader(image_path_list, mode="crop"):
-            return self._load_and_preprocess_images_without_upscale(
+            return load_and_preprocess_images_without_upscale(
                 [str(path) for path in image_path_list],
                 mode=mode,
                 target_size=target_size,
@@ -689,52 +622,7 @@ class VGGTLongInitializer(VGGTInitializer):
 
         original_forward = VGGT.forward
 
-        def _forward_mixed_precision(model_self, images: torch.Tensor, query_points: torch.Tensor = None):
-            if len(images.shape) == 4:
-                images = images.unsqueeze(0)
-            if query_points is not None and len(query_points.shape) == 2:
-                query_points = query_points.unsqueeze(0)
-
-            aggregated_tokens_list, patch_start_idx = model_self.aggregator(images)
-
-            predictions = {}
-            if model_self.camera_head is not None:
-                pose_enc_list = model_self.camera_head(aggregated_tokens_list)
-                pose_enc = pose_enc_list[-1]
-                if isinstance(pose_enc, torch.Tensor) and pose_enc.dtype in (torch.float16, torch.bfloat16):
-                    pose_enc = pose_enc.float()
-                predictions["pose_enc"] = pose_enc
-            if model_self.depth_head is not None:
-                depth, depth_conf = model_self.depth_head(
-                    aggregated_tokens_list,
-                    images=images,
-                    patch_start_idx=patch_start_idx,
-                )
-                predictions["depth"] = depth
-                predictions["depth_conf"] = depth_conf
-            if model_self.point_head is not None:
-                pts3d, pts3d_conf = model_self.point_head(
-                    aggregated_tokens_list,
-                    images=images,
-                    patch_start_idx=patch_start_idx,
-                )
-                predictions["world_points"] = pts3d
-                predictions["world_points_conf"] = pts3d_conf
-            if model_self.track_head is not None and query_points is not None:
-                track_list, vis, conf = model_self.track_head(
-                    aggregated_tokens_list,
-                    images=images,
-                    patch_start_idx=patch_start_idx,
-                    query_points=query_points,
-                )
-                predictions["track"] = track_list[-1]
-                predictions["vis"] = vis
-                predictions["conf"] = conf
-
-            predictions["images"] = images
-            return predictions
-
-        VGGT.forward = _forward_mixed_precision
+        VGGT.forward = forward_mixed_precision
         try:
             yield
         finally:
@@ -1088,9 +976,7 @@ class VGGTLongInitializer(VGGTInitializer):
 
         # Content-keyed input cache shared with VGGT (never an ingest-folder-named
         # directory another run would empty and rewrite).
-        cache_root = (
-            Path(self.frame_cache_dir) if self.frame_cache_dir else DEFAULT_INPUT_CACHE_ROOT
-        )
+        cache_root = input_cache_root(self.frame_cache_dir)
         cache_root.mkdir(parents=True, exist_ok=True)
         # VGGT-Long pads each chunk's mixed-size images up to that chunk's largest, so a
         # frame's pixel mapping would depend on which chunk it fell in: refuse up front.
@@ -1173,7 +1059,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 for stream_id, size in source_sizes.items()
             })
             artifact.metadata["vggt_long_outputs"] = {
-                "dir": str(backend_output_root), "kept": keep_outputs,
+                "dir": data_dir.record_name(backend_output_root), "kept": keep_outputs,
             }
             return artifact
 
@@ -1186,18 +1072,19 @@ class VGGTLongInitializer(VGGTInitializer):
         the same input (``vggt_long_run/<input folder>``) could be written by two runs
         at once, so each invocation gets its own, and it is removed afterwards (about
         11 GB for 426 frames) unless ``keep_backend_outputs`` is set. An explicit
-        ``output_cache_dir`` is the caller's and is always kept.
+        ``output_cache_dir`` (a name in the data directory's cache) is the caller's and is
+        always kept.
         """
         import shutil
         import tempfile
 
         if self.output_cache_dir:
-            root = Path(self.output_cache_dir)
+            root = data_dir.path(data_dir.CACHE, self.output_cache_dir)
             root.mkdir(parents=True, exist_ok=True)
             yield root, True
             return
         keep = bool(self.cfg.get("keep_backend_outputs", False))
-        parent = DEFAULT_INPUT_CACHE_ROOT.parent / "vggt_long_run"
+        parent = data_dir.path(data_dir.CACHE, "vggt_long_run")
         parent.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix=f"{ingest_artifact.run_id}-", dir=parent))
         try:

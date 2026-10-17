@@ -15,7 +15,7 @@ Reuses the shipped `DetectorDynMask.mask_frame`, `ColmapPoseInitializer.reconstr
 `assess_pose_health`. GPU (Mask R-CNN + hloc/COLMAP).
 
 Run:
-    python scripts/fp6b_validate_dynmask.py --dataset-root ../data/shape_of_motion/iphone/spin --runs 5
+    python scripts/fp6b_validate_dynmask.py --dataset-root dycheck_iphone/spin --runs 5
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from reifyscene.common import data_dir
 from reifyscene.common.types import CameraIntrinsics, CameraPose, TimedCameraState
 from reifyscene.geometry.colmap_wrapper import ColmapPoseInitializer
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
@@ -89,13 +90,16 @@ def _score(poses, ds, names):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset-root", default="../data/shape_of_motion/iphone/spin")
+    ap.add_argument("--dataset-root", default="dycheck_iphone/spin",
+                    help="the sequence's name in the data directory's datasets/")
     ap.add_argument("--max-frames", type=int, default=60)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--gate", type=float, default=0.10)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--work-dir", default="/tmp/fp6b_dynmask")
+    ap.add_argument("--work-dir", default="fp6b_dynmask",
+                    help="a name in the data directory's cache/")
     args = ap.parse_args()
+    args.dataset_root = str(data_dir.path(data_dir.DATASETS, args.dataset_root))
 
     ds = DatasetGeometryInitializer({"dataset_root": args.dataset_root})
     specs = ds.split_frames()
@@ -105,7 +109,7 @@ def main():
     intr0, _, _ = ds.load_camera(names[0])
     cam_params = f"{intr0.fx},{intr0.fy},{intr0.cx},{intr0.cy}"
     seq = Path(args.dataset_root).name
-    work = Path(args.work_dir) / seq
+    work = data_dir.path(data_dir.CACHE, args.work_dir) / seq
 
     print(f"\n=== FP6b step-3 dyn_mask vs COLMAP instability ({seq}, {len(names)} frames, {args.runs} runs/arm) ===")
 
@@ -129,7 +133,7 @@ def main():
         for r in range(args.runs):
             _materialize(ds, names, use_masks, work / arm / "images")
             rung = ColmapPoseInitializer({"camera_params": cam_params, "fix_intrinsics": True,
-                                          "colmap_work_dir": str(work / arm)})
+                                          "colmap_work_dir": f"{args.work_dir}/{seq}/{arm}"})
             poses = rung.reconstruct(work / arm / "images")
             sc = _score(poses, ds, names)
             if sc is None:

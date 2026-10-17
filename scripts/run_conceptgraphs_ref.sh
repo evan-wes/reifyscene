@@ -27,7 +27,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CG_DIR="${ROOT_DIR}/third_party/concept-graphs"
-CG_EXPORT="${CG_EXPORT:-${ROOT_DIR}/../runs/cg_export}"
+: "${REIFYSCENE_DATA_DIR:?set REIFYSCENE_DATA_DIR to your data directory}"
+# the sequences scripts/export_for_conceptgraphs.py wrote, in the data directory's reference/
+CG_EXPORT="${REIFYSCENE_DATA_DIR}/reference/conceptgraphs"
 SAVE_SUFFIX="${SAVE_SUFFIX:-cgref}"
 LOG_DIR="${LOG_DIR:-${CG_EXPORT}/_logs}"
 

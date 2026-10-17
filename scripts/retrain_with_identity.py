@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Retrain a finished run's render stage with per-Gaussian identity, beside the baseline.
 
-    python scripts/retrain_with_identity.py ../runs/slice_lab-coat
-    python scripts/retrain_with_identity.py ../runs/slice_lab-coat --no-identity   # control
+    python scripts/retrain_with_identity.py slice_lab-coat
+    python scripts/retrain_with_identity.py slice_lab-coat --no-identity   # control
 
 Runs the render stage's own dynamic fit on the run's persisted scene artifact, with the run's
 own render config plus ``dynamic.identity = {enabled, dim, lambda, lambda_3d}`` (I2 and I3
@@ -26,7 +26,7 @@ many foreground and background Gaussians each class claims (argmax, and with pro
 >= 0.5). A segmented entity with background Gaussians is the "static entity is addressable"
 check: the motion split put them in the static cloud and identity still reaches them.
 
-Needs CUDA. Long: run it through gpu_guard.sh --detach.
+Needs CUDA. Long: run it detached from the terminal, with the GPU's power cap checked first.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ sys.path.insert(0, str(REPO))
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("run", help="a run, by name in the data directory's runs/")
     ap.add_argument("--no-identity", action="store_true", help="the control: identity off")
     ap.add_argument("--trainer-set", action="append", default=[], metavar="NAME=VALUE",
                     help="override one dynamic-trainer setting (repeatable), e.g. lambda_mask=0")
@@ -78,9 +78,10 @@ def main() -> int:
     args = ap.parse_args()
 
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
     from reifyscene.render.gaussian4d.render_backend import GaussianRenderBackend
 
-    run = RunOutputs.open(args.run_dir.resolve())
+    run = RunOutputs.open(data_dir.path(data_dir.RUNS, args.run))
     cfg = dict(run.config.get("render") or {})
     dyn = dict(cfg.get("dynamic", cfg.get("trainer", {})) or {})
     if not args.no_identity:

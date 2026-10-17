@@ -14,7 +14,7 @@ the true scene independent of the current geometry — so it breaks the
 pose<->geometry gauge ambiguity that leaves photometric pose-opt stuck at the
 seed poses.
 
-Validated in ``spike_step12_vggt`` (Path B): paper-windmill pairwise rotation
+Validated in the step-12 VGGT spike (Path B): paper-windmill pairwise rotation
 1.73deg -> 0.26deg, masked mPSNR 17.01 -> 19.58 (~69% of the gap to the GT-pose
 oracle). Robust BA (Cauchy loss + reprojection-outlier filtering) rejects
 dynamic-foreground tracks on its own at typical dynamic fractions, so no

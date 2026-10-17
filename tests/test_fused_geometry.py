@@ -83,7 +83,7 @@ def _pose_state(stream, frame, center):
 def _pose_artifact(frames, centers, *, model_dir="dummy"):
     states = [_pose_state(f.stream_id, f.frame_idx, c) for f, c in zip(frames, centers)]
     art = GeometryArtifact(
-        run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="colmap",
+        run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="colmap",
         selected_frames=list(frames),
         intrinsics_by_stream={frames[0].stream_id: states[0].intrinsics},
         camera_states_by_stream={frames[0].stream_id: states},
@@ -102,7 +102,7 @@ def _depth_artifact(frames, *, depth_val=2.0, cam_point=(0.0, 0.0, 3.0), h=8, w=
         pts[..., :] = np.asarray(cam_point, np.float32)
         pm[key] = {"points": pts, "confidence": np.ones((h, w), np.float32)}
     return GeometryArtifact(
-        run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="moge-2",
+        run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="moge-2",
         selected_frames=list(frames),
         intrinsics_by_stream={frames[0].stream_id: CameraIntrinsics(fx=90.0, fy=90.0, cx=4.0, cy=4.0)},
         depthmaps_by_frame=dm, pointmaps_by_frame=pm,
@@ -122,7 +122,7 @@ def test_compose_full_fusion_reconciles_scale(monkeypatch):
     monkeypatch.setattr(compose_mod, "extract_colmap_observations", _fake_extract)
     res = GeometryComposer({"scale_min_obs": 4}).compose(
         pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
 
     assert res.fidelity == "fused_metric"
     assert res.artifact.backend_name == "colmap+moge-2"
@@ -149,7 +149,7 @@ def test_compose_identity_fallback_without_model(monkeypatch):
     depth_art = _depth_artifact(frames)
     res = GeometryComposer().compose(
         pose_artifact=pose_art, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "fused_metric"
     assert res.reconcile.status == "identity_fallback" and res.reconcile.scale == 1.0
     # unscaled poses, world points = cam + unscaled center
@@ -158,11 +158,11 @@ def test_compose_identity_fallback_without_model(monkeypatch):
 
 def test_compose_depth_only_when_pose_channel_empty():
     frames = _frames(2)
-    empty_pose = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty_pose = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     depth_art = _depth_artifact(frames)
     res = GeometryComposer().compose(
         pose_artifact=empty_pose, depth_artifact=depth_art, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "depth_only"
     assert res.artifact.backend_name == "colmap+moge-2"
     assert res.artifact.depthmaps_by_frame and not res.artifact.camera_states_by_stream
@@ -171,20 +171,20 @@ def test_compose_depth_only_when_pose_channel_empty():
 def test_compose_poses_only_when_depth_channel_empty():
     frames = _frames(2)
     pose_art = _pose_artifact(frames, [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
-    empty_depth = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty_depth = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     res = GeometryComposer().compose(
         pose_artifact=pose_art, depth_artifact=empty_depth, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "poses_only"
     assert res.artifact.camera_states_by_stream and not res.artifact.depthmaps_by_frame
 
 
 def test_compose_empty_when_both_channels_empty():
     frames = _frames(2)
-    empty = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="/tmp/x", backend_name="empty", selected_frames=[])
+    empty = GeometryArtifact(run_id="t", stage_name="geometry", save_dir="unsaved", backend_name="empty", selected_frames=[])
     res = GeometryComposer().compose(
         pose_artifact=empty, depth_artifact=empty, shared_frames=frames,
-        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="/tmp/x")
+        pose_backend="colmap", depth_backend="moge-2", run_id="t", save_dir="unsaved")
     assert res.fidelity == "empty" and res.artifact.backend_name == "empty"
 
 

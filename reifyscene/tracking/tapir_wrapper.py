@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Native TAPIR / BootsTAPIR point-tracker backend.
 
 A real :class:`~reifyscene.tracking.base.PointTracker`, sibling to
@@ -22,12 +24,12 @@ checked in the validation step.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.common.types import FrameRef, VideoStreamRef
 from reifyscene.tracking.all_pairs import AllPairsTracks
 from reifyscene.tracking.base import PointTracker
@@ -39,13 +41,9 @@ _CKPT_FILENAMES = {
 }
 
 
-def _default_checkpoint_dir() -> Path:
-    """Where ``scripts/fetch_tapir_checkpoint.sh`` puts checkpoints by default."""
-    env = os.environ.get("TAPNET_CKPT_DIR")
-    if env:
-        return Path(env)
-    repo_root = Path(__file__).resolve().parents[2]
-    return repo_root.parent / "data" / "tapnet" / "checkpoints"
+# Where ``scripts/fetch_tapir_checkpoint.sh`` puts checkpoints: a name in the data
+# directory's checkpoints.
+CHECKPOINT_DIR = "tapnet"
 
 
 class TAPIRWrapper(PointTracker):
@@ -53,8 +51,10 @@ class TAPIRWrapper(PointTracker):
 
     Config keys (all optional):
       ``model_type``       'bootstapir' (default) | 'tapir'
-      ``checkpoint_path``  explicit .pt path (overrides dir+model_type)
-      ``checkpoint_dir``   dir holding the .pt (default: data/tapnet/checkpoints)
+      ``checkpoint_path``  the .pt's name in the data directory's checkpoints
+                           (overrides dir+model_type)
+      ``checkpoint_dir``   the name of the folder holding the .pt there (default:
+                           ``tapnet``)
       ``device``           'cuda' (default, falls back to 'cpu') | 'cpu'
       ``grid_size``        query-grid stride in full-res pixels (default 4, the
                            value SoM used for the shipped DyCheck tracks)
@@ -99,8 +99,9 @@ class TAPIRWrapper(PointTracker):
     def checkpoint_path(self) -> Path:
         explicit = self.cfg.get("checkpoint_path")
         if explicit:
-            return Path(explicit)
-        ckpt_dir = Path(self.cfg.get("checkpoint_dir") or _default_checkpoint_dir())
+            return data_dir.path(data_dir.CHECKPOINTS, explicit)
+        ckpt_dir = data_dir.path(data_dir.CHECKPOINTS,
+                                 self.cfg.get("checkpoint_dir") or CHECKPOINT_DIR)
         return ckpt_dir / _CKPT_FILENAMES[self.model_type]
 
     def _resolve_device(self, torch) -> str:

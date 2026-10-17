@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from reifyscene.common.data_dir import record_name
 from reifyscene.common.types import CameraIntrinsics, CameraPose, FrameRef, TimedCameraState, TrackObservation
 from reifyscene.geometry.geometry_artifact import GeometryArtifact
 from reifyscene.optimize.factors.reprojection import ReprojectionFactor
@@ -55,7 +56,7 @@ def _make_geometry_for_refinement(tmp_path: Path) -> GeometryArtifact:
         img_path = tmp_path / f'{frame_key.replace(":", "__")}.png'
         from PIL import Image
         Image.fromarray(img).save(img_path)
-        image_paths[frame_key] = str(img_path)
+        image_paths[frame_key] = record_name(img_path)
     return GeometryArtifact(
         run_id='test',
         stage_name='geometry',

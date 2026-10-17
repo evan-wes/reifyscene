@@ -328,7 +328,7 @@ def test_static_score_renders_the_placed_views_and_records_the_alignment(monkeyp
     result = score_static_cloud(
         _cloud(),
         _static_train_views(range(0, 60, 5)),
-        {"dataset_root": "/data/spin"},
+        {"dataset_root": "dycheck_iphone/spin"},
         backend=_PosedDataset([7, 33]),
         device="cpu",
         rasterizer=_Rasterizer(),
@@ -360,7 +360,9 @@ def test_export_static_heldout_views_writes_images_and_scores(tmp_path: Path):
     assert index["num_heldout_views"] == 4 and index["alignment"]["method"] == "sim3"
 
 
-def test_dynamic_scorer_returns_empty_when_views_cannot_be_placed(tmp_path: Path):
+def test_dynamic_scorer_returns_empty_when_views_cannot_be_placed(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))
+    (tmp_path / "datasets" / "seq").mkdir(parents=True)   # a sequence with no cameras
     ones = np.ones((1, 3), np.float32)
     np.savez(
         tmp_path / "trained_dynamic.npz",
@@ -375,7 +377,7 @@ def test_dynamic_scorer_returns_empty_when_views_cannot_be_placed(tmp_path: Path
     )
     art = SimpleNamespace(save_dir=str(tmp_path), scene_state={"checkpoint": "trained_dynamic.npz"})
     assert (
-        score_render_artifact_masked_nvs_dynamic(art, {"dataset_root": str(tmp_path)}, device="cpu")
+        score_render_artifact_masked_nvs_dynamic(art, {"dataset_root": "seq"}, device="cpu")
         == {}
     )
 
@@ -508,10 +510,11 @@ def test_cli_dynamic_auto_alignment_reads_the_geometry_backend(tmp_path: Path):
 
 
 def test_cli_exports_a_static_runs_heldout_views(tmp_path: Path, monkeypatch, capsys):
-    run = _static_run(tmp_path / "run")
+    monkeypatch.setenv("REIFYSCENE_DATA_DIR", str(tmp_path))     # the run is named in runs/
+    run = _static_run(tmp_path / "runs" / "run")
     monkeypatch.setattr(cli, "build_rasterizer", lambda cfg: _Rasterizer())
     monkeypatch.setattr(cli, "eval_dataset", lambda cfg: _PosedDataset([0, 10, 20]))
-    argv = ["export", str(run), "--dataset-root", "spin", "--views", "2", "--no-score"]
+    argv = ["export", "run", "--dataset-root", "spin", "--views", "2", "--no-score"]
     monkeypatch.setattr("sys.argv", [*argv, "--device", "cpu"])
     cli.main()
     index = json.loads((run / "render" / "exports" / "heldout" / "index.json").read_text())

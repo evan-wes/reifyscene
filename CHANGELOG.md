@@ -9,6 +9,69 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.5.0.0] - 2026-10-16
+
+Ready to be public: one data directory holds everything the pipeline reads and writes, nothing in
+the repository names a folder on a machine, and the project is licensed for non-commercial use.
+Records now name places by their names inside the data directory, so runs made before this
+version are converted outside the repository, not read.
+
+### Added
+- **One data directory**, named by `REIFYSCENE_DATA_DIR` and read only by
+  `reifyscene/common/data_dir.py`, with a fixed layout: `datasets/`, `checkpoints/`, `runs/`,
+  `reference/`, `cache/`, `archive/`. Commands and configs name things inside it
+  (`--run-dir lab-coat` is `runs/lab-coat`; a config's `dataset_root` is a name in `datasets/`).
+  A full path, or a name that climbs out with `..`, is refused.
+- **`THIRD_PARTY_NOTICES.md` and `LICENSES/`**: every file under another project's licence, the
+  methods we implemented from others' work, the DAVIS-derived numbers in `benchmarks/`, and the
+  licences of what the setup scripts and the pipeline download.
+- **Guard tests.** No tracked file names a home folder, a temporary folder, a folder beside the
+  repository, a personal tool or a personal address (`tests/test_no_local_paths.py`). In the
+  Python code only `data_dir` reads the setting, and nothing looks in the home folder. The
+  records of a whole pipeline run, and the run script's manifest, hold no path of the data
+  directory.
+
+### Changed
+- **Licence: PolyForm Noncommercial 1.0.0**, in place of Apache-2.0. Code from other projects
+  keeps its own licence (`THIRD_PARTY_NOTICES.md`).
+- **Records name places inside the data directory, never a path on a machine**: a stream's input,
+  each frame's file (by its name inside the stream's folder), the cached VGGT inputs, the folder a
+  resumed stage was loaded from, and a run manifest's inputs and prior run. The manifest records
+  its config file by name and content hash. A whole data directory can be moved or renamed and
+  its runs still open.
+- **Every command takes names.** `run_single_video_reifyscene.py` takes `--video` /
+  `--frames-dir` in `datasets/` and `--run-dir` / `--prior-run-dir` in `runs/`;
+  `reifyscene serve` takes no folder and serves `runs/`; `reifyscene query` and
+  `reifyscene edit remove` take a run's name; so does every Python script that took a dataset,
+  a run, a checkpoint or a data folder (`verify_reference_data.sh` still checks a folder given
+  by path).
+- **The pipeline no longer writes inside the repository**: VGGT inputs, VGGT-Long's scratch
+  outputs and COLMAP's work folder go to `cache/`, a pipeline run with no run folder goes to
+  `runs/dev`, and the TAPIR checkpoint is found in `checkpoints/tapnet/`.
+- **The two functions adapted from VGGT** (its image loader and its forward pass) move to
+  `reifyscene/geometry/vggt_derived.py`, under the VGGT License.
+- The files ported from Shape of Motion carry its MIT notice, and the change to the vendored
+  TAPIR model is marked in its header.
+- `scripts/run_graph_loop_set.sh` also builds the DAVIS inventory runs (`STOP_STAGE=graph`), so
+  that benchmark's runs can be rebuilt from the repository.
+- The README describes the data directory, what works now (the queryable scene graph), the
+  measured removal limit, the licence and the models that are for non-commercial use only.
+- Mentions of folders on one machine and of private notes are gone from the code, the docs, this
+  changelog's history and `TODOS.md`.
+
+### Removed
+- `TAPNET_CKPT_DIR` and `fetch_tapir_checkpoint.sh --out-dir`: the checkpoint lives in the data
+  directory. The scene stage no longer fingerprints that variable.
+- The fallback to a `miniconda3` folder in the home directory when looking for conda: it is found
+  from `CONDA_EXE` or `PATH`.
+- Config keys nothing read that named folders inside the repository (`run.output_dir`,
+  `dataset.input_dir`, `dataset.cache_dir`), and the benchmark scripts' `--runs` /
+  `--runs-root` options.
+
+### Fixed
+- The handles contract's comment said the body bound is on by default; it is off.
+- `third_party_patches/README.md` listed four of the five patched tools.
+
 ## [0.4.0.0] - 2026-10-16
 
 The queryable-scene-graph spike lands: entities get Gaussians, relations and a query and edit
@@ -161,7 +224,7 @@ runs made before this version are rebuilt, not read.
 
   Runs from before these records get them derived from their run manifests. All three spin runs
   kept on disk — `spin_native_full`, and `spin_oracle_allframes` / `spin_vggtlong_capstone` from
-  the pre-rename `project` paths — resume at `scene`; the static oracle below is one.
+  before the working directory was renamed — resume at `scene`; the static oracle below is one.
 - **`scripts/export_checkpoint_views.py`: see a trained scene, not just its score.** The
   masked-NVS benchmark rendered every held-out view and kept only the average, and the
   pipeline's one saved render, the orbit flythrough, swings far off the captured path and
@@ -530,7 +593,7 @@ runs made before this version are rebuilt, not read.
   records whatever the env contains — including an internally inconsistent state — and emits
   unportable direct-URL lines for anything installed from a local path. Both shipped: a lock
   pinning `mypy==2.3.1` beside `pathspec==0.12.1` (mypy needs `pathspec>=1`) that pip could
-  not resolve at all, and a `detectron2 @ file:///tmp/...` line pointing at an already-deleted
+  not resolve at all, and a `detectron2 @ file://` line pointing at an already-deleted temporary
   build directory. `gen_env_locks.sh` now rejects `@ file://` lines and resolves the lock with
   `pip install --dry-run` before writing it, so an uninstallable lock cannot be committed.
 
@@ -553,16 +616,15 @@ runs made before this version are rebuilt, not read.
   (373 passed, 1 skipped). `gen_env_locks.sh` now maps `reifyscene -> reifyscene.lock`.
   `room4d_som_ref.lock` is unchanged — that reference environment keeps its name.
 
-- **The working directory is renamed** `room4d` ->
-  `reifyscene`, completing the rename. This breaks things and the
+- **The working directory is renamed** from `room4d` to `reifyscene`, completing the rename. This breaks things and the
   repair is part of the change: seven **editable installs** hardcode the absolute repo path, so
   `vggt`, `cotracker`, `sam2`, `hloc` and `moge` all stopped importing until
   `setup_reifyscene.sh` was re-run to reinstall them against the new location. 39 repo (and 51
   `third_party`) `__pycache__` directories also held the old path baked into `.pyc` files, which
-  made pytest report tests at `../../project/...`; cleared. The Shape-of-Motion env is
+  made pytest report tests under the old directory; cleared. The Shape-of-Motion env is
   unaffected — it has no editable installs bound to the repo path. `tests/test_gt_scoring.py`'s
-  `data` default and one `TODOS.md` path are updated. Suite verified at 373 passed / 1 skipped,
-  including the 33 real-data `data` tests that would silently skip if that path were wrong.
+  default data folder and one `TODOS.md` path are updated. Suite verified at 373 passed / 1
+  skipped, including the 33 real-data tests that would silently skip if that path were wrong.
 - **`setup_reference_tool.sh` gains `--create-env` too**, so both installers behave the same way:
   creation is opt-in, a missing env without the flag is a hard error naming it, and the Python
   version comes from the lockfile header rather than a hardcoded `PINNED_PYTHON` (now only a
@@ -588,7 +650,7 @@ runs made before this version are rebuilt, not read.
   Prose that pointed at "the `room4d` env" for day-to-day work now points at `reifyscene`, which
   is the development environment going forward. The only old-name references left in the repo
   are deliberate: the `.room4d_cache` gitignore line (so the not-yet-deleted cache stays
-  ignored), the two paths naming the `project` working directory (renamed separately),
+  ignored), the two paths naming the old working directory (renamed separately),
   and the README's link to the rename entry.
 - **README** now leads with reconstruction from casually captured, uncalibrated video — *one clip
   or several* — rather than "single-video", matching the multi-stream architecture (`stream_id`
@@ -628,8 +690,8 @@ runs made before this version are rebuilt, not read.
   - scripts renamed: `setup_room4d.sh` → `setup_reifyscene.sh`,
     `run_single_video_room4d.py` → `run_single_video_reifyscene.py`,
     `run_calibration_room4d.py` → `run_calibration_reifyscene.py`
-  - env vars `ROOM4D_*` → `REIFYSCENE_*` (`REIFYSCENE_LOCK_FILE`, `REIFYSCENE_RUN_VGGT`,
-    `REIFYSCENE_DATA`)
+  - env vars `ROOM4D_*` → `REIFYSCENE_*` (`REIFYSCENE_LOCK_FILE`, `REIFYSCENE_RUN_VGGT`, and
+    the real-data tests' data folder)
   - benchmark `method_name` (and its Python fallbacks in `run_render_proof.py`):
     `room4d` → `reifyscene`, `room4d-dynamic` → `reifyscene-dynamic`. This is only the
     display label in `reference_benchmark.json`; records written before this release
@@ -649,9 +711,9 @@ Expect to see the old name throughout the history below.
   (`gen_env_locks.sh`, `run_reference_benchmark.py`'s `DEFAULT_CONDA_ENV`,
   `setup_reference_tool.sh`). These name *external* machine state, not code; renaming
   them means recreating the environments, which is a separate decision.
-- **The repository working directory** `the project folder`, which is why
-  `tests/test_gt_scoring.py`'s `data` default and one `TODOS.md` path still say
-  `project`. Both need updating when that directory is renamed.
+- **The repository's working directory**, which is why `tests/test_gt_scoring.py`'s default
+  data folder and one `TODOS.md` path still name the old directory. Both need updating when that
+  directory is renamed.
 
 ## [0.2.0.0] - 2026-07-08
 
@@ -1468,8 +1530,8 @@ phases P3–P7)*. Per-feature detail lives under the `0.1.x` entries below.
   - **Build plan (§7)** — adds **FP0–FP6** (floor-first structure, then climb the
     ladder ungated-first), resumes **F0b** dynamic render on FP1 floor-rung masks,
     and subsumes the old **F3 pose2d de-stub** into FP5.
-  - §0/§3/§8/§9 reconciled; `a private note` memory records
-    the verified stack + licenses/gating.
+  - §0/§3/§8/§9 reconciled; the verified stack and its licenses and gating are recorded
+    outside the repository.
 
 ## [0.1.17.0] - 2026-06-25
 
@@ -1686,7 +1748,8 @@ phases P3–P7)*. Per-feature detail lives under the `0.1.x` entries below.
     (re-diffable against upstream; Apache-2.0 headers kept). `einshape` is added to
     the `vision` extra + `scripts/locks/room4d.lock` specifically to keep the port
     byte-faithful. `scripts/fetch_tapir_checkpoint.sh` fetches the bootstapir/tapir
-    checkpoints (idempotent, size-guarded) to `data/tapnet/checkpoints/`.
+    checkpoints (idempotent, size-guarded) to a `tapnet/checkpoints/` data folder beside the
+    repository.
   - `room4d/tracking/tapir_wrapper.py::TAPIRWrapper` is now a real `PointTracker`
     backend (model_type bootstapir|tapir): per-frame foreground-masked query grid
     (grid_size 4, SoM's value), 256×256 model input, all-pairs tracking to

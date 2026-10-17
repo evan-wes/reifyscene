@@ -42,7 +42,6 @@ from typing import Any
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-DAVIS = REPO.parent / "data/Davis2017/DAVIS-2017-trainval-480p/DAVIS"
 
 
 def _touches_all_borders(mask: np.ndarray) -> bool:
@@ -144,12 +143,14 @@ def evaluate(cache: dict[str, Any], *, min_area: float, max_area: float,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cache", type=Path, default=REPO / "benchmarks/amg_keyframe_cache.json")
-    ap.add_argument("--davis", type=Path, default=DAVIS)
     ap.add_argument("--sweep", action="store_true", help="score settings against an existing cache")
     args = ap.parse_args()
 
     if not args.sweep:
-        build_cache(args.davis, args.cache)
+        from reifyscene.common import data_dir
+        from reifyscene.ingest.datasets import DavisSequence
+
+        build_cache(data_dir.path(data_dir.DATASETS, DavisSequence.TRAINVAL_480P), args.cache)
         return
 
     cache = json.loads(args.cache.read_text())

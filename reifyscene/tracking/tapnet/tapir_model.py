@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+#
+# Modified for reifyscene: ``TAPIR.forward`` takes an optional precomputed ``feature_grids``,
+# so a caller tracking many query batches over one clip computes the feature pyramid once.
 
 """TAPIR models definition."""
 

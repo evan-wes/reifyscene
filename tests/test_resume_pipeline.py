@@ -21,6 +21,7 @@ from reifyscene.api.resume import (
     materialize_stage,
 )
 from reifyscene.api.stages import STAGE_ORDER, build_stage_registry
+from reifyscene.common import data_dir
 from reifyscene.common.types import FrameRef, GraphEdge, GraphNode, VideoStreamRef
 from reifyscene.graph.graph_artifact import GraphArtifact
 from reifyscene.ingest.ingest_artifact import IngestArtifact
@@ -258,6 +259,16 @@ def test_every_stage_records_a_fingerprint_with_its_lineage(prior) -> None:
     assert len(inputs) == 1  # every stage fingerprints the same input
 
 
+def test_a_run_records_no_path_on_this_machine(prior) -> None:
+    """Every record names what it uses by its name inside the data directory, so the whole data
+    directory can move: no record of any stage holds the data directory's own path."""
+    _, run_dir, _, _ = prior
+    root = str(data_dir.root())
+    offenders = [p.relative_to(run_dir).as_posix() for p in sorted(run_dir.rglob('*.json'))
+                 if root in p.read_text()]
+    assert offenders == []
+
+
 def test_the_same_invocation_resumes(prior, tmp_path) -> None:
     root, run_dir, cfg, video = prior
     plan = _check(run_dir, tmp_path / 'new', 'scene', copy.deepcopy(cfg), [video])
@@ -407,7 +418,7 @@ def test_materialize_copies_exactly_and_records_where_from(prior, tmp_path) -> N
     assert tracking.save_dir == new / 'tracking'
     raw = json.loads((new / 'tracking' / 'artifact.json').read_text())
     assert 'save_dir' not in raw                   # a record names no folder: it is in one
-    assert raw['metadata']['resume']['loaded_from'] == str(run_dir / 'tracking')
+    assert data_dir.from_record(raw['metadata']['resume']['loaded_from']) == run_dir / 'tracking'
     assert raw['metadata']['contract'] == plan.records['tracking']
     # Everything but artifact.json is byte-for-byte the prior's: no save/load round trip.
     cmp = filecmp.dircmp(run_dir / 'tracking', new / 'tracking')
@@ -485,7 +496,7 @@ def test_vggt_long_scratch_outputs_are_per_run_and_removed(tmp_path, monkeypatch
 
     import reifyscene.geometry.vggt_long_wrapper as wrapper
 
-    monkeypatch.setattr(wrapper, 'DEFAULT_INPUT_CACHE_ROOT', tmp_path / 'cache' / 'vggt_inputs')
+    monkeypatch.setenv(data_dir.ENV, str(tmp_path))      # its own cache, to check what is left
     init = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic'})
     ingest = SimpleNamespace(run_id='1x')
     with init._backend_outputs(ingest) as (a, kept_a), init._backend_outputs(ingest) as (b, _):
@@ -496,10 +507,10 @@ def test_vggt_long_scratch_outputs_are_per_run_and_removed(tmp_path, monkeypatch
     with keep._backend_outputs(ingest) as (c, kept_c):
         pass
     assert kept_c and c.exists()
-    given = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic', 'output_cache_dir': str(tmp_path / 'mine')})
+    given = wrapper.VGGTLongInitializer({'backend_mode': 'heuristic', 'output_cache_dir': 'mine'})
     with given._backend_outputs(ingest) as (d, kept_d):
         pass
-    assert kept_d and d == tmp_path / 'mine' and d.exists()
+    assert kept_d and d == tmp_path / 'cache' / 'mine' and d.exists()
 
 
 def test_a_run_tracked_under_a_frame_cap_resumes_with_that_cap(prior, tmp_path) -> None:

@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.text import Text
 
 from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_yaml
 from reifyscene.debug_exports import export_debug_artifacts, load_debug_config, materialize_shared_debug_frames
 from reifyscene.common.memory import release_memory
@@ -191,8 +192,10 @@ def _print_stage_summary(console: Console, ingest, sync, geometry) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", required=True, help="Path to a single RGB video file.")
-    parser.add_argument("--run-dir", required=True, help="Directory where artifacts will be written.")
+    parser.add_argument("--video", required=True,
+                        help="A single RGB video, by name in the data directory's datasets/.")
+    parser.add_argument("--run-dir", required=True,
+                        help="Where artifacts are written, by name in runs/.")
     parser.add_argument("--config", default=None, help="Optional YAML config path.")
     parser.add_argument("--debug-config", default=None, help="Optional YAML debug-export config path.")
 
@@ -280,6 +283,8 @@ def main() -> None:
         help="Maximum point-cloud samples per keyframe in debug exports.",
     )
     args = parser.parse_args()
+    args.video = str(data_dir.path(data_dir.DATASETS, args.video))
+    args.run_dir = str(data_dir.path(data_dir.RUNS, args.run_dir))
 
     console = Console()
     system_report = collect_system_report()

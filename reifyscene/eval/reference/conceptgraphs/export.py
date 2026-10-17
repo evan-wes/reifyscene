@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.common.paths import ensure_dir
 
 if TYPE_CHECKING:
@@ -74,7 +75,7 @@ class ExportedSequence:
     sequence: str
     out_dir: str
     stage: str
-    run_dir: str = ""                     # the run it was exported from: its ground truth
+    run_dir: str = ""                     # the run it was exported from (its record name)
     num_frames: int = 0
     scale_factor: float = 1.0
     scene_diagonal_units: float = 0.0
@@ -190,7 +191,7 @@ def export_run(
     frame_list = list(indexed if frames is None else [f for f in frames if f in set(indexed)])
     result = ExportedSequence(
         sequence=stream.source.sequence or run.name, out_dir=str(out_dir), stage=stage,
-        run_dir=str(run.root.resolve()),
+        run_dir=data_dir.record_name(run.root),
         num_frames=len(frame_list), intrinsics=dict(intr),
     )
     if not frame_list:

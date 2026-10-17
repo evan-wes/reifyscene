@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from reifyscene.common.data_dir import DataDirError
 from reifyscene.tracking.all_pairs import AllPairsTracks
 from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
 from reifyscene.tracking.track_artifact import TrackArtifact
@@ -113,14 +114,17 @@ def test_write_2d_tracks_stream_selection(tmp_path: Path) -> None:
 
 # -- wrapper config / checkpoint resolution --------------------------------
 
-def test_checkpoint_path_resolution(tmp_path: Path) -> None:
-    w = TAPIRWrapper({"checkpoint_dir": str(tmp_path), "model_type": "bootstapir"})
-    assert w.checkpoint_path() == tmp_path / "bootstapir_checkpoint_v2.pt"
-    w2 = TAPIRWrapper({"checkpoint_dir": str(tmp_path), "model_type": "tapir"})
-    assert w2.checkpoint_path() == tmp_path / "tapir_checkpoint_panning.pt"
-    explicit = tmp_path / "custom.pt"
-    w3 = TAPIRWrapper({"checkpoint_path": str(explicit)})
-    assert w3.checkpoint_path() == explicit
+def test_checkpoint_path_resolution(isolated_data_dir: Path) -> None:
+    """Checkpoints are named inside the data directory's checkpoints/ (tapnet/ by default)."""
+    ckpts = isolated_data_dir / "checkpoints"
+    w = TAPIRWrapper({"model_type": "bootstapir"})
+    assert w.checkpoint_path() == ckpts / "tapnet" / "bootstapir_checkpoint_v2.pt"
+    w2 = TAPIRWrapper({"checkpoint_dir": "mine", "model_type": "tapir"})
+    assert w2.checkpoint_path() == ckpts / "mine" / "tapir_checkpoint_panning.pt"
+    w3 = TAPIRWrapper({"checkpoint_path": "mine/custom.pt"})
+    assert w3.checkpoint_path() == ckpts / "mine" / "custom.pt"
+    with pytest.raises(DataDirError):
+        TAPIRWrapper({"checkpoint_path": str(ckpts / "custom.pt")}).checkpoint_path()
 
 
 def test_unknown_model_type_raises() -> None:
@@ -148,7 +152,7 @@ def test_query_budget_and_seed_config() -> None:
 
 
 def test_missing_checkpoint_raises(tmp_path: Path) -> None:
-    w = TAPIRWrapper({"checkpoint_dir": str(tmp_path), "device": "cpu"})
+    w = TAPIRWrapper({"checkpoint_dir": f"{tmp_path.name}/empty", "device": "cpu"})
     with pytest.raises(FileNotFoundError):
         w.compute_all_pairs(
             np.zeros((2, 16, 16, 3), np.uint8), np.ones((2, 16, 16), bool), ["a", "b"]
@@ -157,7 +161,7 @@ def test_missing_checkpoint_raises(tmp_path: Path) -> None:
 
 # -- gated real forward (GPU + checkpoint) ---------------------------------
 
-def test_compute_all_pairs_forward() -> None:
+def test_compute_all_pairs_forward(real_data_dir) -> None:
     pytest.importorskip("torch")
     import torch
 
@@ -184,7 +188,7 @@ def test_compute_all_pairs_forward() -> None:
     assert np.isfinite(ap.tracks[0][:, :, 2:]).all()
 
 
-def test_compute_all_pairs_query_budget_caps_and_is_deterministic() -> None:
+def test_compute_all_pairs_query_budget_caps_and_is_deterministic(real_data_dir) -> None:
     pytest.importorskip("torch")
     import torch
 

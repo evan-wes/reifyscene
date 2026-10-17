@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 # Goliath (Sapiens) keypoint indices of the body joints used here, from the Sapiens pose
-# config (pose/configs/_base_/datasets/goliath.py).
+# config (pose/configs/_base_/datasets/goliath.py; https://github.com/facebookresearch/sapiens,
+# CC BY-NC 4.0; THIRD_PARTY_NOTICES.md).
 JOINTS = {
     "nose": 0, "left_eye": 1, "right_eye": 2, "left_ear": 3, "right_ear": 4,
     "left_shoulder": 5, "right_shoulder": 6, "left_elbow": 7, "right_elbow": 8,

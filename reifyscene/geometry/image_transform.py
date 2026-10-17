@@ -309,7 +309,7 @@ def vggt_loader_ops(
     ``upstream`` mirrors ``vggt.utils.load_fn.load_and_preprocess_images``: width to
     518, height to ``round(h * 518 / w / 14) * 14``, bicubic, then the rows centred
     on 518 when taller. ``bounded`` mirrors VGGT-Long's no-upscale loader
-    (``VGGTLongInitializer._load_and_preprocess_images_without_upscale``): width to
+    (``vggt_derived.load_and_preprocess_images_without_upscale``): width to
     ``min(target, w)`` in whole 14-pixel patches, height in proportion (floored to 14),
     then the rows centred on the target when taller -- like upstream, never upscaling.
     ``pad`` mode letterboxes, which no backend uses: it is not implemented rather than

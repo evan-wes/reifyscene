@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from reifyscene.common import data_dir
 from reifyscene.common.depth import unproject_depth_to_world
 from reifyscene.common.frame_keys import frame_key
 from reifyscene.common.types import (
@@ -59,6 +60,15 @@ class DatasetGeometryInitializer(GeometryInitializer):
         self.split = str(cfg.get("split", "train"))
         self.run_id = str(cfg.get("run_id", f"dataset:{self.dataset_root.name}"))
         self.save_dir = Path(cfg.get("geometry_save_dir", "artifacts/geometry_dataset"))
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any]) -> DatasetGeometryInitializer:
+        """The reader a config describes: a config names its sequence inside the data
+        directory's datasets/, where the constructor takes the sequence's folder."""
+        if not cfg.get("dataset_root"):
+            raise ValueError("the config names no dataset_root (a DyCheck-format sequence)")
+        root = data_dir.path(data_dir.DATASETS, cfg["dataset_root"])
+        return cls({**cfg, "dataset_root": str(root)})
 
     # -- the sequence, at this initializer's factor ---------------------------
 
@@ -189,7 +199,7 @@ class DatasetGeometryInitializer(GeometryInitializer):
             # (same metadata['debug_image_paths'] contract VGGT populates).
             rgb_path = self.sequence.rgb_path(name, self.factor)
             if rgb_path.exists():
-                debug_image_paths[key] = str(rgb_path.resolve())
+                debug_image_paths[key] = data_dir.record_name(rgb_path)
             depth_sizes.setdefault(stream_id, (int(depth.shape[1]), int(depth.shape[0])))
 
         return GeometryArtifact(

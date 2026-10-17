@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from reifyscene.api.pipeline import ReifyScenePipeline
+from reifyscene.common import data_dir
 from reifyscene.common.io import read_yaml
 from reifyscene.common.system_report import collect_system_report, save_system_report
 
@@ -64,8 +65,11 @@ def _print_system_report(console: Console, report: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", dest="videos", action="append", required=True, help="Input video path. Repeat for multiple streams.")
-    parser.add_argument("--run-dir", required=True, help="Output directory for the calibration artifact.")
+    parser.add_argument("--video", dest="videos", action="append", required=True,
+                        help="Input video, by name in the data directory's datasets/. "
+                             "Repeat for multiple streams.")
+    parser.add_argument("--run-dir", required=True,
+                        help="Where the calibration artifact is written, by name in runs/.")
     parser.add_argument("--config", default=str(Path(__file__).resolve().parents[1] / "configs" / "calibration" / "calibration.yaml"), help="Calibration config YAML.")
     parser.add_argument("--sample-spacing-sec", type=float, default=None)
     parser.add_argument("--max-frames-per-stream", type=int, default=None)
@@ -79,6 +83,8 @@ def main() -> None:
     parser.add_argument("--verbose-hloc", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+    args.videos = [str(data_dir.path(data_dir.DATASETS, v)) for v in args.videos]
+    args.run_dir = str(data_dir.path(data_dir.RUNS, args.run_dir))
 
     console = Console()
     report = collect_system_report()

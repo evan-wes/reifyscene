@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from rich.progress import track
 
+from reifyscene.common import data_dir
 from reifyscene.common.backend_ladder import CapabilityManifest
 from reifyscene.common.frame_keys import frame_key as make_frame_key
 from reifyscene.common.io import read_json, write_json
@@ -330,7 +331,7 @@ class GeometryArtifact(BaseArtifact):
             return copied
         ensure_dir(image_dir)
         for frame_key, source in self._progress_iter(source_map.items(), total=len(source_map), description="[cyan]Geometry · copying debug RGB"):
-            src = Path(source)
+            src = data_dir.from_record(source)
             if not src.exists():
                 continue
             dst = image_dir / f"{self._sanitize_key(frame_key)}{src.suffix or '.png'}"

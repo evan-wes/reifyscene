@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Low-dimensional SE(3) motion bases (Shape-of-Motion deformation model).
 
 K shared bases, each a per-frame rotation (6D) + translation; a foreground

@@ -66,7 +66,7 @@ numbers are not directly comparable.
 
 - **Shape-of-Motion** — `scripts/run_reference_benchmark.py` trains/evaluates SoM
   in its reference conda env and harvests the metrics. Pre-computed baselines
-  live under `data/shape_of_motion/runs/*/reference_benchmark.json` (e.g.
+  live under `reference/som_runs/*/reference_benchmark.json` in the data directory (e.g.
   `paper-windmill-full`: masked_mpsnr 19.53 / mssim 0.559 / mlpips 0.198).
 - **reifyscene** — `scripts/run_render_proof.py` (the `train` flow) renders the
   trained Gaussian field at the held-out cameras and emits a record via
@@ -76,8 +76,8 @@ numbers are not directly comparable.
 
 ```bash
 python scripts/run_reference_benchmark.py --compare \
-    data/shape_of_motion/runs/paper-windmill-full/reference_benchmark.json \
-    <reifyscene_run>/reference_benchmark.json
+    reference/som_runs/paper-windmill-full/reference_benchmark.json \
+    runs/<reifyscene_run>/reference_benchmark.json
 ```
 
 `compare()` prints a metric-by-metric table with a per-row "better" verdict,

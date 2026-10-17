@@ -166,6 +166,20 @@ def test_only_the_dataset_classes_know_a_datasets_folders(name: str) -> None:
     })
 
 
+# -- the data directory: data_dir ------------------------------------------------------------
+
+def test_only_data_dir_reads_the_data_directory_setting() -> None:
+    _check(_named("REIFYSCENE_DATA_DIR"), {"reifyscene/common/data_dir.py": "the owner"})
+
+
+def test_nothing_looks_in_the_home_folder() -> None:
+    def rule(tree):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "home":
+                yield node.lineno, "looks in the home folder"
+    _check(rule, {})
+
+
 # -- the guards themselves --------------------------------------------------------------------
 
 def test_the_guards_see_a_violation() -> None:

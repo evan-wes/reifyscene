@@ -11,10 +11,10 @@ is NOT reifyscene's own implementation; replacing it with a native MotionInitial
 is tracked follow-up work. SoM stores params as means(raw)/scales(log)/
 colors(logit)/opacities(logit)/coefs(raw), which match reifyscene's fields exactly.
 
-Example (in reifyscene_som_ref):
+Example (in reifyscene_som_ref; names are inside the data directory, $REIFYSCENE_DATA_DIR):
     python scripts/borrow_som_motion_init.py \
-        --data-dir ../data/shape_of_motion/iphone/paper-windmill \
-        --factor 2 --out ../data/shape_of_motion/borrowed_init/paper-windmill.npz
+        --data-dir dycheck_iphone/paper-windmill \
+        --out borrowed_init/paper-windmill.npz
 """
 
 from __future__ import annotations
@@ -26,11 +26,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-SOM_DIR = Path(__file__).resolve().parents[1] / "third_party" / "shape-of-motion"
+REPO = Path(__file__).resolve().parents[1]
+SOM_DIR = REPO / "third_party" / "shape-of-motion"
 sys.path.insert(0, str(SOM_DIR))
+sys.path.insert(0, str(REPO))     # runs in the reference env, which does not install reifyscene
 
 from flow3d.data import get_train_val_datasets, iPhoneDataConfig  # noqa: E402
 from run_training import init_model_from_tracks  # noqa: E402
+
+from reifyscene.common import data_dir  # noqa: E402
 
 
 def _np(t: torch.Tensor) -> np.ndarray:
@@ -39,16 +43,18 @@ def _np(t: torch.Tensor) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dump SoM's motion init for reifyscene (stopgap borrow)")
-    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--data-dir", required=True,
+                        help="the DyCheck sequence, by its name in the data directory's datasets/")
     parser.add_argument("--num-fg", type=int, default=40_000)
     parser.add_argument("--num-bg", type=int, default=100_000)
     parser.add_argument("--num-bases", type=int, default=10)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", required=True,
+                        help="the .npz to write, by its name in the data directory's reference/")
     args = parser.parse_args()
 
     # SoM's iphone loader runs at factor 1 (full res); cameras/Gaussians are in
     # that frame. reifyscene scales the dumped Ks when it renders at a coarser factor.
-    data_cfg = iPhoneDataConfig(data_dir=args.data_dir)
+    data_cfg = iPhoneDataConfig(data_dir=str(data_dir.path(data_dir.DATASETS, args.data_dir)))
     train_ds, _train_video, val_ds, _val_kpt = get_train_val_datasets(data_cfg, load_val=True)
 
     fg, bases, bg, _tracks = init_model_from_tracks(
@@ -84,7 +90,7 @@ def main() -> None:
         dump[f"{name}_time_ids"] = _np(ds.time_ids)   # (N,) basis frame index
         dump[f"{name}_frame_names"] = np.asarray(list(ds.frame_names))
 
-    out = Path(args.out)
+    out = data_dir.path(data_dir.REFERENCE, args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, **dump)
     print(

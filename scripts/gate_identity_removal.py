@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The step-1 gate, re-run with learned identity -- scored against DAVIS ground truth.
 
-    python scripts/gate_identity_removal.py ../runs/slice_lab-coat ../runs/slice_judo
+    python scripts/gate_identity_removal.py slice_lab-coat slice_judo
 
 I4 of docs/design/2026-09-29-per-gaussian-identity-scope.md. For every hand-annotated DAVIS
 object in each run:
@@ -252,7 +252,7 @@ def gate_run(run, args) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_dirs", type=Path, nargs="+")
+    ap.add_argument("runs", nargs="+", help="runs, by name in the data directory's runs/")
     ap.add_argument("--identity-sub", default="render_identity_3d",
                     help="identity-trained checkpoint dir, or 'none' to leave identity out")
     ap.add_argument("--base-sub", default="render",
@@ -268,6 +268,7 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.common import data_dir
 
     if 0.5 not in args.tau:
         args.tau = sorted(set(args.tau) | {0.5})
@@ -278,8 +279,8 @@ def main() -> int:
         (fs, fs), (fs + "+filter", fs + "+filter")]
     print(f"{'run':<22} {'obj':>3} {'label':<11}  " + "  ".join(
         f"{name + ' took/alone-P/vis-P/intact':>34}" for name, _ in cols))
-    for run in args.run_dirs:
-        res = gate_run(RunOutputs.open(run.resolve()), args)
+    for run in args.runs:
+        res = gate_run(RunOutputs.open(data_dir.path(data_dir.RUNS, run)), args)
         for o in res["objects"]:
             if o["status"] != "matched":
                 print(f"{res['run']:<22} {o['gt_id']:>3} {'-':<11}  not proposed "

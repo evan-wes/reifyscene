@@ -10,21 +10,15 @@ set -euo pipefail
 # browser — see scripts/verify_reference_data.sh), the checkpoints live at
 # direct https URLs, so this fetch is fully scripted and idempotent.
 #
-# Default target mirrors the data convention used across the scripts (a
-# sibling of the repo root): <repo>/../data/tapnet/checkpoints/.
+# The checkpoint goes where the tracker looks for it: checkpoints/tapnet/ in the data
+# directory ($REIFYSCENE_DATA_DIR).
 #
 # Usage:
 #   scripts/fetch_tapir_checkpoint.sh                 # bootstapir (default)
 #   scripts/fetch_tapir_checkpoint.sh --model tapir   # tapir panning variant
-#   scripts/fetch_tapir_checkpoint.sh --out-dir DIR   # override target dir
-#   TAPNET_CKPT_DIR=DIR scripts/fetch_tapir_checkpoint.sh
 #   scripts/fetch_tapir_checkpoint.sh --force         # re-download even if present
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_DIR="${TAPNET_CKPT_DIR:-${ROOT_DIR}/../data/tapnet/checkpoints}"
-
 MODEL="bootstapir"
-OUT_DIR=""
 FORCE=0
 
 # Minimum plausible checkpoint size (MB). Both checkpoints are ~120 MB; a
@@ -36,16 +30,14 @@ MIN_MB="${TAPNET_CKPT_MIN_MB:-80}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)   MODEL="$2"; shift 2 ;;
-    --out-dir) OUT_DIR="$2"; shift 2 ;;
     --force)   FORCE=1; shift ;;
     -h|--help)
       cat <<'EOF'
-Usage: scripts/fetch_tapir_checkpoint.sh [--model {bootstapir|tapir}] [--out-dir DIR] [--force]
+Usage: scripts/fetch_tapir_checkpoint.sh [--model {bootstapir|tapir}] [--force]
 
-Downloads a tapnet torch checkpoint for reifyscene's native point tracker.
-Idempotent: skips when a plausibly-sized file already exists (use --force to
-re-download). Default target dir: <repo>/../data/tapnet/checkpoints
-(override with --out-dir or the TAPNET_CKPT_DIR env var).
+Downloads a tapnet torch checkpoint for reifyscene's native point tracker into
+checkpoints/tapnet/ in the data directory ($REIFYSCENE_DATA_DIR). Idempotent: skips
+when a plausibly-sized file already exists (use --force to re-download).
 EOF
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -64,7 +56,8 @@ case "${MODEL}" in
     exit 2 ;;
 esac
 
-DEST_DIR="${OUT_DIR:-${DEFAULT_DIR}}"
+: "${REIFYSCENE_DATA_DIR:?set REIFYSCENE_DATA_DIR to your data directory}"
+DEST_DIR="${REIFYSCENE_DATA_DIR}/checkpoints/tapnet"
 DEST="${DEST_DIR}/${FILENAME}"
 
 file_big_enough() {

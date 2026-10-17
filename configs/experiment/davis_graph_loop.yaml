@@ -8,22 +8,20 @@
 # a baseline/depth of 0.565 against spin's 0.579.
 #
 # DAVIS ships no held-out views, so there is no masked-NVS block: this clip is for the
-# graph and the edit loop, not for a reconstruction score. Run from the repo root:
+# graph and the edit loop, not for a reconstruction score. Run from the repo root (the clip
+# and the run are named inside the data directory, $REIFYSCENE_DATA_DIR):
 #
 #   python scripts/run_single_video_reifyscene.py \
-#     --frames-dir ../data/Davis2017/DAVIS-2017-trainval-480p/DAVIS/JPEGImages/480p/lab-coat \
+#     --frames-dir davis2017/DAVIS-2017-trainval-480p/DAVIS/JPEGImages/480p/lab-coat \
 #     --geometry-backend-name vggt-long --geometry-device cuda \
 #     --keyframes-all --pose-refine-enable \
 #     --config configs/experiment/davis_graph_loop.yaml \
-#     --run-dir ../runs/davis_lab-coat_full
+#     --run-dir davis_lab-coat_full
 
 run:
   name: reifyscene_dev
-  output_dir: artifacts/runs/reifyscene_dev
 
 dataset:
-  input_dir: data/raw
-  cache_dir: artifacts/cache
   keyframe_stride: 15
 
 models:

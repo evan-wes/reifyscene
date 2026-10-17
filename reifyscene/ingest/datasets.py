@@ -190,6 +190,10 @@ class DyCheckSequence:
 class DavisSequence:
     """One DAVIS 2017 sequence: its frames and per-frame instance annotations."""
 
+    # DAVIS 2017 trainval at 480p, unzipped as it ships, by its name in the data directory's
+    # datasets/ (the folder holding JPEGImages/ and Annotations/)
+    TRAINVAL_480P = "davis2017/DAVIS-2017-trainval-480p/DAVIS"
+
     def __init__(self, root: str | Path, resolution: str, name: str) -> None:
         self.root, self.resolution, self.name = Path(root), str(resolution), str(name)
 
