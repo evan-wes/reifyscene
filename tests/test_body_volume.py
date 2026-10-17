@@ -71,6 +71,13 @@ def test_an_occluded_joint_is_left_out_not_guessed() -> None:
     assert len(capsules) == len(_lift(TORSO)[0])      # the thigh was not built
 
 
+def test_pixels_without_depth_are_not_read_as_depth() -> None:
+    depth = np.full((H, W), DEPTH)
+    depth[::2] = 0.0                                  # the geometry has no depth on half the rows
+    capsules, length = _lift(TORSO, depth=depth)
+    assert np.isclose(length, 24 * DEPTH / F)         # the median of the valid pixels only
+
+
 def test_the_bound_keeps_a_moving_person_and_a_static_one_seen_once() -> None:
     from reifyscene.graph.assignment import bound_to_body
 

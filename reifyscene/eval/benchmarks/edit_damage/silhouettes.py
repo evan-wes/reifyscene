@@ -1,14 +1,16 @@
-"""People's silhouettes in photos, independent of any removal -- pseudo ground truth.
+"""Silhouettes of a category in an image, independent of any removal -- pseudo ground truth.
 
 A held-out DyCheck view has a real photo and a covisibility mask but no instance masks, so
 "where is the person in this view" has to come from the photo itself. Without it, a removal
-can only be judged against its own footprint, which is circular: it cannot fail.
+can only be judged against its own footprint, which is circular: it cannot fail. The removal
+tests ask the same of renders: is there still a person (or a dog, a car) where one was removed.
 
-Each person in a photo is found by the person detector (the pipeline's own
-:class:`~reifyscene.perception.humans.detector.HumanDetector`) and segmented by SAM 2's image
-predictor prompted with the detection box. SAM 2 is optional: without it the detector's own
-mask is used, and every silhouette records which one produced it. These are model outputs, not
-annotation -- reports say so and save the masks as images to be checked.
+Each instance of the category is found by the pipeline's own object detector
+(:class:`~reifyscene.perception.objects.detector.ObjectDetector`, Mask R-CNN over the COCO
+categories the graph's labels come from) and segmented by SAM 2's image predictor prompted with
+the detection box. SAM 2 is optional: without it the detector's own mask is used, and every
+silhouette records which one produced it. These are model outputs, not annotation -- reports
+say so and save the masks as images to be checked.
 """
 
 from __future__ import annotations
@@ -28,11 +30,12 @@ class Silhouette:
 
 
 @dataclass
-class PersonSegmenter:
-    """Detector + SAM 2 box prompt, loaded once, reused for every photo."""
+class InstanceSegmenter:
+    """Detector + SAM 2 box prompt, loaded once, reused for every image."""
 
     device: str = "cuda"
     score_threshold: float = 0.5
+    max_detections: int = 50
     _detector: Any = field(default=None, repr=False)
     _predictor: Any = field(default=None, repr=False)
     backend: str = "unloaded"
@@ -40,10 +43,11 @@ class PersonSegmenter:
     def _load(self) -> None:
         if self._detector is not None:
             return
-        from reifyscene.perception.humans.detector import HumanDetector
+        from reifyscene.perception.objects.detector import ObjectDetector
 
-        self._detector = HumanDetector({"backend_mode": "real", "device": self.device,
-                                        "score_threshold": self.score_threshold})
+        self._detector = ObjectDetector({"backend_mode": "real", "device": self.device,
+                                         "score_threshold": self.score_threshold,
+                                         "max_detections": self.max_detections})
         try:
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -62,11 +66,12 @@ class PersonSegmenter:
             self._predictor = None
             self.backend = "detector mask"
 
-    def people(self, rgb: np.ndarray) -> list[Silhouette]:
-        """Every person the detector finds in ``rgb`` (uint8 HWC), segmented."""
+    def find(self, rgb: np.ndarray, category: str) -> list[Silhouette]:
+        """Every instance of ``category`` (a COCO name) the detector finds in ``rgb`` (uint8
+        HWC), segmented."""
         self._load()
         h, w = rgb.shape[:2]
-        dets = [d for d in self._detector.detect(rgb) if d.get("category") == "person"]
+        dets = [d for d in self._detector.detect(rgb) if d.get("category") == category]
         if not dets:
             return []
         out: list[Silhouette] = []
@@ -96,11 +101,11 @@ class PersonSegmenter:
         return out
 
 
-def pick_entity(people: list[Silhouette], hint: np.ndarray) -> tuple[Silhouette | None, float]:
-    """The person whose silhouette best overlaps ``hint`` (where the entity renders), and that
-    IoU. The hint only chooses among independent silhouettes; it never shapes one."""
+def pick_entity(found: list[Silhouette], hint: np.ndarray) -> tuple[Silhouette | None, float]:
+    """The silhouette that best overlaps ``hint`` (where the entity renders), and that IoU.
+    The hint only chooses among independent silhouettes; it never shapes one."""
     best, best_iou = None, 0.0
-    for p in people:
+    for p in found:
         inter = int((p.mask & hint).sum())
         union = int((p.mask | hint).sum())
         iou = inter / union if union else 0.0

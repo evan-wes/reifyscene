@@ -122,7 +122,7 @@ def lift_frame(keypoints: np.ndarray, mask: np.ndarray, depth: np.ndarray, camer
             continue
         x0, x1 = max(int(u) - cfg.window_px, 0), min(int(u) + cfg.window_px + 1, w)
         y0, y1 = max(int(v) - cfg.window_px, 0), min(int(v) + cfg.window_px + 1, h)
-        sel = mask[y0:y1, x0:x1]
+        sel = mask[y0:y1, x0:x1] & (depth[y0:y1, x0:x1] > 0)     # 0: no depth there
         if not sel.any():
             continue
         d = float(np.median(depth[y0:y1, x0:x1][sel]))
@@ -157,13 +157,16 @@ def lift_frame(keypoints: np.ndarray, mask: np.ndarray, depth: np.ndarray, camer
 
 
 def sapiens_body(renderer, humans_artifact, track_id: str, masks_by_frame: dict,
-                 node_id: str, stream, *, cfg: BodyConfig | None = None) -> BodyVolume:
+                 node_id: str, stream, *, cfg: BodyConfig | None = None,
+                 depth_by_frame: dict[int, np.ndarray] | None = None) -> BodyVolume:
     """The body of the human tracked as ``track_id``, on every frame it can be built.
 
-    ``renderer`` a :class:`~reifyscene.edit.renderer.CheckpointRenderer` (its scene's depth
-    and cameras); ``masks_by_frame`` ``{frame: {node_id: mask}}`` in the render raster
-    (:func:`~reifyscene.graph.renderable_handle.render_pixel_masks`); ``stream`` the run's
-    :class:`~reifyscene.ingest.streams.FrameStream`.
+    ``renderer`` a :class:`~reifyscene.edit.renderer.CheckpointRenderer` (its cameras, and its
+    scene's rendered depth); ``masks_by_frame`` ``{frame: {node_id: mask}}`` in the render
+    raster (:func:`~reifyscene.graph.renderable_handle.render_pixel_masks`); ``stream`` the
+    run's :class:`~reifyscene.ingest.streams.FrameStream`. ``depth_by_frame`` (scene units, 0
+    where invalid) replaces the rendered depth: a measurement that must not move with training
+    builds the body from the geometry's depth.
     """
     import torch
 
@@ -179,13 +182,18 @@ def sapiens_body(renderer, humans_artifact, track_id: str, masks_by_frame: dict,
             continue
         t = renderer.time_of[frame]
         camera = renderer.cams[t].render_camera(*renderer.size)
-        with torch.no_grad():
-            c = renderer.scene.cloud_at(int(t))
-            out = renderer.rasterizer.rasterize(c.means, c.quats, c.scales, c.opacities,
-                                                c.colors, camera)
+        if depth_by_frame is not None:
+            if frame not in depth_by_frame:
+                continue
+            depth = np.asarray(depth_by_frame[frame], np.float64)
+        else:
+            with torch.no_grad():
+                c = renderer.scene.cloud_at(int(t))
+                out = renderer.rasterizer.rasterize(c.means, c.quats, c.scales, c.opacities,
+                                                    c.colors, camera)
+            depth = out.depth.detach().cpu().numpy()
         lifted = lift_frame(np.asarray(state.keypoints_2d), np.asarray(mask, bool),
-                            out.depth.detach().cpu().numpy(), camera, stream.transform,
-                            stream.size, cfg)
+                            depth, camera, stream.transform, stream.size, cfg)
         if lifted is not None:
             body.frames[frame], body.torso_length[frame] = lifted
     return body
