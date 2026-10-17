@@ -19,6 +19,14 @@ on background pixels around the entity (:func:`band`), where nothing occludes, i
 floor**: how well the projection predicts what is visible, which bounds how well T3 can do on
 that clip.
 
+The floor depends on how far in time the frame that saw a pixel is: the projection from the next
+frame is far better than from one 16 frames away (on lab-coat's person 2, 23.1 against 16.0 dB),
+and background behind an entity is often seen only from far frames, while the band is seen from
+the next one. So the floor is measured per band of source distance (:data:`DT_BINS`: the band
+projected from frames at least that far) and combined with the weights of the entity's seen
+pixels in each (:func:`matched_psnr`): the floor the seen pixels would have, were nothing in front
+of them.
+
 Limit, by construction: only background is projected. Where another entity stands behind the
 removed one, the expected colour is the background behind both.
 """
@@ -32,6 +40,15 @@ import numpy as np
 from reifyscene.eval.benchmarks.edit_damage.score import dilate
 from reifyscene.eval.benchmarks.removal.views import RunViews
 from reifyscene.graph.id_maps import BACKGROUND
+
+
+# Source-frame distance bands (frames; None: no upper end).
+DT_BINS: tuple[tuple[int, int | None], ...] = ((1, 1), (2, 3), (4, 7), (8, 15), (16, None))
+
+
+def dt_bin(dt: np.ndarray, b: tuple[int, int | None]) -> np.ndarray:
+    lo, hi = b
+    return (dt >= lo) & (dt <= hi) if hi is not None else dt >= lo
 
 
 @dataclass
@@ -104,12 +121,14 @@ class BackgroundProjector:
                 cols.append(rgb[inb][behind])
         return torch.cat(idx), torch.cat(zs), torch.cat(cols)
 
-    def project(self, frame: int) -> Projected:
+    def project(self, frame: int, *, min_dt: int = 1) -> Projected:
+        """``frame``'s background as the frames at least ``min_dt`` away saw it."""
         import torch
 
         v = self.views
         h, w = v.shape
-        sources = sorted((f for f in v.frames if f != frame), key=lambda f: (abs(f - frame), f))
+        sources = sorted((f for f in v.frames if abs(f - frame) >= max(min_dt, 1)),
+                         key=lambda f: (abs(f - frame), f))
         zmin = torch.full((h * w,), float("inf"), device=self.device)
         for s in sources:
             p, z, _ = self._splat(frame, s)
@@ -151,5 +170,26 @@ class SquaredError:
     def psnr(self) -> float | None:
         if not self.n:
             return None
-        mse = self.sse / self.n
-        return round(60.0 if mse <= 1e-6 else float(10.0 * np.log10(1.0 / mse)), 3)
+        return _psnr(self.sse / self.n)
+
+
+def _psnr(mse: float) -> float:
+    return round(60.0 if mse <= 1e-6 else float(10.0 * np.log10(1.0 / mse)), 3)
+
+
+def matched_psnr(errors: dict, weights: dict) -> float | None:
+    """PSNR of the per-band mean squared errors ``errors`` ({band: SquaredError}) averaged with
+    ``weights`` ({band: pixels}). A band with weight but no error measured takes the nearest band
+    that has one, the nearer in time on a tie (the stricter). None without any weight or error."""
+    have = [b for b in DT_BINS if errors[b].n]
+    total = sum(weights.values())
+    if not have or not total:
+        return None
+    mse = 0.0
+    for i, b in enumerate(DT_BINS):
+        if not weights[b]:
+            continue
+        src = b if errors[b].n else min(have, key=lambda h: (abs(DT_BINS.index(h) - i),
+                                                              DT_BINS.index(h)))
+        mse += weights[b] / total * errors[src].sse / errors[src].n
+    return _psnr(mse)

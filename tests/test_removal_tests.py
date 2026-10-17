@@ -2,7 +2,8 @@
 
 What these pin: background another frame saw behind an entity is found, with that frame's
 colour, and background no frame saw is not; a point in front of what a frame shows is not
-background; the floor's band keeps away from every mask's edge; a slab holds what lies between
+background; the floor's band keeps away from every mask's edge, and the floor is weighted like
+the seen pixels' distance in time from the frame that saw them; a slab holds what lies between
 the entity's surface and its width behind it, only over its own pixels; a trace needs a view
 the detector could judge and a detection over the entity's own region; and the pass marks are
 the owner's.
@@ -14,7 +15,13 @@ import numpy as np
 
 from reifyscene.eval.benchmarks.edit_damage.silhouettes import Silhouette
 from reifyscene.eval.benchmarks.removal import PASS, verdict
-from reifyscene.eval.benchmarks.removal.seen import BackgroundProjector, SquaredError, band
+from reifyscene.eval.benchmarks.removal.seen import (
+    DT_BINS,
+    BackgroundProjector,
+    SquaredError,
+    band,
+    matched_psnr,
+)
 from reifyscene.eval.benchmarks.removal.trace import entity_region, has_trace
 from reifyscene.eval.benchmarks.removal.views import RunViews
 from reifyscene.eval.benchmarks.removal.volume import EntityVolume, entity_volume, entity_width
@@ -76,6 +83,31 @@ def test_the_floor_band_keeps_away_from_every_mask() -> None:
     near[10:20, 13:27] = True
     assert b.any() and not (b & near).any()
     assert not b[0:4].any()                         # farther than gap + px
+
+
+def test_a_projection_can_be_asked_for_far_frames_only() -> None:
+    views = _views({0: (5, 10), 1: (15, 10), 2: (25, 10), 3: (35, 10)})
+    proj = BackgroundProjector(views, device="cpu", erode_px=0)
+    near, far = proj.project(1), proj.project(1, min_dt=2)
+    assert set(np.unique(near.source[near.seen])) == {0, 2}
+    assert set(np.unique(far.source[far.seen])) == {3}
+
+
+def _err(mse: float, n: int = 1) -> SquaredError:
+    return SquaredError(sse=mse * n, n=n)
+
+
+def test_the_floor_is_weighted_like_the_seen_pixels() -> None:
+    errors = {b: SquaredError() for b in DT_BINS}
+    errors[DT_BINS[0]], errors[DT_BINS[-1]] = _err(0.01), _err(0.1)
+    weights = dict.fromkeys(DT_BINS, 0)
+    weights[DT_BINS[0]] = weights[DT_BINS[-1]] = 5
+    assert matched_psnr(errors, weights) == round(10 * np.log10(1 / 0.055), 3)
+    weights[DT_BINS[0]] = 0
+    assert matched_psnr(errors, weights) == 10.0              # far pixels: the far floor
+    weights[DT_BINS[1]] = 5                                    # no floor there: the nearest
+    assert matched_psnr(errors, weights) == round(10 * np.log10(1 / 0.055), 3)
+    assert matched_psnr(errors, dict.fromkeys(DT_BINS, 0)) is None
 
 
 def test_squared_error_pools_pixels() -> None:

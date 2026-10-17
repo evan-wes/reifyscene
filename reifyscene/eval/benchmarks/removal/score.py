@@ -7,7 +7,8 @@ Per entity, what does not depend on the removal method -- measured once:
   saw the background behind (:mod:`.seen`); its complement ranks clips by how much there is to
   reveal;
 - **the geometry floor**: PSNR of the unedited render (and, as a diagnostic, of the photo)
-  against the projected background on the background pixels around the entity;
+  against the projected background on the background pixels around the entity, per band of
+  source-frame distance, weighted like the entity's seen pixels (:mod:`.seen`);
 - its **volume** on each frame (:mod:`.volume`) and the Gaussians inside it.
 
 Per entity and method (``owner``: the entity's owned Gaussians, where the checkpoint was trained
@@ -33,7 +34,14 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from reifyscene.eval.benchmarks.removal.seen import BackgroundProjector, SquaredError, band
+from reifyscene.eval.benchmarks.removal.seen import (
+    DT_BINS,
+    BackgroundProjector,
+    SquaredError,
+    band,
+    dt_bin,
+    matched_psnr,
+)
 from reifyscene.eval.benchmarks.removal.trace import TraceCount, entity_region, has_trace
 from reifyscene.eval.benchmarks.removal.views import RunViews
 from reifyscene.eval.benchmarks.removal.volume import entity_volume, person_body
@@ -211,17 +219,31 @@ def score_run(checkpoint: Checkpoint, *, methods: list[str] | None = None,
 
         # -- what the method does not change ---------------------------------------------------
         px = seen_px = 0
-        floor, floor_photo = SquaredError(), SquaredError()
+        seen_by = {b: 0 for b in DT_BINS}
+        floor = {b: SquaredError() for b in DT_BINS}
+        floor_photo = {b: SquaredError() for b in DT_BINS}
         for f in frames:
             m, pr = views.mask(node_id, f), project(f)
             px += int(m.sum())
             seen_px += int((m & pr.seen).sum())
-            ring = band(views, node_id, f, cfg.band_px, cfg.band_gap_px) & pr.seen
-            floor.add(r.before(f), pr.colour, ring)
-            floor_photo.add(views.photos[f], pr.colour, ring)
-        row["coverage"] = {"pixels": px, "seen_share": round(seen_px / px, 4),
-                           "unseen_share": round(1.0 - seen_px / px, 4),
-                           "floor_db": floor.psnr(), "floor_photo_db": floor_photo.psnr()}
+            for b in DT_BINS:
+                seen_by[b] += int((m & pr.seen & dt_bin(np.abs(pr.source - f), b)).sum())
+            ring = band(views, node_id, f, cfg.band_px, cfg.band_gap_px)
+            for b in DT_BINS:
+                # the band as the frames at least this far away saw it
+                pb = pr if b[0] == 1 else projector.project(f, min_dt=b[0])
+                where = ring & pb.seen & dt_bin(np.abs(pb.source - f), b)
+                floor[b].add(r.before(f), pb.colour, where)
+                floor_photo[b].add(views.photos[f], pb.colour, where)
+        row["coverage"] = {
+            "pixels": px, "seen_share": round(seen_px / px, 4),
+            "unseen_share": round(1.0 - seen_px / px, 4),
+            "floor_db": matched_psnr(floor, seen_by),
+            "floor_photo_db": matched_psnr(floor_photo, seen_by),
+            "by_source_distance": [
+                {"frames": [b[0], b[1]], "seen_pixels": seen_by[b], "floor_db": floor[b].psnr(),
+                 "floor_photo_db": floor_photo[b].psnr()} for b in DT_BINS],
+        }
 
         body = person_body(run, r, views, node_id) if row["node_type"] == "human" else None
         volume = entity_volume(views, node_id, body=body)

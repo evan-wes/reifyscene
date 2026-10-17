@@ -92,7 +92,12 @@ judges.
 - *Control (the geometry floor):* the unedited render against the same projection on background
   pixels 4–20 px from the entity and at least 4 px from any mask, where nothing occludes. Right
   at a mask's edge the photo still shows the entity (hair, a sleeve): on lab-coat's person 8 the
-  floor read 17.0–17.6 dB with no gap and 20.2–21.5 dB with gaps of 2–8 px. If T3 is no worse
+  floor read 17.0–17.6 dB with no gap and 20.2–21.5 dB with gaps of 2–8 px. The floor also
+  depends on how far in time the frame that saw a pixel is: on lab-coat's person 2 it is 23.1 dB
+  from the next frame and 16.0 dB from frames 16 or more away, and 47% of what lies behind her
+  was seen only from that far, while the band is seen from the next frame. So the floor is
+  measured per band of source distance (1, 2–3, 4–7, 8–15, 16+ frames: the band projected from
+  frames at least that far) and weighted like the entity's seen pixels. If T3 is no worse
   than the floor, the removal revealed what the video saw. If both are poor, the cameras and
   depth disagree across frames — a geometry problem (SLAM It!), not a removal one. The photo
   against the projection on the same pixels is also reported (a geometry-only floor).
