@@ -305,8 +305,9 @@ class GaussianRenderBackend(RenderBackend):
         return path.name
 
     def _train_targets(self, bundle) -> list[dict[str, torch.Tensor]]:
-        """Each training view's depth / validity / foreground targets, from the scene stage's
-        ``target_*`` arrays, matched by frame name (in the order of ``_train_frame_keys``)."""
+        """Each training view's depth / validity / foreground targets, and the id map an owned
+        scene's owner loss reads, from the scene stage's ``target_*`` arrays, matched by frame
+        name (in the order of ``_train_frame_keys``)."""
         names = [str(n) for n in np.asarray(bundle.get("target_frame_names", []))]
         if not names:
             raise ValueError("the scene carries no depth / mask targets; rebuild the scene "
@@ -315,6 +316,7 @@ class GaussianRenderBackend(RenderBackend):
         depths = np.asarray(bundle["target_depths"])
         valid = np.asarray(bundle["target_depth_valid"])
         fg = np.asarray(bundle["target_fg"])
+        ids = np.asarray(bundle["target_ids"]) if "target_ids" in bundle else None
         out = []
         for key in self._train_frame_keys:
             if key not in row:
@@ -324,6 +326,8 @@ class GaussianRenderBackend(RenderBackend):
                 "depth": torch.as_tensor(depths[i].astype(np.float32), device=self.device),
                 "valid": torch.as_tensor(valid[i].astype(bool), device=self.device),
                 "fg": torch.as_tensor(fg[i].astype(np.float32), device=self.device),
+                **({"ids": torch.as_tensor(ids[i].astype(np.int64), device=self.device)}
+                   if ids is not None else {}),
             })
         return out
 
@@ -408,7 +412,9 @@ class GaussianRenderBackend(RenderBackend):
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
         geometry_on = (train_cfg.lambda_depth > 0 or train_cfg.lambda_depth_grad > 0
                        or train_cfg.lambda_mask > 0)
-        targets = self._train_targets(bundle) if geometry_on else None
+        owned = scene.has_owners and (train_cfg.lambda_owner > 0 or train_cfg.owner_drift_every > 0)
+        targets = self._train_targets(bundle) if geometry_on or owned else None
+        drift: list[dict] = []
 
         logs: list[dict] = []
         on_trace = on_snapshot = None
@@ -430,7 +436,8 @@ class GaussianRenderBackend(RenderBackend):
                                               name=f"trained_dynamic_step{step}.npz")
         trained = trainer.fit(train_views, targets=targets,
                               on_log=lambda record: logs.append(record),
-                              on_trace=on_trace, on_snapshot=on_snapshot)
+                              on_trace=on_trace, on_snapshot=on_snapshot,
+                              on_drift=drift.append)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
         checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir, raster=raster)
@@ -458,6 +465,12 @@ class GaussianRenderBackend(RenderBackend):
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
                 "recipe": recipe,
+                **({"ownership": {
+                    "owners": len(trained.owner_node_ids),
+                    "final_owner_loss": next(
+                        (r["owner_loss"] for r in reversed(logs) if "owner_loss" in r), None),
+                    "drift": drift,
+                }} if trained.has_owners else {}),
                 **({"identity": {**identity_summary, "final_identity_loss": next(
                     (r["identity_loss"] for r in reversed(logs) if "identity_loss" in r), None
                 )}} if identity_summary else {}),

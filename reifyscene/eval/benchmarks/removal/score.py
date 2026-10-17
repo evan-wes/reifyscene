@@ -10,9 +10,10 @@ Per entity, what does not depend on the removal method -- measured once:
   against the projected background on the background pixels around the entity;
 - its **volume** on each frame (:mod:`.volume`) and the Gaussians inside it.
 
-Per entity and method (``flashsplat``: FlashSplat with the floater filter, as the app removes
-today; ``flashsplat-unfiltered``; ``identity``: the learned identity, where the checkpoint has
-it):
+Per entity and method (``owner``: the entity's owned Gaussians, where the checkpoint was trained
+with owners; ``flashsplat``: FlashSplat with the floater filter, the app's removal before
+ownership; ``flashsplat-unfiltered``; ``identity``: the learned identity, where the checkpoint
+has it):
 
 - **T1**: share of judged views without a trace (:mod:`.trace`), on training views and on
   views orbited ``orbit_yaws`` about the scene;
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 
 # The owner's pass marks (design doc §5, decided 2026-10-17).
 PASS = {"t1_clean": 0.95, "t2_left": 0.05, "t3_gap_db": 1.0}
-METHODS = ("flashsplat", "flashsplat-unfiltered", "identity")
+METHODS = ("owner", "flashsplat", "flashsplat-unfiltered", "identity")
 
 
 @dataclass
@@ -60,21 +61,18 @@ class ScoreConfig:
 
 def select(editor, node_id: str, method: str) -> tuple[np.ndarray, np.ndarray]:
     """``(fg, bg)`` indices ``method`` removes for ``node_id``."""
-    if method == "flashsplat":
-        fg, bg, _ = editor.select(node_id)
-    elif method == "flashsplat-unfiltered":
-        fg, bg, _ = editor.select(node_id, filtered=False)
-    elif method == "identity":
-        from reifyscene.graph.renderable_handle import identity_handles
-
-        fg, bg = identity_handles(editor.bundle).get(node_id, (np.array([], int),) * 2)
-    else:
+    if method not in METHODS:
         raise ValueError(f"unknown removal method {method!r}; methods: {', '.join(METHODS)}")
+    if method == "flashsplat-unfiltered":
+        fg, bg, _ = editor.select(node_id, method="flashsplat", filtered=False)
+    else:
+        fg, bg, _ = editor.select(node_id, method=method)
     return np.asarray(fg, np.int64), np.asarray(bg, np.int64)
 
 
 def available_methods(bundle) -> list[str]:
-    return [m for m in METHODS if m != "identity" or "identity_classifier_w" in bundle]
+    needs = {"owner": "owner_node_ids", "identity": "identity_classifier_w"}
+    return [m for m in METHODS if m not in needs or needs[m] in bundle]
 
 
 class _Scene:

@@ -30,7 +30,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import numpy as np
 import torch
 
-from reifyscene.graph.id_maps import IGNORE
+from reifyscene.graph.id_maps import labelled
 
 
 def evidence_matrix(
@@ -42,7 +42,8 @@ def evidence_matrix(
     """(N, C): each Gaussian's summed blending weight inside each class's pixels.
 
     ``views`` are ``(camera, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor in
-    the render raster; ignore pixels contribute to no class. Geometry is detached: this reads
+    the render raster; a pixel that is not labelled (unaddressed, ignore) contributes to no
+    class. Geometry is detached: this reads
     the scene, it never changes it.
     """
     n = scene.num_gaussians
@@ -54,7 +55,7 @@ def evidence_matrix(
         feats = torch.zeros((n, num_classes), device=device, requires_grad=True)
         out = rasterizer.rasterize(cloud.means, cloud.quats, cloud.scales, cloud.opacities,
                                    cloud.colors, camera, features=feats)
-        valid = id_map != IGNORE
+        valid = labelled(id_map)
         onehot = torch.nn.functional.one_hot(
             torch.where(valid, id_map, torch.zeros_like(id_map)).long(), num_classes
         ).to(out.features.dtype) * valid[..., None]

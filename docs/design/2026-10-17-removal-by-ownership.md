@@ -46,42 +46,58 @@ applied afterwards, by a vote, to a scene that was never asked to be separable.
 ## 1. Acceptance criteria — what "removed" means
 
 The owner's four expectations, and how each is measured from the clip itself (no ground truth
-beyond the photos and our own masks, except where noted).
+beyond the photos and our own masks, except where noted). As built in
+`reifyscene/eval/benchmarks/removal/` (`scripts/benchmark_removal.py`). Every test reads the
+geometry's depth (the pose-refined geometry the scene was built from, normalised as the scene
+stage normalises its targets), never a render's, so a test does not move with the method it
+judges.
 
 **1. No visual trace of the entity in any rendered image.**
-- *Test T1 (independent of the removal method):* run the entity's category detector on every
-  after-render — training frames and the orbit trajectory. People: `PersonSegmenter`
-  (`reifyscene/eval/benchmarks/edit_damage/silhouettes.py`: the pipeline's `HumanDetector` +
-  SAM 2 box prompt). Other categories: the open-vocabulary detector already used for the
-  inventory (`grounding-dino-base`, `benchmarks/detector_keyframe_cache.json`). A *trace* is a
-  detection of the entity's category whose mask overlaps the entity's before-mask (IoU ≥ 0.3,
-  proposed). Matched against the removed entity's own region only, so a neighbour of the same
-  category (lab-coat's adjacent women) does not count. Reported: share of frames with a trace.
-- *Diagnostic (baseline only):* the residual share of §0 — how much of the before-render inside
-  the mask came from Gaussians that stayed. Under ownership it is zero by construction, so it
-  is not a test of the new design; T1 is.
+- *Test T1 (independent of the removal method):* the entity's category, found in the
+  after-render. One detector serves every category: the pipeline's Mask R-CNN over the COCO
+  categories the graph's labels come from, with SAM 2 box prompts (`InstanceSegmenter`,
+  `reifyscene/eval/benchmarks/edit_damage/silhouettes.py`). On each view the detector first finds
+  the entity in the **before**-render (score ≥ 0.5, the silhouette with IoU ≥ 0.3 against where
+  the entity is: its id-map mask on a training view, where the Gaussians inside its volume show on
+  an orbited one); a view where it cannot is not judged. A *trace* is a detection of the category
+  in the after-render (score ≥ 0.3: a faint ghost counts) with IoU ≥ 0.3 against that
+  silhouette, so a neighbour of the same category (lab-coat's adjacent women) does not count.
+  Views: every training frame with ≥ 200 of the entity's pixels, and eight of them orbited
+  ±20°. Reported: the share of judged views without a trace, for each set.
+- *Diagnostic:* the residual share of §0 — how much of the before-render inside the entity's
+  pixels came from Gaussians the removal kept.
 
 **2. In 3D, the space it occupied is empty, at every moment.**
 - *Test T2:* per training frame *t*, the entity's volume *V_t*; after removal, the opacity mass of
   remaining Gaussians whose positions at *t* (`DynamicScene.cloud_at(t)`) fall inside *V_t*,
   as a share of the same mass before removal.
 - *V_t* for people: the Sapiens body volume (`reifyscene/edit/body_volume.py`, `sapiens_body` /
-  `lift_frame`: capsules round the bones, from the rendered depth over the person's mask). Frames
+  `lift_frame`: capsules round the bones, from the geometry's depth over the person's mask). Frames
   without a torso use the slab below.
-- *V_t* otherwise: a slab — the mask's pixels back-projected from the front surface (the bundle's
-  `target_depths`, scene stage `_train_targets`) to front + the entity's own width at *t*. A slab,
-  not a hull (identity scope doc §3.2: a hull reaches into neighbours).
+- *V_t* otherwise: a slab — the entity's own pixels, from a quarter of its width in front of the
+  geometry's surface there back to the surface plus the entity's own width at *t* (the 5th–95th
+  percentile spread of its pixels across the image, in scene units). A slab, not a hull
+  (identity scope doc §3.2: a hull reaches into neighbours). Reported: the remaining opacity of
+  all frames together over that before.
 
 **3. Background the video saw appears, unoccluded, where the entity was.**
 - *Test T3:* for frame *t* and each pixel *p* of the entity's mask, forward-project every other
-  frame's background pixels (id map = background, valid target depth) into *t* through the
-  training cameras, z-buffered. *p* is **seen** if a background point lands on it from some frame
-  *t′* and is not in front of the entity's surface at *p*; its expected colour is the photo at the
-  nearest such *t′*. Score: PSNR of the after-render against the expected colour over seen pixels.
-- *Control (the geometry floor):* the same projection scored on pixels outside every mask, where
-  nothing occludes. If T3 is no worse than the floor, the removal revealed what the video saw. If
-  both are poor, the cameras and depth disagree across frames — a geometry problem (SLAM It!),
-  not a removal one.
+  frame's background pixels (id map = background, valid depth, at least 2 px from anything that
+  is not background) into *t* through the training cameras, each onto the pixels less than a
+  pixel from where it lands, z-buffered. A point more than 5% in front of *t*'s own surface at
+  *p* is dropped (nothing can be in front of what the photo at *t* shows). *p* is **seen** if a
+  point lands on it; its expected colour is the photo of the frame nearest in time among those
+  whose point lies within 5% of the nearest surface. Score: PSNR of the after-render against the
+  expected colour over seen pixels, all frames pooled.
+- *Control (the geometry floor):* the unedited render against the same projection on background
+  pixels 4–20 px from the entity and at least 4 px from any mask, where nothing occludes. Right
+  at a mask's edge the photo still shows the entity (hair, a sleeve): on lab-coat's person 8 the
+  floor read 17.0–17.6 dB with no gap and 20.2–21.5 dB with gaps of 2–8 px. If T3 is no worse
+  than the floor, the removal revealed what the video saw. If both are poor, the cameras and
+  depth disagree across frames — a geometry problem (SLAM It!), not a removal one. The photo
+  against the projection on the same pixels is also reported (a geometry-only floor).
+- *Limit:* only background is projected. Where another entity stands behind the removed one,
+  the expected colour is the background behind both.
 
 **4. Background the video never saw: left as is, or blurred.**
 - *Test T4:* the complement of "seen" inside the mask. Reported: unseen share per entity. The
@@ -127,25 +143,27 @@ outside this design.
 ### 4.1 Who owns a seed
 
 The source of truth for "which entity is this pixel" is the id map
-(`reifyscene/graph/id_maps.py`): `0` background, `1..K` graph nodes, `65535` ignore (overlap,
-unmapped tracklet, padding), in the geometry's raster, built from the same mapping the removal uses
-(`render_pixel_masks`). The scene stage reads only `segment` today; it gains `reid` and `graph`
-upstream (both run before it).
+(`reifyscene/graph/id_maps.py`): `0` background, `1..K` graph nodes, `65534` **unaddressed**
+(only a tracklet the graph dropped claims it; new in id-map format 2), `65535` ignore (overlap,
+padding), in the geometry's raster, built from the same mapping the removal uses
+(`render_pixel_masks`). The scene stage gains `reid` and `graph` upstream (both run before it)
+and exports the id maps itself.
 
 - **Foreground seeds** are 2D tracks lifted to 3D (`lift_tracks_3d`,
   `reifyscene/lifting/native_track_lift.py`), each sampled at a query pixel in a query frame. Its
-  owner is the id map at that pixel. Seeds whose neighbourhood (radius 2 px, proposed) is not one
-  class are not used: mask edges are where SAM is least reliable.
-- **Background seeds** come from pixels outside every mask (`lift_bkgd_points`): owner 0.
+  owner is the id map at that pixel. Seeds within 2 px (a square) of another code, or on an
+  ignore pixel, are not used: mask edges are where SAM is least reliable (`owner_purity`).
+- **Background seeds** come from background pixels only (`lift_bkgd_points`): owner 0.
 - **Unmapped tracklets** (a segment the graph dropped) sit inside the foreground union and seed
-  Gaussians too. Their owner is a reserved *unaddressed* class: never removable, and their pixels
-  are ignored by the loss, as the id map already ignores them.
+  Gaussians too. Their owner is the id-map code `65534`, the reserved *unaddressed* owner: never
+  removable, and its pixels carry no loss.
+- **Static tracks** the motion gate moves into the background field keep their owners.
 - **Owner is not motion.** fg/bg is the motion split; ownership is semantic and lives on both
   fields (identity scope doc §3.3). A static entity under the motion gate is a background-field
   Gaussian with owner *k*, still removable.
 
-The owner is an integer buffer on each field (`GaussianField`), not a parameter and never
-optimised, plus a class table (index → node id) in the bundle.
+The owner is an integer buffer on each field (`GaussianField.owner`: the id-map code), not a
+parameter and never optimised, plus a class table (code → node id) on the scene and in the bundle.
 
 ### 4.2 Inheritance
 
@@ -162,9 +180,12 @@ unaddressed, *K* entities) through the same rasterizer. This is the mechanism th
 term already uses (the `fg_ind` channel in `DynamicGaussianTrainer.fit`), and §8.1 of the identity
 doc measured wide channels as cheap (19 channels, 1.31 ms for 80k Gaussians at 518×294).
 
-- **Loss:** per pixel, the rendered owner shares against the id map's one-hot, ignoring `65535`,
-  with total alpha driven to 1 (Shape-of-Motion's mask term, per entity). Equivalently: each
-  entity's Gaussians, rendered alone, must cover its mask and nothing else.
+- **Loss:** per labelled pixel (background or an entity), the summed absolute difference between
+  the rendered owner shares and the id map's one-hot, halved to [0, 1]: 0 when the pixel's own
+  owner alone covers it fully, 0.5 when nothing covers it, 1 when another owner does. As in
+  Shape-of-Motion's mask term, the worst 2% of pixels are left out (a mask is wrong somewhere in
+  every frame), and the weight is theirs, 1.0 (`lambda_owner`). The unaddressed owner has a
+  channel of its own and is wrong on every labelled pixel.
 - **Gradients reach geometry** — means, scales, opacities, motion coefficients. That is the point.
 - **Densification sees photometric gradients only.** The owner channels go in a second
   rasterization, so the `means2d` gradient densification thresholds on is the photo pass's. The
@@ -201,19 +222,23 @@ the owner table on runs trained with owners.
 
 ### 4.5 The drift check (the owner's re-labelling idea)
 
-Every *N* steps (500, proposed), compute FlashSplat's evidence (`evidence_matrix` over
-`id_map_views`) and compare it with each Gaussian's owner. A Gaussian whose evidence goes clearly
-to another class is **flagged, never relabelled** — per identity doc §3.1, a Gaussian that is
+Every 500 steps and at the end (`owner_drift_every`), compute FlashSplat's evidence
+(`evidence_matrix` over every training view) and compare it with each Gaussian's owner. A
+Gaussian owned by an entity or the background whose evidence goes clearly (slackness 0) to
+another class is **flagged, never relabelled** — per identity doc §3.1, a Gaussian that is
 genuinely A at one time and B at another makes `remove` ill-posed, and the remedy is to split or
-prune it. First version: count flags per entity pair over training and log them; act (prune, or
-split — unproven) only if the counts are non-trivial.
+prune it. First version: count flags per (owner, evidence) pair and keep them in the render
+record (`scene_state.ownership.drift`); act (prune, or split — unproven) only if the counts are
+non-trivial.
 
 ### 4.6 Format
 
-The bundle gains `fg_owner` / `bg_owner` and the class table. Contract versions: scene 5 → 6 (seeds
-carry owners; upstream adds reid and graph), render 4 → 5 (silhouette loss; the checkpoint carries
-owners), handles 2 → 3 (the selection is ownership). Clean break: no reader for old checkpoints.
-The runs the site needs are rebuilt from the scene stage on.
+The bundle gains `fg_owner` / `bg_owner`, the class table `owner_node_ids`, and the id maps the
+loss trains on (`target_ids`, beside the depth targets), so the render stage still reads only
+the scene. Contract versions: scene 5 → 6 (seeds carry owners; upstream adds reid and graph),
+render 4 → 5 (silhouette loss; the checkpoint carries owners), handles 2 → 3 (the selection is
+ownership). Clean break: no reader for old checkpoints. The runs the site needs are rebuilt
+from the scene stage on.
 
 ## 5. Measurement and gate
 

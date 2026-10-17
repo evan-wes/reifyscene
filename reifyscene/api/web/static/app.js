@@ -64,7 +64,7 @@ async function loadRun(name) {
     (rm.gravity_aligned ? "" : " · no gravity: vertical relations not computed") : "";
   const slider = $("frame-slider");
   slider.max = Math.max(0, S.frames.length - 1); slider.value = 0;
-  fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); updateRemove(); paint();
+  fillMethods(); fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); updateRemove(); paint();
 }
 
 // -- graph -----------------------------------------------------------------------------------
@@ -514,32 +514,50 @@ $("query-form").addEventListener("submit", (ev) => {
 });
 
 // -- edits ------------------------------------------------------------------------------------
+// Removal methods: by owner (each Gaussian owned from seeding) where the checkpoint was trained
+// with owners, FlashSplat's evidence (slackness, floater filter), the learned identity.
+const METHOD_LABELS = { owner: "by owner", flashsplat: "FlashSplat", identity: "learned identity" };
+function fillMethods() {
+  const sel = $("e-method"), r = S.graph.removal;
+  sel.innerHTML = "";
+  for (const m of r.methods) sel.append(el("option", { value: m, text: METHOD_LABELS[m] || m }));
+  sel.value = r.default;
+}
+const ownedLayer = () => S.graph.gaussians_layer?.selection === "owner";
 function sceneText(e) {
   const g = e.gaussians, layer = S.graph.gaussians_layer;
   if (!layer) return "not bound yet (the graph has no gaussians layer)";
   if (!layer.current) return `bound to another checkpoint (${layer.checkpoint}), not this one`;
   if (!g) return "–";
   if (g.status === "unassignable")
-    return "no Gaussians: none has most of its evidence in this entity" + (g.reason ? ` (${g.reason})` : "");
+    return (ownedLayer() ? "no Gaussians: none was seeded on this entity"
+      : "no Gaussians: none has most of its evidence in this entity") + (g.reason ? ` (${g.reason})` : "");
   const pct = (100 * g.assigned_fraction).toFixed(g.assigned_fraction < 0.001 ? 3 : 1);
   return `${(g.fg + g.bg).toLocaleString()} Gaussians (${g.fg.toLocaleString()} moving, ${g.bg.toLocaleString()} static) · ${pct}% of the scene`;
 }
-// At the default slackness an entity with no Gaussians has nothing to remove; "take more"
-// admits Gaussians only partly its own, so it may still find some.
+// The layer says what its own selection found. By owner, an entity with none has nothing to
+// remove. With FlashSplat at the default slackness neither; "take more" admits Gaussians only
+// partly its own, so it may still find some.
 function updateRemove() {
   const e = S.selected && entity(S.selected), btn = $("e-remove"), note = $("e-note");
-  const stuck = noGaussians(e) && parseFloat($("e-slack").value) >= 0;
+  const method = $("e-method").value, flash = method === "flashsplat";
+  $("e-slack").disabled = $("e-filter").disabled = !flash;
+  const applies = ownedLayer() ? method === "owner" : flash;
+  const none = applies && noGaussians(e);
+  const stuck = none && (!flash || parseFloat($("e-slack").value) >= 0);
   btn.disabled = !e || stuck;
-  note.hidden = !noGaussians(e);
-  note.textContent = !noGaussians(e) ? "" : stuck
-    ? "Nothing to remove at this setting: no Gaussian is mostly this entity. \"−0.8 · take more\" admits partial ones."
+  note.hidden = !none;
+  note.textContent = !none ? "" : !flash ? "Nothing to remove: no Gaussian was seeded on this entity."
+    : stuck ? "Nothing to remove at this setting: no Gaussian is mostly this entity. \"−0.8 · take more\" admits partial ones."
     : "No Gaussian is mostly this entity; \"take more\" will remove the ones partly in it.";
 }
 $("e-slack").addEventListener("change", updateRemove);
+$("e-method").addEventListener("change", updateRemove);
 $("e-remove").addEventListener("click", async () => {
   if (!S.selected) return;
   const st = $("e-status"); st.className = "edit-status";
-  const body = { op: "remove", entity: S.selected, slackness: parseFloat($("e-slack").value), filtered: $("e-filter").checked };
+  const body = { op: "remove", entity: S.selected, method: $("e-method").value,
+                 slackness: parseFloat($("e-slack").value), filtered: $("e-filter").checked };
   try {
     const job = await api(`/api/runs/${S.run}/edits`, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) });
@@ -578,7 +596,9 @@ function drawEdits() {
   for (const rec of S.edits[S.run] || []) {
     const e = entity(rec.node);
     const li = el("li", { class: rec.id === S.activeEdit ? "active" : "",
-      text: `remove ${e ? e.category : ""} ${short(rec.node)} · slack ${rec.params.slackness}${rec.params.filtered ? " · filtered" : ""} · ${rec.status}`,
+      text: `remove ${e ? e.category : ""} ${short(rec.node)} · ${METHOD_LABELS[rec.params.method] || rec.params.method}` +
+        (rec.params.method === "flashsplat" ? ` · slack ${rec.params.slackness}${rec.params.filtered ? " · filtered" : ""}` : "") +
+        ` · ${rec.status}`,
       onclick: () => { if (rec.status === "done") { S.activeEdit = rec.id; S.view = "after"; S.flipped = false; drawEdits(); paint(); } } });
     ul.append(li);
   }

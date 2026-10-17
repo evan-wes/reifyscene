@@ -13,7 +13,8 @@ What it adds:
 - the index arrays themselves in ``<graph>/layers/gaussians.npz`` (a person is ~10^5 indices,
   too many for a document a person reads), keyed by node;
 - ``metadata["layers"]["gaussians"]``: the checkpoint it was computed against (its folder and a
-  content digest), the assignment parameters, and the ``renderable`` grade it provides.
+  content digest), how the Gaussians were selected (``selection``: ``owner`` on a checkpoint
+  trained with owners, else ``flashsplat`` with its parameters), and the ``renderable`` grade.
 
 Indices are only meaningful for the checkpoint they came from: a retrained scene has other
 Gaussians in another order. :func:`load_handles` therefore refuses a checkpoint whose digest
@@ -65,24 +66,32 @@ def compute_handles(
     editor,
     node_ids: list[str],
     *,
+    method: str = "flashsplat",
     slackness: float = 0.0,
     filtered: bool = True,
 ) -> dict[str, tuple[np.ndarray, np.ndarray, dict[str, Any]]]:
-    """``{node_id: (fg_idx, bg_idx, stats)}`` for every entity, one evidence pass for all.
+    """``{node_id: (fg_idx, bg_idx, stats)}`` for every entity: by owner, or by FlashSplat
+    with one evidence pass for all.
 
     ``editor`` is a :class:`~reifyscene.edit.remove.RemoveEditor` (it holds the checkpoint on
     the GPU and caches the evidence). An entity the id maps do not carry -- never segmented in
     any training frame -- gets empty indices and ``stats["reason"]``.
     """
-    editor.evidence()
-    known = set(n for n in editor._node_ids if n is not None)
+    if method == "owner":
+        from reifyscene.graph.renderable_handle import owner_handles
+
+        known = set(owner_handles(editor.bundle))
+    else:
+        editor.evidence()
+        known = set(n for n in editor._node_ids if n is not None)
     out: dict[str, tuple[np.ndarray, np.ndarray, dict[str, Any]]] = {}
     empty = np.array([], dtype=np.int64)
     for node in node_ids:
         if node not in known:
             out[node] = (empty, empty, {"reason": "not in the id maps"})
             continue
-        fg, bg, stats = editor.select(node, slackness=slackness, filtered=filtered)
+        fg, bg, stats = editor.select(node, method=method, slackness=slackness,
+                                      filtered=filtered)
         stats["coverage_deg"] = editor.view_span(node, fg, bg)
         out[node] = (np.asarray(fg, np.int64), np.asarray(bg, np.int64), stats)
     return out
@@ -94,8 +103,9 @@ def write_layer(
     *,
     checkpoint: Checkpoint,
     num_gaussians: int,
-    slackness: float,
-    filtered: bool,
+    selection: str = "flashsplat",
+    slackness: float | None = None,
+    filtered: bool | None = None,
     body_bound: bool = False,
     stage: str = "handles",
 ) -> str:
@@ -130,8 +140,11 @@ def write_layer(
         "stage": stage,
         "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": {"path": checkpoint.name, "digest": checkpoint.digest()},
-        "method": "FlashSplat evidence majority" + (" + floater filter" if filtered else "")
-                  + (" + body bound (people)" if body_bound else ""),
+        "selection": selection,
+        "method": ("ownership: owned from seeding, trained to the owner's pixels"
+                   if selection == "owner" else
+                   "FlashSplat evidence majority" + (" + floater filter" if filtered else "")
+                   + (" + body bound (people)" if body_bound else "")),
         "body_bound": bool(body_bound),
         "slackness": slackness,
         "file": str(LAYER_FILE),
@@ -189,12 +202,17 @@ def run_handles(graph, render, *, run: RunOutputs, device: str, slackness: float
     checkpoint = run.checkpoint(Path(render.save_dir).name)   # the saved render, as recorded
     editor = RemoveEditor(checkpoint, device=device, body_bound=body_bound and filtered)
     editor.use_layer = False          # this is what writes the layer: never read it back
-    editor.evidence(refresh=True)     # the id maps and evidence of THIS graph and checkpoint
-    handles = compute_handles(editor, entities, slackness=slackness, filtered=filtered)
+    method = editor.default_method    # owners when the checkpoint was trained with them
+    if method == "flashsplat":
+        editor.evidence(refresh=True)     # the id maps and evidence of THIS graph and checkpoint
+    else:
+        slackness, filtered, body_bound = None, None, False
+    handles = compute_handles(editor, entities, method=method, slackness=slackness,
+                              filtered=filtered)
     grade = write_layer(graph, handles, checkpoint=checkpoint,
                         num_gaussians=int(editor.renderer.scene.num_gaussians),
-                        slackness=slackness, filtered=filtered,
-                        body_bound=body_bound and filtered)
+                        selection=method, slackness=slackness, filtered=filtered,
+                        body_bound=bool(body_bound and filtered))
     info = layer_info(graph)
     return {"renderable": grade, "layer": LAYER, "checkpoint": info["checkpoint"],
             "counts": info["counts"],

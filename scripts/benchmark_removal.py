@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Measure removals against the owner's four criteria (T1-T4) and rank the clips.
 
-    python scripts/benchmark_removal.py exp_a_lab-coat slice_judo --out benchmarks/removal_baseline.json
+    python scripts/benchmark_removal.py exp_a_lab-coat slice_judo \
+        --out benchmarks/removal_baseline.json
 
 For each run (by name in runs/), every entity on enough frames is removed by each method
 (FlashSplat with and without the floater filter, and the learned identity where the checkpoint

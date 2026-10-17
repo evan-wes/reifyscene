@@ -16,16 +16,19 @@ Encoding -- chosen so the loss can never be taught something the masks do not sa
 - ``0`` is **background**: no segment covers the pixel.
 - ``1..K`` are the graph's entity nodes, numbered in sorted ``node_id`` order so the numbering
   is deterministic for a given graph.
-- ``65535`` is **ignore**, for three kinds of pixel:
-    * **overlap** -- two or more entities claim it (SAM 2 does this at occlusion boundaries).
-      Picking a winner would train a guess.
-    * **unmapped** -- a tracklet the graph dropped covers it. It is a real thing with no id;
-      calling it background would teach the field that, say, a person is background.
+- ``65534`` is **unaddressed**: only a tracklet the graph dropped covers it. It is a real
+  thing with no id; calling it background would teach the field that, say, a person is
+  background. Nothing supervises these pixels, but the scene stage seeds Gaussians there and
+  owns them by a reserved *unaddressed* owner (never removable).
+- ``65535`` is **ignore**, for two kinds of pixel:
+    * **overlap** -- two or more claim it: entities, or an entity and a dropped tracklet (SAM 2
+      does this at occlusion boundaries). Picking a winner would train a guess.
     * **padding** -- the transform put no source pixel there.
 
-``num_classes`` in the manifest is ``K + 1`` (background included, ignore not). It is
-scene-dependent, and so is the loss's ``log(num_classes)`` normalisation, which is why it lives
-in the manifest rather than a config.
+A pixel is **labelled** (:func:`labelled`) when it is background or an entity: the loss and the
+evidence read only those. ``num_classes`` in the manifest is ``K + 1`` (background included,
+unaddressed and ignore not). It is scene-dependent, and so is the loss's ``log(num_classes)``
+normalisation, which is why it lives in the manifest rather than a config.
 
 Identity is time-invariant, so an entity that enters or leaves mid-clip needs no special case:
 it is simply absent from the frames it is not in. The manifest records each class's span.
@@ -42,11 +45,19 @@ import numpy as np
 
 if TYPE_CHECKING:
     from reifyscene.api.run_outputs import RunOutputs
+    from reifyscene.graph.renderable_handle import RenderPixelMasks
 
 BACKGROUND = 0
+UNADDRESSED = 65534
 IGNORE = 65535
 MANIFEST = "manifest.json"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2          # 2: pixels only a dropped tracklet claims are unaddressed
+
+
+def labelled(id_map):
+    """Where an id map (numpy or torch) says background or an entity, not unaddressed or
+    ignore."""
+    return id_map < UNADDRESSED
 
 
 def compose_id_map(
@@ -57,10 +68,10 @@ def compose_id_map(
     unmapped: np.ndarray | None = None,
     valid: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    """One frame's ``(H, W)`` uint16 id map, and how many pixels each ignore reason took.
+    """One frame's ``(H, W)`` uint16 id map, and how many pixels each non-label took.
 
-    A pixel an unmapped tracklet shares with an entity counts as ``unmapped``, not
-    ``overlap``: the entity may be right there, but the pixel is contested either way.
+    A pixel an unmapped tracklet shares with an entity is ``overlap``: the entity may be right
+    there, but the pixel is contested either way. ``unmapped`` counts the unaddressed pixels.
     """
     coverage = np.zeros(shape, dtype=np.int32)
     out = np.full(shape, BACKGROUND, dtype=np.uint16)
@@ -70,13 +81,15 @@ def compose_id_map(
             raise ValueError(f"mask for {node_id} is {m.shape}, raster is {shape}")
         coverage += m
         out[m] = class_of[node_id]
-    overlap = coverage >= 2
     unm = np.zeros(shape, bool) if unmapped is None else np.asarray(unmapped, dtype=bool)
     pad = np.zeros(shape, bool) if valid is None else ~np.asarray(valid, dtype=bool)
-    out[overlap | unm | pad] = IGNORE
+    overlap = (coverage + unm) >= 2
+    alone = unm & (coverage == 0)
+    out[alone] = UNADDRESSED
+    out[overlap | pad] = IGNORE
     counts = {
-        "overlap": int((overlap & ~unm & ~pad).sum()),
-        "unmapped": int((unm & ~pad).sum()),
+        "overlap": int((overlap & ~pad).sum()),
+        "unmapped": int((alone & ~pad).sum()),
         "padding": int(pad.sum()),
     }
     return out, counts
@@ -87,14 +100,17 @@ def _frame_file(frame: int) -> str:
 
 
 def export_id_maps(
-    run: RunOutputs, *, stream_id: str | None = None, out_dir: Path | None = None
+    run: RunOutputs, *, stream_id: str | None = None, out_dir: Path | None = None,
+    placed: RenderPixelMasks | None = None,
 ) -> dict[str, Any]:
     """Write ``frame_NNNNN.png`` + ``manifest.json`` into the run's identity dir (or
     ``out_dir``); return the manifest.
 
     Every frame the stream has gets a map -- its real frame numbers, which a folder of frames
     may start above 0 or skip -- including frames with no segment at all (all background):
-    whichever frames training samples, there is a target for it.
+    whichever frames training samples, there is a target for it. ``placed`` gives the masks
+    (:func:`~reifyscene.graph.renderable_handle.pixel_masks`) when a stage holds the graph
+    itself; by default they are read from the run.
     """
     from PIL import Image
 
@@ -103,7 +119,8 @@ def export_id_maps(
     out_dir = Path(out_dir) if out_dir is not None else run.identity_dir
     stream = run.streams.resolve(stream_id)
     stream_id = stream.id
-    placed = render_pixel_masks(run, stream_id=stream_id)
+    if placed is None:
+        placed = render_pixel_masks(run, stream_id=stream_id)
     transform = placed.transform
     width, height = transform.output_size
     shape = (int(height), int(width))
@@ -135,7 +152,7 @@ def export_id_maps(
             per_class[nid]["pixels"] += px
             if px:
                 per_class[nid]["frames"].append(frame)
-        totals["entity"] += int(((id_map != BACKGROUND) & (id_map != IGNORE)).sum())
+        totals["entity"] += int(((id_map != BACKGROUND) & labelled(id_map)).sum())
         frames_out.append({"frame_idx": frame, "file": _frame_file(frame)})
 
     total_px = len(stream.frames) * shape[0] * shape[1]
@@ -161,16 +178,16 @@ def export_id_maps(
         "stream_id": stream_id,
         "raster": {"width": int(width), "height": int(height)},
         "image_transform": transform.to_dict(),
-        "encoding": {"dtype": "uint16", "background": BACKGROUND, "ignore": IGNORE},
+        "encoding": {"dtype": "uint16", "background": BACKGROUND, "unaddressed": UNADDRESSED,
+                     "ignore": IGNORE},
         "num_classes": len(classes),
         "classes": classes,
         "frames": frames_out,
         "fractions": {
             k: round(v / total_px, 6) if total_px else 0.0 for k, v in totals.items()
         } | {
-            "ignore": round(
-                (totals["overlap"] + totals["unmapped"] + totals["padding"]) / total_px, 6
-            ) if total_px else 0.0
+            "ignore": round((totals["overlap"] + totals["padding"]) / total_px, 6)
+            if total_px else 0.0
         },
         "notes": notes,
     }
@@ -179,8 +196,10 @@ def export_id_maps(
 
 
 def has_id_maps(run: RunOutputs) -> bool:
-    """Whether :func:`export_id_maps` has written the run's maps."""
-    return (run.identity_dir / MANIFEST).is_file()
+    """Whether :func:`export_id_maps` has written the run's maps in this format. Maps of an
+    older format are not read: they are a cache of the graph, and are written again."""
+    path = run.identity_dir / MANIFEST
+    return path.is_file() and json.loads(path.read_text()).get("format_version") == FORMAT_VERSION
 
 
 def load_id_maps(run: RunOutputs) -> tuple[dict[str, Any], dict[int, np.ndarray]]:
@@ -226,15 +245,15 @@ def round_trip_mismatches(
 ) -> dict[str, int]:
     """Pixels where the decoded maps disagree with the source masks, per node id.
 
-    Agreement means: on every non-ignore pixel, an entity's decoded mask equals its source
-    mask. Ignore pixels are excluded by construction -- that is where the encoding chose not
-    to assert anything. An empty dict is a perfect round trip.
+    Agreement means: on every labelled pixel, an entity's decoded mask equals its source
+    mask. Other pixels are excluded by construction -- that is where the encoding chose not
+    to assert an entity. An empty dict is a perfect round trip.
     """
     decoded = masks_from_id_maps(manifest, maps)
     known = {c["node_id"] for c in manifest["classes"] if c["node_id"]}
     bad: dict[str, int] = {}
     for frame, arr in maps.items():
-        keep = arr != IGNORE
+        keep = labelled(arr)
         src = by_frame.get(frame, {})
         dec = decoded.get(frame, {})
         for nid in set(src) | set(dec):

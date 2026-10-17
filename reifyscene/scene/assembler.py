@@ -252,16 +252,20 @@ class SingleVideoSceneAssembler:
         terms (Shape-of-Motion's): depth in the scene's normalized units (the geometry's depth
         over ``norm.scale`` -- the normalization rotates the world, which leaves camera depth
         alone, and divides translations by ``scale``), where that depth is valid, and the
-        foreground mask. Keyed by frame name, in the training raster. Depth as float16 (the
-        scene is ~unit-sized), masks as uint8: spin's 426 frames stay tens of MB."""
+        foreground mask. With owners, also the id maps they came from, for the owner loss.
+        Keyed by frame name, in the training raster. Depth as float16 (the scene is
+        ~unit-sized), masks as uint8: spin's 426 frames stay tens of MB."""
         depth = (stack.depths / float(norm.scale)).cpu().numpy()
         valid = (stack.valid.cpu().numpy() > 0.5) & np.isfinite(depth) & (depth > 0)
-        return {
+        out = {
             "target_frame_names": np.asarray(list(stack.cameras.frame_names)),
             "target_depths": np.where(valid, depth, 0.0).astype(np.float16),
             "target_depth_valid": valid.astype(np.uint8),
             "target_fg": (stack.fg.cpu().numpy() > 0.5).astype(np.uint8),
         }
+        if stack.owners is not None:
+            out["target_ids"] = stack.owners.cpu().numpy().astype(np.uint16)
+        return out
 
     def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
         """Per-frame union of all segment instance masks -> the dynamic foreground.
@@ -336,7 +340,7 @@ class SingleVideoSceneAssembler:
 
     def _assemble_dynamic(
         self, *, run_id: str, save_dir, geometry_artifact, instance_artifact,
-        metadata: dict[str, Any] | None, frame_refs, timeline,
+        metadata: dict[str, Any] | None, frame_refs, timeline, id_maps=None,
     ) -> SceneArtifact:
         """Build a dynamic SE(3) scene from the pipeline's own geometry + tracks.
 
@@ -345,14 +349,19 @@ class SingleVideoSceneAssembler:
         tracks are generated in-memory here (decision: tracks live in the dynamic
         init for F0b, not the tracking stage). The built ``DynamicScene`` + cameras
         are serialized into ``dynamic_bundle`` for the render stage.
+
+        ``id_maps`` -- ``(maps by frame key, class table)`` of the run's graph
+        (:mod:`reifyscene.graph.id_maps`) -- give every Gaussian its owner: the code of the
+        pixel it is seeded from (``docs/design/2026-10-17-removal-by-ownership.md`` §4.1).
         """
         from reifyscene.lifting.geometry_provider import ArtifactGeometryProvider
         from reifyscene.render.gaussian4d.motion_init import NativeMotionInitializer, dump_bundle
         from reifyscene.tracking.tapir_wrapper import TAPIRWrapper
 
         fg_by_frame = self._fg_mask_by_frame(instance_artifact)
+        maps, owner_node_ids = id_maps if id_maps is not None else (None, None)
         provider = ArtifactGeometryProvider(geometry_artifact, stream=self._streams.only(),
-                                            fg_mask_by_frame=fg_by_frame)
+                                            fg_mask_by_frame=fg_by_frame, id_map_by_frame=maps)
         # NOTE: build_native_init_inputs re-reads frame_stack internally; we read it
         # once more here for the all-pairs frames + the lift resolution (acceptable
         # for v1 -- it reads the in-memory artifact, not disk-heavy dataset loaders).
@@ -399,6 +408,8 @@ class SingleVideoSceneAssembler:
             )
 
         norm.transfm = self._fold_ground_plane_into_norm(norm.transfm, geometry_artifact)
+        if owner_node_ids is not None:
+            scene.owner_node_ids = list(owner_node_ids)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
         bundle.update(self._train_targets(stack, norm))
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact, save_dir)
@@ -411,6 +422,12 @@ class SingleVideoSceneAssembler:
             f"fg_frames={len(fg_by_frame)}",
             f"render_cameras={len(render_trajectory)}",
         ]
+        if scene.has_owners:
+            owners = scene.owners()
+            k = len(scene.owner_node_ids)
+            notes.append(f"owners: {int((owners == 0).sum())} background, "
+                         f"{int(((owners > 0) & (owners < k)).sum())} entity, "
+                         f"{int((owners >= k).sum())} unaddressed")
         return SceneArtifact(
             run_id=run_id, stage_name="scene", save_dir=save_dir,
             metadata=self._scene_metadata(metadata, geometry_artifact),
@@ -431,9 +448,11 @@ class SingleVideoSceneAssembler:
         instance_artifact=None,
         metadata: dict[str, Any] | None = None,
         streams,
+        id_maps=None,
     ) -> SceneArtifact:
         """``streams``: the run's :class:`~reifyscene.ingest.streams.RunStreams` -- where every
-        training photo is read from."""
+        training photo is read from. ``id_maps``: ``({frame key: id map}, class table)``, which
+        give a dynamic scene's Gaussians their owners."""
         self._streams = streams
         frame_refs = sorted(list(geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
@@ -446,7 +465,7 @@ class SingleVideoSceneAssembler:
             return self._assemble_dynamic(
                 run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
                 instance_artifact=instance_artifact, metadata=metadata,
-                frame_refs=frame_refs, timeline=timeline,
+                frame_refs=frame_refs, timeline=timeline, id_maps=id_maps,
             )
 
         return self._assemble_static(

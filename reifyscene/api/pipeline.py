@@ -1323,15 +1323,35 @@ class ReifyScenePipeline:
         artifact.save()
         return artifact
 
-    def assemble_scene(self, ingest_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None):
+    def assemble_scene(self, ingest_artifact, geometry_artifact, track_artifact, human_artifact=None, object_artifact=None, optimization_artifact=None, instance_artifact=None, reid_artifact=None, graph_artifact=None):
         """Assemble a lightweight static/dynamic single-video 4D scene.
 
         ``instance_artifact`` (segment stage) supplies the per-frame foreground
         masks the dynamic (``scene.kind=dynamic``) path lifts SE(3) motion from;
-        the training photos are the ingest streams' own frames.
+        the training photos are the ingest streams' own frames. ``reid_artifact`` and
+        ``graph_artifact`` say which entity each mask is: the owners of a dynamic scene's
+        Gaussians.
         """
         from reifyscene.ingest.streams import RunStreams
 
+        streams = RunStreams.from_artifacts(ingest_artifact, geometry_artifact)
+        id_maps = None
+        if self.scene_assembler.kind == 'dynamic':
+            # Every Gaussian is owned from birth by the entity it was seeded on (design doc
+            # 2026-10-17-removal-by-ownership §4.1): the graph's entities, as id maps.
+            from reifyscene.common.frame_keys import frame_key
+            from reifyscene.graph.id_maps import export_id_maps, load_id_maps
+            from reifyscene.graph.renderable_handle import pixel_masks
+
+            nodes = [{'node_id': n.node_id, 'node_type': n.node_type, 'label': n.label,
+                      'attrs': n.attrs} for n in graph_artifact.nodes]
+            placed = pixel_masks(nodes, reid_artifact.merge_map, instance_artifact,
+                                 streams.only())
+            manifest = export_id_maps(self.outputs, placed=placed)
+            _, maps = load_id_maps(self.outputs)
+            classes = sorted(manifest['classes'], key=lambda c: c['index'])
+            id_maps = ({frame_key(manifest['stream_id'], f): m for f, m in maps.items()},
+                       [c['node_id'] for c in classes])
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -1340,7 +1360,8 @@ class ReifyScenePipeline:
             human_artifact=human_artifact,
             object_artifact=object_artifact,
             instance_artifact=instance_artifact,
-            streams=RunStreams.from_artifacts(ingest_artifact, geometry_artifact),
+            streams=streams,
+            id_maps=id_maps,
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),

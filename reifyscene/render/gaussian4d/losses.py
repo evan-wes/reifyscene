@@ -57,3 +57,25 @@ def gradient_loss(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor,
     return (masked_l1_loss(pred_x[mask_x][..., None], gt_x[mask_x][..., None], quantile=quantile)
             + masked_l1_loss(pred_y[mask_y][..., None], gt_y[mask_y][..., None],
                              quantile=quantile))
+
+
+def owner_loss(shares: torch.Tensor, ids: torch.Tensor, known: torch.Tensor,
+               quantile: float = 0.98) -> torch.Tensor | None:
+    """The per-entity silhouette loss (``docs/design/2026-10-17-removal-by-ownership.md``
+    §4.3): each owner's rendered share against the id map's one-hot, over labelled pixels.
+
+    ``shares`` (H, W, C): per pixel, the composited weight of each owner channel's Gaussians;
+    ``ids`` (H, W) the class of each labelled pixel (``< C``); ``known`` (H, W) bool, the
+    labelled pixels. A pixel's error is the summed absolute difference over channels (0 when
+    its own owner alone covers it fully, 2 when another owner does), halved to [0, 1]. As in
+    Shape-of-Motion's mask term, the worst ``1 - quantile`` of pixels are left out: a mask is
+    wrong somewhere in every frame. None when nothing is labelled.
+    """
+    if not bool(known.any()):
+        return None
+    pred = shares[known]
+    target = F.one_hot(ids[known].long(), pred.shape[-1]).to(pred.dtype)
+    err = (pred - target).abs().sum(dim=-1) / 2.0
+    if quantile < 1 and err.numel() > 1:
+        err = err[err <= torch.quantile(err, quantile)]
+    return err.mean()

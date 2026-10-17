@@ -107,12 +107,16 @@ class ArtifactGeometryProvider(GeometryProvider):
     so ``val`` is empty here.
     """
 
-    def __init__(self, geometry_artifact, *, stream, fg_mask_by_frame: dict | None = None) -> None:
+    def __init__(self, geometry_artifact, *, stream, fg_mask_by_frame: dict | None = None,
+                 id_map_by_frame: dict | None = None) -> None:
         """``stream``: the :class:`~reifyscene.ingest.streams.FrameStream` this geometry is of;
-        its frames are the photos, and only its frames are used (streams are never merged)."""
+        its frames are the photos, and only its frames are used (streams are never merged).
+        ``id_map_by_frame`` (frame key -> id map, already in the geometry's raster) gives the
+        stack its owners; every frame with depth must then have one."""
         self.geometry_artifact = geometry_artifact
         self.stream = stream
         self.fg_mask_by_frame = dict(fg_mask_by_frame or {})
+        self.id_map_by_frame = None if id_map_by_frame is None else dict(id_map_by_frame)
         frames = [fr for fr in geometry_artifact.selected_frames if str(fr.stream_id) == stream.id]
         self.train_frames = sorted(frames, key=lambda fr: (str(fr.stream_id), int(fr.frame_idx)))
 
@@ -166,6 +170,7 @@ class ArtifactGeometryProvider(GeometryProvider):
         rgbs: list[torch.Tensor] = []
         fgs: list[torch.Tensor] = []
         valids: list[torch.Tensor] = []
+        owners: list[torch.Tensor] = []
         expected = 0
 
         for fr in self.train_frames:
@@ -204,6 +209,11 @@ class ArtifactGeometryProvider(GeometryProvider):
             # Valid only where depth is usable (finite & > near) — a zero/NaN hole must not
             # be fed to the render trainer as valid supervision (was unconditional ones).
             valids.append(torch.as_tensor(valid_depth_mask(depth).astype(np.float32), device=device))
+            if self.id_map_by_frame is not None:
+                ids = self.id_map_by_frame.get(key)
+                if ids is None or np.asarray(ids).shape != (h, w):
+                    raise ValueError(f"geometry frame {key}: no id map in its raster {(h, w)}")
+                owners.append(torch.as_tensor(np.asarray(ids).astype(np.int64), device=device))
 
         n = len(names)
         # Time ids number the stack; every frame with depth is in it, so no frame the
@@ -221,4 +231,5 @@ class ArtifactGeometryProvider(GeometryProvider):
             rgbs=torch.stack(rgbs) if rgbs else torch.zeros((0, 0, 0, 3), dtype=torch.uint8, device=device),
             fg=torch.stack(fgs) if fgs else torch.zeros((0, 0, 0), dtype=torch.float32, device=device),
             valid=torch.stack(valids) if valids else torch.zeros((0, 0, 0), dtype=torch.float32, device=device),
+            owners=torch.stack(owners) if owners else None,
         )

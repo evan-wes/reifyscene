@@ -16,6 +16,15 @@ graph), and letting their errors move geometry cost 1.2 dB on lab-coat. Densific
 then also sees photometric gradients only. ``identity_detach_geometry=False`` is the
 coupled single-pass variant, kept for comparison.
 
+When the scene's Gaussians have **owners** (each one's entity, fixed at seeding and inherited
+through densification) and the views carry id maps, the **owner loss** asks each entity's
+Gaussians to cover its pixels and nothing else: the owners are rendered as one channel each in
+a second pass whose geometry is live -- this term moves Gaussians, it is the point -- so
+densification still sees photometric gradients only. Every ``owner_drift_every`` steps the
+FlashSplat evidence of each Gaussian is compared with its owner, and Gaussians whose evidence
+went to another entity are counted (flagged, never relabelled;
+``docs/design/2026-10-17-removal-by-ownership.md`` §4.3-4.5).
+
 A 3D consistency term (Gaussian Grouping's ``loss_cls_3d``) pulls each sampled
 Gaussian's class distribution toward its k nearest neighbours' -- canonical means for
 the foreground, which stay neighbours on a typical frame across all ten loop scenes,
@@ -41,12 +50,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from reifyscene.graph.id_maps import IGNORE
+from reifyscene.graph.id_maps import labelled
 from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig, compute_scene_extent
 from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES, DynamicScene
-from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM, PARAM_NAMES
+from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM, OWNER_BUFFER, PARAM_NAMES
 from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_bchw
-from reifyscene.render.gaussian4d.losses import gradient_loss, masked_l1_loss
+from reifyscene.render.gaussian4d.losses import gradient_loss, masked_l1_loss, owner_loss
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 
 
@@ -93,6 +102,10 @@ class DynamicTrainConfig:
     lambda_depth: float = 0.5
     lambda_depth_grad: float = 0.0
     lambda_mask: float = 0.0
+    # The owner loss (per-entity silhouettes), on whenever the scene has owners; Shape-of-
+    # Motion's weight for its mask term. 0 trains the same owned scene without it.
+    lambda_owner: float = 1.0
+    owner_drift_every: int = 500        # 0: no drift check
     lr_means: float = 1.6e-4
     lr_scales: float = 5.0e-3
     lr_quats: float = 1.0e-3
@@ -164,14 +177,16 @@ class DynamicGaussianTrainer:
         # Identity rides densification like any other per-Gaussian param: a split
         # child inherits its parent's vector, a pruned Gaussian takes its vector along.
         extra = (IDENTITY_PARAM,) if self.scene.has_identity else ()
+        # Owners ride densification too: a child is its parent's, a pruned Gaussian's goes.
+        buffers = (OWNER_BUFFER,) if self.scene.has_owners else ()
         self.fg_ctrl = DensificationController(
             self.scene.fg, self.optimizer, self.densify_cfg, scene_extent,
-            param_names=FG_PARAM_NAMES + extra, group_prefix="fg.",
+            param_names=FG_PARAM_NAMES + extra, group_prefix="fg.", buffer_names=buffers,
         )
         self.bg_ctrl = (
             DensificationController(
                 self.scene.bg, self.optimizer, self.densify_cfg, scene_extent,
-                param_names=PARAM_NAMES + extra, group_prefix="bg.",
+                param_names=PARAM_NAMES + extra, group_prefix="bg.", buffer_names=buffers,
             )
             if self.scene.bg is not None
             else None
@@ -243,17 +258,17 @@ class DynamicGaussianTrainer:
     def identity_loss(self, features: torch.Tensor, id_map: torch.Tensor) -> torch.Tensor | None:
         """Cross-entropy of rendered identity against an id map, normalised to ~(0, 1).
 
-        Pixels marked ignore (overlaps, dropped tracklets, padding) contribute nothing.
+        Pixels that are not labelled (dropped tracklets, overlaps, padding) contribute nothing.
         Divided by ``log(num_classes)`` as Gaussian Grouping does, so the weight means
         the same across scenes with 4 classes and with 24. None when no pixel is labelled.
         """
         target = id_map.reshape(-1).long()
-        labelled = target != IGNORE
-        if not bool(labelled.any()):
+        known = labelled(target)
+        if not bool(known.any()):
             return None
         head = self.scene.identity_classifier
         logits = head(features.reshape(-1, features.shape[-1]))
-        ce = F.cross_entropy(logits[labelled], target[labelled])
+        ce = F.cross_entropy(logits[known], target[known])
         return ce / math.log(head.out_features)
 
     def _photometric(self, pred: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -309,6 +324,46 @@ class DynamicGaussianTrainer:
         loss = self.identity_loss(feat, id_map)
         return None if loss is None else self.cfg.lambda_identity * loss
 
+    def owner_term(self, cloud, camera: RenderCamera, ids: torch.Tensor,
+                   onehot: torch.Tensor) -> torch.Tensor | None:
+        """The weighted owner loss for one view (None when nothing is labelled): the owner
+        channels ``onehot`` (N, C) rendered with live geometry in a pass of their own."""
+        shares = self.rasterizer.rasterize(
+            cloud.means, cloud.quats, cloud.scales, cloud.opacities, cloud.colors.detach(),
+            camera, features=onehot,
+        ).features
+        loss = owner_loss(shares, ids, labelled(ids))
+        return None if loss is None else self.cfg.lambda_owner * loss
+
+    @torch.no_grad()
+    def owner_drift(self, views: list[tuple]) -> dict:
+        """Gaussians whose FlashSplat evidence now goes to another entity than their owner.
+
+        ``views`` are ``(camera, time_id, id map)``. Only Gaussians that some entity's or the
+        background's evidence clearly claims (slackness 0) and that are owned by an entity or
+        the background are judged; a flag is counted per (owner, evidence) pair of id-map
+        codes. Flagged, never relabelled: a Gaussian that is one thing at one time and another
+        at another makes removal ill-posed, and relabelling it hides that.
+        """
+        from reifyscene.graph.assignment import assign, evidence_matrix
+
+        k = len(self.scene.owner_node_ids)
+        with torch.enable_grad():
+            counts = evidence_matrix(self.scene, self.rasterizer, views, k)
+        member = assign(counts)
+        claimed = member.any(dim=1)
+        evidence = member.float().argmax(dim=1)
+        owners = self.scene.owners()
+        judged = claimed & (owners < k)
+        flagged = judged & (evidence != owners)
+        pairs: dict[str, int] = {}
+        if bool(flagged.any()):
+            o, e = owners[flagged].tolist(), evidence[flagged].tolist()
+            for a, b in zip(o, e, strict=True):
+                pairs[f"{a}->{b}"] = pairs.get(f"{a}->{b}", 0) + 1
+        return {"judged": int(judged.sum()), "flagged": int(flagged.sum()),
+                "pairs": dict(sorted(pairs.items(), key=lambda kv: -kv[1]))}
+
     def geometry_terms(self, out, fg_share, target) -> tuple[torch.Tensor, dict[str, float]]:
         """The depth, depth-gradient and mask losses of one view against its ``target``
         (``depth`` (H, W) in scene units, ``valid`` (H, W) bool, ``fg`` (H, W) float);
@@ -344,11 +399,13 @@ class DynamicGaussianTrainer:
         on_log: Callable[[dict], None] | None = None,
         on_trace: Callable[[dict], None] | None = None,
         on_snapshot: Callable[[int, DynamicScene], None] | None = None,
+        on_drift: Callable[[dict], None] | None = None,
     ) -> DynamicScene:
         """``train_views`` are ``(camera, gt, time_id)`` or, for identity training,
         ``(camera, gt, time_id, id_map)`` with ``id_map`` an (H, W) integer tensor.
-        ``targets``, one per view, carry its geometry supervision (:meth:`geometry_terms`);
-        they are required while any geometry weight is on.
+        ``targets``, one per view, carry its geometry supervision (:meth:`geometry_terms`)
+        and, for an owned scene, its id map (``ids``); they are required while any geometry
+        weight is on, or the owner loss is. ``on_drift`` receives each drift check.
 
         ``on_trace`` receives an identity trace record every ``identity_trace_every`` steps
         (and at step 1); ``on_snapshot`` receives the scene at each of ``snapshot_steps``.
@@ -362,6 +419,16 @@ class DynamicGaussianTrainer:
             raise ValueError("the geometry terms are on but not every training view has "
                              "depth / mask targets (set lambda_depth, lambda_depth_grad and "
                              "lambda_mask to 0 to train on photos alone)")
+        owners_on = self.scene.has_owners and self.cfg.lambda_owner > 0
+        drift_on = self.scene.has_owners and self.cfg.owner_drift_every > 0
+        if (owners_on or drift_on) and (targets is None or len(targets) != len(train_views)
+                                        or any(t is None or "ids" not in t for t in targets)):
+            raise ValueError("the scene's Gaussians have owners but not every training view "
+                             "has an id map (set lambda_owner and owner_drift_every to 0 to "
+                             "train without them)")
+        drift_views = ([(v[0], v[2], t["ids"]) for v, t in zip(train_views, targets, strict=True)]
+                       if drift_on else [])
+        owner_value = float("nan")
         geo_stats: dict[str, float] = {}
         mask_on = self.cfg.lambda_mask > 0
         torch.manual_seed(self.cfg.random_seed)
@@ -394,6 +461,9 @@ class DynamicGaussianTrainer:
             n_bg = self.scene.bg.num_gaussians if self.scene.bg is not None else 0
             coupled = not self.cfg.identity_detach_geometry
             loss = self.cfg.lambda_smooth * self.scene.motion_smoothness()
+            if owners_on:                # owners change only when densification runs
+                channel, n_channels = self.scene.owner_channels()
+                onehot = F.one_hot(channel, n_channels).to(torch.float32)
             outs, l1s = [], []
             for idx in picks:
                 view = train_views[idx]
@@ -418,6 +488,11 @@ class DynamicGaussianTrainer:
                         out.features = out.features[..., :-1] if coupled else None
                     geo, geo_stats = self.geometry_terms(out, fg_share, targets[idx])
                     loss = loss + geo / batch
+                if owners_on:
+                    own = self.owner_term(cloud, camera, targets[idx]["ids"], onehot)
+                    if own is not None:
+                        loss = loss + own / batch
+                        owner_value = float(own.detach()) / self.cfg.lambda_owner
                 if cloud.features is not None and id_map is not None:
                     id_term = self.identity_term(cloud, camera, id_map, out)
                     if id_term is not None:
@@ -445,12 +520,17 @@ class DynamicGaussianTrainer:
                 self.bg_ctrl.after_step(step)
             if self._identity_reset_due(step):
                 self.reset_identity(step)
+            if drift_on and on_drift is not None and (step % self.cfg.owner_drift_every == 0
+                                                      or step == self.cfg.iters):
+                on_drift({"step": step, **self.owner_drift(drift_views)})
 
             if on_log is not None and (step % self.cfg.log_every == 0 or step == 1):
                 with torch.no_grad():
                     psnr = image_psnr(out.rgb.detach().clamp(0, 1), gt)
                 record = {"step": step, "loss": float(loss.detach()), "l1": l1, "psnr": psnr,
                           "num_gaussians": self.scene.num_gaussians, **geo_stats}
+                if owners_on:
+                    record["owner_loss"] = owner_value
                 if self.scene.has_identity:
                     record["identity_loss"] = id_loss_value
                     record["identity_3d_loss"] = id3d_value
