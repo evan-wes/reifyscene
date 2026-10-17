@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Procrustes + clustering motion initialization (Shape-of-Motion port).
 
 The algorithm half of reifyscene's native motion initializer. Given lifted 3D

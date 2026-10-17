@@ -13,8 +13,10 @@ ones grazing an entity in some views while mostly covering something else (§4.6
 identity scope): the cross-entropy loss nudges each toward the pixels it touches and nothing
 asks where most of its evidence lies.
 
-Implemented here from the paper and a reading of their released code (whose rasterizer is
-Inria-licensed and is not used): the evidence comes from our own gsplat wrapper. Rendering a
+Implemented here from the paper and a reading of their released code
+(https://github.com/florinshen/FlashSplat, under the Gaussian-Splatting non-commercial licence
+of Inria and MPII); none of their code is used, and the evidence comes from our own gsplat
+wrapper (THIRD_PARTY_NOTICES.md). Rendering a
 C-channel feature is linear in each Gaussian's feature, so for ``L = sum_pixels
 onehot(label)[pixel] . F[pixel]`` the gradient with respect to Gaussian *i*'s feature is
 exactly its accumulated blending weight per class. One backward per view. The scene is

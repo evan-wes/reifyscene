@@ -29,7 +29,7 @@ from reifyscene.geometry.image_transform import (
     pad_to_batch,
     vggt_input_transform,
 )
-from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_derived import load_and_preprocess_images_without_upscale
 from reifyscene.ingest.decoder import VideoDecoder
 from reifyscene.ingest.ingest_artifact import IngestArtifact
 
@@ -94,9 +94,8 @@ def test_upstream_parity_after_the_cache_downscale(tmp_path: Path) -> None:
 def test_bounded_loader_parity_is_pixel_identical(tmp_path: Path, size, target) -> None:
     path = tmp_path / "frame.png"
     Image.fromarray(_photo(*size, seed=2)).save(path)
-    init = VGGTLongInitializer({"backend_mode": "heuristic", "device": "cpu"})
     theirs = _to_u8(
-        init._load_and_preprocess_images_without_upscale(
+        load_and_preprocess_images_without_upscale(
             [str(path)], mode="crop", target_size=target
         )[0]
     )

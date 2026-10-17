@@ -7,11 +7,12 @@ emits — replacing the last borrowed input in the native motion-init path.
 Provenance
 ----------
 These four modules (``nets.py``, ``tapir_model.py``, ``transforms.py``,
-``utils.py``) are vendored **byte-for-byte** from Shape of Motion's
-``preproc/tapnet_torch/`` (itself DeepMind's TAPIR torch port), so they can be
-re-diffed against upstream without noise. They carry their original DeepMind
-Apache-2.0 headers. Do NOT edit them in place: to update, re-copy from the
-pinned ``third_party/shape-of-motion`` checkout and re-run the parity check.
+``utils.py``) are vendored from Shape of Motion's ``preproc/tapnet_torch/`` (itself
+DeepMind's TAPIR torch port) under the Apache License 2.0 (LICENSES/Apache-2.0.txt), with
+their original DeepMind headers. Three are byte-for-byte copies; ``tapir_model.py`` has one
+change, marked in its header (``TAPIR.forward`` takes precomputed ``feature_grids``). To
+update, re-copy from the pinned ``third_party/shape-of-motion`` checkout, re-apply that change,
+and re-run the parity check.
 
 The single non-torch dependency is ``einshape`` (declared in the ``vision``
 extra in ``pyproject.toml`` / pinned in ``scripts/locks/reifyscene.lock``), kept as

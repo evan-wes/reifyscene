@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Rotation helpers for the SE(3) motion model (ported, no roma dependency).
 
 The 6D continuous rotation parameterization (Zhou et al.) is what the

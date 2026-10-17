@@ -13,6 +13,7 @@ import torch
 
 from reifyscene.api.pipeline import ReifyScenePipeline
 from reifyscene.common.types import FrameRef
+from reifyscene.geometry.vggt_derived import load_and_preprocess_images_without_upscale
 from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
 from reifyscene.geometry.vggt_wrapper import VGGTInitializer, input_cache_root
 from reifyscene.ingest.decoder import VideoDecoder
@@ -580,7 +581,7 @@ def test_vggt_long_bounded_preprocess_avoids_reinflating_small_inputs(tmp_path: 
 
     init = VGGTLongInitializer({"backend_mode": "real", "device": "cuda", "resize_max_dim": 320})
     target_size = init._effective_vggt_input_target_size(320)
-    batch = init._load_and_preprocess_images_without_upscale([str(image_path)], target_size=target_size)
+    batch = load_and_preprocess_images_without_upscale([str(image_path)], target_size=target_size)
 
     assert batch.shape[0] == 1
     assert batch.shape[-1] == target_size

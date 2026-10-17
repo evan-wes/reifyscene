@@ -8,7 +8,9 @@ Gaussian) representation.
 representation you can **interpret, query, and semantically edit** — not an opaque
 neural blob. ([Renamed from `room4d`.](CHANGELOG.md#0201---2026-09-10))
 
-Licensed under Apache 2.0.
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for personal, hobby,
+research and teaching use, not for commercial use. Some files are under other licences, and
+several models the pipeline downloads are for non-commercial use only ([Licence](#licence)).
 
 reifyscene is a **research / learning project** (not a product): the aim is to build the whole
 reconstruction pipeline end to end and understand every stage. Today one video goes end to end,
@@ -364,3 +366,15 @@ fallback can't pose as a fixed-intrinsics result.
 Measured so far: Balloon1 cross-camera pairwise rotation error mean 0.176°
 (free intrinsics) / 0.136° (known-intrinsics protocol); DyCheck
 `paper-windmill` 1.89° across 3 cameras against ARKit odometry.
+
+## Licence
+
+reifyscene is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Code adapted
+from other projects keeps its own licence: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists
+every such file, and `LICENSES/` holds the licence texts.
+
+The tools the setup scripts check out, the models the pipeline downloads and the datasets have
+their own terms, which you accept by using them. Several of the models it uses are for
+**non-commercial use only**: CoTracker (code and weights), the VGGT-1B, VGGSfM and Sapiens
+weights, and SuperPoint and SuperGlue in the calibration stage. `THIRD_PARTY_NOTICES.md` lists
+them.

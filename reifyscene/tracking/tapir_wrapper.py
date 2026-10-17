@@ -1,3 +1,5 @@
+# Portions adapted from Shape of Motion (https://github.com/vye16/shape-of-motion),
+# Copyright (c) 2024 Vickie Ye, under the MIT License (LICENSES/MIT-shape-of-motion.txt).
 """Native TAPIR / BootsTAPIR point-tracker backend.
 
 A real :class:`~reifyscene.tracking.base.PointTracker`, sibling to
