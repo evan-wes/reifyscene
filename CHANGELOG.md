@@ -9,6 +9,69 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.5.0.0] - 2026-10-16
+
+Ready to be public: one data directory holds everything the pipeline reads and writes, nothing in
+the repository names a folder on a machine, and the project is licensed for non-commercial use.
+Records now name places by their names inside the data directory, so runs made before this
+version are converted outside the repository, not read.
+
+### Added
+- **One data directory**, named by `REIFYSCENE_DATA_DIR` and read only by
+  `reifyscene/common/data_dir.py`, with a fixed layout: `datasets/`, `checkpoints/`, `runs/`,
+  `reference/`, `cache/`, `archive/`. Commands and configs name things inside it
+  (`--run-dir lab-coat` is `runs/lab-coat`; a config's `dataset_root` is a name in `datasets/`).
+  A full path, or a name that climbs out with `..`, is refused.
+- **`THIRD_PARTY_NOTICES.md` and `LICENSES/`**: every file under another project's licence, the
+  methods we implemented from others' work, the DAVIS-derived numbers in `benchmarks/`, and the
+  licences of what the setup scripts and the pipeline download.
+- **Guard tests.** No tracked file names a home folder, a temporary folder, a folder beside the
+  repository, a personal tool or a personal address (`tests/test_no_local_paths.py`). In the
+  Python code only `data_dir` reads the setting, and nothing looks in the home folder. The
+  records of a whole pipeline run, and the run script's manifest, hold no path of the data
+  directory.
+
+### Changed
+- **Licence: PolyForm Noncommercial 1.0.0**, in place of Apache-2.0. Code from other projects
+  keeps its own licence (`THIRD_PARTY_NOTICES.md`).
+- **Records name places inside the data directory, never a path on a machine**: a stream's input,
+  each frame's file (by its name inside the stream's folder), the cached VGGT inputs, the folder a
+  resumed stage was loaded from, and a run manifest's inputs and prior run. The manifest records
+  its config file by name and content hash. A whole data directory can be moved or renamed and
+  its runs still open.
+- **Every command takes names.** `run_single_video_reifyscene.py` takes `--video` /
+  `--frames-dir` in `datasets/` and `--run-dir` / `--prior-run-dir` in `runs/`;
+  `reifyscene serve` takes no folder and serves `runs/`; `reifyscene query` and
+  `reifyscene edit remove` take a run's name; so does every Python script that took a dataset,
+  a run, a checkpoint or a data folder (`verify_reference_data.sh` still checks a folder given
+  by path).
+- **The pipeline no longer writes inside the repository**: VGGT inputs, VGGT-Long's scratch
+  outputs and COLMAP's work folder go to `cache/`, a pipeline run with no run folder goes to
+  `runs/dev`, and the TAPIR checkpoint is found in `checkpoints/tapnet/`.
+- **The two functions adapted from VGGT** (its image loader and its forward pass) move to
+  `reifyscene/geometry/vggt_derived.py`, under the VGGT License.
+- The files ported from Shape of Motion carry its MIT notice, and the change to the vendored
+  TAPIR model is marked in its header.
+- `scripts/run_graph_loop_set.sh` also builds the DAVIS inventory runs (`STOP_STAGE=graph`), so
+  that benchmark's runs can be rebuilt from the repository.
+- The README describes the data directory, what works now (the queryable scene graph), the
+  measured removal limit, the licence and the models that are for non-commercial use only.
+- Mentions of folders on one machine and of private notes are gone from the code, the docs, this
+  changelog's history and `TODOS.md`.
+
+### Removed
+- `TAPNET_CKPT_DIR` and `fetch_tapir_checkpoint.sh --out-dir`: the checkpoint lives in the data
+  directory. The scene stage no longer fingerprints that variable.
+- The fallback to a `miniconda3` folder in the home directory when looking for conda: it is found
+  from `CONDA_EXE` or `PATH`.
+- Config keys nothing read that named folders inside the repository (`run.output_dir`,
+  `dataset.input_dir`, `dataset.cache_dir`), and the benchmark scripts' `--runs` /
+  `--runs-root` options.
+
+### Fixed
+- The handles contract's comment said the body bound is on by default; it is off.
+- `third_party_patches/README.md` listed four of the five patched tools.
+
 ## [0.4.0.0] - 2026-10-16
 
 The queryable-scene-graph spike lands: entities get Gaussians, relations and a query and edit
