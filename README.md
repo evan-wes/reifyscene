@@ -184,7 +184,10 @@ reifyscene edit remove my_run 8                   # an entity's node id or its t
 
 ### Results
 
-Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views):
+Masked novel-view PSNR on the DyCheck "spin" sequence (all 722 held-out views). reifyscene's rows
+were measured at v0.3.0.0. Training changed in 0.4.0.0 (eight views per step, depth supervision
+on by default) and these runs have not been re-scored since, so today's code may score
+differently.
 
 | geometry | scene | frames | masked mPSNR | mLPIPS |
 |---|---|---|---|---|
