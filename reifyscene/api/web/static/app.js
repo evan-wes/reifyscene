@@ -372,6 +372,9 @@ function drawViews() {
   t.setAttribute("aria-pressed", String(S.free3d));
   t.disabled = S.view === "photo";
   t.title = S.view === "photo" ? "a photo has no 3D: pick render or an edit view" : "orbit this view in 3D";
+  const r = $("reset3d");
+  r.disabled = !in3d();
+  r.title = in3d() ? "back to the camera that recorded this frame (or double-click the view)" : "for the 3D view";
 }
 function frameUrl(view, f) {
   if (in3d(view)) {
@@ -474,7 +477,9 @@ function initFreeView() {
     S.moving = true; paint();
     clearTimeout(S.wheelEnd); S.wheelEnd = setTimeout(() => { S.moving = false; paint(); }, 250);
   }, { passive: false });
-  st.addEventListener("dblclick", () => { if (in3d()) { S.cam = { ...HOME }; paint(); } });
+  const reset = () => { if (in3d()) { S.cam = { ...HOME }; paint(); } };
+  st.addEventListener("dblclick", reset);
+  $("reset3d").addEventListener("click", reset);
   $("free3d").addEventListener("click", () => { S.free3d = !S.free3d; paint(); });
 }
 
