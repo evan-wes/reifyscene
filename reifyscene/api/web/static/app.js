@@ -350,7 +350,10 @@ function placeCursor() {
 const nearestIndex = (f) => S.frames.reduce((best, v, i) => (Math.abs(v - f) < Math.abs(S.frames[best] - f) ? i : best), 0);
 
 // -- frame view -------------------------------------------------------------------------------
-const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"], ["took", "took"]];
+// [view, what the button and the tag call it]: "took" is what the removal took, the entity alone
+const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"],
+               ["took", "extracted entity"]];
+const viewLabel = (v) => Object.fromEntries(VIEWS)[v] ?? v;
 // what each Gaussian view shows from the 3D camera; a photo has no 3D
 const SHOW_3D = { render: "scene", before: "scene", after: "edited", took: "took" };
 const shown = () => (S.flipped ? flipTarget(S.view) : S.view);
@@ -413,12 +416,12 @@ function paint() {
     // one moving camera saw this scene: far off its path the reconstruction is guesswork
     const far = Math.abs(S.cam.yaw) > 15 || Math.abs(S.cam.pitch) > 10;
     const flip = view === "render" ? " · (no photo from a moved camera)"
-      : ` · click: ${S.flipped ? S.view : flipTarget(S.view)}`;
+      : ` · click: ${viewLabel(S.flipped ? S.view : flipTarget(S.view))}`;
     sel = flip +
       (far ? ` · ${Math.round(S.cam.yaw)}°/${Math.round(S.cam.pitch)}° off the recorded view: unseen, expect smears` : "") +
       " · drag orbit · shift-drag pan · wheel zoom · double-click reset";
   }
-  $("stage-tag").textContent = `${is3d ? `3D ${view}` : view}${sel}`;
+  $("stage-tag").textContent = `${is3d ? `3D ${viewLabel(view)}` : viewLabel(view)}${sel}`;
   $("stage").classList.toggle("free", is3d);
   drawViews(); placeCursor(); updateEdges();
   if (S.selected || S.selRel !== null) drawRelTimeline();
