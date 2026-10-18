@@ -1,0 +1,4232 @@
+{
+ "benchmark": "removal_tests",
+ "generated": "2026-10-18T00:55:56Z",
+ "commit": "450406d",
+ "pass_marks": {
+  "t1_clean": 0.95,
+  "t2_left": 0.05,
+  "t3_gap_db": 1.0
+ },
+ "checkpoint": "render",
+ "ranking": [
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "human:cam_00:sam2:cam_00:2",
+   "label": "person",
+   "frames": 47,
+   "pixels": 570162,
+   "seen_share": 0.8632,
+   "unseen_share": 0.1368,
+   "floor_db": 17.374,
+   "floor_photo_db": 16.96,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 12481,
+     "floor_db": 21.235,
+     "floor_photo_db": 22.422
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 32630,
+     "floor_db": 20.954,
+     "floor_photo_db": 20.867
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 73683,
+     "floor_db": 20.339,
+     "floor_photo_db": 19.749
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 142810,
+     "floor_db": 18.456,
+     "floor_photo_db": 17.94
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 230572,
+     "floor_db": 15.894,
+     "floor_photo_db": 15.501
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "human:cam_00:sam2:cam_00:2",
+   "label": "person",
+   "frames": 47,
+   "pixels": 570162,
+   "seen_share": 0.8632,
+   "unseen_share": 0.1368,
+   "floor_db": 17.053,
+   "floor_photo_db": 16.961,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 12481,
+     "floor_db": 21.529,
+     "floor_photo_db": 22.427
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 32630,
+     "floor_db": 20.719,
+     "floor_photo_db": 20.861
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 73683,
+     "floor_db": 19.84,
+     "floor_photo_db": 19.75
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 142810,
+     "floor_db": 17.985,
+     "floor_photo_db": 17.942
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 230572,
+     "floor_db": 15.633,
+     "floor_photo_db": 15.503
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "human:cam_00:sam2:cam_00:3",
+   "label": "person",
+   "frames": 47,
+   "pixels": 895172,
+   "seen_share": 0.5871,
+   "unseen_share": 0.4129,
+   "floor_db": 17.577,
+   "floor_photo_db": 16.785,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 9675,
+     "floor_db": 22.993,
+     "floor_photo_db": 23.615
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 21458,
+     "floor_db": 22.637,
+     "floor_photo_db": 21.784
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 55709,
+     "floor_db": 22.121,
+     "floor_photo_db": 20.364
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 115297,
+     "floor_db": 19.942,
+     "floor_photo_db": 18.116
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 323456,
+     "floor_db": 16.344,
+     "floor_photo_db": 15.782
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "human:cam_00:sam2:cam_00:3",
+   "label": "person",
+   "frames": 47,
+   "pixels": 895172,
+   "seen_share": 0.5871,
+   "unseen_share": 0.4129,
+   "floor_db": 17.102,
+   "floor_photo_db": 16.786,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 9675,
+     "floor_db": 23.93,
+     "floor_photo_db": 23.629
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 21458,
+     "floor_db": 22.602,
+     "floor_photo_db": 21.763
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 55709,
+     "floor_db": 21.082,
+     "floor_photo_db": 20.387
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 115297,
+     "floor_db": 18.694,
+     "floor_photo_db": 18.117
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 323456,
+     "floor_db": 16.016,
+     "floor_photo_db": 15.781
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "human:cam_00:sam2:cam_00:8",
+   "label": "person",
+   "frames": 47,
+   "pixels": 896029,
+   "seen_share": 0.3625,
+   "unseen_share": 0.6375,
+   "floor_db": 15.189,
+   "floor_photo_db": 14.723,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 3691,
+     "floor_db": 21.166,
+     "floor_photo_db": 21.556
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 6312,
+     "floor_db": 20.664,
+     "floor_photo_db": 20.132
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 16434,
+     "floor_db": 19.768,
+     "floor_photo_db": 18.31
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 53511,
+     "floor_db": 16.988,
+     "floor_photo_db": 15.932
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 244901,
+     "floor_db": 14.591,
+     "floor_photo_db": 14.226
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "human:cam_00:sam2:cam_00:8",
+   "label": "person",
+   "frames": 47,
+   "pixels": 896029,
+   "seen_share": 0.3625,
+   "unseen_share": 0.6375,
+   "floor_db": 14.889,
+   "floor_photo_db": 14.729,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 3691,
+     "floor_db": 21.319,
+     "floor_photo_db": 21.562
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 6312,
+     "floor_db": 20.333,
+     "floor_photo_db": 20.129
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 16434,
+     "floor_db": 18.636,
+     "floor_photo_db": 18.302
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 53511,
+     "floor_db": 16.184,
+     "floor_photo_db": 15.934
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 244901,
+     "floor_db": 14.377,
+     "floor_photo_db": 14.233
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "object:cam_00:sam2:cam_00:6",
+   "label": "handbag",
+   "frames": 47,
+   "pixels": 50275,
+   "seen_share": 0.3337,
+   "unseen_share": 0.6663,
+   "floor_db": 22.325,
+   "floor_photo_db": 21.106,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 813,
+     "floor_db": 25.816,
+     "floor_photo_db": 25.94
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 1729,
+     "floor_db": 26.069,
+     "floor_photo_db": 25.401
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 2525,
+     "floor_db": 24.313,
+     "floor_photo_db": 23.22
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 3798,
+     "floor_db": 22.782,
+     "floor_photo_db": 21.14
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 7914,
+     "floor_db": 21.028,
+     "floor_photo_db": 19.858
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "object:cam_00:sam2:cam_00:6",
+   "label": "handbag",
+   "frames": 47,
+   "pixels": 50275,
+   "seen_share": 0.3337,
+   "unseen_share": 0.6663,
+   "floor_db": 21.469,
+   "floor_photo_db": 21.106,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 813,
+     "floor_db": 26.111,
+     "floor_photo_db": 25.936
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 1729,
+     "floor_db": 25.879,
+     "floor_photo_db": 25.374
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 2525,
+     "floor_db": 23.482,
+     "floor_photo_db": 23.244
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 3798,
+     "floor_db": 21.634,
+     "floor_photo_db": 21.118
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 7914,
+     "floor_db": 20.189,
+     "floor_photo_db": 19.864
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "object:cam_00:sam2:cam_00:4",
+   "label": "bird",
+   "frames": 47,
+   "pixels": 72687,
+   "seen_share": 0.3299,
+   "unseen_share": 0.6701,
+   "floor_db": 16.961,
+   "floor_photo_db": 15.894,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 2393,
+     "floor_db": 19.744,
+     "floor_photo_db": 20.23
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 4581,
+     "floor_db": 19.733,
+     "floor_photo_db": 19.313
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 4759,
+     "floor_db": 18.307,
+     "floor_photo_db": 17.035
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 4645,
+     "floor_db": 17.004,
+     "floor_photo_db": 15.606
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 7603,
+     "floor_db": 14.903,
+     "floor_photo_db": 13.772
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "object:cam_00:sam2:cam_00:4",
+   "label": "bird",
+   "frames": 47,
+   "pixels": 72687,
+   "seen_share": 0.3299,
+   "unseen_share": 0.6701,
+   "floor_db": 16.286,
+   "floor_photo_db": 15.895,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 2393,
+     "floor_db": 20.026,
+     "floor_photo_db": 20.257
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 4581,
+     "floor_db": 19.751,
+     "floor_photo_db": 19.319
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 4759,
+     "floor_db": 17.534,
+     "floor_photo_db": 17.042
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 4645,
+     "floor_db": 16.021,
+     "floor_photo_db": 15.61
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 7603,
+     "floor_db": 14.163,
+     "floor_photo_db": 13.767
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "object:cam_00:sam2:cam_00:7",
+   "label": "bird",
+   "frames": 21,
+   "pixels": 6093,
+   "seen_share": 0.1901,
+   "unseen_share": 0.8099,
+   "floor_db": 25.666,
+   "floor_photo_db": 24.046,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 54,
+     "floor_db": 27.427,
+     "floor_photo_db": 26.622
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 138,
+     "floor_db": 27.299,
+     "floor_photo_db": 25.762
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 309,
+     "floor_db": 27.057,
+     "floor_photo_db": 25.331
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 434,
+     "floor_db": 26.538,
+     "floor_photo_db": 24.431
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 223,
+     "floor_db": 22.636,
+     "floor_photo_db": 21.42
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "object:cam_00:sam2:cam_00:7",
+   "label": "bird",
+   "frames": 21,
+   "pixels": 6093,
+   "seen_share": 0.1901,
+   "unseen_share": 0.8099,
+   "floor_db": 24.651,
+   "floor_photo_db": 24.033,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 54,
+     "floor_db": 27.367,
+     "floor_photo_db": 26.534
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 138,
+     "floor_db": 26.822,
+     "floor_photo_db": 25.838
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 309,
+     "floor_db": 26.053,
+     "floor_photo_db": 25.339
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 434,
+     "floor_db": 24.968,
+     "floor_photo_db": 24.394
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 223,
+     "floor_db": 21.921,
+     "floor_photo_db": 21.405
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "object:cam_00:sam2:cam_00:0",
+   "label": "cup",
+   "frames": 33,
+   "pixels": 129554,
+   "seen_share": 0.0935,
+   "unseen_share": 0.9065,
+   "floor_db": 16.975,
+   "floor_photo_db": 15.346,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 541,
+     "floor_db": 20.1,
+     "floor_photo_db": 19.529
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 1278,
+     "floor_db": 19.408,
+     "floor_photo_db": 17.787
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 2388,
+     "floor_db": 18.091,
+     "floor_photo_db": 16.226
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 3793,
+     "floor_db": 16.863,
+     "floor_photo_db": 15.138
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 4118,
+     "floor_db": 15.81,
+     "floor_photo_db": 14.288
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "object:cam_00:sam2:cam_00:0",
+   "label": "cup",
+   "frames": 33,
+   "pixels": 129554,
+   "seen_share": 0.0935,
+   "unseen_share": 0.9065,
+   "floor_db": 15.679,
+   "floor_photo_db": 15.34,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 541,
+     "floor_db": 20.071,
+     "floor_photo_db": 19.515
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 1278,
+     "floor_db": 18.223,
+     "floor_photo_db": 17.8
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 2388,
+     "floor_db": 16.604,
+     "floor_photo_db": 16.226
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 3793,
+     "floor_db": 15.432,
+     "floor_photo_db": 15.123
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 4118,
+     "floor_db": 14.613,
+     "floor_photo_db": 14.284
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_b",
+   "node_id": "object:cam_00:sam2:cam_00:5",
+   "label": "cup",
+   "frames": 7,
+   "pixels": 7051,
+   "seen_share": 0.0084,
+   "unseen_share": 0.9916,
+   "floor_db": 24.443,
+   "floor_photo_db": 22.357,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 46,
+     "floor_db": 24.565,
+     "floor_photo_db": 22.562
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 10,
+     "floor_db": 24.747,
+     "floor_photo_db": 22.08
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 3,
+     "floor_db": 22.267,
+     "floor_photo_db": 20.632
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 0,
+     "floor_db": 17.16,
+     "floor_photo_db": 12.187
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 0,
+     "floor_db": null,
+     "floor_photo_db": null
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "node_id": "object:cam_00:sam2:cam_00:5",
+   "label": "cup",
+   "frames": 7,
+   "pixels": 7051,
+   "seen_share": 0.0084,
+   "unseen_share": 0.9916,
+   "floor_db": 23.756,
+   "floor_photo_db": 22.285,
+   "by_source_distance": [
+    {
+     "frames": [
+      1,
+      1
+     ],
+     "seen_pixels": 46,
+     "floor_db": 24.048,
+     "floor_photo_db": 22.462
+    },
+    {
+     "frames": [
+      2,
+      3
+     ],
+     "seen_pixels": 10,
+     "floor_db": 23.478,
+     "floor_photo_db": 22.092
+    },
+    {
+     "frames": [
+      4,
+      7
+     ],
+     "seen_pixels": 3,
+     "floor_db": 21.264,
+     "floor_photo_db": 20.629
+    },
+    {
+     "frames": [
+      8,
+      15
+     ],
+     "seen_pixels": 0,
+     "floor_db": 16.255,
+     "floor_photo_db": 12.115
+    },
+    {
+     "frames": [
+      16,
+      null
+     ],
+     "seen_pixels": 0,
+     "floor_db": null,
+     "floor_photo_db": null
+    }
+   ]
+  }
+ ],
+ "runs": [
+  {
+   "run": "own_lab-coat_contain_b",
+   "checkpoint": "render",
+   "config": {
+    "min_px": 200,
+    "min_frames": 5,
+    "band_px": 16,
+    "band_gap_px": 4,
+    "erode_px": 2,
+    "tol": 0.05,
+    "orbit_yaws": [
+     -20.0,
+     20.0
+    ],
+    "orbit_frames": 8,
+    "stills": 3
+   },
+   "methods": [
+    "owner",
+    "flashsplat",
+    "flashsplat-unfiltered"
+   ],
+   "entities": [
+    {
+     "node_id": "human:cam_00:sam2:cam_00:2",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 570162,
+      "seen_share": 0.8632,
+      "unseen_share": 0.1368,
+      "floor_db": 17.374,
+      "floor_photo_db": 16.96,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 12481,
+        "floor_db": 21.235,
+        "floor_photo_db": 22.422
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 32630,
+        "floor_db": 20.954,
+        "floor_photo_db": 20.867
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 73683,
+        "floor_db": 20.339,
+        "floor_photo_db": 19.749
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 142810,
+        "floor_db": 18.456,
+        "floor_photo_db": 17.94
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 230572,
+        "floor_db": 15.894,
+        "floor_photo_db": 15.501
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 29,
+      "slab_frames": 18
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 47240,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.9149,
+        "judged": 47,
+        "traces": 4,
+        "unjudged": 0,
+        "trace_views": [
+         "train:17",
+         "train:34",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.9167,
+        "judged": 12,
+        "traces": 1,
+        "unjudged": 4,
+        "trace_views": [
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.0144,
+       "t3_db": 15.018,
+       "t3_gap_db": 2.356,
+       "residual": 0.0322,
+       "pass": {
+        "t1": false,
+        "t2": true,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 38346,
+       "removed_bg": 331,
+       "t1_train": {
+        "clean": 0.0213,
+        "judged": 47,
+        "traces": 46,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.1667,
+        "judged": 12,
+        "traces": 10,
+        "unjudged": 4,
+        "trace_views": [
+         "orbit:7:-20",
+         "orbit:13:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:20:20",
+         "orbit:26:20",
+         "orbit:33:20",
+         "orbit:39:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2284,
+       "t3_db": 8.85,
+       "t3_gap_db": 8.524,
+       "residual": 0.4861,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 43507,
+       "removed_bg": 342,
+       "t1_train": {
+        "clean": 0.6383,
+        "judged": 47,
+        "traces": 17,
+        "unjudged": 0,
+        "trace_views": [
+         "train:4",
+         "train:5",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:11",
+         "train:12",
+         "train:14",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:23",
+         "train:24",
+         "train:30",
+         "train:31",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 1.0,
+        "judged": 12,
+        "traces": 0,
+        "unjudged": 4,
+        "trace_views": []
+       },
+       "t2_left": 0.1172,
+       "t3_db": 11.429,
+       "t3_gap_db": 5.945,
+       "residual": 0.0317,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "human:cam_00:sam2:cam_00:3",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 895172,
+      "seen_share": 0.5871,
+      "unseen_share": 0.4129,
+      "floor_db": 17.577,
+      "floor_photo_db": 16.785,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 9675,
+        "floor_db": 22.993,
+        "floor_photo_db": 23.615
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 21458,
+        "floor_db": 22.637,
+        "floor_photo_db": 21.784
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 55709,
+        "floor_db": 22.121,
+        "floor_photo_db": 20.364
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 115297,
+        "floor_db": 19.942,
+        "floor_photo_db": 18.116
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 323456,
+        "floor_db": 16.344,
+        "floor_photo_db": 15.782
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 26,
+      "slab_frames": 21
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 69510,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.6739,
+        "judged": 46,
+        "traces": 15,
+        "unjudged": 1,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:13",
+         "train:16",
+         "train:21",
+         "train:22",
+         "train:26",
+         "train:34"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.5714,
+        "judged": 14,
+        "traces": 6,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:13:-20",
+         "orbit:26:-20",
+         "orbit:33:-20",
+         "orbit:39:-20",
+         "orbit:26:20"
+        ]
+       },
+       "t2_left": 0.1916,
+       "t3_db": 14.212,
+       "t3_gap_db": 3.365,
+       "residual": 0.0148,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 53248,
+       "removed_bg": 381,
+       "t1_train": {
+        "clean": 0.0,
+        "judged": 46,
+        "traces": 46,
+        "unjudged": 1,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.2857,
+        "judged": 14,
+        "traces": 10,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:7:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:20:20",
+         "orbit:26:20"
+        ]
+       },
+       "t2_left": 0.3784,
+       "t3_db": 11.286,
+       "t3_gap_db": 6.291,
+       "residual": 0.4083,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 59288,
+       "removed_bg": 421,
+       "t1_train": {
+        "clean": 0.1087,
+        "judged": 46,
+        "traces": 41,
+        "unjudged": 1,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:37",
+         "train:38",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.2857,
+        "judged": 14,
+        "traces": 10,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:7:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:33:-20",
+         "orbit:39:-20",
+         "orbit:46:-20",
+         "orbit:0:20",
+         "orbit:26:20"
+        ]
+       },
+       "t2_left": 0.3001,
+       "t3_db": 12.953,
+       "t3_gap_db": 4.624,
+       "residual": 0.0201,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "human:cam_00:sam2:cam_00:8",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 896029,
+      "seen_share": 0.3625,
+      "unseen_share": 0.6375,
+      "floor_db": 15.189,
+      "floor_photo_db": 14.723,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 3691,
+        "floor_db": 21.166,
+        "floor_photo_db": 21.556
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 6312,
+        "floor_db": 20.664,
+        "floor_photo_db": 20.132
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 16434,
+        "floor_db": 19.768,
+        "floor_photo_db": 18.31
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 53511,
+        "floor_db": 16.988,
+        "floor_photo_db": 15.932
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 244901,
+        "floor_db": 14.591,
+        "floor_photo_db": 14.226
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 24,
+      "slab_frames": 23
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 71018,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.1702,
+        "judged": 47,
+        "traces": 39,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:32",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.4545,
+        "judged": 11,
+        "traces": 6,
+        "unjudged": 5,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:46:-20",
+         "orbit:26:20",
+         "orbit:33:20"
+        ]
+       },
+       "t2_left": 0.1693,
+       "t3_db": 9.678,
+       "t3_gap_db": 5.511,
+       "residual": 0.0204,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 52541,
+       "removed_bg": 146,
+       "t1_train": {
+        "clean": 0.0,
+        "judged": 47,
+        "traces": 47,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.0,
+        "judged": 11,
+        "traces": 11,
+        "unjudged": 5,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:46:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:20:20",
+         "orbit:26:20",
+         "orbit:33:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.3816,
+       "t3_db": 9.542,
+       "t3_gap_db": 5.647,
+       "residual": 0.4107,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 58292,
+       "removed_bg": 165,
+       "t1_train": {
+        "clean": 0.0213,
+        "judged": 47,
+        "traces": 46,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.1818,
+        "judged": 11,
+        "traces": 9,
+        "unjudged": 5,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:46:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:26:20",
+         "orbit:33:20"
+        ]
+       },
+       "t2_left": 0.3075,
+       "t3_db": 9.596,
+       "t3_gap_db": 5.593,
+       "residual": 0.0234,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:0",
+     "label": "cup",
+     "node_type": "object",
+     "frames": 33,
+     "status": "scored",
+     "coverage": {
+      "pixels": 129554,
+      "seen_share": 0.0935,
+      "unseen_share": 0.9065,
+      "floor_db": 16.975,
+      "floor_photo_db": 15.346,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 541,
+        "floor_db": 20.1,
+        "floor_photo_db": 19.529
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 1278,
+        "floor_db": 19.408,
+        "floor_photo_db": 17.787
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 2388,
+        "floor_db": 18.091,
+        "floor_photo_db": 16.226
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 3793,
+        "floor_db": 16.863,
+        "floor_photo_db": 15.138
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 4118,
+        "floor_db": 15.81,
+        "floor_photo_db": 14.288
+       }
+      ]
+     },
+     "volume": {
+      "frames": 33,
+      "body_frames": 0,
+      "slab_frames": 33
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 3192,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.048,
+       "t3_db": 15.388,
+       "t3_gap_db": 1.587,
+       "residual": 0.0255,
+       "pass": {
+        "t1": null,
+        "t2": true,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 2489,
+       "removed_bg": 160,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.2423,
+       "t3_db": 15.943,
+       "t3_gap_db": 1.032,
+       "residual": 0.3165,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 2777,
+       "removed_bg": 168,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.1282,
+       "t3_db": 15.243,
+       "t3_gap_db": 1.732,
+       "residual": 0.0344,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:4",
+     "label": "bird",
+     "node_type": "object",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 72687,
+      "seen_share": 0.3299,
+      "unseen_share": 0.6701,
+      "floor_db": 16.961,
+      "floor_photo_db": 15.894,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 2393,
+        "floor_db": 19.744,
+        "floor_photo_db": 20.23
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 4581,
+        "floor_db": 19.733,
+        "floor_photo_db": 19.313
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 4759,
+        "floor_db": 18.307,
+        "floor_photo_db": 17.035
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 4645,
+        "floor_db": 17.004,
+        "floor_photo_db": 15.606
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 7603,
+        "floor_db": 14.903,
+        "floor_photo_db": 13.772
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 0,
+      "slab_frames": 47
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 4835,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.129,
+       "t3_db": 11.351,
+       "t3_gap_db": 5.61,
+       "residual": 0.2035,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 3542,
+       "removed_bg": 267,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.3511,
+       "t3_db": 12.073,
+       "t3_gap_db": 4.888,
+       "residual": 0.4962,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 4063,
+       "removed_bg": 303,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.1292,
+       "t3_db": 10.329,
+       "t3_gap_db": 6.632,
+       "residual": 0.2175,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:5",
+     "label": "cup",
+     "node_type": "object",
+     "frames": 7,
+     "status": "scored",
+     "coverage": {
+      "pixels": 7051,
+      "seen_share": 0.0084,
+      "unseen_share": 0.9916,
+      "floor_db": 24.443,
+      "floor_photo_db": 22.357,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 46,
+        "floor_db": 24.565,
+        "floor_photo_db": 22.562
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 10,
+        "floor_db": 24.747,
+        "floor_photo_db": 22.08
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 3,
+        "floor_db": 22.267,
+        "floor_photo_db": 20.632
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 0,
+        "floor_db": 17.16,
+        "floor_photo_db": 12.187
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 0,
+        "floor_db": null,
+        "floor_photo_db": null
+       }
+      ]
+     },
+     "volume": {
+      "frames": 7,
+      "body_frames": 0,
+      "slab_frames": 7
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 14,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 0.8805,
+       "t3_db": 15.8,
+       "t3_gap_db": 8.643,
+       "residual": 0.2283,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 61,
+       "removed_bg": 62,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 0.6365,
+       "t3_db": 15.891,
+       "t3_gap_db": 8.552,
+       "residual": 0.6666,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 71,
+       "removed_bg": 69,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 0.5513,
+       "t3_db": 15.67,
+       "t3_gap_db": 8.773,
+       "residual": 0.1393,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:6",
+     "label": "handbag",
+     "node_type": "object",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 50275,
+      "seen_share": 0.3337,
+      "unseen_share": 0.6663,
+      "floor_db": 22.325,
+      "floor_photo_db": 21.106,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 813,
+        "floor_db": 25.816,
+        "floor_photo_db": 25.94
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 1729,
+        "floor_db": 26.069,
+        "floor_photo_db": 25.401
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 2525,
+        "floor_db": 24.313,
+        "floor_photo_db": 23.22
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 3798,
+        "floor_db": 22.782,
+        "floor_photo_db": 21.14
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 7914,
+        "floor_db": 21.028,
+        "floor_photo_db": 19.858
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 0,
+      "slab_frames": 47
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 2131,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 1.0,
+        "judged": 1,
+        "traces": 0,
+        "unjudged": 46,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.1853,
+       "t3_db": 14.063,
+       "t3_gap_db": 8.262,
+       "residual": 0.1999,
+       "pass": {
+        "t1": true,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 1755,
+       "removed_bg": 260,
+       "t1_train": {
+        "clean": 1.0,
+        "judged": 1,
+        "traces": 0,
+        "unjudged": 46,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.2978,
+       "t3_db": 16.298,
+       "t3_gap_db": 6.027,
+       "residual": 0.4561,
+       "pass": {
+        "t1": true,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 2000,
+       "removed_bg": 354,
+       "t1_train": {
+        "clean": 1.0,
+        "judged": 1,
+        "traces": 0,
+        "unjudged": 46,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.1779,
+       "t3_db": 14.102,
+       "t3_gap_db": 8.223,
+       "residual": 0.1842,
+       "pass": {
+        "t1": true,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:7",
+     "label": "bird",
+     "node_type": "object",
+     "frames": 21,
+     "status": "scored",
+     "coverage": {
+      "pixels": 6093,
+      "seen_share": 0.1901,
+      "unseen_share": 0.8099,
+      "floor_db": 25.666,
+      "floor_photo_db": 24.046,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 54,
+        "floor_db": 27.427,
+        "floor_photo_db": 26.622
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 138,
+        "floor_db": 27.299,
+        "floor_photo_db": 25.762
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 309,
+        "floor_db": 27.057,
+        "floor_photo_db": 25.331
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 434,
+        "floor_db": 26.538,
+        "floor_photo_db": 24.431
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 223,
+        "floor_db": 22.636,
+        "floor_photo_db": 21.42
+       }
+      ]
+     },
+     "volume": {
+      "frames": 21,
+      "body_frames": 0,
+      "slab_frames": 21
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 5,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 1.0,
+       "t3_db": 14.706,
+       "t3_gap_db": 10.96,
+       "residual": 1.0,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 16,
+       "removed_bg": 133,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.537,
+       "t3_db": 16.198,
+       "t3_gap_db": 9.468,
+       "residual": 0.5058,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 17,
+       "removed_bg": 146,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.4756,
+       "t3_db": 16.162,
+       "t3_gap_db": 9.504,
+       "residual": 0.3791,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "run": "own_lab-coat_contain_off",
+   "checkpoint": "render",
+   "config": {
+    "min_px": 200,
+    "min_frames": 5,
+    "band_px": 16,
+    "band_gap_px": 4,
+    "erode_px": 2,
+    "tol": 0.05,
+    "orbit_yaws": [
+     -20.0,
+     20.0
+    ],
+    "orbit_frames": 8,
+    "stills": 3
+   },
+   "methods": [
+    "owner",
+    "flashsplat",
+    "flashsplat-unfiltered"
+   ],
+   "entities": [
+    {
+     "node_id": "human:cam_00:sam2:cam_00:2",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 570162,
+      "seen_share": 0.8632,
+      "unseen_share": 0.1368,
+      "floor_db": 17.053,
+      "floor_photo_db": 16.961,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 12481,
+        "floor_db": 21.529,
+        "floor_photo_db": 22.427
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 32630,
+        "floor_db": 20.719,
+        "floor_photo_db": 20.861
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 73683,
+        "floor_db": 19.84,
+        "floor_photo_db": 19.75
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 142810,
+        "floor_db": 17.985,
+        "floor_photo_db": 17.942
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 230572,
+        "floor_db": 15.633,
+        "floor_photo_db": 15.503
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 29,
+      "slab_frames": 18
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 53392,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.0435,
+        "judged": 46,
+        "traces": 44,
+        "unjudged": 1,
+        "trace_views": [
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.9,
+        "judged": 10,
+        "traces": 1,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20"
+        ]
+       },
+       "t2_left": 0.0943,
+       "t3_db": 11.201,
+       "t3_gap_db": 5.852,
+       "residual": 0.1258,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 38273,
+       "removed_bg": 3399,
+       "t1_train": {
+        "clean": 0.1522,
+        "judged": 46,
+        "traces": 39,
+        "unjudged": 1,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:43"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.4,
+        "judged": 10,
+        "traces": 6,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:7:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2138,
+       "t3_db": 9.588,
+       "t3_gap_db": 7.465,
+       "residual": 0.4089,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 41645,
+       "removed_bg": 3780,
+       "t1_train": {
+        "clean": 0.8261,
+        "judged": 46,
+        "traces": 8,
+        "unjudged": 1,
+        "trace_views": [
+         "train:14",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:26",
+         "train:31",
+         "train:39",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.9,
+        "judged": 10,
+        "traces": 1,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20"
+        ]
+       },
+       "t2_left": 0.1565,
+       "t3_db": 11.762,
+       "t3_gap_db": 5.291,
+       "residual": 0.099,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "human:cam_00:sam2:cam_00:3",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 895172,
+      "seen_share": 0.5871,
+      "unseen_share": 0.4129,
+      "floor_db": 17.102,
+      "floor_photo_db": 16.786,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 9675,
+        "floor_db": 23.93,
+        "floor_photo_db": 23.629
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 21458,
+        "floor_db": 22.602,
+        "floor_photo_db": 21.763
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 55709,
+        "floor_db": 21.082,
+        "floor_photo_db": 20.387
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 115297,
+        "floor_db": 18.694,
+        "floor_photo_db": 18.117
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 323456,
+        "floor_db": 16.016,
+        "floor_photo_db": 15.781
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 26,
+      "slab_frames": 21
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 76817,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.0,
+        "judged": 47,
+        "traces": 47,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.4286,
+        "judged": 14,
+        "traces": 8,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:7:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:46:-20",
+         "orbit:7:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2185,
+       "t3_db": 12.59,
+       "t3_gap_db": 4.512,
+       "residual": 0.1384,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 53513,
+       "removed_bg": 10890,
+       "t1_train": {
+        "clean": 0.0638,
+        "judged": 47,
+        "traces": 44,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:37",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.1429,
+        "judged": 14,
+        "traces": 12,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:7:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:46:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:20:20",
+         "orbit:26:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2631,
+       "t3_db": 11.249,
+       "t3_gap_db": 5.853,
+       "residual": 0.3391,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 57178,
+       "removed_bg": 11814,
+       "t1_train": {
+        "clean": 0.3617,
+        "judged": 47,
+        "traces": 30,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:24",
+         "train:25",
+         "train:28",
+         "train:29",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:42",
+         "train:44",
+         "train:45"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.7143,
+        "judged": 14,
+        "traces": 4,
+        "unjudged": 2,
+        "trace_views": [
+         "orbit:46:-20",
+         "orbit:7:20",
+         "orbit:26:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2117,
+       "t3_db": 12.875,
+       "t3_gap_db": 4.227,
+       "residual": 0.0715,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "human:cam_00:sam2:cam_00:8",
+     "label": "person",
+     "node_type": "human",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 896029,
+      "seen_share": 0.3625,
+      "unseen_share": 0.6375,
+      "floor_db": 14.889,
+      "floor_photo_db": 14.729,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 3691,
+        "floor_db": 21.319,
+        "floor_photo_db": 21.562
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 6312,
+        "floor_db": 20.333,
+        "floor_photo_db": 20.129
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 16434,
+        "floor_db": 18.636,
+        "floor_photo_db": 18.302
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 53511,
+        "floor_db": 16.184,
+        "floor_photo_db": 15.934
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 244901,
+        "floor_db": 14.377,
+        "floor_photo_db": 14.233
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 24,
+      "slab_frames": 23
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 62067,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": 0.0213,
+        "judged": 47,
+        "traces": 46,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.2,
+        "judged": 10,
+        "traces": 8,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:20:20",
+         "orbit:33:20"
+        ]
+       },
+       "t2_left": 0.3543,
+       "t3_db": 9.872,
+       "t3_gap_db": 5.017,
+       "residual": 0.224,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 49858,
+       "removed_bg": 9351,
+       "t1_train": {
+        "clean": 0.0213,
+        "judged": 47,
+        "traces": 46,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:10",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:33",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.0,
+        "judged": 10,
+        "traces": 10,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:20:20",
+         "orbit:33:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.3127,
+       "t3_db": 10.454,
+       "t3_gap_db": 4.435,
+       "residual": 0.3453,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 54506,
+       "removed_bg": 9818,
+       "t1_train": {
+        "clean": 0.0426,
+        "judged": 47,
+        "traces": 45,
+        "unjudged": 0,
+        "trace_views": [
+         "train:0",
+         "train:1",
+         "train:2",
+         "train:3",
+         "train:4",
+         "train:5",
+         "train:6",
+         "train:7",
+         "train:8",
+         "train:9",
+         "train:11",
+         "train:12",
+         "train:13",
+         "train:14",
+         "train:15",
+         "train:16",
+         "train:17",
+         "train:18",
+         "train:19",
+         "train:20",
+         "train:21",
+         "train:22",
+         "train:23",
+         "train:24",
+         "train:25",
+         "train:26",
+         "train:27",
+         "train:28",
+         "train:29",
+         "train:30",
+         "train:31",
+         "train:32",
+         "train:34",
+         "train:35",
+         "train:36",
+         "train:37",
+         "train:38",
+         "train:39",
+         "train:40",
+         "train:41",
+         "train:42",
+         "train:43",
+         "train:44",
+         "train:45",
+         "train:46"
+        ]
+       },
+       "t1_orbit": {
+        "clean": 0.1,
+        "judged": 10,
+        "traces": 9,
+        "unjudged": 6,
+        "trace_views": [
+         "orbit:0:-20",
+         "orbit:13:-20",
+         "orbit:20:-20",
+         "orbit:26:-20",
+         "orbit:0:20",
+         "orbit:7:20",
+         "orbit:13:20",
+         "orbit:33:20",
+         "orbit:46:20"
+        ]
+       },
+       "t2_left": 0.2555,
+       "t3_db": 9.716,
+       "t3_gap_db": 5.173,
+       "residual": 0.0646,
+       "pass": {
+        "t1": false,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:0",
+     "label": "cup",
+     "node_type": "object",
+     "frames": 33,
+     "status": "scored",
+     "coverage": {
+      "pixels": 129554,
+      "seen_share": 0.0935,
+      "unseen_share": 0.9065,
+      "floor_db": 15.679,
+      "floor_photo_db": 15.34,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 541,
+        "floor_db": 20.071,
+        "floor_photo_db": 19.515
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 1278,
+        "floor_db": 18.223,
+        "floor_photo_db": 17.8
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 2388,
+        "floor_db": 16.604,
+        "floor_photo_db": 16.226
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 3793,
+        "floor_db": 15.432,
+        "floor_photo_db": 15.123
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 4118,
+        "floor_db": 14.613,
+        "floor_photo_db": 14.284
+       }
+      ]
+     },
+     "volume": {
+      "frames": 33,
+      "body_frames": 0,
+      "slab_frames": 33
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 15378,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.038,
+       "t3_db": 15.947,
+       "t3_gap_db": -0.268,
+       "residual": 0.143,
+       "pass": {
+        "t1": null,
+        "t2": true,
+        "t3": true,
+        "all": true
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 1959,
+       "removed_bg": 885,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.4746,
+       "t3_db": 15.111,
+       "t3_gap_db": 0.568,
+       "residual": 0.4375,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": true,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 2147,
+       "removed_bg": 999,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 33,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.438,
+       "t3_db": 14.161,
+       "t3_gap_db": 1.518,
+       "residual": 0.17,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:4",
+     "label": "bird",
+     "node_type": "object",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 72687,
+      "seen_share": 0.3299,
+      "unseen_share": 0.6701,
+      "floor_db": 16.286,
+      "floor_photo_db": 15.895,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 2393,
+        "floor_db": 20.026,
+        "floor_photo_db": 20.257
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 4581,
+        "floor_db": 19.751,
+        "floor_photo_db": 19.319
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 4759,
+        "floor_db": 17.534,
+        "floor_photo_db": 17.042
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 4645,
+        "floor_db": 16.021,
+        "floor_photo_db": 15.61
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 7603,
+        "floor_db": 14.163,
+        "floor_photo_db": 13.767
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 0,
+      "slab_frames": 47
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 11302,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.2393,
+       "t3_db": 11.458,
+       "t3_gap_db": 4.828,
+       "residual": 0.543,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 4351,
+       "removed_bg": 470,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.4888,
+       "t3_db": 12.344,
+       "t3_gap_db": 3.942,
+       "residual": 0.6678,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 4991,
+       "removed_bg": 593,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.3861,
+       "t3_db": 11.573,
+       "t3_gap_db": 4.713,
+       "residual": 0.476,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:5",
+     "label": "cup",
+     "node_type": "object",
+     "frames": 7,
+     "status": "scored",
+     "coverage": {
+      "pixels": 7051,
+      "seen_share": 0.0084,
+      "unseen_share": 0.9916,
+      "floor_db": 23.756,
+      "floor_photo_db": 22.285,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 46,
+        "floor_db": 24.048,
+        "floor_photo_db": 22.462
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 10,
+        "floor_db": 23.478,
+        "floor_photo_db": 22.092
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 3,
+        "floor_db": 21.264,
+        "floor_photo_db": 20.629
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 0,
+        "floor_db": 16.255,
+        "floor_photo_db": 12.115
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 0,
+        "floor_db": null,
+        "floor_photo_db": null
+       }
+      ]
+     },
+     "volume": {
+      "frames": 7,
+      "body_frames": 0,
+      "slab_frames": 7
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 3,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 1.0,
+       "t3_db": 15.08,
+       "t3_gap_db": 8.676,
+       "residual": 0.9998,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 22,
+       "removed_bg": 896,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 0.375,
+       "t3_db": 14.544,
+       "t3_gap_db": 9.212,
+       "residual": 0.348,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 23,
+       "removed_bg": 919,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 7,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 14,
+        "trace_views": []
+       },
+       "t2_left": 0.3615,
+       "t3_db": 14.552,
+       "t3_gap_db": 9.204,
+       "residual": 0.2867,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:6",
+     "label": "handbag",
+     "node_type": "object",
+     "frames": 47,
+     "status": "scored",
+     "coverage": {
+      "pixels": 50275,
+      "seen_share": 0.3337,
+      "unseen_share": 0.6663,
+      "floor_db": 21.469,
+      "floor_photo_db": 21.106,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 813,
+        "floor_db": 26.111,
+        "floor_photo_db": 25.936
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 1729,
+        "floor_db": 25.879,
+        "floor_photo_db": 25.374
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 2525,
+        "floor_db": 23.482,
+        "floor_photo_db": 23.244
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 3798,
+        "floor_db": 21.634,
+        "floor_photo_db": 21.118
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 7914,
+        "floor_db": 20.189,
+        "floor_photo_db": 19.864
+       }
+      ]
+     },
+     "volume": {
+      "frames": 47,
+      "body_frames": 0,
+      "slab_frames": 47
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 6593,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.051,
+       "t3_db": 15.212,
+       "t3_gap_db": 6.257,
+       "residual": 0.301,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 902,
+       "removed_bg": 806,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.4878,
+       "t3_db": 16.297,
+       "t3_gap_db": 5.172,
+       "residual": 0.6434,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 1000,
+       "removed_bg": 1041,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 47,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.4447,
+       "t3_db": 16.069,
+       "t3_gap_db": 5.4,
+       "residual": 0.475,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    },
+    {
+     "node_id": "object:cam_00:sam2:cam_00:7",
+     "label": "bird",
+     "node_type": "object",
+     "frames": 21,
+     "status": "scored",
+     "coverage": {
+      "pixels": 6093,
+      "seen_share": 0.1901,
+      "unseen_share": 0.8099,
+      "floor_db": 24.651,
+      "floor_photo_db": 24.033,
+      "by_source_distance": [
+       {
+        "frames": [
+         1,
+         1
+        ],
+        "seen_pixels": 54,
+        "floor_db": 27.367,
+        "floor_photo_db": 26.534
+       },
+       {
+        "frames": [
+         2,
+         3
+        ],
+        "seen_pixels": 138,
+        "floor_db": 26.822,
+        "floor_photo_db": 25.838
+       },
+       {
+        "frames": [
+         4,
+         7
+        ],
+        "seen_pixels": 309,
+        "floor_db": 26.053,
+        "floor_photo_db": 25.339
+       },
+       {
+        "frames": [
+         8,
+         15
+        ],
+        "seen_pixels": 434,
+        "floor_db": 24.968,
+        "floor_photo_db": 24.394
+       },
+       {
+        "frames": [
+         16,
+         null
+        ],
+        "seen_pixels": 223,
+        "floor_db": 21.921,
+        "floor_photo_db": 21.405
+       }
+      ]
+     },
+     "volume": {
+      "frames": 21,
+      "body_frames": 0,
+      "slab_frames": 21
+     },
+     "methods": {
+      "owner": {
+       "removed_fg": 1830,
+       "removed_bg": 0,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.8648,
+       "t3_db": 9.937,
+       "t3_gap_db": 14.714,
+       "residual": 0.6667,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat": {
+       "removed_fg": 26,
+       "removed_bg": 382,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.455,
+       "t3_db": 15.39,
+       "t3_gap_db": 9.261,
+       "residual": 0.7426,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      },
+      "flashsplat-unfiltered": {
+       "removed_fg": 28,
+       "removed_bg": 421,
+       "t1_train": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 21,
+        "trace_views": []
+       },
+       "t1_orbit": {
+        "clean": null,
+        "judged": 0,
+        "traces": 0,
+        "unjudged": 16,
+        "trace_views": []
+       },
+       "t2_left": 0.2228,
+       "t3_db": 15.33,
+       "t3_gap_db": 9.321,
+       "residual": 0.6103,
+       "pass": {
+        "t1": null,
+        "t2": false,
+        "t3": false,
+        "all": false
+       }
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

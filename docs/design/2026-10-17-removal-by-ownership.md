@@ -366,6 +366,26 @@ person. A crisper
 background is the geometry's to give (pose refinement, SLAM It!), not this design's. What
 ownership itself costs is the interiors' 0.5 dB on held-out frames.
 
+**The result on lab-coat, and the decision (the owner, 2026-10-17).** The three people
+(`benchmarks/removal_ownership_lab-coat.json`), the removal this design replaces (FlashSplat with
+the filter, on the arm without ownership training) → removal by owner on the ownership arm:
+
+| | T1 training views clean | T2 opacity left | T3 dB below the floor |
+|---|---|---|---|
+| left woman | 0.152 → 0.915 | 0.214 → 0.014 | 7.47 → 2.36 |
+| right woman | 0.064 → 0.674 | 0.263 → 0.192 | 5.85 → 3.37 |
+| middle woman | 0.021 → 0.170 | 0.313 → 0.169 | 4.44 → 5.51 |
+
+No person passes every mark. The left woman passes T2 and nearly T1. The middle woman, between
+the other two, keeps a trace on 83% of the judged training views. Where she stood, her stills
+show a pale column smeared out of the background no frame saw behind her and her neighbours'
+coats -- the likeliest thing the detector still reads as a person. Her T3 is 1.1 dB below the
+replaced removal's. The
+owner judged the removals clearly better by eye and chose to merge on that: **the gate this
+design passed is "better than the replaced removal on T1–T3 for the people, and the owner's
+look"**. The absolute marks stay the target for the work that follows: contact between people,
+the unseen column, and T3.
+
 ## 6. Risks
 
 - **Mask errors become permanent.** About 30% of DAVIS's annotated objects are never proposed and
@@ -395,6 +415,9 @@ ownership itself costs is the interiors' 0.5 dB on held-out frames.
    comparison, after ownership passes; ownership becomes the default removal (§4.4).
 5. **Drift check: flag-only first.**
 6. **Containment on by default, the owner loss at 1.0** (the owner's look at lab-coat, §4.6).
+7. **Merge on lab-coat alone, as better than the replaced removal** (§5); the absolute marks are
+   unmet and recorded there. The clip ranking (decision 1) waits on a cleaner graph -- its top is
+   noise entities -- and the other clips are rebuilt with the site's.
 
 Settled before: unseen background is left as is (criterion 4); a blur stays a cosmetic option
 for the site.
@@ -410,7 +433,8 @@ One branch, one pull request, a commit per step:
 4. Ownership: owners at seeding, inheritance through densification, the silhouette loss in a
    second pass, removal by owner, the drift check; scene 5 → 6, render 4 → 5, handles 2 → 3.
 5. The chosen clips rebuilt on the option-A geometry, each trained with and without ownership
-   training (§5's two arms).
+   training (§5's two arms). Built: lab-coat only, and containment (§4.6) before it; steps 3
+   and 5–6 for the other clips wait (§7, decision 7).
 6. Today's removal against ownership on all tests, and stills for the owner.
 
 ## References
