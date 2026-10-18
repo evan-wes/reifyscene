@@ -415,6 +415,15 @@ class GaussianRenderBackend(RenderBackend):
         owned = scene.has_owners and (train_cfg.lambda_owner > 0 or train_cfg.owner_drift_every > 0)
         targets = self._train_targets(bundle) if geometry_on or owned else None
         drift: list[dict] = []
+        # holdout_every N > 0 keeps every Nth view out of training, to be scored after it: how
+        # well the scene does on frames it was not fitted to (a DAVIS clip has no held-out views).
+        holdout = int(self.cfg.get("holdout_every", 0) or 0)
+        held: list[tuple] = []
+        if holdout > 0:
+            keep = [i for i in range(len(train_views)) if i % holdout]
+            held = [train_views[i] for i in range(len(train_views)) if not i % holdout]
+            train_views = [train_views[i] for i in keep]
+            targets = None if targets is None else [targets[i] for i in keep]
 
         logs: list[dict] = []
         on_trace = on_snapshot = None
@@ -447,6 +456,9 @@ class GaussianRenderBackend(RenderBackend):
                 float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
                 for v in train_views[:eval_n]
             ]
+            heldout = [float(image_psnr(trainer.render_at(v[0], v[2]), v[1])) for v in held]
+            fitted = ([float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
+                       for v in train_views] if held else [])
         train_view_psnr = float(np.mean(psnrs)) if psnrs else 0.0
 
         return RenderArtifact(
@@ -465,6 +477,9 @@ class GaussianRenderBackend(RenderBackend):
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
                 "recipe": recipe,
+                **({"holdout": {"every": holdout, "views": len(held),
+                                "heldout_view_psnr": float(np.mean(heldout)),
+                                "fitted_view_psnr": float(np.mean(fitted))}} if held else {}),
                 **({"ownership": {
                     "owners": len(trained.owner_node_ids),
                     "final_owner_loss": next(
