@@ -160,25 +160,30 @@ def render_pixel_masks(run: RunOutputs, *, stream_id: str | None = None) -> Rend
     ``stream_id`` defaults to the run's only stream
     (:class:`~reifyscene.ingest.streams.RunStreams`).
     """
+    nodes = [raw.get("value", raw) for raw in run.record("graph").get("nodes") or []]
+    merge_map = run.record("reid")["merge_map"] if run.has("reid") else {}
+    return pixel_masks(nodes, merge_map, run.artifact("segment"), run.streams.resolve(stream_id))
+
+
+def pixel_masks(nodes, merge_map: Mapping[str, str], segment, stream) -> RenderPixelMasks:
+    """:func:`render_pixel_masks` from the stages' own outputs: the graph's ``nodes`` (each a
+    mapping with ``node_id``, ``node_type``, ``label`` and ``attrs``), reid's ``merge_map``, the
+    ``segment`` artifact and the ``stream`` (a :class:`~reifyscene.ingest.streams.FrameStream`)
+    -- for a stage that is handed them rather than reading the run."""
     notes: list[str] = []
-    stream = run.streams.resolve(stream_id)
     stream_id = stream.id
     transform = stream.transform          # raises when the geometry recorded none
 
-    graph = run.record("graph")
     canonical_to_node: dict[str, str] = {}
     labels: dict[str, str] = {}
-    for raw_node in graph.get("nodes") or []:
-        node = raw_node.get("value", raw_node)
+    for node in nodes:
         found = _node_track_id(node)
         if found is None or found[0] != stream_id:
             continue
         canonical_to_node[found[1]] = str(node["node_id"])
         labels[str(node["node_id"])] = str(node.get("label", ""))
 
-    merge_map: dict[str, str] = {}
-    if run.has("reid"):
-        merge_map = {str(k): str(v) for k, v in run.record("reid")["merge_map"].items()}
+    merge_map = {str(k): str(v) for k, v in merge_map.items()}
 
     def canonical(track: str) -> str:
         seen: set[str] = set()
@@ -188,7 +193,7 @@ def render_pixel_masks(run: RunOutputs, *, stream_id: str | None = None) -> Rend
             cur = merge_map[cur]
         return cur
 
-    inst = run.artifact("segment")
+    inst = segment
     by_frame: dict[int, dict[str, np.ndarray]] = {}
     unmapped_masks: dict[int, np.ndarray] = {}
     unmapped: set[str] = set()
@@ -294,6 +299,23 @@ def drop_gaussians(
             if key.startswith(prefix) and arr.ndim >= 1 and arr.shape[0] == keep.size:
                 out[key] = arr[keep]
     return {k: np.asarray(v) for k, v in out.items()}
+
+
+def owner_handles(bundle: Mapping[str, Any]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """``{node_id: (fg_indices, bg_indices)}``: each entity's Gaussians, by owner.
+
+    Removal by ownership (``docs/design/2026-10-17-removal-by-ownership.md`` §4.4): every
+    Gaussian was owned from seeding by the entity whose pixel it came from, and its children
+    by the same, so an entity *is* its owned Gaussians. Disjoint by construction; the
+    background and the unaddressed owner are no node's.
+    """
+    if "owner_node_ids" not in bundle:
+        raise ValueError("checkpoint was not trained with owners")
+    table = [str(x) or None for x in np.asarray(bundle["owner_node_ids"])]
+    fg = np.asarray(bundle["fg_owner"])
+    bg = np.asarray(bundle["bg_owner"]) if "bg_owner" in bundle else np.zeros(0, np.int32)
+    return {node: (np.flatnonzero(fg == code), np.flatnonzero(bg == code))
+            for code, node in enumerate(table) if node is not None}
 
 
 def identity_probs(bundle: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, list[str | None]]:

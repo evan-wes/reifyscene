@@ -274,6 +274,7 @@ def init_fg_from_tracks_3d(cano_t: int, tracks: Tracks3D, motion_coefs: torch.Te
     return DynamicGaussianField(
         means=means, quats=quats, log_scales=log_scales,
         logit_opacities=logit_opacities, colors_logit=colors_logit, motion_coefs=motion_coefs,
+        owner=tracks.owners,
     )
 
 
@@ -301,5 +302,5 @@ def init_bg(points: StaticPoints3D) -> GaussianField:
     logit_opacities = torch.logit(torch.full((num_bg,), 0.7, device=device))
     return GaussianField(
         means=means, quats=quats, log_scales=log_scales,
-        logit_opacities=logit_opacities, colors_logit=colors_logit,
+        logit_opacities=logit_opacities, colors_logit=colors_logit, owner=points.owners,
     )

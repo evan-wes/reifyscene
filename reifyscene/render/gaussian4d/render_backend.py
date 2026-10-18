@@ -47,6 +47,23 @@ def _intrinsics_obj(intr: dict[str, Any]) -> CameraIntrinsics:
     return CameraIntrinsics(fx=float(intr["fx"]), fy=float(intr["fy"]), cx=float(intr["cx"]), cy=float(intr["cy"]))
 
 
+def train_bodies(bundle, device: str) -> dict[int, dict[int, dict]]:
+    """The scene stage's bodies (``target_body_*``) by target row, then owner code: each a dict
+    of ``capsules`` (n, 7) -- ends and radius, clothing margin included -- its ``torso`` length
+    and its ``margin``, in the scene's units (removal-by-ownership §4.6)."""
+    caps = np.asarray(bundle["target_body_capsules"], np.float32).reshape(-1, 7)
+    rows = np.asarray(bundle["target_body_rows"]).reshape(-1, 2).astype(int)
+    out: dict[int, dict[int, dict]] = {}
+    for i, code, torso, margin in np.asarray(bundle["target_body_frames"]).reshape(-1, 4):
+        i, code = int(i), int(code)
+        sel = (rows[:, 0] == i) & (rows[:, 1] == code)
+        out.setdefault(i, {})[code] = {
+            "capsules": torch.as_tensor(caps[sel], device=device),
+            "torso": float(torso), "margin": float(margin),
+        }
+    return out
+
+
 class GaussianRenderBackend(RenderBackend):
     """gsplat-backed trainer + renderer over a self-contained SceneArtifact."""
 
@@ -305,8 +322,9 @@ class GaussianRenderBackend(RenderBackend):
         return path.name
 
     def _train_targets(self, bundle) -> list[dict[str, torch.Tensor]]:
-        """Each training view's depth / validity / foreground targets, from the scene stage's
-        ``target_*`` arrays, matched by frame name (in the order of ``_train_frame_keys``)."""
+        """Each training view's depth / validity / foreground targets, and the id map an owned
+        scene's owner loss reads, from the scene stage's ``target_*`` arrays, matched by frame
+        name (in the order of ``_train_frame_keys``)."""
         names = [str(n) for n in np.asarray(bundle.get("target_frame_names", []))]
         if not names:
             raise ValueError("the scene carries no depth / mask targets; rebuild the scene "
@@ -315,6 +333,8 @@ class GaussianRenderBackend(RenderBackend):
         depths = np.asarray(bundle["target_depths"])
         valid = np.asarray(bundle["target_depth_valid"])
         fg = np.asarray(bundle["target_fg"])
+        ids = np.asarray(bundle["target_ids"]) if "target_ids" in bundle else None
+        bodies = train_bodies(bundle, self.device) if "target_body_frames" in bundle else None
         out = []
         for key in self._train_frame_keys:
             if key not in row:
@@ -324,6 +344,9 @@ class GaussianRenderBackend(RenderBackend):
                 "depth": torch.as_tensor(depths[i].astype(np.float32), device=self.device),
                 "valid": torch.as_tensor(valid[i].astype(bool), device=self.device),
                 "fg": torch.as_tensor(fg[i].astype(np.float32), device=self.device),
+                **({"ids": torch.as_tensor(ids[i].astype(np.int64), device=self.device)}
+                   if ids is not None else {}),
+                **({"bodies": bodies.get(i, {})} if bodies is not None else {}),
             })
         return out
 
@@ -408,7 +431,19 @@ class GaussianRenderBackend(RenderBackend):
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
         geometry_on = (train_cfg.lambda_depth > 0 or train_cfg.lambda_depth_grad > 0
                        or train_cfg.lambda_mask > 0)
-        targets = self._train_targets(bundle) if geometry_on else None
+        owned = scene.has_owners and (train_cfg.lambda_owner > 0 or train_cfg.owner_drift_every > 0
+                                      or train_cfg.lambda_body > 0)
+        targets = self._train_targets(bundle) if geometry_on or owned else None
+        drift: list[dict] = []
+        # holdout_every N > 0 keeps every Nth view out of training, to be scored after it: how
+        # well the scene does on frames it was not fitted to (a DAVIS clip has no held-out views).
+        holdout = int(self.cfg.get("holdout_every", 0) or 0)
+        held: list[tuple] = []
+        if holdout > 0:
+            keep = [i for i in range(len(train_views)) if i % holdout]
+            held = [train_views[i] for i in range(len(train_views)) if not i % holdout]
+            train_views = [train_views[i] for i in keep]
+            targets = None if targets is None else [targets[i] for i in keep]
 
         logs: list[dict] = []
         on_trace = on_snapshot = None
@@ -430,7 +465,8 @@ class GaussianRenderBackend(RenderBackend):
                                               name=f"trained_dynamic_step{step}.npz")
         trained = trainer.fit(train_views, targets=targets,
                               on_log=lambda record: logs.append(record),
-                              on_trace=on_trace, on_snapshot=on_snapshot)
+                              on_trace=on_trace, on_snapshot=on_snapshot,
+                              on_drift=drift.append)
 
         path_index = self._render_dynamic_trajectory(scene_artifact, trained, rasterizer, save_dir)
         checkpoint = self._save_dynamic_checkpoint(trained, cams, bundle, save_dir, raster=raster)
@@ -440,6 +476,9 @@ class GaussianRenderBackend(RenderBackend):
                 float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
                 for v in train_views[:eval_n]
             ]
+            heldout = [float(image_psnr(trainer.render_at(v[0], v[2]), v[1])) for v in held]
+            fitted = ([float(image_psnr(trainer.render_at(v[0], v[2]), v[1]))
+                       for v in train_views] if held else [])
         train_view_psnr = float(np.mean(psnrs)) if psnrs else 0.0
 
         return RenderArtifact(
@@ -458,6 +497,17 @@ class GaussianRenderBackend(RenderBackend):
                 "checkpoint": checkpoint,
                 "num_train_views": len(train_views),
                 "recipe": recipe,
+                **({"holdout": {"every": holdout, "views": len(held),
+                                "heldout_view_psnr": float(np.mean(heldout)),
+                                "fitted_view_psnr": float(np.mean(fitted))}} if held else {}),
+                **({"ownership": {
+                    "owners": len(trained.owner_node_ids),
+                    "final_owner_loss": next(
+                        (r["owner_loss"] for r in reversed(logs) if "owner_loss" in r), None),
+                    "final_body_loss": next(
+                        (r["body_loss"] for r in reversed(logs) if "body_loss" in r), None),
+                    "drift": drift,
+                }} if trained.has_owners else {}),
                 **({"identity": {**identity_summary, "final_identity_loss": next(
                     (r["identity_loss"] for r in reversed(logs) if "identity_loss" in r), None
                 )}} if identity_summary else {}),

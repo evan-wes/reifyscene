@@ -60,8 +60,9 @@ class QueryIn(BaseModel):
 class EditIn(BaseModel):
     op: str = "remove"
     entity: str
-    slackness: float = 0.0
-    filtered: bool = True
+    method: str | None = None          # the checkpoint's default: owner when it has owners
+    slackness: float = 0.0             # FlashSplat's
+    filtered: bool = True              # FlashSplat's
 
 
 @dataclass
@@ -75,6 +76,7 @@ class Run:
     _maps: tuple | None = None
     _photos: dict[int, Path] | None = None
     _digest: str | None = None
+    _methods: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -84,6 +86,16 @@ class Run:
         if self._digest is None:
             self._digest = self.checkpoint.digest()
         return self._digest
+
+    def removal_methods(self) -> dict[str, Any]:
+        """The removal methods this checkpoint supports, its default first: by owner when it
+        was trained with owners (its render record says so; the weights are not opened)."""
+        if self._methods is None:
+            state = self.checkpoint.state
+            methods = (["owner"] if "ownership" in state else []) + ["flashsplat"] + (
+                ["identity"] if "identity" in state else [])
+            self._methods = {"methods": methods, "default": methods[0]}
+        return self._methods
 
     def gaussians_layer(self) -> dict[str, Any] | None:
         """The graph's ``gaussians`` layer as the app can use it: whether it describes the
@@ -96,7 +108,7 @@ class Run:
         return {"checkpoint": info["checkpoint"]["path"],
                 "current": info["checkpoint"]["digest"] == self.checkpoint_digest(),
                 "renderable": info["provides"]["renderable"], "counts": info["counts"],
-                "method": info["method"]}
+                "method": info["method"], "selection": info.get("selection")}
 
     @property
     def query(self):
@@ -208,6 +220,7 @@ def create_app(
                     ed = editor(run)
                     job.out_dir = run.outputs.output_dir(jid)
                     job.result = ed.remove(job.params["node_id"],
+                                           method=job.params.get("method"),
                                            slackness=float(job.params.get("slackness", 0.0)),
                                            filtered=bool(job.params.get("filtered", True)),
                                            out_dir=job.out_dir)
@@ -262,6 +275,7 @@ def create_app(
                                             "gaussians": e.attrs.get("gaussians") if use else None}
                              for e in sorted(q.entities.values(), key=lambda e: e.node_id)],
                 "gaussians_layer": layer,
+                "removal": r.removal_methods(),
                 "edges": edges,
                 "relations_available": bool(edges),
                 "relations_meta": (q.graph.metadata or {}).get("relations")}
@@ -328,8 +342,8 @@ def create_app(
             raise HTTPException(400, str(exc)) from exc
         jid = f"remove-{tracklet_number(node)}-{uuid.uuid4().hex[:8]}"
         jobs[jid] = Job(id=jid, run=name, op="remove",
-                        params={"node_id": node, "slackness": body.slackness,
-                                "filtered": body.filtered})
+                        params={"node_id": node, "method": body.method,
+                                "slackness": body.slackness, "filtered": body.filtered})
         work.put(jid)
         return {"id": jid, "status": "queued", "position": work.qsize()}
 

@@ -36,10 +36,11 @@ class DynamicGaussianField(GaussianField):
         *,
         color_model: str = "rgb",
         identity: torch.Tensor | None = None,
+        owner: torch.Tensor | None = None,
     ) -> None:
         super().__init__(
             means, quats, log_scales, logit_opacities, colors_logit,
-            color_model=color_model, identity=identity,
+            color_model=color_model, identity=identity, owner=owner,
         )
         self.motion_coefs = nn.Parameter(motion_coefs.float())  # (G, K) raw logits
 
@@ -76,6 +77,10 @@ class DynamicScene(nn.Module):
         # enable_identity (training) or bundle_to_scene (a checkpoint that has one).
         self.identity_classifier: nn.Linear | None = None
         self.identity_node_ids: list[str | None] = []   # class index -> graph node id
+        # Ownership: each field's ``owner`` buffer holds id-map codes; this is the class
+        # table they index (code -> graph node id, 0 the background as None). Codes past it
+        # are the unaddressed owner (reifyscene.graph.id_maps.UNADDRESSED).
+        self.owner_node_ids: list[str | None] = []
 
     @property
     def has_identity(self) -> bool:
@@ -104,6 +109,24 @@ class DynamicScene(nn.Module):
             raise ValueError("this scene was not trained with identity")
         ids = [self.fg.identity] + ([self.bg.identity] if self.bg is not None else [])
         return torch.softmax(self.identity_classifier(torch.cat(ids, dim=0)), dim=-1)
+
+    @property
+    def has_owners(self) -> bool:
+        return self.fg.owner is not None and (self.bg is None or self.bg.owner is not None)
+
+    def owners(self) -> torch.Tensor:
+        """(N_fg + N_bg,) id-map codes of the combined cloud, fg first."""
+        if not self.has_owners:
+            raise ValueError("this scene's Gaussians have no owners")
+        parts = [self.fg.owner] + ([self.bg.owner] if self.bg is not None else [])
+        return torch.cat(parts, dim=0)
+
+    def owner_channels(self) -> tuple[torch.Tensor, int]:
+        """``(channel per Gaussian (N,), C)``: background 0, entity *k* channel *k*, and the
+        unaddressed owner the last channel, ``C - 1``."""
+        k = len(self.owner_node_ids)
+        owners = self.owners()
+        return torch.where(owners < k, owners, torch.full_like(owners, k)), k + 1
 
     @property
     def num_frames(self) -> int:

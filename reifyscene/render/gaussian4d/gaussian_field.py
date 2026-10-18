@@ -22,6 +22,11 @@ PARAM_NAMES = ("means", "quats", "log_scales", "logit_opacities", "colors_logit"
 # PARAM_NAMES: a field only carries it when identity training is on, and the trainer
 # adds it to the densifier's list then, so splits and prunes carry it with the rest.
 IDENTITY_PARAM = "identity"
+# Optional per-Gaussian owner: the id-map code (reifyscene.graph.id_maps) of the pixel the
+# Gaussian was seeded from -- the entity it is part of, the background, or unaddressed. A
+# buffer, never optimised: a split or cloned child inherits it, pruning takes it along
+# (docs/design/2026-10-17-removal-by-ownership.md §4.1-4.2).
+OWNER_BUFFER = "owner"
 
 
 def logit(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -42,8 +47,11 @@ class GaussianField(nn.Module):
         *,
         color_model: str = "rgb",
         identity: torch.Tensor | None = None,
+        owner: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        if owner is not None and owner.shape != means.shape[:1]:
+            raise ValueError(f"{owner.shape[0]} owners for {means.shape[0]} Gaussians")
         self.color_model = str(color_model)
         self.means = nn.Parameter(means.float())
         self.quats = nn.Parameter(quats.float())
@@ -54,6 +62,8 @@ class GaussianField(nn.Module):
         self.register_parameter(
             IDENTITY_PARAM, None if identity is None else nn.Parameter(identity.float())
         )
+        self.owner: torch.Tensor | None
+        self.register_buffer(OWNER_BUFFER, None if owner is None else owner.long())
 
     @classmethod
     def from_cloud(cls, cloud: GaussianCloud, *, color_model: str = "rgb") -> "GaussianField":
@@ -126,3 +136,9 @@ class GaussianField(nn.Module):
 
     def set_param(self, name: str, param: nn.Parameter) -> None:
         setattr(self, name, param)
+
+    def get_buffer_rows(self, name: str) -> torch.Tensor:
+        return getattr(self, name)
+
+    def set_buffer_rows(self, name: str, rows: torch.Tensor) -> None:
+        self._buffers[name] = rows
