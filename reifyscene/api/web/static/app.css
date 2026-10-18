@@ -149,3 +149,4 @@ select { background: var(--surface); border: 1px solid var(--line); padding: 4px
 .edit .note { margin: 0; }
 .toggle[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .toggle:disabled { opacity: .45; cursor: not-allowed; }
+.legend .small-toggle { font-family: var(--mono); font-size: .7rem; padding: 2px 7px; }
