@@ -9,6 +9,15 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.2] - 2026-10-17
+
+### Changed
+- **The README's viewer animation is in the app's dark theme**, and each person's pair of removal
+  animations has its own label (left, middle, right).
+- **`scripts/readme_media/capture_viewer.mjs` takes the colour scheme** (dark by default, or
+  light), and `viewer_animation.py` crops to what differs from the panel's own background, so
+  either theme crops the same.
+
 ## [0.6.1.1] - 2026-10-17
 
 The README shows the app and the removals on DAVIS's lab-coat.
