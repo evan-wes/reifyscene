@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """The README's viewer animation, step 2: the scene-panel screenshots of ``capture_viewer.mjs``,
-cropped to what changes on any frame and written as one animated WebP.
+cropped to their content -- what differs from the panel's own background on any frame, in either
+theme -- and written as one animated WebP.
 
     python scripts/readme_media/viewer_animation.py FRAMES_DIR OUT.webp [--width 900] [--fps 4]
 """
@@ -26,9 +27,14 @@ def main() -> int:
     shots = [np.asarray(Image.open(p).convert("RGB")) for p in sorted(args.frames.glob("*.png"))]
     if not shots:
         raise SystemExit(f"no screenshots in {args.frames}")
+    # the panel's background: the commonest colour just inside its 1 px border
+    inner = shots[0][3:-3, 3:-3]
+    edge = np.concatenate([inner[0], inner[-1], inner[:, 0], inner[:, -1]]).astype(np.int16)
+    colours, counts = np.unique(edge, axis=0, return_counts=True)
+    background = colours[np.argmax(counts)]
     content = np.zeros(shots[0].shape[:2], bool)
     for shot in shots:
-        content |= (shot < 245).any(-1)
+        content |= (np.abs(shot.astype(np.int16) - background) > 10).any(-1)
     content[:, :3] = content[:, -3:] = content[:3, :] = content[-3:, :] = False   # the border
     ys, xs = np.nonzero(content)
     y0, y1 = max(int(ys.min()) - 8, 0), min(int(ys.max()) + 10, shots[0].shape[0])

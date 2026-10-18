@@ -30,12 +30,20 @@ when each entity is seen.
 Removing each person: before, after, and the extracted entity (the Gaussians the removal took,
 rendered alone), along the camera's path and then at one moment while the camera swings ±20°.
 
-![Removing the woman on the left, along the clip](docs/media/lab-coat_remove_left_clip.webp)
-![Removing the woman on the left, orbiting](docs/media/lab-coat_remove_left_orbit.webp)
-![Removing the woman in the middle, along the clip](docs/media/lab-coat_remove_middle_clip.webp)
-![Removing the woman in the middle, orbiting](docs/media/lab-coat_remove_middle_orbit.webp)
-![Removing the woman on the right, along the clip](docs/media/lab-coat_remove_right_clip.webp)
-![Removing the woman on the right, orbiting](docs/media/lab-coat_remove_right_orbit.webp)
+**The person on the left**
+
+![Removing the person on the left, along the clip](docs/media/lab-coat_remove_left_clip.webp)
+![Removing the person on the left, orbiting](docs/media/lab-coat_remove_left_orbit.webp)
+
+**The person in the middle**
+
+![Removing the person in the middle, along the clip](docs/media/lab-coat_remove_middle_clip.webp)
+![Removing the person in the middle, orbiting](docs/media/lab-coat_remove_middle_orbit.webp)
+
+**The person on the right**
+
+![Removing the person on the right, along the clip](docs/media/lab-coat_remove_right_clip.webp)
+![Removing the person on the right, orbiting](docs/media/lab-coat_remove_right_orbit.webp)
 
 The camera saw the women from one side: where no frame saw what was behind someone, the scene is
 left as it was reconstructed, a smear (`docs/design/2026-10-17-removal-by-ownership.md`, criterion
