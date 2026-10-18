@@ -9,6 +9,33 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.0] - 2026-10-17
+
+Not every candidate is a thing: the backdrop and fragments no longer become scene-graph entities.
+On the ten DAVIS slice runs the graph went from 139 entities to 72, with all 31 DAVIS-annotated
+objects kept (`docs/design/2026-10-17-graph-candidates.md`). The semantics (2) and graph (7)
+records change: a 0.6.0.0 run is resumed from the semantics stage.
+
+### Added
+- **Background classes** (27: floor, wall, ground, grass, sky, water, building, crowd, ...) and
+  **LVIS v1's frequent tier** (346 more categories) among the semantics stage's labels
+  (`reifyscene/perception/semantics/vocab.py`). A track is backdrop when a background class beats
+  every COCO-80 thing and no LVIS thing beats it by 0.045; a person is never backdrop, and is
+  named among COCO-80 and the background classes.
+- **The background takes the backdrop:** the graph's background node absorbs those tracks, and
+  the id maps give their pixels to the background.
+- **A noise floor for entities:** a candidate needs a mask over 0.1% of the frame (median) and 5
+  support tracks (`graph.entity_min_area`, `graph.entity_min_support_tracks`); below either it is
+  no node, and its pixels are unaddressed. The graph record lists what was absorbed and dropped,
+  and why.
+- **The viewer ranks entities by their Gaussians:** node size and order follow each entity's
+  Gaussian count, and entities with under 0.1% of the scene's Gaussians are folded behind
+  "show N small".
+
+### Changed
+- **`benchmarks/README.md`:** the DAVIS inventory was not re-scored for the new candidates; its
+  `spurious` count describes the code before them.
+
 ## [0.6.0.0] - 2026-10-17
 
 Removal by ownership: every Gaussian has an owner from the moment it is seeded, training keeps
