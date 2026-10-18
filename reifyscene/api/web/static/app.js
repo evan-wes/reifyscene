@@ -246,7 +246,9 @@ function drawRelTimeline() {
 
 function drawLegend() {
   const lg = $("legend"); lg.innerHTML = "";
-  for (const [c, n] of Object.entries(S.graph.categories)) {
+  const counts = {};                                  // what the graph and timeline list
+  for (const e of listed()) counts[e.category] = (counts[e.category] || 0) + 1;
+  for (const [c, n] of Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))) {
     const i = el("i"); i.style.background = S.colorOf[c];
     lg.append(el("span", { title: `select ${c}`, onclick: () => runQuery("select", { category: c }) }, i, `${c} ${n}`));
   }
