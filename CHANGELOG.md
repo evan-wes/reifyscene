@@ -9,6 +9,53 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.0.0] - 2026-10-17
+
+Removal by ownership: every Gaussian has an owner from the moment it is seeded, training keeps
+each owner's Gaussians on its own pixels and in its own space, and removing an entity drops its
+owner's Gaussians. On lab-coat it beats the FlashSplat removal it replaces on all three tests for
+two of the three people, and on T1 and T2 for the third; no person yet passes every absolute mark
+(`benchmarks/removal_ownership_lab-coat.json`). The scene, render and handles records are clean
+breaks: runs made before this version are rebuilt from the scene stage, not read.
+
+### Added
+- **Removal by ownership** (`docs/design/2026-10-17-removal-by-ownership.md`). Each Gaussian's
+  owner is the id-map code of the pixel it was seeded on; a track is not used within 2 px of
+  another code. Densification passes the owner to split and cloned children. Removing an entity
+  drops its owner's Gaussians: `owner` is the default removal method on an owned checkpoint, and
+  FlashSplat and the learned identity stay for comparison. Pixels only a dropped tracklet claims
+  get a reserved *unaddressed* owner, never removable.
+- **The owner loss:** each owner's share of every labelled pixel, rendered in a second pass,
+  against the id map (weight 1.0); densification still sees photometric gradients only.
+- **Containment**, on whenever a scene has owners: a cap on background-owned Gaussians' longest
+  to shortest axis ratio; a ghost prune of background-owned Gaussians that paint only entities;
+  body containment, which keeps each entity's Gaussians inside its body (each person's Sapiens
+  body, built by the scene stage on every training frame that shows its torso) or close behind
+  its own surface; and a prune of background-owned Gaussians inside a body's core.
+- **The drift check:** every 500 steps and at the end, the Gaussians whose FlashSplat evidence
+  goes to another class than their owner are counted, never relabelled, in the render record.
+- **Removal tests T1-T4** (`scripts/benchmark_removal.py`): no trace, empty space, the seen
+  background against a geometry floor matched to how far in time each pixel was seen, and the
+  unseen share, measured from the clip itself. `benchmarks/removal_baseline.json` holds the
+  replaced removal on eleven runs; `benchmarks/removal_ownership_lab-coat.json` the gate pair.
+- **Held-out frames** for the dynamic render stage (`render.holdout_every`), scored after
+  training.
+- **The gate's two arms:** `configs/experiment/davis_graph_loop_gate_ownership_on.yaml` and
+  `davis_graph_loop_gate_ownership_off.yaml`.
+
+### Changed
+- **Scene stage (contract 6):** reid and the graph are its upstream; it exports the run's id maps,
+  seeds owners, and writes owners, id maps and bodies into the bundle.
+- **Render stage (contract 5):** checkpoints carry owners. **Handles stage (contract 3):** on an
+  owned checkpoint the `gaussians` layer is the owners'.
+- **Id maps, format 2:** an unaddressed pixel (65534) is told apart from an ignored one.
+- **The app** offers the removal method a checkpoint supports, and applies slackness and the
+  floater filter to FlashSplat only.
+- **The edit-damage benchmark's segmenter** finds any COCO category, up to 50 detections.
+
+### Fixed
+- **A body keypoint's depth** no longer reads a pixel without depth as depth 0.
+
 ## [0.5.0.0] - 2026-10-16
 
 Ready to be public: one data directory holds everything the pipeline reads and writes, nothing in
