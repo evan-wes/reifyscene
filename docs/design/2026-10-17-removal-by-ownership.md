@@ -200,7 +200,7 @@ doc measured wide channels as cheap (19 channels, 1.31 ms for 80k Gaussians at 5
   supervises them — that is criterion 4's unseen region, by definition.
 - **Why not the −1.9 dB mask term again:** that term drove the foreground *field* to match every
   segmented instance, forcing a motion split to carry identity (render stage, 2026-10-01). Here
-  ownership is independent of the field split. Its PSNR cost is still unknown (§5).
+  ownership is independent of the field split. Its PSNR cost is measured in §5.
 
 **Why fixed owners force separation, and relabelling would not.** If a Gaussian drifts so that it
 draws part of person B while owned by A, the loss sees A's Gaussians covering B's pixels. If the
@@ -236,7 +236,88 @@ prune it. First version: count flags per (owner, evidence) pair and keep them in
 record (`scene_state.ownership.drift`); act (prune, or split — unproven) only if the counts are
 non-trivial.
 
-### 4.6 Format
+### 4.6 Containment of the background
+
+The owner's look at lab-coat (`own_lab-coat_hold_on`, 2026-10-17) found the middle woman's
+removal still leaving a ghost at her boundaries, and the owner-coloured orbit showed why: the
+streaks behind the people are **background-owned** Gaussians stretched along the line of sight.
+Nothing in training reaches them. Every loss works through a render, and a Gaussian hidden behind
+a person in every frame gets almost no gradient; the depth prior there is the person's depth; and
+Shape-of-Motion's only shape term is a variance of scales. The literature review
+(`reports/Gaussian object identity and containment.md`) found no published fix aimed at this,
+and two that carry over:
+
+- **Scale-ratio cap** (`lambda_scale_ratio`, `max_scale_ratio`, `scale_ratio_every`):
+  splatfacto's term after PhysGaussian, the mean of max(longest / shortest axis, *r*) − *r* over
+  background-owned Gaussians, at its defaults (*r* = 10, weight 0.1, every 10 steps). It acts on
+  each Gaussian alone, so it needs no second view.
+- **Ghost prune** (`ghost_max_bg_share`): the drift check's evidence (§4.5) is already an
+  occlusion-aware record of where each Gaussian's blending weight lands, split by id-map class,
+  over every training view. At every drift check but the last, a background-owned Gaussian whose
+  weight lands on entities' pixels, with under this share (0.1) of it on the background's, is
+  pruned: it paints only an entity, so removing the entity would leave it behind. The last check
+  only counts, so that every prune is followed by training that lets the entity's own Gaussians
+  fill in. Each check's record carries `ghosts`, and `pruned` (all prunes at that check).
+
+Nothing in training made the people occupy the space of standing people either: seeding puts
+their Gaussians on the surface the camera sees, the depth term pins that surface and nothing
+behind it, and the owner loss is a silhouette, which a Gaussian stretched straight back along
+the line of sight still satisfies. **Body containment** (the owner's question, 2026-10-17) acts
+on each Gaussian directly, not through a render, so it reaches Gaussians hidden in every view:
+
+- **Bodies at the scene stage.** Each person's Sapiens body (`reifyscene.edit.body_volume`,
+  the body T2 measures against) is built on every training frame from that frame's own depth
+  target, owner pixels and camera, and written into the bundle (`target_body_*`): capsules,
+  their frame and owner, each body's torso length and clothing margin.
+- **The loss** (`lambda_body`, `body_sigmas`): an entity's Gaussian may reach (centre plus 2
+  standard deviations) inside its body, or up to a band behind its own surface where the frame
+  shows the entity at its pixel -- the clothing margin for a person, so loose clothes and hair
+  outside the capsules are not squeezed in, and one entity width for anything without a body
+  on that frame (T2's slab). Its excess over the nearer of the two, in its entity's size, is
+  averaged over the Gaussians the view can judge. Another entity's Gaussians behind it are left
+  alone: one person standing behind another is real. The nearest published form is drivestudio's
+  soft out-of-bound loss on deformable nodes, against a tracked box this pipeline does not have.
+- **Background in a body** (`prune_background_in_body`): at the same checks, background-owned
+  Gaussians whose centre lies in a body's core (capsules less the clothing margin) on some
+  training frame are pruned; that space was a person's at that moment (criterion 2). The core,
+  not the whole body, so the ground under a foot is not taken. Recorded as `in_body`.
+
+**Measured on lab-coat, and the owner's look (2026-10-17).** First on `own_lab-coat`'s scene,
+the ratio cap and the ghost prune (arm A) against the owner loss alone (`own_lab-coat_hold_on`):
+background-owned Gaussians drawn mostly on an entity's pixels at the last drift check 11,655 →
+1,838, held-out PSNR 22.08 → 21.72 dB; the owner judged A's removals cleaner. Body containment
+needs the bodies in the bundle, and the scene stage is not deterministic (its seeds differ from
+one build to the next), so every arm below trains on one rebuilt scene
+(`own_lab-coat_contain_b`'s), with every 6th training frame held out:
+
+| on one scene | ownership training off | A2: owner loss, ratio cap, ghost prune | B: A2 + body containment and its prune | C: B with the owner loss at 0.1 |
+|---|---|---|---|---|
+| PSNR, training frames | 27.95 dB | 24.86 dB | 24.65 dB | 26.27 dB |
+| PSNR, held-out frames | 21.77 dB | 21.41 dB | 21.65 dB | 21.34 dB |
+| Gaussians drawn mostly in another owner's pixels (last drift check) | 94,546 | 6,721 | 5,905 | 24,436 |
+| … background-owned ones, drawn mostly on entities | 29,264 | 1,789 | 1,789 | 1,863 |
+| background-owned Gaussians whose longest axis is over 10× their shortest | 178,086 of 378,122 | 3,216 of 425,012 | 3,215 of 425,351 | 1,793 of 391,307 |
+| middle woman removed: share of her pixels drawn by background outside her body | 0.10 | 0.32 | 0.38 | 0.26 |
+| … by background inside her body | 0.55 | 0.14 | 0.16 | 0.15 |
+| … by the other two women inside her body | 0.25 | 0.21 | 0.15 | 0.17 |
+| … by nothing | ≈ 0 | ≈ 0.04 | ≈ 0.10 | ≈ 0.23 |
+
+The removal rows are over the frames where she covers at least 200 px, split by whether the
+drawing Gaussian's centre lies in her T2 volume; "nothing" is what the rows over 0.005 leave.
+
+- **The owner's look:** B removes more cleanly than A2; C leaves a black void where B leaves a
+  natural fill; B is a little softer than the arm without ownership training, otherwise alike.
+  **All four are on by default** whenever the scene has owners, like the owner loss, and the
+  owner loss stays at 1.0.
+- **Without ownership training the ghost is background-owned:** over half of the middle woman's
+  pixels are still drawn after her removal, by background Gaussians inside her body.
+- **The background-in-body prune does not lower that share on its own** (A2 0.14, B 0.16): it
+  takes 344–2,554 Gaussians per check, but only centres in the core, while the measurement counts
+  the clothed body, and densification refills between checks.
+- **The ghost prune peaks after the opacity reset** (step 3000), when hidden background shows
+  through the people: 12,427 in B there, 426–1,279 at the other checks.
+
+### 4.7 Format
 
 The bundle gains `fg_owner` / `bg_owner`, the class table `owner_node_ids`, and the id maps the
 loss trains on (`target_ids`, beside the depth targets), so the render stage still reads only
@@ -255,11 +336,35 @@ On the same clips as the baseline, today's removal vs ownership:
 | T2 space | remaining opacity mass in *V_t* ≤ 5% of before |
 | T3 seen background | within 1 dB of the geometry floor |
 | T4 unseen | reported, no pass mark |
-| training-view PSNR | ≤ 0.5 dB below the same run without the loss (the identity work's noise band) |
+| held-out PSNR | ≤ 0.5 dB below the same run without ownership training (the identity work's noise band), on every 6th training frame held out; the training-frame gap reported |
 | by eye | the owner, on stills of each removal |
 
-The thresholds are proposals for the owner. Also reported: the drift check's flag counts, and the
-render stage's time and memory.
+Also reported: the drift check's flag counts, and the render stage's time and memory. The two
+arms: `configs/experiment/davis_graph_loop_gate_ownership_on.yaml` and
+`davis_graph_loop_gate_ownership_off.yaml` (the off arm resumes the on arm's run at the render
+stage, so both train on one scene).
+
+**Why held-out frames, not training frames** (the owner, 2026-10-17; the mark was first on
+training frames). On lab-coat (§4.6's scene) B is 3.30 dB below the arm without ownership
+training on training frames and 0.12 dB on held-out frames; on `own_lab-coat`'s scene the owner
+loss alone was 2.31 dB below on training frames (25.49 against 27.80) and 0.18 dB above on
+held-out ones (22.08 against 21.90). By region (PSNR pooled over pixels):
+
+| region | training frames, off | training frames, B | held-out, off | held-out, B |
+|---|---|---|---|---|
+| background, beyond 3 px of a mask edge | 27.87 | 23.86 | 21.23 | 21.33 |
+| mask edges, ±3 px | 24.76 | 22.40 | 18.09 | 17.93 |
+| entity interiors | 27.73 | 26.43 | 19.14 | 18.61 |
+
+In the arm without ownership training, on training frames, 31% of the weight on those
+background pixels comes from the people's moving Gaussians; in B, 0.2%. B's extra error sits on
+thin, high-contrast background -- fence posts and rail, branches against the sky -- not on the
+grass or the shadows: the pattern of a background that does not land in the same place on every
+frame (camera and depth error), patched frame by frame by the people's moving Gaussians. The
+patch does not carry to frames it was not fitted to, and it is what a removal takes along with a
+person. A crisper
+background is the geometry's to give (pose refinement, SLAM It!), not this design's. What
+ownership itself costs is the interiors' 0.5 dB on held-out frames.
 
 ## 6. Risks
 
@@ -269,7 +374,8 @@ render stage's time and memory.
 - **Contact and occlusion.** lab-coat's women stand shoulder to shoulder. A pixel claimed by two
   masks is ignored, so the loss says nothing exactly where separation is hardest.
 - **PSNR cost.** A constraint on where colour may come from can cost fidelity; the SoM mask term
-  cost 1.9 dB for a different reason. Unknown until measured.
+  cost 1.9 dB for a different reason. Measured on lab-coat (§5): 3.30 dB on training frames, 0.12
+  dB on held-out ones.
 - **Criterion 3 needs consistent geometry.** If cameras or depth disagree across frames, seen
   background lands in the wrong place, and T3 fails whatever the removal does. The control in T3
   separates the two; the fix is SLAM It!, not this PR.
@@ -282,11 +388,13 @@ render stage's time and memory.
    background behind each entity the video saw (T4's complement), propose the top few, and the
    owner picks. Those clips are both the gate set and the site's. The ranking uses the existing
    runs' geometry; the picks are re-checked after their rebuild.
-2. **Pass marks as in §5.** The owner's look at stills is the final gate.
+2. **Pass marks as in §5.** The owner's look at stills is the final gate. The PSNR mark is on
+   held-out frames, after §5's measurement (it was on training frames).
 3. **Unmapped tracklets: the reserved *unaddressed* owner.** Never removable; ignored by the loss.
 4. **Keep the old paths.** FlashSplat selection and the learned identity (I2/I3) stay, for
    comparison, after ownership passes; ownership becomes the default removal (§4.4).
 5. **Drift check: flag-only first.**
+6. **Containment on by default, the owner loss at 1.0** (the owner's look at lab-coat, §4.6).
 
 Settled before: unseen background is left as is (criterion 4); a blur stays a cosmetic option
 for the site.
@@ -301,7 +409,8 @@ One branch, one pull request, a commit per step:
 3. The clip ranking, for the owner to choose from.
 4. Ownership: owners at seeding, inheritance through densification, the silhouette loss in a
    second pass, removal by owner, the drift check; scene 5 → 6, render 4 → 5, handles 2 → 3.
-5. The chosen clips rebuilt on the option-A geometry, each trained with and without the loss.
+5. The chosen clips rebuilt on the option-A geometry, each trained with and without ownership
+   training (§5's two arms).
 6. Today's removal against ownership on all tests, and stills for the owner.
 
 ## References

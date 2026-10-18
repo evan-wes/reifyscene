@@ -267,6 +267,16 @@ class DensificationController:
         for name in self.buffer_names:
             self.field.set_buffer_rows(name, self.field.get_buffer_rows(name)[keep_mask])
 
+    @torch.no_grad()
+    def prune(self, keep_mask: torch.Tensor) -> int:
+        """Prune outside the schedule (the trainer's ghost prune): the params, their optimizer
+        state, the buffers and the gradient accumulators keep ``keep_mask``'s rows. Returns how
+        many went."""
+        self._prune(keep_mask)
+        self.grad2d_accum = self.grad2d_accum[keep_mask]
+        self.count = self.count[keep_mask]
+        return int((~keep_mask).sum())
+
     # -- densification primitives -----------------------------------------
 
     def _clone_and_split_rows(self, clone_mask: torch.Tensor, split_mask: torch.Tensor) -> dict[str, torch.Tensor]:

@@ -170,21 +170,15 @@ def sapiens_body(renderer, humans_artifact, track_id: str, masks_by_frame: dict,
     """
     import torch
 
-    cfg = cfg or BodyConfig()
-    body = BodyVolume()
-    states = [h for h in humans_artifact.humans
-              if str(h.human_id) == str(track_id) and h.keypoints_2d is not None
-              and str(h.frame_ref.stream_id) == stream.id]
-    for state in states:
-        frame = int(state.frame_ref.frame_idx)
+    def frame_inputs(frame: int):
         mask = masks_by_frame.get(frame, {}).get(node_id)
         if mask is None or frame not in renderer.time_of:
-            continue
+            return None
         t = renderer.time_of[frame]
         camera = renderer.cams[t].render_camera(*renderer.size)
         if depth_by_frame is not None:
             if frame not in depth_by_frame:
-                continue
+                return None
             depth = np.asarray(depth_by_frame[frame], np.float64)
         else:
             with torch.no_grad():
@@ -192,8 +186,32 @@ def sapiens_body(renderer, humans_artifact, track_id: str, masks_by_frame: dict,
                 out = renderer.rasterizer.rasterize(c.means, c.quats, c.scales, c.opacities,
                                                     c.colors, camera)
             depth = out.depth.detach().cpu().numpy()
+        return mask, depth, camera
+
+    return lift_body(humans_artifact, track_id, stream, frame_inputs, cfg=cfg)
+
+
+def lift_body(humans_artifact, track_id: str, stream, frame_inputs, *,
+              cfg: BodyConfig | None = None) -> BodyVolume:
+    """The body of the human tracked as ``track_id`` on every frame of ``stream`` where it can
+    be built. ``frame_inputs(frame)`` gives that frame's ``(mask, depth, camera)`` in one raster
+    -- the person's pixels, depth in the scene's units (0 where there is none) and the
+    :class:`~reifyscene.render.gaussian4d.rasterizer.RenderCamera` -- or None to skip it. The
+    scene stage calls this before any checkpoint exists, with its own depth targets."""
+    cfg = cfg or BodyConfig()
+    body = BodyVolume()
+    states = [h for h in humans_artifact.humans
+              if str(h.human_id) == str(track_id) and h.keypoints_2d is not None
+              and str(h.frame_ref.stream_id) == stream.id]
+    for state in states:
+        frame = int(state.frame_ref.frame_idx)
+        inputs = frame_inputs(frame)
+        if inputs is None:
+            continue
+        mask, depth, camera = inputs
         lifted = lift_frame(np.asarray(state.keypoints_2d), np.asarray(mask, bool),
-                            depth, camera, stream.transform, stream.size, cfg)
+                            np.asarray(depth, np.float64), camera, stream.transform,
+                            stream.size, cfg)
         if lifted is not None:
             body.frames[frame], body.torso_length[frame] = lifted
     return body

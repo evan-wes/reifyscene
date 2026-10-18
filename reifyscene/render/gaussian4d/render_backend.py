@@ -47,6 +47,23 @@ def _intrinsics_obj(intr: dict[str, Any]) -> CameraIntrinsics:
     return CameraIntrinsics(fx=float(intr["fx"]), fy=float(intr["fy"]), cx=float(intr["cx"]), cy=float(intr["cy"]))
 
 
+def train_bodies(bundle, device: str) -> dict[int, dict[int, dict]]:
+    """The scene stage's bodies (``target_body_*``) by target row, then owner code: each a dict
+    of ``capsules`` (n, 7) -- ends and radius, clothing margin included -- its ``torso`` length
+    and its ``margin``, in the scene's units (removal-by-ownership §4.6)."""
+    caps = np.asarray(bundle["target_body_capsules"], np.float32).reshape(-1, 7)
+    rows = np.asarray(bundle["target_body_rows"]).reshape(-1, 2).astype(int)
+    out: dict[int, dict[int, dict]] = {}
+    for i, code, torso, margin in np.asarray(bundle["target_body_frames"]).reshape(-1, 4):
+        i, code = int(i), int(code)
+        sel = (rows[:, 0] == i) & (rows[:, 1] == code)
+        out.setdefault(i, {})[code] = {
+            "capsules": torch.as_tensor(caps[sel], device=device),
+            "torso": float(torso), "margin": float(margin),
+        }
+    return out
+
+
 class GaussianRenderBackend(RenderBackend):
     """gsplat-backed trainer + renderer over a self-contained SceneArtifact."""
 
@@ -317,6 +334,7 @@ class GaussianRenderBackend(RenderBackend):
         valid = np.asarray(bundle["target_depth_valid"])
         fg = np.asarray(bundle["target_fg"])
         ids = np.asarray(bundle["target_ids"]) if "target_ids" in bundle else None
+        bodies = train_bodies(bundle, self.device) if "target_body_frames" in bundle else None
         out = []
         for key in self._train_frame_keys:
             if key not in row:
@@ -328,6 +346,7 @@ class GaussianRenderBackend(RenderBackend):
                 "fg": torch.as_tensor(fg[i].astype(np.float32), device=self.device),
                 **({"ids": torch.as_tensor(ids[i].astype(np.int64), device=self.device)}
                    if ids is not None else {}),
+                **({"bodies": bodies.get(i, {})} if bodies is not None else {}),
             })
         return out
 
@@ -412,7 +431,8 @@ class GaussianRenderBackend(RenderBackend):
         trainer = DynamicGaussianTrainer(scene, train_cfg, densify_cfg, device=self.device, rasterizer=rasterizer)
         geometry_on = (train_cfg.lambda_depth > 0 or train_cfg.lambda_depth_grad > 0
                        or train_cfg.lambda_mask > 0)
-        owned = scene.has_owners and (train_cfg.lambda_owner > 0 or train_cfg.owner_drift_every > 0)
+        owned = scene.has_owners and (train_cfg.lambda_owner > 0 or train_cfg.owner_drift_every > 0
+                                      or train_cfg.lambda_body > 0)
         targets = self._train_targets(bundle) if geometry_on or owned else None
         drift: list[dict] = []
         # holdout_every N > 0 keeps every Nth view out of training, to be scored after it: how
@@ -484,6 +504,8 @@ class GaussianRenderBackend(RenderBackend):
                     "owners": len(trained.owner_node_ids),
                     "final_owner_loss": next(
                         (r["owner_loss"] for r in reversed(logs) if "owner_loss" in r), None),
+                    "final_body_loss": next(
+                        (r["body_loss"] for r in reversed(logs) if "body_loss" in r), None),
                     "drift": drift,
                 }} if trained.has_owners else {}),
                 **({"identity": {**identity_summary, "final_identity_loss": next(

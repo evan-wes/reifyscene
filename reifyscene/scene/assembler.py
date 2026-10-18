@@ -267,6 +267,52 @@ class SingleVideoSceneAssembler:
             out["target_ids"] = stack.owners.cpu().numpy().astype(np.uint16)
         return out
 
+    def _train_bodies(self, stack, norm, cams_train, human_artifact,
+                      people: dict[int, str]) -> dict[str, np.ndarray]:
+        """Each person's Sapiens body (:mod:`reifyscene.edit.body_volume`) on each training
+        frame, for the render stage's body containment (removal-by-ownership §4.6), built from
+        the frame's own depth target, owner pixels and normalized camera, so it sits in the
+        scene's world and units. ``people`` maps an owner code to its human track.
+
+        Rows: each capsule ``(a, b, radius)`` with its ``(target row, owner)``; each body's
+        ``(target row, owner, torso length, clothing margin)``. Written, empty or not, for
+        every owned scene, so the render stage can tell a scene without people from one
+        assembled before bodies were."""
+        from reifyscene.common.frame_keys import parse_key
+        from reifyscene.edit.body_volume import BodyConfig, lift_body
+
+        cfg = BodyConfig()
+        stream = self._streams.only()
+        height, width = int(stack.depths.shape[1]), int(stack.depths.shape[2])
+        names = [str(n) for n in stack.cameras.frame_names]
+        row_of = {int(parse_key(n)[1]): i for i, n in enumerate(names)
+                  if parse_key(n)[0] == stream.id}
+        cam_of = {str(c.frame_name): c for c in cams_train}
+        depths = (stack.depths / float(norm.scale)).cpu().numpy()
+        valid = (stack.valid.cpu().numpy() > 0.5) & np.isfinite(depths) & (depths > 0)
+        owners = stack.owners.cpu().numpy()
+        caps, cap_rows, frames = [], [], []
+        for code, track_id in sorted(people.items() if human_artifact is not None else []):
+            def inputs(frame: int, code: int = code):
+                i = row_of.get(frame)
+                if i is None or names[i] not in cam_of:
+                    return None
+                return (owners[i] == code, np.where(valid[i], depths[i], 0.0),
+                        cam_of[names[i]].render_camera(width, height))
+
+            body = lift_body(human_artifact, track_id, stream, inputs, cfg=cfg)
+            for frame, capsules in sorted(body.frames.items()):
+                i, length = row_of[frame], body.torso_length[frame]
+                frames.append((i, code, length, cfg.margin * length))
+                for a, b, r in capsules:
+                    caps.append((*a, *b, r))
+                    cap_rows.append((i, code))
+        return {
+            "target_body_capsules": np.asarray(caps, np.float32).reshape(-1, 7),
+            "target_body_rows": np.asarray(cap_rows, np.int32).reshape(-1, 2),
+            "target_body_frames": np.asarray(frames, np.float32).reshape(-1, 4),
+        }
+
     def _fg_mask_by_frame(self, instance_artifact) -> dict[str, np.ndarray]:
         """Per-frame union of all segment instance masks -> the dynamic foreground.
 
@@ -341,6 +387,7 @@ class SingleVideoSceneAssembler:
     def _assemble_dynamic(
         self, *, run_id: str, save_dir, geometry_artifact, instance_artifact,
         metadata: dict[str, Any] | None, frame_refs, timeline, id_maps=None,
+        human_artifact=None, people: dict[int, str] | None = None,
     ) -> SceneArtifact:
         """Build a dynamic SE(3) scene from the pipeline's own geometry + tracks.
 
@@ -353,6 +400,8 @@ class SingleVideoSceneAssembler:
         ``id_maps`` -- ``(maps by frame key, class table)`` of the run's graph
         (:mod:`reifyscene.graph.id_maps`) -- give every Gaussian its owner: the code of the
         pixel it is seeded from (``docs/design/2026-10-17-removal-by-ownership.md`` §4.1).
+        ``people`` (owner code -> human track) and ``human_artifact`` give the people among
+        them a body on each training frame (:meth:`_train_bodies`, §4.6).
         """
         from reifyscene.lifting.geometry_provider import ArtifactGeometryProvider
         from reifyscene.render.gaussian4d.motion_init import NativeMotionInitializer, dump_bundle
@@ -412,6 +461,9 @@ class SingleVideoSceneAssembler:
             scene.owner_node_ids = list(owner_node_ids)
         bundle = dump_bundle(scene, cams, factor=1, scene_norm=norm)
         bundle.update(self._train_targets(stack, norm))
+        if owner_node_ids is not None and stack.owners is not None:
+            bundle.update(self._train_bodies(stack, norm, cams.get("train", []), human_artifact,
+                                             people or {}))
         train_views = self._dynamic_train_views(cams.get("train", []), height, width, geometry_artifact, save_dir)
         render_trajectory = self._dynamic_orbit_trajectory(scene, train_views)
         notes = [
@@ -449,10 +501,12 @@ class SingleVideoSceneAssembler:
         metadata: dict[str, Any] | None = None,
         streams,
         id_maps=None,
+        people: dict[int, str] | None = None,
     ) -> SceneArtifact:
         """``streams``: the run's :class:`~reifyscene.ingest.streams.RunStreams` -- where every
         training photo is read from. ``id_maps``: ``({frame key: id map}, class table)``, which
-        give a dynamic scene's Gaussians their owners."""
+        give a dynamic scene's Gaussians their owners; ``people``: which of those owner codes
+        are humans, by track, to give them bodies."""
         self._streams = streams
         frame_refs = sorted(list(geometry_artifact.selected_frames), key=lambda fr: (fr.stream_id, int(fr.frame_idx)))
         timeline = {
@@ -466,6 +520,7 @@ class SingleVideoSceneAssembler:
                 run_id=run_id, save_dir=save_dir, geometry_artifact=geometry_artifact,
                 instance_artifact=instance_artifact, metadata=metadata,
                 frame_refs=frame_refs, timeline=timeline, id_maps=id_maps,
+                human_artifact=human_artifact, people=people,
             )
 
         return self._assemble_static(

@@ -25,6 +25,15 @@ FlashSplat evidence of each Gaussian is compared with its owner, and Gaussians w
 went to another entity are counted (flagged, never relabelled;
 ``docs/design/2026-10-17-removal-by-ownership.md`` §4.3-4.5).
 
+**Containment** (§4.6; on whenever the scene has owners, like the owner loss) keeps each
+Gaussian in its owner's space where one camera cannot: a cap on the longest-to-shortest axis
+ratio of background-owned Gaussians, against needles along the line of sight; the **ghost
+prune**, which at the drift checks removes background-owned Gaussians whose evidence lies almost
+all on entities' pixels -- they paint only an entity, and removing it would leave them behind;
+**body containment**, a per-Gaussian loss (not through a render, so it reaches Gaussians hidden
+in every view) that keeps each entity's Gaussians inside its body or close behind its own
+surface; and a prune of background-owned Gaussians inside a body's core.
+
 A 3D consistency term (Gaussian Grouping's ``loss_cls_3d``) pulls each sampled
 Gaussian's class distribution toward its k nearest neighbours' -- canonical means for
 the foreground, which stay neighbours on a typical frame across all ten loop scenes,
@@ -50,12 +59,23 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from reifyscene.graph.id_maps import labelled
-from reifyscene.render.gaussian4d.densify import DensificationController, DensifyConfig, compute_scene_extent
+from reifyscene.graph.id_maps import BACKGROUND, labelled
+from reifyscene.render.gaussian4d.densify import (
+    DensificationController,
+    DensifyConfig,
+    _quat_to_rotmat,
+    compute_scene_extent,
+)
 from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES, DynamicScene
 from reifyscene.render.gaussian4d.gaussian_field import IDENTITY_PARAM, OWNER_BUFFER, PARAM_NAMES
 from reifyscene.render.gaussian4d.gaussian_trainer import image_psnr, ssim, _to_bchw
-from reifyscene.render.gaussian4d.losses import gradient_loss, masked_l1_loss, owner_loss
+from reifyscene.render.gaussian4d.losses import (
+    capsule_distance,
+    gradient_loss,
+    masked_l1_loss,
+    owner_loss,
+    scale_ratio_loss,
+)
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, build_rasterizer
 
 
@@ -106,6 +126,31 @@ class DynamicTrainConfig:
     # Motion's weight for its mask term. 0 trains the same owned scene without it.
     lambda_owner: float = 1.0
     owner_drift_every: int = 500        # 0: no drift check
+    # Containment (removal-by-ownership §4.6), on like the owner loss whenever the scene has
+    # owners; 0 / False turns each off. The scale-ratio cap (splatfacto: r = 10, weight 0.1,
+    # every 10 steps) on background-owned Gaussians, against needles stretched along the line
+    # of sight behind an entity, where no view constrains their length.
+    lambda_scale_ratio: float = 0.1
+    max_scale_ratio: float = 10.0
+    scale_ratio_every: int = 10
+    # The ghost prune: at every drift check but the last, background-owned Gaussians whose
+    # blending weight falls on entities' pixels, with under this share of it on the
+    # background's, are pruned -- they paint only an entity, so removing it would leave them
+    # behind as its ghost.
+    ghost_max_bg_share: float = 0.1
+    # Body containment. Each entity's own Gaussians are kept in the space it occupies on each
+    # training frame: inside its body (a person's Sapiens capsules, built by the scene stage)
+    # or within a band behind its own surface where the frame shows it -- the clothing margin
+    # for a person, so loose clothes and hair outside the capsules are not squeezed in; one
+    # entity width for anything without a body on that frame. A Gaussian reaches its centre
+    # plus ``body_sigmas`` standard deviations; how far it reaches out is measured in its
+    # entity's size (torso length, or width), so the weight is scale-free.
+    lambda_body: float = 1.0
+    body_sigmas: float = 2.0
+    # At every drift check but the last, background-owned Gaussians whose centre lies in a
+    # body's core (its capsules less the clothing margin) on some training frame are pruned:
+    # that space was a person's at that moment.
+    prune_background_in_body: bool = True
     lr_means: float = 1.6e-4
     lr_scales: float = 5.0e-3
     lr_quats: float = 1.0e-3
@@ -336,20 +381,31 @@ class DynamicGaussianTrainer:
         return None if loss is None else self.cfg.lambda_owner * loss
 
     @torch.no_grad()
-    def owner_drift(self, views: list[tuple]) -> dict:
-        """Gaussians whose FlashSplat evidence now goes to another entity than their owner.
+    def owner_evidence(self, views: list[tuple]) -> torch.Tensor:
+        """(N, K): each Gaussian's FlashSplat evidence, its blending weight summed over each
+        id-map class's pixels (background 0, the entities after) across ``views``
+        (``(camera, time_id, id map)``). Occlusion counts: a Gaussian hidden behind another
+        gets only the weight that reaches the pixel."""
+        from reifyscene.graph.assignment import evidence_matrix
 
-        ``views`` are ``(camera, time_id, id map)``. Only Gaussians that some entity's or the
-        background's evidence clearly claims (slackness 0) and that are owned by an entity or
-        the background are judged; a flag is counted per (owner, evidence) pair of id-map
-        codes. Flagged, never relabelled: a Gaussian that is one thing at one time and another
-        at another makes removal ill-posed, and relabelling it hides that.
-        """
-        from reifyscene.graph.assignment import assign, evidence_matrix
-
-        k = len(self.scene.owner_node_ids)
         with torch.enable_grad():
-            counts = evidence_matrix(self.scene, self.rasterizer, views, k)
+            return evidence_matrix(self.scene, self.rasterizer, views,
+                                   len(self.scene.owner_node_ids))
+
+    @torch.no_grad()
+    def owner_drift(self, counts: torch.Tensor) -> dict:
+        """Gaussians whose FlashSplat evidence ``counts`` (:meth:`owner_evidence`) now goes to
+        another entity than their owner.
+
+        Only Gaussians that some entity's or the background's evidence clearly claims
+        (slackness 0) and that are owned by an entity or the background are judged; a flag is
+        counted per (owner, evidence) pair of id-map codes. Flagged, never relabelled: a
+        Gaussian that is one thing at one time and another at another makes removal
+        ill-posed, and relabelling it hides that.
+        """
+        from reifyscene.graph.assignment import assign
+
+        k = counts.shape[1]
         member = assign(counts)
         claimed = member.any(dim=1)
         evidence = member.float().argmax(dim=1)
@@ -363,6 +419,118 @@ class DynamicGaussianTrainer:
                 pairs[f"{a}->{b}"] = pairs.get(f"{a}->{b}", 0) + 1
         return {"judged": int(judged.sum()), "flagged": int(flagged.sum()),
                 "pairs": dict(sorted(pairs.items(), key=lambda kv: -kv[1]))}
+
+    def ghosts(self, counts: torch.Tensor) -> torch.Tensor:
+        """bool (N,): the background-owned Gaussians whose evidence ``counts`` falls on
+        entities' pixels, with under ``ghost_max_bg_share`` of it on the background's."""
+        total = counts.sum(dim=1)
+        return ((self.scene.owners() == BACKGROUND) & (total > 1e-8)
+                & (counts[:, BACKGROUND] < self.cfg.ghost_max_bg_share * total))
+
+    @torch.no_grad()
+    def background_in_bodies(self, views: list[tuple], targets: list[dict]) -> torch.Tensor:
+        """bool (N,): the background-owned Gaussians whose centre lies in a body's core -- its
+        capsules less the clothing margin -- on the frame of some view (``(camera, gt,
+        time_id, ...)``, its target's ``bodies``)."""
+        background = self.scene.owners() == BACKGROUND
+        hit = torch.zeros_like(background)
+        for view, target in zip(views, targets, strict=True):
+            bodies = target.get("bodies") or {}
+            if not bodies or not bool(background.any()):
+                continue
+            points = self.scene.cloud_at(int(view[2])).means[background]
+            inside = torch.zeros(points.shape[0], dtype=torch.bool, device=points.device)
+            for body in bodies.values():
+                core = body["capsules"].clone()
+                core[:, 6] -= body["margin"]
+                inside |= capsule_distance(points, core) < 0
+            hit[background] |= inside
+        return hit
+
+    @torch.no_grad()
+    def prune(self, drop: torch.Tensor) -> int:
+        """Prune the ``drop`` (N,) Gaussians from both fields; returns how many went."""
+        keep = ~drop
+        n_fg = self.scene.fg.num_gaussians
+        pruned = self.fg_ctrl.prune(keep[:n_fg])
+        if self.bg_ctrl is not None:
+            pruned += self.bg_ctrl.prune(keep[n_fg:])
+        return pruned
+
+    @staticmethod
+    def entity_widths(camera: RenderCamera, target: dict, k: int) -> dict[int, float]:
+        """Each entity's horizontal extent on one view in scene units, the 5th-95th percentile
+        of its pixels' camera x, as the removal tests' slab has it (``entity_width``); an
+        entity with under 10 pixels of depth has none."""
+        ids, depth, valid = target["ids"], target["depth"], target["valid"]
+        K = np.asarray(camera.K, dtype=np.float64)
+        out: dict[int, float] = {}
+        for code in torch.unique(ids[valid]).tolist():
+            m = valid & (ids == code)
+            if not 0 < code < k or int(m.sum()) < 10:
+                continue
+            v, u = m.nonzero(as_tuple=True)
+            x = (u.float() - K[0, 2]) / K[0, 0] * depth[v, u]
+            lo, hi = torch.quantile(x, torch.tensor([0.05, 0.95], device=x.device)).tolist()
+            if hi > lo:
+                out[int(code)] = hi - lo
+        return out
+
+    def body_term(self, cloud, camera: RenderCamera, target: dict, widths: dict[int, float],
+                  members: dict[int, torch.Tensor]) -> torch.Tensor | None:
+        """The weighted body-containment loss of one view: the mean, over the entity-owned
+        Gaussians it can judge, of how far each reaches out of the space its owner occupies
+        on this frame, in its owner's size (None when it can judge none). ``members`` maps an
+        entity's code to its Gaussians (bool (N,)); ``widths`` are :meth:`entity_widths`."""
+        ids, depth, valid = target["ids"], target["depth"], target["valid"]
+        bodies = target.get("bodies") or {}
+        h, w = ids.shape
+        dev = cloud.means.device
+        viewmat = torch.as_tensor(np.asarray(camera.viewmat), dtype=torch.float32, device=dev)
+        K = np.asarray(camera.K, dtype=np.float64)
+        reach = self.cfg.body_sigmas
+        excess = []
+        for code, member in members.items():
+            body, width = bodies.get(code), widths.get(code)
+            if body is None and width is None:
+                continue
+            band, size = (body["margin"], body["torso"]) if body is not None else (width, width)
+            means, scales = cloud.means[member], cloud.scales[member]
+            # Behind its own surface: where this frame shows the entity at the Gaussian's pixel,
+            # its far side (centre + reach along the camera's z) may be at most `band` behind.
+            cam = means @ viewmat[:3, :3].T + viewmat[:3, 3]
+            z = cam[:, 2]
+            zc = z.detach().clamp_min(1e-6)
+            u = torch.floor(K[0, 0] * cam[:, 0].detach() / zc + K[0, 2]).long()
+            v = torch.floor(K[1, 1] * cam[:, 1].detach() / zc + K[1, 2]).long()
+            seen = (z.detach() > 1e-6) & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+            u, v = u.clamp(0, w - 1), v.clamp(0, h - 1)
+            seen = seen & valid[v, u] & (ids[v, u] == code)
+            axes = viewmat[:3, :3] @ _quat_to_rotmat(cloud.quats[member])   # in camera axes
+            sigma_z = (scales * axes[:, 2, :]).norm(dim=-1)
+            behind = F.relu(z + reach * sigma_z - depth[v, u] - band) / size
+            out = torch.where(seen, behind, torch.full_like(behind, float("inf")))
+            if body is not None:     # or inside its body, all round
+                inside = F.relu(capsule_distance(means, body["capsules"])
+                                + reach * scales.amax(dim=-1)) / size
+                out = torch.minimum(out, inside)
+            excess.append(out[torch.isfinite(out)])
+        judged = torch.cat(excess) if excess else torch.zeros(0, device=dev)
+        if judged.numel() == 0:
+            return None
+        return self.cfg.lambda_body * judged.mean()
+
+    def scale_ratio_term(self) -> torch.Tensor | None:
+        """The weighted scale-ratio cap over the background-owned Gaussians of both fields
+        (None when there are none)."""
+        scales = [self.scene.fg.get_scales()]
+        if self.scene.bg is not None:
+            scales.append(self.scene.bg.get_scales())
+        owned = self.scene.owners() == BACKGROUND
+        if not bool(owned.any()):
+            return None
+        loss = scale_ratio_loss(torch.cat(scales, dim=0)[owned], self.cfg.max_scale_ratio)
+        return self.cfg.lambda_scale_ratio * loss
 
     def geometry_terms(self, out, fg_share, target) -> tuple[torch.Tensor, dict[str, float]]:
         """The depth, depth-gradient and mask losses of one view against its ``target``
@@ -426,9 +594,26 @@ class DynamicGaussianTrainer:
             raise ValueError("the scene's Gaussians have owners but not every training view "
                              "has an id map (set lambda_owner and owner_drift_every to 0 to "
                              "train without them)")
+        owned = self.scene.has_owners
+        ratio_on = owned and self.cfg.lambda_scale_ratio > 0
+        ghosts_on = owned and self.cfg.ghost_max_bg_share > 0
+        body_on = owned and self.cfg.lambda_body > 0
+        in_body_on = owned and self.cfg.prune_background_in_body
+        if (ghosts_on or in_body_on) and not drift_on:
+            raise ValueError("the ghost and background-in-body prunes run at the drift checks "
+                             "(set owner_drift_every > 0, or turn them off)")
+        if (body_on or in_body_on) and (targets is None
+                                        or any("bodies" not in t for t in targets)):
+            raise ValueError("body containment needs the scene stage's bodies, and this scene "
+                             "was assembled without them: rebuild it from the scene stage")
+        pruning = ghosts_on or in_body_on
+        k_owners = len(self.scene.owner_node_ids)
+        widths = ([self.entity_widths(v[0], t, k_owners) for v, t in zip(train_views, targets,
+                                                                          strict=True)]
+                  if body_on else [])
         drift_views = ([(v[0], v[2], t["ids"]) for v, t in zip(train_views, targets, strict=True)]
                        if drift_on else [])
-        owner_value = float("nan")
+        owner_value = ratio_value = body_value = float("nan")
         geo_stats: dict[str, float] = {}
         mask_on = self.cfg.lambda_mask > 0
         torch.manual_seed(self.cfg.random_seed)
@@ -461,9 +646,18 @@ class DynamicGaussianTrainer:
             n_bg = self.scene.bg.num_gaussians if self.scene.bg is not None else 0
             coupled = not self.cfg.identity_detach_geometry
             loss = self.cfg.lambda_smooth * self.scene.motion_smoothness()
+            if ratio_on and step % max(self.cfg.scale_ratio_every, 1) == 0:
+                ratio = self.scale_ratio_term()
+                if ratio is not None:
+                    loss = loss + ratio
+                    ratio_value = float(ratio.detach()) / self.cfg.lambda_scale_ratio
             if owners_on:                # owners change only when densification runs
                 channel, n_channels = self.scene.owner_channels()
                 onehot = F.one_hot(channel, n_channels).to(torch.float32)
+            if body_on:                  # ... or a prune does
+                owners = self.scene.owners()
+                members = {c: owners == c for c in torch.unique(owners).tolist()
+                           if 0 < c < k_owners}
             outs, l1s = [], []
             for idx in picks:
                 view = train_views[idx]
@@ -493,6 +687,11 @@ class DynamicGaussianTrainer:
                     if own is not None:
                         loss = loss + own / batch
                         owner_value = float(own.detach()) / self.cfg.lambda_owner
+                if body_on:
+                    body = self.body_term(cloud, camera, targets[idx], widths[idx], members)
+                    if body is not None:
+                        loss = loss + body / batch
+                        body_value = float(body.detach()) / self.cfg.lambda_body
                 if cloud.features is not None and id_map is not None:
                     id_term = self.identity_term(cloud, camera, id_map, out)
                     if id_term is not None:
@@ -520,9 +719,25 @@ class DynamicGaussianTrainer:
                 self.bg_ctrl.after_step(step)
             if self._identity_reset_due(step):
                 self.reset_identity(step)
-            if drift_on and on_drift is not None and (step % self.cfg.owner_drift_every == 0
-                                                      or step == self.cfg.iters):
-                on_drift({"step": step, **self.owner_drift(drift_views)})
+            if drift_on and (on_drift is not None or pruning) and (
+                    step % self.cfg.owner_drift_every == 0 or step == self.cfg.iters):
+                counts = self.owner_evidence(drift_views)
+                record = {"step": step, **self.owner_drift(counts)}
+                drop = torch.zeros(counts.shape[0], dtype=torch.bool, device=counts.device)
+                if ghosts_on:
+                    found = self.ghosts(counts)
+                    record["ghosts"] = int(found.sum())
+                    drop |= found
+                if in_body_on:
+                    found = self.background_in_bodies(train_views, targets)
+                    record["in_body"] = int(found.sum())
+                    drop |= found
+                # Not at the last check: a pruned Gaussian may paint part of an entity's
+                # render, and the steps after a prune let the entity's own Gaussians fill in.
+                if pruning and step < self.cfg.iters:
+                    record["pruned"] = self.prune(drop)
+                if on_drift is not None:
+                    on_drift(record)
 
             if on_log is not None and (step % self.cfg.log_every == 0 or step == 1):
                 with torch.no_grad():
@@ -531,6 +746,10 @@ class DynamicGaussianTrainer:
                           "num_gaussians": self.scene.num_gaussians, **geo_stats}
                 if owners_on:
                     record["owner_loss"] = owner_value
+                if ratio_on:
+                    record["scale_ratio_loss"] = ratio_value
+                if body_on:
+                    record["body_loss"] = body_value
                 if self.scene.has_identity:
                     record["identity_loss"] = id_loss_value
                     record["identity_3d_loss"] = id3d_value

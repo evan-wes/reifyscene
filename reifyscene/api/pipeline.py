@@ -1335,7 +1335,7 @@ class ReifyScenePipeline:
         from reifyscene.ingest.streams import RunStreams
 
         streams = RunStreams.from_artifacts(ingest_artifact, geometry_artifact)
-        id_maps = None
+        id_maps = people = None
         if self.scene_assembler.kind == 'dynamic':
             # Every Gaussian is owned from birth by the entity it was seeded on (design doc
             # 2026-10-17-removal-by-ownership §4.1): the graph's entities, as id maps.
@@ -1352,6 +1352,11 @@ class ReifyScenePipeline:
             classes = sorted(manifest['classes'], key=lambda c: c['index'])
             id_maps = ({frame_key(manifest['stream_id'], f): m for f, m in maps.items()},
                        [c['node_id'] for c in classes])
+            # The people among the owners get a body on each training frame (§4.6).
+            humans = {n['node_id']: n['attrs']['track_id'] for n in nodes
+                      if n['node_type'] == 'human' and 'track_id' in n['attrs']}
+            people = {int(c['index']): str(humans[c['node_id']]) for c in classes
+                      if c['node_id'] in humans}
         artifact = self.scene_assembler.assemble(
             run_id=geometry_artifact.run_id,
             save_dir=self._stage_dir('scene'),
@@ -1362,6 +1367,7 @@ class ReifyScenePipeline:
             instance_artifact=instance_artifact,
             streams=streams,
             id_maps=id_maps,
+            people=people,
             metadata={
                 'optimization_available': optimization_artifact is not None,
                 'timeline_source': str(self.cfg.get('scene', {}).get('timeline_source', 'geometry')),

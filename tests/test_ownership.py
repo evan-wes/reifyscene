@@ -5,8 +5,11 @@ What these pin is what would go wrong quietly: a seed at a mask's edge given to 
 background point taken from a pixel an entity or a dropped tracklet claims, an owner row that
 stops following its Gaussian through densification or a removal, the unaddressed owner mixed
 into an entity's channel, a loss that counts unlabelled pixels or cannot tell a wrong owner
-from a right one, an owned scene trained without its id maps -- and, on CUDA, whether the loss
-moves a Gaussian off another entity's pixels and whether the drift check sees one there.
+from a right one, an owned scene trained without its id maps, a scale-ratio cap that charges
+the wrong Gaussians -- and, on CUDA, whether the loss moves a Gaussian off another entity's
+pixels, whether the drift check sees one there, whether the ghost prune takes the background
+Gaussian behind an entity and nothing else, and whether containment, on by default, leaves a
+scene without owners alone.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from reifyscene.render.gaussian4d.densify import DensificationController, Densif
 from reifyscene.render.gaussian4d.dynamic_field import FG_PARAM_NAMES
 from reifyscene.render.gaussian4d.dynamic_trainer import DynamicGaussianTrainer, DynamicTrainConfig
 from reifyscene.render.gaussian4d.gaussian_field import OWNER_BUFFER
-from reifyscene.render.gaussian4d.losses import owner_loss
+from reifyscene.render.gaussian4d.losses import owner_loss, scale_ratio_loss
 from reifyscene.render.gaussian4d.motion_init import bundle_to_scene, dump_bundle
 from reifyscene.render.gaussian4d.rasterizer import RenderCamera, gsplat_available
 
@@ -210,6 +213,25 @@ def test_the_owner_loss_is_zero_for_the_right_owner_and_one_for_another() -> Non
     assert owner_loss(right, ids, torch.zeros_like(known), quantile=1.0) is None
 
 
+def test_the_scale_ratio_cap_charges_only_past_the_ratio() -> None:
+    within = torch.tensor([[1.0, 1.0, 1.0], [10.0, 1.0, 1.0], [10.0, 10.0, 1.0]])
+    assert float(scale_ratio_loss(within, 10.0)) == 0.0
+    needle = torch.tensor([[100.0, 1.0, 1.0]])
+    assert float(scale_ratio_loss(torch.cat([within, needle]), 10.0)) == pytest.approx(90 / 4)
+
+
+def test_the_scale_ratio_cap_reaches_only_background_owned_gaussians() -> None:
+    b = _bundle()
+    b["fg_scales"][:] = np.log([1.0, 0.01, 0.01])            # every Gaussian a needle
+    b["bg_scales"][:] = np.log([1.0, 0.01, 0.01])
+    scene, _ = bundle_to_scene(b, device="cpu")
+    trainer = DynamicGaussianTrainer(scene, DynamicTrainConfig(lambda_scale_ratio=1.0),
+                                     device="cpu")
+    trainer.scale_ratio_term().backward()
+    moved = torch.cat([scene.fg.log_scales.grad, scene.bg.log_scales.grad]).abs().sum(dim=1) > 0
+    assert bool((moved == (scene.owners() == BACKGROUND)).all())
+
+
 def test_an_owned_scene_is_not_trained_without_its_id_maps() -> None:
     scene, cams = bundle_to_scene(_bundle(), device="cpu")
     cfg = DynamicTrainConfig(iters=1, lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0)
@@ -220,6 +242,10 @@ def test_an_owned_scene_is_not_trained_without_its_id_maps() -> None:
 
 
 # -- CUDA: does the loss move Gaussians, and does the drift check see them? -------------------
+
+# Containment is on by default with owners; a test of one mechanism turns the rest off.
+NO_CONTAINMENT = dict(lambda_scale_ratio=0.0, ghost_max_bg_share=0.0, lambda_body=0.0,
+                      prune_background_in_body=False)
 
 def _two_blobs():
     """A owns the Gaussian at y=+0.3 and B the one at y=-0.3; the id map gives the right half
@@ -262,7 +288,7 @@ def test_the_owner_loss_moves_a_gaussian_off_another_entitys_pixels() -> None:
     assert before > 50.0
     cfg = DynamicTrainConfig(iters=300, lambda_depth=0.0, lambda_depth_grad=0.0,
                              lambda_mask=0.0, lambda_owner=5.0, owner_drift_every=0,
-                             lr_means=1e-2)
+                             lr_means=1e-2, **NO_CONTAINMENT)
     DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r).fit(
         [(cam, gt, 0)], targets=[{"ids": ids}])
     assert _a_share_on_b(scene, cam, ids) < 0.5 * before
@@ -272,5 +298,56 @@ def test_the_owner_loss_moves_a_gaussian_off_another_entitys_pixels() -> None:
 def test_the_drift_check_flags_a_gaussian_on_another_entitys_pixels() -> None:
     scene, cam, ids = _two_blobs()
     cfg = DynamicTrainConfig(iters=1, lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0)
-    drift = DynamicGaussianTrainer(scene, cfg, device="cuda").owner_drift([(cam, 0, ids)])
+    trainer = DynamicGaussianTrainer(scene, cfg, device="cuda")
+    drift = trainer.owner_drift(trainer.owner_evidence([(cam, 0, ids)]))
     assert drift["flagged"] >= 1 and drift["pairs"].get("1->2", 0) >= 1
+
+
+@requires_gsplat
+def test_the_ghost_prune_takes_the_background_behind_an_entity_and_nothing_else() -> None:
+    """A owns an opaque Gaussian at the origin. Seen from x=2, a background-owned Gaussian
+    sits right behind it and only ever shows through A's pixels: a ghost. Another lies on the
+    background's pixels, and a third behind the camera, seen nowhere: both are kept."""
+    from reifyscene.render.gaussian4d.rasterizer import GsplatRasterizer
+
+    b = _bundle(g=1, nb=3)
+    b["fg_means"] = np.zeros((1, 3), np.float32)
+    b["fg_scales"] = np.full((1, 3), np.log(0.15), np.float32)
+    b["bg_means"] = np.array([[-0.5, 0.0, 0.0], [0.0, 0.6, 0.0], [5.0, 0.0, 0.0]], np.float32)
+    b["bg_scales"] = np.full((3, 3), np.log(0.05), np.float32)
+    b["bg_owner"] = np.zeros(3, np.int32)
+    scene, _ = bundle_to_scene(b, device="cuda")
+    cam = RenderCamera.from_look_at([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 96, 64)
+    r = GsplatRasterizer("cuda")
+    channel, n = scene.owner_channels()
+    with torch.no_grad():
+        c = scene.cloud_at(0)
+        out = r.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors, cam,
+                          features=torch.nn.functional.one_hot(channel, n).float())
+    ids = torch.where(out.features[..., 1] > 0.3, 1, BACKGROUND).long()
+    cfg = DynamicTrainConfig(iters=2, lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0,
+                             owner_drift_every=1, **{**NO_CONTAINMENT, "ghost_max_bg_share": 0.1})
+    trainer = DynamicGaussianTrainer(scene, cfg, device="cuda", rasterizer=r)
+    drift: list[dict] = []
+    trainer.fit([(cam, out.rgb, 0)], targets=[{"ids": ids}], on_drift=drift.append)
+
+    assert drift[0]["ghosts"] == 1 and drift[0]["pruned"] == 1
+    assert drift[1]["ghosts"] == 0 and "pruned" not in drift[1]     # the last check
+    kept = scene.bg.means.detach().cpu().numpy()
+    assert np.allclose(kept[:, 0], [0.0, 5.0], atol=0.05)
+    assert trainer.bg_ctrl.grad2d_accum.shape[0] == scene.bg.num_gaussians == 2
+    bg_means = next(g for g in trainer.optimizer.param_groups if g["name"] == "bg.means")
+    assert bg_means["params"][0] is scene.bg.means
+
+
+@requires_gsplat
+def test_containment_on_by_default_leaves_a_scene_without_owners_alone() -> None:
+    b = {k: v for k, v in _bundle(g=2, nb=1).items()
+         if k not in ("fg_owner", "bg_owner", "owner_node_ids")}
+    scene, _ = bundle_to_scene(b, device="cuda")
+    assert not scene.has_owners
+    cam = RenderCamera.from_look_at([2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 32, 32)
+    cfg = DynamicTrainConfig(iters=2, lambda_depth=0.0, lambda_depth_grad=0.0, lambda_mask=0.0)
+    DynamicGaussianTrainer(scene, cfg, device="cuda").fit(
+        [(cam, torch.zeros(32, 32, 3, device="cuda"), 0)])
+    assert (scene.fg.num_gaussians, scene.bg.num_gaussians) == (2, 1)

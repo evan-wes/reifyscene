@@ -59,6 +59,30 @@ def gradient_loss(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor,
                              quantile=quantile))
 
 
+def scale_ratio_loss(scales: torch.Tensor, max_ratio: float = 10.0) -> torch.Tensor:
+    """Splatfacto's cap on "huge spikey gaussians" (after PhysGaussian): the mean, over the
+    activated ``scales`` (N, 3), of how far each Gaussian's longest-to-shortest axis ratio
+    exceeds ``max_ratio``. 0 for a Gaussian within it; a disc pays as a needle does."""
+    if scales.shape[0] == 0:
+        return scales.sum()
+    ratio = scales.amax(dim=-1) / scales.amin(dim=-1).clamp_min(1e-12)
+    return (ratio.clamp_min(max_ratio) - max_ratio).mean()
+
+
+def capsule_distance(points: torch.Tensor, capsules: torch.Tensor) -> torch.Tensor:
+    """(N,): how far each of ``points`` (N, 3) lies outside the nearest of ``capsules`` (M, 7)
+    -- segment ends ``a``, ``b`` and radius -- negative inside; +inf when there are none.
+    The torch twin of :meth:`reifyscene.edit.body_volume.BodyVolume.distance`."""
+    if capsules.shape[0] == 0:
+        return torch.full(points.shape[:1], float("inf"), device=points.device)
+    a, b, r = capsules[:, :3], capsules[:, 3:6], capsules[:, 6]
+    ab = b - a
+    rel = points[:, None, :] - a                                   # (N, M, 3)
+    t = ((rel * ab).sum(-1) / (ab * ab).sum(-1).clamp_min(1e-18)).clamp(0.0, 1.0)
+    off = rel - t[..., None] * ab
+    return (((off * off).sum(-1) + 1e-12).sqrt() - r).amin(dim=1)
+
+
 def owner_loss(shares: torch.Tensor, ids: torch.Tensor, known: torch.Tensor,
                quantile: float = 0.98) -> torch.Tensor | None:
     """The per-entity silhouette loss (``docs/design/2026-10-17-removal-by-ownership.md``
