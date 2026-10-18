@@ -64,6 +64,9 @@ Contract versions: semantics 1 → 2, graph 6 → 7.
 
 Each change was run on the same upstream (segment, tracking and reid loaded from the slice runs),
 so node ids stay the same and the DAVIS matches of `benchmarks/davis_edit_damage.json` still apply.
+The 90-sequence DAVIS inventory (`benchmarks/davis_inventory.json`) was not re-scored: the owner
+chose the ten-clip measurement (2026-10-17), so the margin and the floor are checked only on the
+clips they were chosen on.
 
 | vocabulary and rule | entities (of 139) | unmatched (of 108) | DAVIS objects kept (of 31) |
 |---|---|---|---|
