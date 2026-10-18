@@ -226,7 +226,7 @@ class _FakeSiglip(SiglipSemantics):
     def _load_model(self):  # no transformers / no download
         self._device_resolved = 'cpu'
         self._model = object()
-        self._text_embs = np.eye(len(self.vocab), dtype=np.float32)  # cat=[1,0], dog=[0,1]
+        self._text_embs = np.eye(len(self._labels), dtype=np.float32)  # cat=[1,0], dog=[0,1]
 
     def _embed_image_crops(self, crops):
         # red crop -> cat axis, blue crop -> dog axis
@@ -249,12 +249,48 @@ def test_siglip_run_labels_tracks(tmp_path: Path) -> None:
     ])
     art.rebuild_indices()
 
-    records, embeddings = _FakeSiglip(_PaintDecoder(), cfg={'vocab': ['cat', 'dog']}).run(ingest, art)
+    pets = {'vocab': ['cat', 'dog'], 'person_vocab': ['cat', 'dog']}
+    records, embeddings = _FakeSiglip(_PaintDecoder(), cfg=pets).run(ingest, art)
 
     assert records['track_a'].category == 'cat'
     assert records['track_b'].category == 'dog'
     assert set(embeddings) == {'track_a', 'track_b'}
     assert records['track_a'].attributes['source'] == 'siglip2'
+    assert not records['track_a'].background and not records['track_b'].background
+
+    # Named a background class: the record says so, for the graph to give it to the background.
+    cfg = {'vocab': ['cat', 'grass'], 'person_vocab': ['cat', 'grass'],
+           'background_vocab': ['grass']}
+    records, _ = _FakeSiglip(_PaintDecoder(), cfg=cfg).run(ingest, art)
+    assert records['track_b'].category == 'grass' and records['track_b'].background
+    assert records['track_a'].category == 'cat' and not records['track_a'].background
+
+    # A person is never backdrop: the detector said what it is.
+    for o in art.observations:
+        if o.track_id == 'track_b':
+            o.kind = 'human'
+    records, _ = _FakeSiglip(_PaintDecoder(), cfg=cfg).run(ingest, art)
+    assert not records['track_b'].background
+
+
+def test_a_core_thing_keeps_a_track_and_an_extended_one_must_win_by_the_margin() -> None:
+    """Backdrop when a background class beats every core (COCO) thing and no extended (LVIS)
+    thing beats it by ``background_margin`` (0.045): the extended tail scores close to any
+    backdrop ("paper towel" for a sidewalk), while a fish clearly beats the water."""
+    sem = SiglipSemantics(decoder=None, cfg={'background_vocab': ['water'],
+                                             'extended_vocab': ['fish']})
+    labels = ['bird', 'fish', 'water']
+    text = np.eye(3, dtype=np.float32)
+
+    def crop(bird, fish, water=0.5):
+        return np.array([bird, fish, water], dtype=np.float32)
+
+    background, best, leads = sem._backdrop(crop(0.52, 0.40), text, labels)
+    assert not background and abs(leads['core_lead'] - 0.02) < 1e-6         # a swan: bird wins
+    background, best, leads = sem._backdrop(crop(0.40, 0.56), text, labels)
+    assert not background and abs(leads['extended_lead'] - 0.06) < 1e-6     # a fish, clearly
+    background, best, _ = sem._backdrop(crop(0.40, 0.52), text, labels)
+    assert background and best == ('water', 0.5)                            # backdrop
 
 
 # --- records written before these fields existed still load -------------------
@@ -269,6 +305,7 @@ def test_a_record_round_trips_through_json() -> None:
     rec = SemanticRecord(
         category=UNKNOWN_CATEGORY, score=0.117, category_topk=[('handbag', 0.117)],
         margin=0.0105, margin_z=3.004, abstained=True, abstain_reason='low_separation',
+        background=False,
     )
     payload = rec.to_dict()
     assert json.loads(json.dumps(payload)) == payload  # JSON-safe, no numpy scalars

@@ -79,6 +79,11 @@ These are reifyscene's own code, under its own licence, and are credited here:
   annotations. The DAVIS organisers license the annotations under CC BY 4.0
   (<https://creativecommons.org/licenses/by/4.0/>). No DAVIS frames or masks are included.
 - `benchmarks/dycheck_spin_heldout_edit.json` holds scores on DyCheck's `spin` sequence only.
+- **LVIS v1 category names** (<https://www.lvisdataset.org>; A. Gupta, P. Dollár, R. Girshick,
+  "LVIS: A Dataset for Large Vocabulary Instance Segmentation", CVPR 2019).
+  `reifyscene/perception/semantics/vocab.py` lists the names of LVIS v1's frequent-tier categories
+  as label candidates, taken from detectron2's `lvis_v1_categories.py` (Apache-2.0). The LVIS
+  annotations are licensed under CC BY 4.0 (<https://creativecommons.org/licenses/by/4.0/>).
 
 ## What you install or download
 

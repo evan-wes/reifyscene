@@ -41,6 +41,12 @@ longer load and were deleted, with the `cg_export` they fed into `davis_conceptg
 committed rows stand as measured at their commit; re-scoring either file starts with the rebuild
 above.
 
+**The graph's candidates changed in 0.6.1.0, and this file was not re-scored.** Background classes
+and a noise floor now keep the backdrop and fragments out of the graph
+(`docs/design/2026-10-17-graph-candidates.md`), so `spurious` here describes the code before them.
+On the ten `slice_*` runs, the graph went from 139 entities to 72 with all 31 DAVIS objects kept
+(the design doc's §3); the 90-sequence rebuild above was left for later (the owner, 2026-10-17).
+
 ## `davis_edit_damage.json`
 
 Does removing an entity take the entity, and leave the rest of the scene alone? Scored on the

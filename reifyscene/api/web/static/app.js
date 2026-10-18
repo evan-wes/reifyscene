@@ -31,6 +31,7 @@ const S = {
   cam: { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 },   // the 3D view, relative to the frame's camera
   moving: false,  // a drag is under way: preview renders are smaller
   free3d: false,  // the 3D camera, over whichever Gaussian view is showing
+  showAll: false, // list the entities that own almost none of the scene's Gaussians too
 };
 const HOME = { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 };
 
@@ -72,12 +73,28 @@ const short = (id) => id.split(":").pop();
 // no Gaussian is mostly this entity (the graph's gaussians layer, for this checkpoint)
 const noGaussians = (e) => e?.gaussians?.status === "unassignable";
 const entLabel = (e) => `${e.category} ${short(e.node_id)}${noGaussians(e) ? " ∅" : ""}`;
+// How much of the scene an entity is: its Gaussians, when the layer describes this checkpoint.
+const gaussianCount = (e) => (e?.gaussians && !noGaussians(e) ? e.gaussians.fg + e.gaussians.bg : null);
+// An entity with none of the scene's Gaussians, or under this share of them, is folded away
+// until "show all": what is left of a fragment the graph's noise floor let through.
+const SMALL_SHARE = 0.001;
+const isSmall = (e) => !!e?.gaussians && (noGaussians(e) || e.gaussians.assigned_fraction < SMALL_SHARE);
+// The entities the graph and the timeline list, biggest first when the Gaussians are known.
+function listed() {
+  const ents = S.graph.entities.filter((e) => S.showAll || !isSmall(e));
+  return ents.some((e) => gaussianCount(e) !== null)
+    ? ents.sort((a, b) => (gaussianCount(b) ?? 0) - (gaussianCount(a) ?? 0) || a.node_id.localeCompare(b.node_id))
+    : ents.sort((a, b) => a.category.localeCompare(b.category) || a.node_id.localeCompare(b.node_id));
+}
 function drawGraph() {
-  const els = S.graph.entities.map((e) => ({
-    data: { id: e.node_id, label: entLabel(e), color: S.colorOf[e.category],
-            size: 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
+  const ents = listed();
+  const top = Math.max(1, ...ents.map((e) => gaussianCount(e) ?? 0));
+  const els = ents.map((e, rank) => ({
+    data: { id: e.node_id, label: entLabel(e), color: S.colorOf[e.category], rank,
+            size: gaussianCount(e) !== null ? 12 + 22 * Math.sqrt(gaussianCount(e) / top)
+              : 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
   }));
-  const known = new Set(S.graph.entities.map((e) => e.node_id));
+  const known = new Set(ents.map((e) => e.node_id));
   S.graph.edges.forEach((e, i) => {
     if (!known.has(e.src) || !known.has(e.dst)) return;
     const also = e.attrs?.and;
@@ -117,13 +134,13 @@ function drawGraph() {
   });
   S.cy.on("tap", "node", (ev) => select(ev.target.id()));
   S.cy.on("tap", "edge", (ev) => selectRelation(+ev.target.id().slice(1)));
-  // Entities on a circle, grouped by category: `near` holds between most pairs in these scenes,
-  // and a force layout packs a dense graph into overlapping nodes. On a circle every entity
-  // keeps its own place and relations read as chords. Without relations, a grid.
-  const byCategory = (a, b) => a.data("label").localeCompare(b.data("label"), undefined, { numeric: true });
+  // Entities on a circle in the order they are listed (biggest first): `near` holds between most
+  // pairs in these scenes, and a force layout packs a dense graph into overlapping nodes. On a
+  // circle every entity keeps its own place and relations read as chords. Without relations, a grid.
+  const byRank = (a, b) => a.data("rank") - b.data("rank");
   (S.cy.edges().length
-    ? S.cy.nodes().layout({ name: "circle", sort: byCategory, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
-    : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byCategory })).run();
+    ? S.cy.nodes().layout({ name: "circle", sort: byRank, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
+    : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byRank })).run();
   S.cy.fit(undefined, 40);
   updateEdges();
   S.cy.on("tap", (ev) => { if (ev.target === S.cy) { S.highlight = null; applyHighlight(); } });
@@ -233,6 +250,11 @@ function drawLegend() {
     const i = el("i"); i.style.background = S.colorOf[c];
     lg.append(el("span", { title: `select ${c}`, onclick: () => runQuery("select", { category: c }) }, i, `${c} ${n}`));
   }
+  const small = S.graph.entities.filter(isSmall).length;
+  if (small) lg.append(el("button", { type: "button", class: "ghost small-toggle", "aria-pressed": String(S.showAll),
+    title: `entities with under ${100 * SMALL_SHARE}% of the scene's Gaussians`,
+    text: S.showAll ? `hide ${small} small` : `show ${small} small`,
+    onclick: () => { S.showAll = !S.showAll; drawGraph(); drawLegend(); drawTimeline(); paint(); } }));
 }
 function applyHighlight() {
   const hl = S.highlight ? new Set(S.highlight) : null;
@@ -282,8 +304,7 @@ function drawTimeline() {
   if (!S.frames.length) return;
   const f0 = S.frames[0], f1 = S.frames[S.frames.length - 1], span = f1 - f0 + 1;
   const x = (f) => `${(100 * (f - f0)) / span}%`, w = (n) => `${(100 * n) / span}%`;
-  const ents = [...S.graph.entities].sort((a, b) => a.category.localeCompare(b.category) || a.node_id.localeCompare(b.node_id));
-  for (const e of ents) {
+  for (const e of listed()) {
     const name = el("div", { class: `name${noGaussians(e) ? " nogs" : ""}`, "data-node": e.node_id,
       title: noGaussians(e) ? `${e.node_id} · no Gaussians in the scene` : e.node_id, text: entLabel(e),
       onclick: () => select(e.node_id) });

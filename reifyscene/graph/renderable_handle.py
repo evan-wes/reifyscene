@@ -169,14 +169,19 @@ def pixel_masks(nodes, merge_map: Mapping[str, str], segment, stream) -> RenderP
     """:func:`render_pixel_masks` from the stages' own outputs: the graph's ``nodes`` (each a
     mapping with ``node_id``, ``node_type``, ``label`` and ``attrs``), reid's ``merge_map``, the
     ``segment`` artifact and the ``stream`` (a :class:`~reifyscene.ingest.streams.FrameStream`)
-    -- for a stage that is handed them rather than reading the run."""
+    -- for a stage that is handed them rather than reading the run. A tracklet the background
+    node absorbed (``absorbed_tracks``) places nothing: its pixels are background."""
     notes: list[str] = []
     stream_id = stream.id
     transform = stream.transform          # raises when the geometry recorded none
 
     canonical_to_node: dict[str, str] = {}
     labels: dict[str, str] = {}
+    absorbed: set[str] = set()
     for node in nodes:
+        attrs = node.get("attrs") or {}
+        if node.get("node_type") == "region" and attrs.get("stream_id") == stream_id:
+            absorbed.update(str(t) for t in attrs.get("absorbed_tracks") or [])
         found = _node_track_id(node)
         if found is None or found[0] != stream_id:
             continue
@@ -200,12 +205,15 @@ def pixel_masks(nodes, merge_map: Mapping[str, str], segment, stream) -> RenderP
     for obs in inst.observations:
         if obs.frame_ref.stream_id != stream_id:
             continue
+        track = canonical(str(obs.track_id))
+        if track in absorbed:
+            continue                 # the background's own: its pixels stay background
         mask = inst.mask_arrays.get(obs.instance_id)
         if mask is None:
             continue
         placed = transform.apply_to_image(np.asarray(mask), kind="mask").astype(bool)
         frame = int(obs.frame_ref.frame_idx)
-        node_id = canonical_to_node.get(canonical(str(obs.track_id)))
+        node_id = canonical_to_node.get(track)
         if node_id is None:
             unmapped.add(str(obs.track_id))
             prev = unmapped_masks.get(frame)
@@ -214,7 +222,7 @@ def pixel_masks(nodes, merge_map: Mapping[str, str], segment, stream) -> RenderP
         slot = by_frame.setdefault(frame, {})
         slot[node_id] = placed if node_id not in slot else (slot[node_id] | placed)
     if unmapped:
-        # Tracklets the graph did not turn into a node: dropped by a support or size rule.
+        # Tracklets the graph did not turn into a node: under its noise floor (builders).
         # Named rather than silently ignored, because they are Gaussians nothing can claim.
         notes.append(f"{len(unmapped)} tracklet(s) have no graph node and were skipped")
     return RenderPixelMasks(by_frame, labels, notes, unmapped_masks, transform)
