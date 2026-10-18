@@ -246,7 +246,9 @@ function drawRelTimeline() {
 
 function drawLegend() {
   const lg = $("legend"); lg.innerHTML = "";
-  for (const [c, n] of Object.entries(S.graph.categories)) {
+  const counts = {};                                  // what the graph and timeline list
+  for (const e of listed()) counts[e.category] = (counts[e.category] || 0) + 1;
+  for (const [c, n] of Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))) {
     const i = el("i"); i.style.background = S.colorOf[c];
     lg.append(el("span", { title: `select ${c}`, onclick: () => runQuery("select", { category: c }) }, i, `${c} ${n}`));
   }
@@ -350,7 +352,10 @@ function placeCursor() {
 const nearestIndex = (f) => S.frames.reduce((best, v, i) => (Math.abs(v - f) < Math.abs(S.frames[best] - f) ? i : best), 0);
 
 // -- frame view -------------------------------------------------------------------------------
-const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"], ["took", "took"]];
+// [view, what the button and the tag call it]: "took" is what the removal took, the entity alone
+const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"],
+               ["took", "extracted entity"]];
+const viewLabel = (v) => Object.fromEntries(VIEWS)[v] ?? v;
 // what each Gaussian view shows from the 3D camera; a photo has no 3D
 const SHOW_3D = { render: "scene", before: "scene", after: "edited", took: "took" };
 const shown = () => (S.flipped ? flipTarget(S.view) : S.view);
@@ -369,6 +374,9 @@ function drawViews() {
   t.setAttribute("aria-pressed", String(S.free3d));
   t.disabled = S.view === "photo";
   t.title = S.view === "photo" ? "a photo has no 3D: pick render or an edit view" : "orbit this view in 3D";
+  const r = $("reset3d");
+  r.disabled = !in3d();
+  r.title = in3d() ? "back to the camera that recorded this frame (or double-click the view)" : "for the 3D view";
 }
 function frameUrl(view, f) {
   if (in3d(view)) {
@@ -413,12 +421,12 @@ function paint() {
     // one moving camera saw this scene: far off its path the reconstruction is guesswork
     const far = Math.abs(S.cam.yaw) > 15 || Math.abs(S.cam.pitch) > 10;
     const flip = view === "render" ? " · (no photo from a moved camera)"
-      : ` · click: ${S.flipped ? S.view : flipTarget(S.view)}`;
+      : ` · click: ${viewLabel(S.flipped ? S.view : flipTarget(S.view))}`;
     sel = flip +
       (far ? ` · ${Math.round(S.cam.yaw)}°/${Math.round(S.cam.pitch)}° off the recorded view: unseen, expect smears` : "") +
       " · drag orbit · shift-drag pan · wheel zoom · double-click reset";
   }
-  $("stage-tag").textContent = `${is3d ? `3D ${view}` : view}${sel}`;
+  $("stage-tag").textContent = `${is3d ? `3D ${viewLabel(view)}` : viewLabel(view)}${sel}`;
   $("stage").classList.toggle("free", is3d);
   drawViews(); placeCursor(); updateEdges();
   if (S.selected || S.selRel !== null) drawRelTimeline();
@@ -471,7 +479,9 @@ function initFreeView() {
     S.moving = true; paint();
     clearTimeout(S.wheelEnd); S.wheelEnd = setTimeout(() => { S.moving = false; paint(); }, 250);
   }, { passive: false });
-  st.addEventListener("dblclick", () => { if (in3d()) { S.cam = { ...HOME }; paint(); } });
+  const reset = () => { if (in3d()) { S.cam = { ...HOME }; paint(); } };
+  st.addEventListener("dblclick", reset);
+  $("reset3d").addEventListener("click", reset);
   $("free3d").addEventListener("click", () => { S.free3d = !S.free3d; paint(); });
 }
 
