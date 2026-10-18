@@ -394,7 +394,8 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "segment", "tracking", "pose_refine"),
         ),
         StageContract(
-            "semantics", settings={"semantics": {}},
+            # 2: background classes in the vocabulary; a record says whether its category is one
+            "semantics", version=2, settings={"semantics": {}},
             upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
@@ -435,8 +436,9 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
+            # 7: background-class candidates go to the background; a noise floor on entities
             "graph",
-            version=6,
+            version=7,
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,

@@ -7,6 +7,12 @@ the tracks that support it (:mod:`reifyscene.graph.track_support`), how many fra
 each was inside it, whether those tracks were moving, and where the entity was over
 time -- and the tracks themselves stay in the tracking artifact.
 
+Not every candidate is a thing. One the semantics stage named a background class (floor, sky,
+a crowd) is the scene's backdrop: the background node takes it over (``absorbed``), and its
+pixels are the background's. One under the noise floor -- a mask under ``entity_min_area`` of
+the frame, or fewer than ``entity_min_support_tracks`` point tracks inside it -- is not an
+entity; its pixels are unaddressed. Both are listed in ``metadata["candidates"]``.
+
 TODO implementation order:
 1. Associate entities across streams: one person seen by two cameras is two nodes.
 2. Add relation edges (holds, sits-on) once the entities carry 3D extent.
@@ -33,6 +39,13 @@ from reifyscene.lifting.entity_geometry import entity_positions_from_pointmaps
 
 DEFAULT_MIN_RATIO = 0.5
 DEFAULT_MIN_FRAMES = 2
+# The noise floor: a candidate is an entity only when its mask covers at least this share of
+# the frame (median over the frames it is seen) and at least this many point tracks support it.
+# On the ten DAVIS slice runs (2026-10-17), the smallest annotated object covered 0.18% of the
+# frame and had 12 support tracks; 9 of the 108 unannotated candidates fall under the area and
+# 14 under the support, none of the 31 annotated ones.
+DEFAULT_MIN_AREA = 0.001
+DEFAULT_MIN_SUPPORT_TRACKS = 5
 
 
 class DynamicSceneGraphBuilder:
@@ -43,6 +56,8 @@ class DynamicSceneGraphBuilder:
         cfg = dict(cfg or {})
         self.min_ratio = float(cfg.get("track_membership_min_ratio", DEFAULT_MIN_RATIO))
         self.min_frames = int(cfg.get("track_membership_min_frames", DEFAULT_MIN_FRAMES))
+        self.min_area = float(cfg.get("entity_min_area", DEFAULT_MIN_AREA))
+        self.min_support = int(cfg.get("entity_min_support_tracks", DEFAULT_MIN_SUPPORT_TRACKS))
         self.node_factory = NodeFactory()
         self.edge_factory = EdgeFactory()
 
@@ -70,7 +85,12 @@ class DynamicSceneGraphBuilder:
             )
 
         entities = _entities_by_stream(human_artifact, object_artifact)
+        absorbed: dict[str, list[dict[str, Any]]] = {}
+        dropped: list[dict[str, Any]] = []
         for stream_id in sorted(entities):
+            entities[stream_id], absorbed[stream_id] = _split_background(
+                entities[stream_id], semantics_artifact
+            )
             payload = track_artifact.track_payloads_by_stream.get(stream_id, {})
             masks_by_frame, mask_frames = _masks_by_frame(entities[stream_id])
             support, evidence = _support_for_stream(
@@ -83,11 +103,17 @@ class DynamicSceneGraphBuilder:
             )
             notes.append(_position_note(stream_id, entities[stream_id], geometry_positions))
 
+            kept = 0
             for entity in entities[stream_id]:
                 attrs = dict(entity.attrs)
                 attrs.update(evidence.for_entity(entity.node_id))
                 _apply_positions(attrs, geometry_positions.get(entity.node_id))
                 label, embedding = _apply_identity(attrs, entity, semantics_artifact)
+                reason = self._below_floor(entity, attrs)
+                if reason is not None:
+                    dropped.append({"node_id": entity.node_id, "track_id": attrs["track_id"],
+                                    "label": label, "reason": reason})
+                    continue
                 if embedding is not None:
                     embeddings[entity.node_id] = embedding
                 node = (
@@ -98,11 +124,12 @@ class DynamicSceneGraphBuilder:
                     )
                 )
                 nodes.append(node)
+                kept += 1
                 edges.append(
                     self.edge_factory.observed_by(entity.node_id, stream_id, conf=entity.confidence)
                 )
 
-            if payload:
+            if payload or absorbed[stream_id]:
                 background_id = f"background:{stream_id}"
                 nodes.append(
                     self.node_factory.region_node(
@@ -110,7 +137,10 @@ class DynamicSceneGraphBuilder:
                         label="background",
                         attrs={
                             "stream_id": stream_id,
-                            "num_entities": len(entities[stream_id]),
+                            "num_entities": kept,
+                            # tracks the background took over: their pixels are the background's
+                            "absorbed_tracks": [a["track_id"] for a in absorbed[stream_id]],
+                            "absorbed": absorbed[stream_id],
                             **evidence.for_background(),
                         },
                     )
@@ -121,6 +151,12 @@ class DynamicSceneGraphBuilder:
             f"track support: inside its mask on at least {self.min_frames} frames, and on "
             f"at least {self.min_ratio:.0%} of the frames it was inside any entity"
         )
+        n_absorbed = sum(len(v) for v in absorbed.values())
+        notes.append(
+            f"{n_absorbed} candidate(s) named a background class went to the background; "
+            f"{len(dropped)} under the noise floor (mask under {self.min_area:.2%} of the frame, "
+            f"or under {self.min_support} support tracks) are not entities"
+        )
         notes.append(
             "TODO: associate entities across streams; a person seen by two cameras is two nodes."
         )
@@ -130,7 +166,7 @@ class DynamicSceneGraphBuilder:
             if n.node_type in ("human", "object") and not (n.attrs or {}).get("abstained", False)
             and (n.attrs or {}).get("semantics_source") == "semantics"
         )
-        entity_count = sum(len(v) for v in entities.values())
+        entity_count = sum(len(v) for v in entities.values()) - len(dropped)
         if semantics_artifact is not None:
             notes.append(f"semantics named {named} of {entity_count} entities")
 
@@ -148,9 +184,47 @@ class DynamicSceneGraphBuilder:
                 "num_track_streams": len(track_artifact.stream_ids()),
                 "num_entities": entity_count,
             },
-            metadata={"world_frame": _world_frame(geometry_artifact)},
+            metadata={
+                "world_frame": _world_frame(geometry_artifact),
+                "candidates": {
+                    "absorbed": [a for v in absorbed.values() for a in v],
+                    "dropped": dropped,
+                    "min_area": self.min_area,
+                    "min_support_tracks": self.min_support,
+                },
+            },
             notes=notes,
         )
+
+    def _below_floor(self, entity, attrs: dict[str, Any]) -> str | None:
+        """Why ``entity`` is under the noise floor, or None: a mask too small to be a thing,
+        or too few point tracks inside it to say where it is."""
+        areas = [float(np.asarray(m).mean()) for m in entity.masks.values()]
+        area = float(np.median(areas)) if areas else 0.0
+        if area < self.min_area:
+            return f"its mask covers {area:.3%} of the frame (median), under {self.min_area:.2%}"
+        support = int(attrs.get("num_support_tracks", 0))
+        if support < self.min_support:
+            return f"{support} support track(s), under {self.min_support}"
+        return None
+
+
+def _split_background(entities: list[_Entity], semantics_artifact
+                      ) -> tuple[list[_Entity], list[dict[str, Any]]]:
+    """``(things, absorbed)``: the objects the semantics stage named a background class (floor,
+    sky, a crowd...) are the backdrop, not things -- the background takes them over. A person is
+    never: the detector said it is one."""
+    if semantics_artifact is None:
+        return entities, []
+    things, absorbed = [], []
+    for entity in entities:
+        record = semantics_artifact.records.get(entity.attrs["track_id"])
+        if entity.kind == "object" and record is not None and record.background:
+            absorbed.append({"node_id": entity.node_id, "track_id": entity.attrs["track_id"],
+                             "category": record.category})
+        else:
+            things.append(entity)
+    return things, absorbed
 
 
 class _Entity:

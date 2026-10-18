@@ -196,3 +196,30 @@ def test_an_unknown_format_version_is_refused_and_written_again(tmp_path, monkey
     with pytest.raises(ValueError, match="format"):
         load_id_maps(run)
     assert not has_id_maps(run)          # a cache of the graph: callers export it again
+
+
+def test_a_track_the_background_absorbed_is_background_not_unaddressed() -> None:
+    """``pixel_masks``: the graph's background node absorbed the lawn; its pixels are
+    background, while a tracklet with no node at all stays unaddressed."""
+    from types import SimpleNamespace
+
+    from reifyscene.common.types import FrameRef
+    from reifyscene.graph.renderable_handle import pixel_masks
+
+    lawn, speck, person = np.zeros((4, 6), bool), np.zeros((4, 6), bool), np.zeros((4, 6), bool)
+    lawn[3, :], speck[0, 5], person[1:3, 1:3] = True, True, True
+    obs = [SimpleNamespace(frame_ref=FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=None),
+                           track_id=t, instance_id=f"inst:{t}") for t in ("t0", "t1", "t2")]
+    segment = SimpleNamespace(observations=obs, mask_arrays={"inst:t0": person,
+                                                             "inst:t1": lawn, "inst:t2": speck})
+    nodes = [{"node_id": "human:cam_00:t0", "node_type": "human", "label": "person",
+              "attrs": {"stream_id": "cam_00", "track_id": "t0"}},
+             {"node_id": "background:cam_00", "node_type": "region", "label": "background",
+              "attrs": {"stream_id": "cam_00", "absorbed_tracks": ["t1"]}}]
+    stream = SimpleNamespace(id="cam_00", transform=ImageTransform.identity((6, 4)))
+    placed = pixel_masks(nodes, {}, segment, stream)
+    assert set(placed.by_frame[0]) == {"human:cam_00:t0"}
+    assert placed.unmapped[0].sum() == 1                    # the speck, not the lawn
+    out, counts = compose_id_map(placed.by_frame[0], {"human:cam_00:t0": 1}, shape=(4, 6),
+                                 unmapped=placed.unmapped[0])
+    assert (out[3] == BACKGROUND).all() and out[0, 5] == UNADDRESSED and counts["unmapped"] == 1
