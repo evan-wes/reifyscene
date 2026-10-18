@@ -9,6 +9,24 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.1] - 2026-10-17
+
+The README shows the app and the removals on DAVIS's lab-coat.
+
+### Added
+- **README animations** (`docs/media/`): the app's scene panel stepping through lab-coat, and
+  each of the three women removed -- before, after and the extracted entity, along the clip and
+  orbiting ±20° -- made by `scripts/readme_media/` (`removal_animation.py`; `capture_viewer.mjs`,
+  which needs Node and Playwright outside the repository, and `viewer_animation.py`).
+- **A "reset view" button** for the app's 3D view, beside the 3D toggle.
+
+### Changed
+- **The app's "took" view is called "extracted entity"** on its button and in the frame's tag.
+
+### Fixed
+- **The app's legend counted folded entities:** it now counts the entities the graph and the
+  timeline list.
+
 ## [0.6.1.0] - 2026-10-17
 
 Not every candidate is a thing: the backdrop and fragments no longer become scene-graph entities.
