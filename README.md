@@ -47,7 +47,9 @@ rendered alone), along the camera's path and then at one moment while the camera
 
 The camera saw the women from one side: where no frame saw what was behind someone, the scene is
 left as it was reconstructed, a smear (`docs/design/2026-10-17-removal-by-ownership.md`, criterion
-4). The animations are made by `scripts/readme_media/`.
+4). The animations are made by `scripts/readme_media/`. The footage is DAVIS 2017's `lab-coat`
+(J. Pont-Tuset et al., arXiv:1704.00675), used under the dataset's CC BY-NC 4.0 terms;
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) has the details.
 
 ## Quick start
 

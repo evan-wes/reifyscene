@@ -9,6 +9,22 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.3] - 2026-10-18
+
+### Tests
+- **The local-path guard also refuses a link to a Claude Code session, a Windows home folder and
+  the owner's full name**, and finds a Gmail address in any case. The name is held as the SHA-256
+  of each of its words, never written out, and is found across a line break or a dot. The guard's
+  own tests check that each pattern reports its kind and leaves alike-looking text alone, that a
+  binary file is skipped, and that a name is found by its digests.
+
+### Docs
+- **The DAVIS notice said no DAVIS frames are included, but the README's animations show
+  `lab-coat`.** `THIRD_PARTY_NOTICES.md` now says what they show, gives both licences the
+  dataset's README names (CC BY 4.0 in its credits, CC BY-NC 4.0 in its terms of use; the stricter
+  is followed), and that `lab-coat`'s source video is no longer available. The README credits the
+  footage.
+
 ## [0.6.1.2] - 2026-10-17
 
 ### Changed
