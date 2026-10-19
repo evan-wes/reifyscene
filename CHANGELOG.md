@@ -9,6 +9,17 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.4] - 2026-10-18
+
+### Docs
+- **The README says how reifyscene is built**, in a new section with a diagram
+  (`docs/media/workflow.svg`): Claude Code agents research, build, run and score; the owner
+  decides each design fork, judges each result in the numbers and in the app, and makes every
+  merge and release call.
+- **`scripts/readme_media/draw_workflow.py` draws the diagram**, laid out by hand in the app's
+  dark theme; to change it, edit its `stages()` and run it again. It measures text with
+  Liberation Sans (`fonts-liberation`), which has Arial's metrics.
+
 ## [0.6.1.3] - 2026-10-18
 
 ### Tests

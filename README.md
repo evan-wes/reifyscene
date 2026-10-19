@@ -51,6 +51,17 @@ left as it was reconstructed, a smear (`docs/design/2026-10-17-removal-by-owners
 (J. Pont-Tuset et al., arXiv:1704.00675), used under the dataset's CC BY-NC 4.0 terms;
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) has the details.
 
+## How it's built
+
+reifyscene is built by Claude Code agents, directed by its owner. Agents research the papers and
+reference code, write the pipeline and its tests, and run and score the experiments; the owner
+decides every design fork, judges each result in the numbers and in the app, and makes every merge
+(in amber below). The design notes, with the decisions taken, are in [`docs/design/`](docs/design/),
+and the measured results in [`benchmarks/`](benchmarks/).
+
+<!-- Drawn by scripts/readme_media/draw_workflow.py: edit its stages() and run it again. -->
+![How reifyscene is built: design, build, verify, ship](docs/media/workflow.svg)
+
 ## Quick start
 
 ```bash
