@@ -41,6 +41,12 @@ longer load and were deleted, with the `cg_export` they fed into `davis_conceptg
 committed rows stand as measured at their commit; re-scoring either file starts with the rebuild
 above.
 
+**The graph's candidates changed in 0.6.1.0, and this file was not re-scored.** Background classes
+and a noise floor now keep the backdrop and fragments out of the graph
+(`docs/design/2026-10-17-graph-candidates.md`), so `spurious` here describes the code before them.
+On the ten `slice_*` runs, the graph went from 139 entities to 72 with all 31 DAVIS objects kept
+(the design doc's §3); the 90-sequence rebuild above was left for later (the owner, 2026-10-17).
+
 ## `davis_edit_damage.json`
 
 Does removing an entity take the entity, and leave the rest of the scene alone? Scored on the
@@ -110,6 +116,49 @@ number held, and the photo PSNR before any edit rose slightly (held-out 20.6 -> 
 - **What remains is a ghost:** ~21% of the person's pixels are not mostly drawn by the removed
   Gaussians -- person Gaussians the assignment missed, over a hole nothing was reconstructed
   behind. An assignment and inpainting problem, not damage.
+
+**Its run is gone (2026-10-17):** `slice_spin` was deleted to free space. Re-measuring starts with
+rebuilding it (about 30 minutes for the 2026-09-30 rebuild).
+
+## `removal_baseline.json`, `removal_ownership_lab-coat.json`
+
+Does a removal leave no trace, empty space, and the background the video saw? The four tests of
+`docs/design/2026-10-17-removal-by-ownership.md` §1 (`reifyscene/eval/benchmarks/removal`),
+measured from the clip itself, with no ground truth, for every removal method a checkpoint has:
+
+    python scripts/benchmark_removal.py exp_a_lab-coat slice_blackswan slice_crossing \
+        slice_dogs-scale slice_gold-fish slice_india slice_judo slice_lab-coat slice_lindy-hop \
+        slice_miami-surf slice_motocross-bumps --out benchmarks/removal_baseline.json  # GPU, ~2 h
+    python scripts/benchmark_removal.py own_lab-coat_contain_b own_lab-coat_contain_off \
+        --out benchmarks/removal_ownership_lab-coat.json                            # GPU, ~10 min
+
+Marks: T1, no trace on ≥ 95% of the judged views (a view is judged when the detector finds the
+entity's category over it before removal); T2, ≤ 5% of the opacity in the entity's volume left;
+T3, the background the video saw behind the entity within 1 dB of the geometry floor; T4, the
+share no frame saw, reported.
+
+**`removal_baseline.json`** (commit 50c9ee0): the removal this design replaces -- FlashSplat, with
+and without the floater filter -- on `exp_a_lab-coat` and the ten `slice_*` runs; 126 entities
+scored, 21 on too few frames. With the filter, 2 of 126 pass every mark; median T2 0.553 of the
+opacity left, median T3 4.01 dB below the floor; T1 could judge 47 entities, median 0.114 of their
+views clean. The clip ranking it carries (by the share of the background behind each entity the
+video saw) is led by noise entities -- a 24-frame "broccoli" on blackswan first -- so the clip
+choice waits on a cleaner graph.
+
+**`removal_ownership_lab-coat.json`** (commit 450406d): lab-coat's gate pair (design §5), both on
+one scene with every 6th frame held out: `own_lab-coat_contain_b` (ownership training at this
+version's defaults) and `own_lab-coat_contain_off` (none). The three people, the removal this
+design replaces (FlashSplat with the filter, on the arm without ownership training) -> removal by
+owner on the ownership arm:
+
+| | T1 training views clean | T2 opacity left | T3 dB below the floor |
+|---|---|---|---|
+| left woman (`human:...:2`) | 0.152 -> 0.915 | 0.214 -> 0.014 | 7.47 -> 2.36 |
+| right woman (`human:...:3`) | 0.064 -> 0.674 | 0.263 -> 0.192 | 5.85 -> 3.37 |
+| middle woman (`human:...:8`) | 0.021 -> 0.170 | 0.313 -> 0.169 | 4.44 -> 5.51 |
+
+No person passes every mark. The owner merged on "better than today's removal, and the owner's
+look" (design §5); the absolute marks stay the target.
 
 ## `amg_keyframe_cache.json`
 

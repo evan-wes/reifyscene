@@ -33,7 +33,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from reifyscene.graph.id_maps import IGNORE
+from reifyscene.graph.id_maps import BACKGROUND, UNADDRESSED, labelled
 
 
 def _median(xs: list[float]) -> float | None:
@@ -100,7 +100,7 @@ class IdentityTracer:
             with torch.no_grad():
                 pred = head(out.features.detach()).argmax(-1)
                 pix_args.append(pred)
-                valid = id_map != IGNORE
+                valid = labelled(id_map)
                 for c in torch.unique(id_map[valid]).tolist():
                     p, g = (pred == c) & valid, (id_map == c) & valid
                     union = int((p | g).sum())
@@ -151,7 +151,7 @@ class IdentityTracer:
                                          ("alone_recall", "alone_precision",
                                           "visible_recall", "visible_precision")}
         present = sorted({int(c) for *_, m in self.views for c in torch.unique(m).tolist()
-                          if c not in (0, IGNORE)})
+                          if c != BACKGROUND and c < UNADDRESSED})
         for c in present:
             sel = probs[:, c] >= self.select_threshold
             if not sel.any():
@@ -161,7 +161,7 @@ class IdentityTracer:
             inter_a = took_a = inter_v = took_v = area = 0
             for cam, _gt, t, id_map in self.views:
                 gt = id_map == c
-                valid = id_map != IGNORE
+                valid = labelled(id_map)
                 cloud = scene.cloud_at(t)
                 alone = rast.rasterize(cloud.means[sel], cloud.quats[sel], cloud.scales[sel],
                                        cloud.opacities[sel], cloud.colors[sel], cam).alpha > 0.5

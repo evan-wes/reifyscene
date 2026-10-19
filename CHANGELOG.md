@@ -9,6 +9,123 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.3] - 2026-10-18
+
+### Tests
+- **The local-path guard also refuses a link to a Claude Code session, a Windows home folder and
+  the owner's full name**, and finds a Gmail address in any case. The name is held as the SHA-256
+  of each of its words, never written out, and is found across a line break or a dot. The guard's
+  own tests check that each pattern reports its kind and leaves alike-looking text alone, that a
+  binary file is skipped, and that a name is found by its digests.
+
+### Docs
+- **The DAVIS notice said no DAVIS frames are included, but the README's animations show
+  `lab-coat`.** `THIRD_PARTY_NOTICES.md` now says what they show, gives both licences the
+  dataset's README names (CC BY 4.0 in its credits, CC BY-NC 4.0 in its terms of use; the stricter
+  is followed), and that `lab-coat`'s source video is no longer available. The README credits the
+  footage.
+
+## [0.6.1.2] - 2026-10-17
+
+### Changed
+- **The README's viewer animation is in the app's dark theme**, and each person's pair of removal
+  animations has its own label (left, middle, right).
+- **`scripts/readme_media/capture_viewer.mjs` takes the colour scheme** (dark by default, or
+  light), and `viewer_animation.py` crops to what differs from the panel's own background, so
+  either theme crops the same.
+
+## [0.6.1.1] - 2026-10-17
+
+The README shows the app and the removals on DAVIS's lab-coat.
+
+### Added
+- **README animations** (`docs/media/`): the app's scene panel stepping through lab-coat, and
+  each of the three women removed -- before, after and the extracted entity, along the clip and
+  orbiting ±20° -- made by `scripts/readme_media/` (`removal_animation.py`; `capture_viewer.mjs`,
+  which needs Node and Playwright outside the repository, and `viewer_animation.py`).
+- **A "reset view" button** for the app's 3D view, beside the 3D toggle.
+
+### Changed
+- **The app's "took" view is called "extracted entity"** on its button and in the frame's tag.
+
+### Fixed
+- **The app's legend counted folded entities:** it now counts the entities the graph and the
+  timeline list.
+
+## [0.6.1.0] - 2026-10-17
+
+Not every candidate is a thing: the backdrop and fragments no longer become scene-graph entities.
+On the ten DAVIS slice runs the graph went from 139 entities to 72, with all 31 DAVIS-annotated
+objects kept (`docs/design/2026-10-17-graph-candidates.md`). The semantics (2) and graph (7)
+records change: a 0.6.0.0 run is resumed from the semantics stage.
+
+### Added
+- **Background classes** (27: floor, wall, ground, grass, sky, water, building, crowd, ...) and
+  **LVIS v1's frequent tier** (346 more categories) among the semantics stage's labels
+  (`reifyscene/perception/semantics/vocab.py`). A track is backdrop when a background class beats
+  every COCO-80 thing and no LVIS thing beats it by 0.045; a person is never backdrop, and is
+  named among COCO-80 and the background classes.
+- **The background takes the backdrop:** the graph's background node absorbs those tracks, and
+  the id maps give their pixels to the background.
+- **A noise floor for entities:** a candidate needs a mask over 0.1% of the frame (median) and 5
+  support tracks (`graph.entity_min_area`, `graph.entity_min_support_tracks`); below either it is
+  no node, and its pixels are unaddressed. The graph record lists what was absorbed and dropped,
+  and why.
+- **The viewer ranks entities by their Gaussians:** node size and order follow each entity's
+  Gaussian count, and entities with under 0.1% of the scene's Gaussians are folded behind
+  "show N small".
+
+### Changed
+- **`benchmarks/README.md`:** the DAVIS inventory was not re-scored for the new candidates; its
+  `spurious` count describes the code before them.
+
+## [0.6.0.0] - 2026-10-17
+
+Removal by ownership: every Gaussian has an owner from the moment it is seeded, training keeps
+each owner's Gaussians on its own pixels and in its own space, and removing an entity drops its
+owner's Gaussians. On lab-coat it beats the FlashSplat removal it replaces on all three tests for
+two of the three people, and on T1 and T2 for the third; no person yet passes every absolute mark
+(`benchmarks/removal_ownership_lab-coat.json`). The scene, render and handles records are clean
+breaks: runs made before this version are rebuilt from the scene stage, not read.
+
+### Added
+- **Removal by ownership** (`docs/design/2026-10-17-removal-by-ownership.md`). Each Gaussian's
+  owner is the id-map code of the pixel it was seeded on; a track is not used within 2 px of
+  another code. Densification passes the owner to split and cloned children. Removing an entity
+  drops its owner's Gaussians: `owner` is the default removal method on an owned checkpoint, and
+  FlashSplat and the learned identity stay for comparison. Pixels only a dropped tracklet claims
+  get a reserved *unaddressed* owner, never removable.
+- **The owner loss:** each owner's share of every labelled pixel, rendered in a second pass,
+  against the id map (weight 1.0); densification still sees photometric gradients only.
+- **Containment**, on whenever a scene has owners: a cap on background-owned Gaussians' longest
+  to shortest axis ratio; a ghost prune of background-owned Gaussians that paint only entities;
+  body containment, which keeps each entity's Gaussians inside its body (each person's Sapiens
+  body, built by the scene stage on every training frame that shows its torso) or close behind
+  its own surface; and a prune of background-owned Gaussians inside a body's core.
+- **The drift check:** every 500 steps and at the end, the Gaussians whose FlashSplat evidence
+  goes to another class than their owner are counted, never relabelled, in the render record.
+- **Removal tests T1-T4** (`scripts/benchmark_removal.py`): no trace, empty space, the seen
+  background against a geometry floor matched to how far in time each pixel was seen, and the
+  unseen share, measured from the clip itself. `benchmarks/removal_baseline.json` holds the
+  replaced removal on eleven runs; `benchmarks/removal_ownership_lab-coat.json` the gate pair.
+- **Held-out frames** for the dynamic render stage (`render.holdout_every`), scored after
+  training.
+- **The gate's two arms:** `configs/experiment/davis_graph_loop_gate_ownership_on.yaml` and
+  `davis_graph_loop_gate_ownership_off.yaml`.
+
+### Changed
+- **Scene stage (contract 6):** reid and the graph are its upstream; it exports the run's id maps,
+  seeds owners, and writes owners, id maps and bodies into the bundle.
+- **Render stage (contract 5):** checkpoints carry owners. **Handles stage (contract 3):** on an
+  owned checkpoint the `gaussians` layer is the owners'.
+- **Id maps, format 2:** an unaddressed pixel (65534) is told apart from an ignored one.
+- **The app** offers the removal method a checkpoint supports, and applies slackness and the
+  floater filter to FlashSplat only.
+- **The edit-damage benchmark's segmenter** finds any COCO category, up to 50 detections.
+
+### Fixed
+- **A body keypoint's depth** no longer reads a pixel without depth as depth 0.
+
 ## [0.5.0.0] - 2026-10-16
 
 Ready to be public: one data directory holds everything the pipeline reads and writes, nothing in

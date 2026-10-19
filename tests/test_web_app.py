@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from reifyscene.api.web.app import create_app, discover_runs  # noqa: E402
 from reifyscene.common.types import GraphNode  # noqa: E402
 from reifyscene.graph.graph_artifact import GraphArtifact  # noqa: E402
+from reifyscene.graph.id_maps import FORMAT_VERSION  # noqa: E402
 from tests.conftest import write_checkpoint, write_ingest, write_manifest
 
 H, W = 6, 8
@@ -56,7 +57,7 @@ def _fixture_run(root: Path, name: str = "loop_demo") -> Path:
         Image.fromarray(m).save(ident / f"frame_{f:05d}.png")
         frames.append({"frame_idx": f, "file": f"frame_{f:05d}.png"})
     (ident / "manifest.json").write_text(json.dumps({
-        "format_version": 1, "raster": {"width": W, "height": H}, "frames": frames,
+        "format_version": FORMAT_VERSION, "raster": {"width": W, "height": H}, "frames": frames,
         "classes": [{"index": 0, "node_id": None, "label": "background"},
                     {"index": 1, "node_id": PERSON, "label": "person"},
                     {"index": 2, "node_id": CUP, "label": "cup"}]}))
@@ -79,7 +80,8 @@ class FakeEditor:
         self.last_view = (frame, edit_dir, show, camera)
         return np.full((H, W, 3), 7, np.uint8)
 
-    def remove(self, node_id, *, slackness, filtered, out_dir):
+    def remove(self, node_id, *, method, slackness, filtered, out_dir):
+        self.last_method = method
         out_dir.mkdir(parents=True, exist_ok=True)
         for kind in ("before", "after", "took"):
             Image.fromarray(np.zeros((H, W, 3), np.uint8)).save(out_dir / f"{kind}_00001.jpg")
@@ -175,6 +177,33 @@ def test_an_edit_queues_runs_and_exposes_its_images(client) -> None:
     assert st["result"]["node_id"] == PERSON and st["params"]["slackness"] == 0.4
     assert client.get(f"/api/edits/{jid}/after/1.jpg").status_code == 200
     assert client.get(f"/api/edits/{jid}/after/9.jpg").status_code == 404
+
+
+def test_an_owned_checkpoint_removes_by_owner_unless_told_otherwise(tmp_path) -> None:
+    run = _fixture_run(tmp_path)
+    plain = TestClient(create_app(tmp_path, editor_factory=FakeEditor))
+    assert plain.get("/api/runs/loop_demo/graph").json()["removal"] == {
+        "methods": ["flashsplat"], "default": "flashsplat"}
+    record = json.loads((run / "render" / "artifact.json").read_text())
+    record["scene_state"]["ownership"] = {"owners": 3}
+    (run / "render" / "artifact.json").write_text(json.dumps(record))
+    editors: list[FakeEditor] = []
+
+    def factory(r):
+        editors.append(FakeEditor(r))
+        return editors[-1]
+
+    owned = TestClient(create_app(tmp_path, editor_factory=factory))
+    assert owned.get("/api/runs/loop_demo/graph").json()["removal"] == {
+        "methods": ["owner", "flashsplat"], "default": "owner"}
+    for method in ("flashsplat", None):
+        jid = owned.post("/api/runs/loop_demo/edits",
+                         json={"entity": "2", "method": method}).json()["id"]
+        for _ in range(50):
+            if owned.get(f"/api/edits/{jid}").json()["status"] in ("done", "failed"):
+                break
+            time.sleep(0.05)
+        assert editors[-1].last_method == method     # None: the editor's own default
 
 
 def test_the_3d_view_passes_the_camera_and_the_edit_through(client) -> None:

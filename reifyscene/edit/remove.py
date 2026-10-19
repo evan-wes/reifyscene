@@ -1,9 +1,17 @@
 """``remove(entity)`` on a finished run: select its Gaussians, drop them, render the result.
 
-Selection is the removal path the identity scope settled on (§4.7-4.9 of
-``docs/design/2026-09-29-per-gaussian-identity-scope.md``): FlashSplat's evidence-majority
-assignment against the run's id maps, then the floater filter. The edit is a checkpoint transform
-(the selected Gaussians dropped, the scene rebuilt), so what renders afterwards is a real scene.
+How the Gaussians are selected is the edit's **method**:
+
+- ``owner`` (the default on a checkpoint trained with owners): the entity's own Gaussians,
+  owned from seeding and trained to stay on its pixels
+  (``docs/design/2026-10-17-removal-by-ownership.md``);
+- ``flashsplat``: FlashSplat's evidence-majority assignment against the run's id maps, then the
+  floater filter (§4.7-4.9 of ``docs/design/2026-09-29-per-gaussian-identity-scope.md``), with
+  its slackness, filter and body bound; the default on a checkpoint without owners;
+- ``identity``: the learned identity (I2/I3), on a checkpoint trained with it.
+
+The edit is a checkpoint transform (the selected Gaussians dropped, the scene rebuilt), so what
+renders afterwards is a real scene.
 
 An edit is a *view* on a run. Its results go to the run's output dir for the edit
 (``RunOutputs.output_dir(<edit id>)``) and nothing in the pipeline's own stage directories
@@ -29,6 +37,7 @@ if TYPE_CHECKING:
     from reifyscene.api.run_outputs import Checkpoint
 
 REMOVED_FILE = "removed.npz"     # the removed Gaussians, so the edit can be re-rendered
+METHODS = ("owner", "flashsplat", "identity")
 
 
 def edit_id(op: str, node_id: str) -> str:
@@ -55,6 +64,7 @@ class RemoveEditor:
         self._bodies: dict[str, Any] = {}
         self._placed = None
         self.bundle = checkpoint.load()
+        self.owned = "owner_node_ids" in self.bundle
         self.renderer = CheckpointRenderer.for_run(self.bundle, device, self.run)
         self._counts = None
         self._node_ids: list[str | None] = []
@@ -102,14 +112,21 @@ class RemoveEditor:
 
     # -- selection ----------------------------------------------------------------------------
 
-    def select(
-        self, node_id: str, *, slackness: float = 0.0, filtered: bool = True
-    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        """``(fg_idx, bg_idx, stats)`` for one entity.
+    @property
+    def default_method(self) -> str:
+        return "owner" if self.owned else "flashsplat"
 
-        The default selection (slackness 0, filter on) comes from the graph's ``gaussians``
-        layer when that was computed against this checkpoint; otherwise, and for any other
-        parameters, it is computed here. ``stats["source"]`` says which.
+    def select(
+        self, node_id: str, *, method: str | None = None, slackness: float = 0.0,
+        filtered: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        """``(fg_idx, bg_idx, stats)`` for one entity, by ``method`` (:data:`METHODS`; the
+        checkpoint's default when None). ``slackness`` and ``filtered`` are FlashSplat's.
+
+        FlashSplat's default selection (slackness 0, filter on) comes from the graph's
+        ``gaussians`` layer when that was computed against this checkpoint with FlashSplat;
+        otherwise, and for any other parameters, it is computed here. ``stats["source"]``
+        says which.
         """
         from reifyscene.graph.assignment import (
             assign,
@@ -118,6 +135,19 @@ class RemoveEditor:
             filter_members,
         )
         from reifyscene.graph.handles import StaleHandles, load_handles
+        from reifyscene.graph.renderable_handle import identity_handles, owner_handles
+
+        method = method or self.default_method
+        if method in ("owner", "identity"):
+            handles = owner_handles(self.bundle) if method == "owner" else identity_handles(
+                self.bundle)
+            if node_id not in handles:
+                raise KeyError(f"{node_id} is not a class of this checkpoint's {method}s")
+            fg, bg = handles[node_id]
+            return fg, bg, {"selected_fg": int(len(fg)), "selected_bg": int(len(bg)),
+                            "source": method}
+        if method != "flashsplat":
+            raise ValueError(f"unknown removal method {method!r}; methods: {', '.join(METHODS)}")
 
         if slackness == 0.0 and filtered and self.use_layer and self._layer_matches():
             try:
@@ -159,13 +189,15 @@ class RemoveEditor:
         return None if span is None else round(span, 2)
 
     def _layer_matches(self) -> bool:
-        """Whether the graph's stored selection was made the way this editor selects."""
+        """Whether the graph's stored selection was made the way this editor selects with
+        FlashSplat."""
         from reifyscene.graph.handles import LAYER
 
         if not self.run.has("graph"):
             return False
         info = (self.run.record("graph")["metadata"].get("layers") or {}).get(LAYER)
-        return info is not None and bool(info.get("body_bound", False)) == self.body_bound
+        return (info is not None and info.get("selection") == "flashsplat"
+                and bool(info.get("body_bound", False)) == self.body_bound)
 
     def body_of(self, node_id: str):
         """The person's :class:`~reifyscene.edit.body_volume.BodyVolume`, or None when the
@@ -193,6 +225,7 @@ class RemoveEditor:
         self,
         node_id: str,
         *,
+        method: str | None = None,
         slackness: float = 0.0,
         filtered: bool = True,
         frames: list[int] | None = None,
@@ -204,7 +237,11 @@ class RemoveEditor:
         from reifyscene.graph.renderable_handle import drop_gaussians
 
         t0 = time.time()
-        fg, bg, stats = self.select(node_id, slackness=slackness, filtered=filtered)
+        method = method or self.default_method
+        fg, bg, stats = self.select(node_id, method=method, slackness=slackness,
+                                    filtered=filtered)
+        if method != "flashsplat":
+            slackness, filtered = None, None           # not this method's parameters
         eid = edit_id("remove", node_id)
         out = Path(out_dir) if out_dir is not None else self.run.output_dir(eid)
         out.mkdir(parents=True, exist_ok=True)
@@ -221,7 +258,8 @@ class RemoveEditor:
         n_taken = int(len(fg) + len(bg))
         result = {
             "edit_id": eid, "op": "remove", "run": self.run.name, "node_id": node_id,
-            "checkpoint": self.checkpoint.name, "slackness": slackness, "filtered": filtered,
+            "checkpoint": self.checkpoint.name, "method": method,
+            "slackness": slackness, "filtered": filtered,
             "removed_fg": int(len(fg)), "removed_bg": int(len(bg)),
             "assigned_fraction": round(n_taken / max(n_total, 1), 6),
             "renderable": "grounded" if n_taken else "unassignable",

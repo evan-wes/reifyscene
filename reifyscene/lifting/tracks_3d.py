@@ -23,8 +23,8 @@ import torch
 
 
 def _map(value, fn: Callable[[torch.Tensor], torch.Tensor]):
-    """Apply ``fn`` to every tensor field, returning a new instance."""
-    return type(value)(**{k: fn(v) for k, v in vars(value).items()})
+    """Apply ``fn`` to every tensor field (an absent optional one stays None)."""
+    return type(value)(**{k: None if v is None else fn(v) for k, v in vars(value).items()})
 
 
 @dataclass
@@ -36,6 +36,8 @@ class Tracks3D:
     invisibles   (N, T)    bool, occluded but confident at that frame
     confidences  (N, T)    float in [0, 1], 0 where neither visible nor invisible
     colors       (N, 3)    canonical RGB in [0, 1] (sampled at the query frame)
+    owners       (N,)      the id-map code at the query pixel (reifyscene.graph.id_maps): who
+                           owns the Gaussian the track seeds. None when no id maps were given.
     """
 
     xyz: torch.Tensor
@@ -43,6 +45,7 @@ class Tracks3D:
     invisibles: torch.Tensor
     confidences: torch.Tensor
     colors: torch.Tensor
+    owners: torch.Tensor | None = None
 
     @property
     def num_tracks(self) -> int:
@@ -61,6 +64,7 @@ class Tracks3D:
             and self.colors.shape[:-1] == dims[:-1]
             and self.xyz.shape[-1] == 3
             and self.colors.shape[-1] == 3
+            and (self.owners is None or self.owners.shape == dims[:-1])
         )
 
     def filter_valid(self, valid_mask: torch.Tensor) -> "Tracks3D":
@@ -73,11 +77,13 @@ class Tracks3D:
 
 @dataclass
 class StaticPoints3D:
-    """Static background points: ``xyz`` / ``normals`` / ``colors`` all (M, 3)."""
+    """Static background points: ``xyz`` / ``normals`` / ``colors`` all (M, 3); ``owners``
+    (M,) id-map codes, as on :class:`Tracks3D`."""
 
     xyz: torch.Tensor
     normals: torch.Tensor
     colors: torch.Tensor
+    owners: torch.Tensor | None = None
 
     @property
     def num_points(self) -> int:
@@ -85,7 +91,8 @@ class StaticPoints3D:
 
     def check_sizes(self) -> bool:
         dims = self.xyz.shape
-        return self.normals.shape == dims and self.colors.shape == dims
+        return (self.normals.shape == dims and self.colors.shape == dims
+                and (self.owners is None or self.owners.shape == dims[:1]))
 
     def filter_valid(self, valid_mask: torch.Tensor) -> "StaticPoints3D":
         return _map(self, lambda x: x[valid_mask])

@@ -31,6 +31,7 @@ const S = {
   cam: { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 },   // the 3D view, relative to the frame's camera
   moving: false,  // a drag is under way: preview renders are smaller
   free3d: false,  // the 3D camera, over whichever Gaussian view is showing
+  showAll: false, // list the entities that own almost none of the scene's Gaussians too
 };
 const HOME = { yaw: 0, pitch: 0, zoom: 1, px: 0, py: 0 };
 
@@ -64,7 +65,7 @@ async function loadRun(name) {
     (rm.gravity_aligned ? "" : " · no gravity: vertical relations not computed") : "";
   const slider = $("frame-slider");
   slider.max = Math.max(0, S.frames.length - 1); slider.value = 0;
-  fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); updateRemove(); paint();
+  fillMethods(); fillQueryOptions(); drawPredChips(); drawGraph(); drawLegend(); drawTimeline(); drawSelection(); drawEdits(); updateRemove(); paint();
 }
 
 // -- graph -----------------------------------------------------------------------------------
@@ -72,12 +73,28 @@ const short = (id) => id.split(":").pop();
 // no Gaussian is mostly this entity (the graph's gaussians layer, for this checkpoint)
 const noGaussians = (e) => e?.gaussians?.status === "unassignable";
 const entLabel = (e) => `${e.category} ${short(e.node_id)}${noGaussians(e) ? " ∅" : ""}`;
+// How much of the scene an entity is: its Gaussians, when the layer describes this checkpoint.
+const gaussianCount = (e) => (e?.gaussians && !noGaussians(e) ? e.gaussians.fg + e.gaussians.bg : null);
+// An entity with none of the scene's Gaussians, or under this share of them, is folded away
+// until "show all": what is left of a fragment the graph's noise floor let through.
+const SMALL_SHARE = 0.001;
+const isSmall = (e) => !!e?.gaussians && (noGaussians(e) || e.gaussians.assigned_fraction < SMALL_SHARE);
+// The entities the graph and the timeline list, biggest first when the Gaussians are known.
+function listed() {
+  const ents = S.graph.entities.filter((e) => S.showAll || !isSmall(e));
+  return ents.some((e) => gaussianCount(e) !== null)
+    ? ents.sort((a, b) => (gaussianCount(b) ?? 0) - (gaussianCount(a) ?? 0) || a.node_id.localeCompare(b.node_id))
+    : ents.sort((a, b) => a.category.localeCompare(b.category) || a.node_id.localeCompare(b.node_id));
+}
 function drawGraph() {
-  const els = S.graph.entities.map((e) => ({
-    data: { id: e.node_id, label: entLabel(e), color: S.colorOf[e.category],
-            size: 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
+  const ents = listed();
+  const top = Math.max(1, ...ents.map((e) => gaussianCount(e) ?? 0));
+  const els = ents.map((e, rank) => ({
+    data: { id: e.node_id, label: entLabel(e), color: S.colorOf[e.category], rank,
+            size: gaussianCount(e) !== null ? 12 + 22 * Math.sqrt(gaussianCount(e) / top)
+              : 14 + 14 * Math.sqrt(e.num_observed / Math.max(1, S.frames.length)) },
   }));
-  const known = new Set(S.graph.entities.map((e) => e.node_id));
+  const known = new Set(ents.map((e) => e.node_id));
   S.graph.edges.forEach((e, i) => {
     if (!known.has(e.src) || !known.has(e.dst)) return;
     const also = e.attrs?.and;
@@ -117,13 +134,13 @@ function drawGraph() {
   });
   S.cy.on("tap", "node", (ev) => select(ev.target.id()));
   S.cy.on("tap", "edge", (ev) => selectRelation(+ev.target.id().slice(1)));
-  // Entities on a circle, grouped by category: `near` holds between most pairs in these scenes,
-  // and a force layout packs a dense graph into overlapping nodes. On a circle every entity
-  // keeps its own place and relations read as chords. Without relations, a grid.
-  const byCategory = (a, b) => a.data("label").localeCompare(b.data("label"), undefined, { numeric: true });
+  // Entities on a circle in the order they are listed (biggest first): `near` holds between most
+  // pairs in these scenes, and a force layout packs a dense graph into overlapping nodes. On a
+  // circle every entity keeps its own place and relations read as chords. Without relations, a grid.
+  const byRank = (a, b) => a.data("rank") - b.data("rank");
   (S.cy.edges().length
-    ? S.cy.nodes().layout({ name: "circle", sort: byCategory, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
-    : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byCategory })).run();
+    ? S.cy.nodes().layout({ name: "circle", sort: byRank, padding: 30, avoidOverlap: true, spacingFactor: 1.05 })
+    : S.cy.nodes().layout({ name: "grid", padding: 24, avoidOverlapPadding: 18, sort: byRank })).run();
   S.cy.fit(undefined, 40);
   updateEdges();
   S.cy.on("tap", (ev) => { if (ev.target === S.cy) { S.highlight = null; applyHighlight(); } });
@@ -229,10 +246,17 @@ function drawRelTimeline() {
 
 function drawLegend() {
   const lg = $("legend"); lg.innerHTML = "";
-  for (const [c, n] of Object.entries(S.graph.categories)) {
+  const counts = {};                                  // what the graph and timeline list
+  for (const e of listed()) counts[e.category] = (counts[e.category] || 0) + 1;
+  for (const [c, n] of Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))) {
     const i = el("i"); i.style.background = S.colorOf[c];
     lg.append(el("span", { title: `select ${c}`, onclick: () => runQuery("select", { category: c }) }, i, `${c} ${n}`));
   }
+  const small = S.graph.entities.filter(isSmall).length;
+  if (small) lg.append(el("button", { type: "button", class: "ghost small-toggle", "aria-pressed": String(S.showAll),
+    title: `entities with under ${100 * SMALL_SHARE}% of the scene's Gaussians`,
+    text: S.showAll ? `hide ${small} small` : `show ${small} small`,
+    onclick: () => { S.showAll = !S.showAll; drawGraph(); drawLegend(); drawTimeline(); paint(); } }));
 }
 function applyHighlight() {
   const hl = S.highlight ? new Set(S.highlight) : null;
@@ -282,8 +306,7 @@ function drawTimeline() {
   if (!S.frames.length) return;
   const f0 = S.frames[0], f1 = S.frames[S.frames.length - 1], span = f1 - f0 + 1;
   const x = (f) => `${(100 * (f - f0)) / span}%`, w = (n) => `${(100 * n) / span}%`;
-  const ents = [...S.graph.entities].sort((a, b) => a.category.localeCompare(b.category) || a.node_id.localeCompare(b.node_id));
-  for (const e of ents) {
+  for (const e of listed()) {
     const name = el("div", { class: `name${noGaussians(e) ? " nogs" : ""}`, "data-node": e.node_id,
       title: noGaussians(e) ? `${e.node_id} · no Gaussians in the scene` : e.node_id, text: entLabel(e),
       onclick: () => select(e.node_id) });
@@ -329,7 +352,10 @@ function placeCursor() {
 const nearestIndex = (f) => S.frames.reduce((best, v, i) => (Math.abs(v - f) < Math.abs(S.frames[best] - f) ? i : best), 0);
 
 // -- frame view -------------------------------------------------------------------------------
-const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"], ["took", "took"]];
+// [view, what the button and the tag call it]: "took" is what the removal took, the entity alone
+const VIEWS = [["photo", "photo"], ["render", "render"], ["before", "before"], ["after", "after"],
+               ["took", "extracted entity"]];
+const viewLabel = (v) => Object.fromEntries(VIEWS)[v] ?? v;
 // what each Gaussian view shows from the 3D camera; a photo has no 3D
 const SHOW_3D = { render: "scene", before: "scene", after: "edited", took: "took" };
 const shown = () => (S.flipped ? flipTarget(S.view) : S.view);
@@ -348,6 +374,9 @@ function drawViews() {
   t.setAttribute("aria-pressed", String(S.free3d));
   t.disabled = S.view === "photo";
   t.title = S.view === "photo" ? "a photo has no 3D: pick render or an edit view" : "orbit this view in 3D";
+  const r = $("reset3d");
+  r.disabled = !in3d();
+  r.title = in3d() ? "back to the camera that recorded this frame (or double-click the view)" : "for the 3D view";
 }
 function frameUrl(view, f) {
   if (in3d(view)) {
@@ -392,12 +421,12 @@ function paint() {
     // one moving camera saw this scene: far off its path the reconstruction is guesswork
     const far = Math.abs(S.cam.yaw) > 15 || Math.abs(S.cam.pitch) > 10;
     const flip = view === "render" ? " · (no photo from a moved camera)"
-      : ` · click: ${S.flipped ? S.view : flipTarget(S.view)}`;
+      : ` · click: ${viewLabel(S.flipped ? S.view : flipTarget(S.view))}`;
     sel = flip +
       (far ? ` · ${Math.round(S.cam.yaw)}°/${Math.round(S.cam.pitch)}° off the recorded view: unseen, expect smears` : "") +
       " · drag orbit · shift-drag pan · wheel zoom · double-click reset";
   }
-  $("stage-tag").textContent = `${is3d ? `3D ${view}` : view}${sel}`;
+  $("stage-tag").textContent = `${is3d ? `3D ${viewLabel(view)}` : viewLabel(view)}${sel}`;
   $("stage").classList.toggle("free", is3d);
   drawViews(); placeCursor(); updateEdges();
   if (S.selected || S.selRel !== null) drawRelTimeline();
@@ -450,7 +479,9 @@ function initFreeView() {
     S.moving = true; paint();
     clearTimeout(S.wheelEnd); S.wheelEnd = setTimeout(() => { S.moving = false; paint(); }, 250);
   }, { passive: false });
-  st.addEventListener("dblclick", () => { if (in3d()) { S.cam = { ...HOME }; paint(); } });
+  const reset = () => { if (in3d()) { S.cam = { ...HOME }; paint(); } };
+  st.addEventListener("dblclick", reset);
+  $("reset3d").addEventListener("click", reset);
   $("free3d").addEventListener("click", () => { S.free3d = !S.free3d; paint(); });
 }
 
@@ -514,32 +545,50 @@ $("query-form").addEventListener("submit", (ev) => {
 });
 
 // -- edits ------------------------------------------------------------------------------------
+// Removal methods: by owner (each Gaussian owned from seeding) where the checkpoint was trained
+// with owners, FlashSplat's evidence (slackness, floater filter), the learned identity.
+const METHOD_LABELS = { owner: "by owner", flashsplat: "FlashSplat", identity: "learned identity" };
+function fillMethods() {
+  const sel = $("e-method"), r = S.graph.removal;
+  sel.innerHTML = "";
+  for (const m of r.methods) sel.append(el("option", { value: m, text: METHOD_LABELS[m] || m }));
+  sel.value = r.default;
+}
+const ownedLayer = () => S.graph.gaussians_layer?.selection === "owner";
 function sceneText(e) {
   const g = e.gaussians, layer = S.graph.gaussians_layer;
   if (!layer) return "not bound yet (the graph has no gaussians layer)";
   if (!layer.current) return `bound to another checkpoint (${layer.checkpoint}), not this one`;
   if (!g) return "–";
   if (g.status === "unassignable")
-    return "no Gaussians: none has most of its evidence in this entity" + (g.reason ? ` (${g.reason})` : "");
+    return (ownedLayer() ? "no Gaussians: none was seeded on this entity"
+      : "no Gaussians: none has most of its evidence in this entity") + (g.reason ? ` (${g.reason})` : "");
   const pct = (100 * g.assigned_fraction).toFixed(g.assigned_fraction < 0.001 ? 3 : 1);
   return `${(g.fg + g.bg).toLocaleString()} Gaussians (${g.fg.toLocaleString()} moving, ${g.bg.toLocaleString()} static) · ${pct}% of the scene`;
 }
-// At the default slackness an entity with no Gaussians has nothing to remove; "take more"
-// admits Gaussians only partly its own, so it may still find some.
+// The layer says what its own selection found. By owner, an entity with none has nothing to
+// remove. With FlashSplat at the default slackness neither; "take more" admits Gaussians only
+// partly its own, so it may still find some.
 function updateRemove() {
   const e = S.selected && entity(S.selected), btn = $("e-remove"), note = $("e-note");
-  const stuck = noGaussians(e) && parseFloat($("e-slack").value) >= 0;
+  const method = $("e-method").value, flash = method === "flashsplat";
+  $("e-slack").disabled = $("e-filter").disabled = !flash;
+  const applies = ownedLayer() ? method === "owner" : flash;
+  const none = applies && noGaussians(e);
+  const stuck = none && (!flash || parseFloat($("e-slack").value) >= 0);
   btn.disabled = !e || stuck;
-  note.hidden = !noGaussians(e);
-  note.textContent = !noGaussians(e) ? "" : stuck
-    ? "Nothing to remove at this setting: no Gaussian is mostly this entity. \"−0.8 · take more\" admits partial ones."
+  note.hidden = !none;
+  note.textContent = !none ? "" : !flash ? "Nothing to remove: no Gaussian was seeded on this entity."
+    : stuck ? "Nothing to remove at this setting: no Gaussian is mostly this entity. \"−0.8 · take more\" admits partial ones."
     : "No Gaussian is mostly this entity; \"take more\" will remove the ones partly in it.";
 }
 $("e-slack").addEventListener("change", updateRemove);
+$("e-method").addEventListener("change", updateRemove);
 $("e-remove").addEventListener("click", async () => {
   if (!S.selected) return;
   const st = $("e-status"); st.className = "edit-status";
-  const body = { op: "remove", entity: S.selected, slackness: parseFloat($("e-slack").value), filtered: $("e-filter").checked };
+  const body = { op: "remove", entity: S.selected, method: $("e-method").value,
+                 slackness: parseFloat($("e-slack").value), filtered: $("e-filter").checked };
   try {
     const job = await api(`/api/runs/${S.run}/edits`, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) });
@@ -578,7 +627,9 @@ function drawEdits() {
   for (const rec of S.edits[S.run] || []) {
     const e = entity(rec.node);
     const li = el("li", { class: rec.id === S.activeEdit ? "active" : "",
-      text: `remove ${e ? e.category : ""} ${short(rec.node)} · slack ${rec.params.slackness}${rec.params.filtered ? " · filtered" : ""} · ${rec.status}`,
+      text: `remove ${e ? e.category : ""} ${short(rec.node)} · ${METHOD_LABELS[rec.params.method] || rec.params.method}` +
+        (rec.params.method === "flashsplat" ? ` · slack ${rec.params.slackness}${rec.params.filtered ? " · filtered" : ""}` : "") +
+        ` · ${rec.status}`,
       onclick: () => { if (rec.status === "done") { S.activeEdit = rec.id; S.view = "after"; S.flipped = false; drawEdits(); paint(); } } });
     ul.append(li);
   }

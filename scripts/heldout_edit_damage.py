@@ -82,7 +82,7 @@ def main() -> int:
     from reifyscene.edit.remove import RemoveEditor
     from reifyscene.edit.renderer import outline
     from reifyscene.eval.benchmarks.edit_damage import dilate, rest_psnr
-    from reifyscene.eval.benchmarks.edit_damage.silhouettes import PersonSegmenter, pick_entity
+    from reifyscene.eval.benchmarks.edit_damage.silhouettes import InstanceSegmenter, pick_entity
     from reifyscene.graph.node_ids import tracklet_number
     from reifyscene.graph.renderable_handle import drop_gaussians
     from reifyscene.query.scene_query import SceneQuery
@@ -140,7 +140,7 @@ def main() -> int:
             return r.rasterizer.rasterize(c.means, c.quats, c.scales, c.opacities, c.colors, cam,
                                           features=features)
 
-    seg = PersonSegmenter(device=args.device)
+    seg = InstanceSegmenter(device=args.device)
     out_dir = run.output_dir(args.out_name)
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     tag = tracklet_number(nid)
@@ -152,7 +152,7 @@ def main() -> int:
         share = draw(r.scene, cam, t, features=ind).features[..., 0].reshape(h, w).cpu().numpy()
         taken = share > 0.5
         alone_px = alone.alpha.reshape(h, w).cpu().numpy() > 0.5
-        person, iou = pick_entity(seg.people(photo), taken)
+        person, iou = pick_entity(seg.find(photo, "person"), taken)
         row = {"view": name, "scene_time": int(t), "silhouette_iou_with_render": round(iou, 4),
                "silhouette_source": seg.backend}
         if person is None or iou < args.min_iou:

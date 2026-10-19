@@ -163,9 +163,10 @@ def build_stage_registry() -> dict[str, StageSpec]:
         ),
         'scene': StageSpec(
             name='scene',
-            dependencies=('ingest', 'pose_refine', 'segment', 'tracking', 'humans', 'objects', 'optimization'),
+            # reid + graph: the id maps that give every Gaussian its owner
+            dependencies=('ingest', 'pose_refine', 'segment', 'tracking', 'reid', 'humans', 'objects', 'graph', 'optimization'),
             artifact_cls=SceneArtifact,
-            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['ingest'], outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment']),
+            run_fn=lambda pipeline, outputs, video_paths: pipeline.assemble_scene(outputs['ingest'], outputs['pose_refine'], outputs['tracking'], human_artifact=outputs['humans'], object_artifact=outputs['objects'], optimization_artifact=outputs['optimization'], instance_artifact=outputs['segment'], reid_artifact=outputs['reid'], graph_artifact=outputs['graph']),
             load_fn=SceneArtifact.load,
         ),
         'render': StageSpec(

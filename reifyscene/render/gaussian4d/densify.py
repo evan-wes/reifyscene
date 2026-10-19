@@ -137,6 +137,7 @@ class DensificationController:
         *,
         param_names: tuple[str, ...] = PARAM_NAMES,
         group_prefix: str = "",
+        buffer_names: tuple[str, ...] = (),
     ) -> None:
         self.field = field
         self.optimizer = optimizer
@@ -146,6 +147,9 @@ class DensificationController:
         # so one combined optimizer can host both fields plus the motion bases.
         self.param_names = tuple(param_names)
         self.group_prefix = str(group_prefix)
+        # Per-Gaussian buffers that are not optimised (the owner): children inherit the
+        # parent's rows, pruning removes them, exactly as for the params.
+        self.buffer_names = tuple(buffer_names)
         self.scene_extent = float(
             cfg.scene_extent if cfg.scene_extent is not None
             else (scene_extent if scene_extent is not None else compute_scene_extent(field.means.detach()))
@@ -247,6 +251,10 @@ class DensificationController:
             return new_tensor, new_ea, new_eas
 
         self._optimizer_op(build)
+        for name in self.buffer_names:
+            old = self.field.get_buffer_rows(name)
+            self.field.set_buffer_rows(name, torch.cat([old[keep_orig_mask],
+                                                        appended[name].to(old)], dim=0))
 
     def _prune(self, keep_mask: torch.Tensor) -> None:
         def build(name, old, exp_avg, exp_avg_sq):
@@ -256,6 +264,18 @@ class DensificationController:
             return new_tensor, exp_avg[keep_mask], exp_avg_sq[keep_mask]
 
         self._optimizer_op(build)
+        for name in self.buffer_names:
+            self.field.set_buffer_rows(name, self.field.get_buffer_rows(name)[keep_mask])
+
+    @torch.no_grad()
+    def prune(self, keep_mask: torch.Tensor) -> int:
+        """Prune outside the schedule (the trainer's ghost prune): the params, their optimizer
+        state, the buffers and the gradient accumulators keep ``keep_mask``'s rows. Returns how
+        many went."""
+        self._prune(keep_mask)
+        self.grad2d_accum = self.grad2d_accum[keep_mask]
+        self.count = self.count[keep_mask]
+        return int((~keep_mask).sum())
 
     # -- densification primitives -----------------------------------------
 
@@ -263,6 +283,7 @@ class DensificationController:
         field = self.field
         # Clones are straight copies of every param (standard 3DGS).
         rows: dict[str, list[torch.Tensor]] = {name: [field.get_param(name).detach()[clone_mask]] for name in self.param_names}
+        rows.update({name: [field.get_buffer_rows(name)[clone_mask]] for name in self.buffer_names})
 
         n_split = int(split_mask.sum())
         if n_split > 0:
@@ -288,8 +309,11 @@ class DensificationController:
                     # are inherited from the parent — the standard 3DGS split.
                     parent = field.get_param(name).detach()[split_mask]
                     rows[name].append(parent[:, None].repeat(1, k, *([1] * (parent.dim() - 1))).reshape(n_split * k, *parent.shape[1:]))
+            for name in self.buffer_names:              # the owner: every child is its parent's
+                parent = field.get_buffer_rows(name)[split_mask]
+                rows[name].append(parent.repeat_interleave(k, dim=0))
 
-        return {name: torch.cat(rows[name], dim=0) for name in self.param_names}
+        return {name: torch.cat(rows[name], dim=0) for name in self.param_names + self.buffer_names}
 
     @torch.no_grad()
     def densify_and_prune(self, step: int) -> dict[str, int]:

@@ -76,9 +76,20 @@ These are reifyscene's own code, under its own licence, and are credited here:
 - **DAVIS 2017** (<https://davischallenge.org>; J. Pont-Tuset et al., "The 2017 DAVIS Challenge on
   Video Object Segmentation", arXiv:1704.00675). The files in `benchmarks/` hold scores against
   DAVIS 2017, and `benchmarks/detector_keyframe_cache.json` holds bounding boxes derived from its
-  annotations. The DAVIS organisers license the annotations under CC BY 4.0
-  (<https://creativecommons.org/licenses/by/4.0/>). No DAVIS frames or masks are included.
+  annotations. The README's animations in `docs/media/` show DAVIS's `lab-coat` sequence: the
+  app's capture shows its frames, scaled down, and the removal animations are renders of a scene
+  trained on them. No other DAVIS frames, and no DAVIS masks, are included. The dataset's own
+  README gives two licences: CC BY 4.0 (<https://creativecommons.org/licenses/by/4.0/>) in its
+  credits and CC BY-NC 4.0 (<https://creativecommons.org/licenses/by-nc/4.0/>) in its terms of
+  use; this repository is non-commercial and follows the stricter. That README also refers each
+  video to its online source for that video's terms; `lab-coat`'s source is a YouTube video that
+  is no longer available.
 - `benchmarks/dycheck_spin_heldout_edit.json` holds scores on DyCheck's `spin` sequence only.
+- **LVIS v1 category names** (<https://www.lvisdataset.org>; A. Gupta, P. Dollár, R. Girshick,
+  "LVIS: A Dataset for Large Vocabulary Instance Segmentation", CVPR 2019).
+  `reifyscene/perception/semantics/vocab.py` lists the names of LVIS v1's frequent-tier categories
+  as label candidates, taken from detectron2's `lvis_v1_categories.py` (Apache-2.0). The LVIS
+  annotations are licensed under CC BY 4.0 (<https://creativecommons.org/licenses/by/4.0/>).
 
 ## What you install or download
 
@@ -108,6 +119,6 @@ apply to you when you use it.
 | Shape of Motion (<https://github.com/vye16/shape-of-motion>) | MIT | the reference comparison |
 | ConceptGraphs and its environment, which installs ultralytics | MIT; ultralytics is AGPL-3.0 | the ConceptGraphs reference comparison |
 | ffmpeg (conda-forge GPL build, for libx264) | GPL | turning image-sequence datasets into videos |
-| DAVIS 2017 | annotations CC BY 4.0; the frames' terms are the DAVIS organisers' | the scene-graph clips and benchmarks |
+| DAVIS 2017 | CC BY-NC 4.0 (its README also names CC BY 4.0); each video's source keeps its own terms | the scene-graph clips, benchmarks and the README's animations |
 | DyCheck iPhone, NVIDIA Dynamic Scenes (Shape of Motion's processed downloads) | their authors' terms | reconstruction benchmarks |
 | CMU Panoptic | research use only; no redistribution without permission | calibration experiments |

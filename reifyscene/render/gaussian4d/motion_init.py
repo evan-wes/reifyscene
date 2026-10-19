@@ -76,6 +76,13 @@ def bundle_to_scene(data, device: str = "cuda") -> tuple[DynamicScene, dict[str,
     def t(key: str) -> torch.Tensor:
         return torch.as_tensor(np.asarray(data[key]), dtype=torch.float32, device=device)
 
+    owned = _bundle_has(data, "fg_owner")
+
+    def owner(prefix: str) -> torch.Tensor | None:
+        if not owned:
+            return None
+        return torch.as_tensor(np.asarray(data[f"{prefix}_owner"]).astype(np.int64), device=device)
+
     fg = DynamicGaussianField(
         means=t("fg_means"),
         quats=t("fg_quats"),
@@ -83,6 +90,7 @@ def bundle_to_scene(data, device: str = "cuda") -> tuple[DynamicScene, dict[str,
         logit_opacities=t("fg_opacities").reshape(-1),
         colors_logit=t("fg_colors"),
         motion_coefs=t("fg_motion_coefs"),
+        owner=owner("fg"),
     )
     bases = MotionBases(rots=t("motion_rots"), transls=t("motion_transls"))
     bg = None
@@ -93,8 +101,12 @@ def bundle_to_scene(data, device: str = "cuda") -> tuple[DynamicScene, dict[str,
             log_scales=t("bg_scales"),
             logit_opacities=t("bg_opacities").reshape(-1),
             colors_logit=t("bg_colors"),
+            owner=owner("bg"),
         )
     scene = DynamicScene(fg, bases, bg).to(device)
+    if owned:
+        # Background is stored as "" (npz string arrays cannot hold None).
+        scene.owner_node_ids = [str(x) or None for x in np.asarray(data["owner_node_ids"])]
     if _bundle_has(data, "identity_classifier_w"):
         _load_identity(scene, data, device)
     cameras = {split: _cameras(data, split) for split in ("train", "val")}
@@ -168,6 +180,11 @@ def dump_bundle(
             "bg_colors": n(scene.bg.colors_logit),
             "bg_opacities": n(scene.bg.logit_opacities),
         })
+    if scene.has_owners:
+        dump["fg_owner"] = n(fg.owner).astype(np.int32)
+        if scene.bg is not None:
+            dump["bg_owner"] = n(scene.bg.owner).astype(np.int32)
+        dump["owner_node_ids"] = np.asarray([nid or "" for nid in scene.owner_node_ids])
     if scene.has_identity:
         dump["fg_identity"] = n(fg.identity)
         if scene.bg is not None:

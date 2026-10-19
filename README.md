@@ -19,6 +19,38 @@ people and objects in it, structured queries over that graph, and removing an en
 scene. Multi-stream fusion and natural-language queries are not built yet (see
 [Status](#status)).
 
+## What it looks like
+
+DAVIS's `lab-coat` (47 frames, one handheld camera) in the local app (`reifyscene serve`): each
+frame beside the scene graph at that moment -- the entities, the relations between them -- and
+when each entity is seen.
+
+![The app: a frame of lab-coat, its scene graph and the presence timeline](docs/media/lab-coat_viewer.webp)
+
+Removing each person: before, after, and the extracted entity (the Gaussians the removal took,
+rendered alone), along the camera's path and then at one moment while the camera swings ±20°.
+
+**The person on the left**
+
+![Removing the person on the left, along the clip](docs/media/lab-coat_remove_left_clip.webp)
+![Removing the person on the left, orbiting](docs/media/lab-coat_remove_left_orbit.webp)
+
+**The person in the middle**
+
+![Removing the person in the middle, along the clip](docs/media/lab-coat_remove_middle_clip.webp)
+![Removing the person in the middle, orbiting](docs/media/lab-coat_remove_middle_orbit.webp)
+
+**The person on the right**
+
+![Removing the person on the right, along the clip](docs/media/lab-coat_remove_right_clip.webp)
+![Removing the person on the right, orbiting](docs/media/lab-coat_remove_right_orbit.webp)
+
+The camera saw the women from one side: where no frame saw what was behind someone, the scene is
+left as it was reconstructed, a smear (`docs/design/2026-10-17-removal-by-ownership.md`, criterion
+4). The animations are made by `scripts/readme_media/`. The footage is DAVIS 2017's `lab-coat`
+(J. Pont-Tuset et al., arXiv:1704.00675), used under the dataset's CC BY-NC 4.0 terms;
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) has the details.
+
 ## Quick start
 
 ```bash

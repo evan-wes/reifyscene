@@ -25,6 +25,7 @@
       <h2>Scene · frame <span id="frame-label">–</span></h2>
       <div class="seg" id="view-seg" role="group" aria-label="image"></div>
       <button type="button" class="ghost toggle" id="free3d" aria-pressed="false">3D</button>
+      <button type="button" class="ghost" id="reset3d" disabled>reset view</button>
       <div class="seg" id="edge-scope" role="group" aria-label="graph shows">
         <button type="button" data-scope="frame" aria-pressed="true">this frame</button>
         <button type="button" data-scope="clip" aria-pressed="false">whole clip</button>
@@ -85,6 +86,9 @@
     <div class="panel-head"><h2>Edit</h2></div>
     <div class="edit">
       <div class="row">
+        <label class="field">method
+          <select id="e-method"></select>
+        </label>
         <label class="field">slackness
           <select id="e-slack">
             <option value="0">0 · balanced</option>

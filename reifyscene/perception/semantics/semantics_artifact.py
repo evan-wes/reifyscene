@@ -56,6 +56,10 @@ class SemanticRecord:
     abstained: bool = False
     # 'low_separation' | 'low_score' | 'no_labels' | 'no_concept'
     abstain_reason: str | None = None
+    # The category is one of the rung's background classes (floor, grass, sky, ...): what
+    # the track covers is the scene's backdrop, not a thing, and the graph gives it to the
+    # background instead of making it an entity.
+    background: bool = False
     attributes: dict[str, Any] = field(default_factory=dict)
     caption: Optional[str] = None  # free-form; filled by Qwen-VL at FP4b
 
@@ -75,6 +79,7 @@ class SemanticRecord:
             margin_z=None if raw['margin_z'] is None else float(raw['margin_z']),
             abstained=bool(raw['abstained']),
             abstain_reason=raw['abstain_reason'],
+            background=bool(raw['background']),
             attributes=dict(raw['attributes']),
             caption=raw['caption'],
         )

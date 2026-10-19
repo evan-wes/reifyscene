@@ -394,7 +394,8 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "segment", "tracking", "pose_refine"),
         ),
         StageContract(
-            "semantics", settings={"semantics": {}},
+            # 2: background classes in the vocabulary; a record says whether its category is one
+            "semantics", version=2, settings={"semantics": {}},
             upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
@@ -435,8 +436,9 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "pose_refine", "segment"),
         ),
         StageContract(
+            # 7: background-class candidates go to the background; a noise floor on entities
             "graph",
-            version=6,
+            version=7,
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
@@ -453,18 +455,22 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "scene",
             # 5: the dynamic bundle carries per-frame depth / mask targets for the render stage
-            version=5,
+            # 6: every Gaussian is seeded with an owner from the graph's id maps, which the
+            #    bundle carries for the render stage's owner loss
+            version=6,
             settings={"scene": {}},
             # timeline_source is only a metadata label.
             exclude=("scene.timeline_source",),
-            # its training photos are the ingest streams' own frames
-            upstream=("ingest", "pose_refine", "segment"),
+            # its training photos are the ingest streams' own frames; its owners the graph's
+            # entities, through reid's merges
+            upstream=("ingest", "pose_refine", "segment", "reid", "graph"),
         ),
         StageContract(
             "render",
             # 3: the render record keeps its checkpoint's recipe
             # 4: trains with Shape-of-Motion's depth, depth-gradient and mask terms
-            version=4,
+            # 5: trains each owner's Gaussians to its own pixels; the checkpoint keeps owners
+            version=5,
             settings={"render": {}, "evaluation.masked_nvs": {}, "geometry.backend_name": "vggt"},
             upstream=("scene",),
             paths=("evaluation.masked_nvs.dataset_root",),
@@ -475,7 +481,8 @@ CONTRACTS: dict[str, StageContract] = {
             "handles",
             # 2: people can be bounded by their body volume (handles.body_bound, off by
             #    default), and every entity records its view coverage
-            version=2,
+            # 3: an owned checkpoint's entities are their owners' Gaussians
+            version=3,
             settings={"handles": {}},
             upstream=("graph", "render"),
             rebuildable=True,

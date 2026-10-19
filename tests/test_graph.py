@@ -101,9 +101,14 @@ def tracking(paths, *, static_labels=None, lifted=None, stream_id: str = "cam0")
     )
 
 
+# The noise floor (entity_min_area / entity_min_support_tracks) has tests of its own; the rest
+# build these few-track scenes without it.
+NO_FLOOR = {"entity_min_area": 0.0, "entity_min_support_tracks": 0}
+
+
 def build(track_artifact, human_artifact=None, object_artifact=None, cfg=None,
           semantics_artifact=None):
-    builder = DynamicSceneGraphBuilder(cfg)
+    builder = DynamicSceneGraphBuilder({**NO_FLOOR, **(cfg or {})})
     return builder.build(geometry(), track_artifact, human_artifact, object_artifact,
                          semantics_artifact=semantics_artifact)
 
@@ -295,6 +300,7 @@ def _record(category="mug", score=0.4, topk=None, **kw):
         category=category, score=score,
         category_topk=topk if topk is not None else [("mug", 0.4), ("cup", 0.1)],
         caption=None, margin=None, margin_z=None, abstained=False, abstain_reason=None,
+        background=False,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -380,3 +386,36 @@ def test_a_canonicalizer_that_did_not_run_is_recorded_as_such() -> None:
     frame = artifact.metadata["world_frame"]
     assert frame["gravity_aligned"] is False
     assert frame["up_axis"] is None
+
+
+# --- not every candidate is a thing -------------------------------------------
+
+def test_a_candidate_named_a_background_class_goes_to_the_background() -> None:
+    recs = {"p1": _record("grass", background=True), "o1": _record("grass", background=True)}
+    artifact = build(tracking([[(10.0, 10.0)] * 4]), humans(), objects(),
+                     semantics_artifact=semantics(recs))
+    ids = nodes_by_id(artifact)
+    assert "object:cam0:o1" not in ids                  # the backdrop is the background's
+    assert "human:cam0:p1" in ids                       # a person never is
+    assert ids["background:cam0"].attrs["absorbed_tracks"] == ["o1"]
+    assert artifact.metadata["candidates"]["absorbed"] == [
+        {"node_id": "object:cam0:o1", "track_id": "o1", "category": "grass"}]
+
+
+def test_a_candidate_under_the_noise_floor_is_not_an_entity() -> None:
+    """By default a thing needs 5 point tracks inside it, and a mask over 0.1% of the frame."""
+    in_person = [[(8.0 + i, 10.0)] * 4 for i in range(5)]
+    in_mug = [[(40.0, 10.0)] * 4]
+    artifact = DynamicSceneGraphBuilder().build(geometry(), tracking(in_person + in_mug),
+                                                humans(), objects())
+    ids = nodes_by_id(artifact)
+    assert "human:cam0:p1" in ids and "object:cam0:o1" not in ids
+    (gone,) = artifact.metadata["candidates"]["dropped"]
+    assert gone["node_id"] == "object:cam0:o1" and "1 support track(s), under 5" in gone["reason"]
+
+    speck = objects()
+    speck.mask_arrays = {k: box(40, 10, 41, 11) for k in speck.mask_arrays}   # 1 px of 2,400
+    artifact = DynamicSceneGraphBuilder({"entity_min_support_tracks": 0}).build(
+        geometry(), tracking(in_person + in_mug), humans(), speck)
+    (gone,) = artifact.metadata["candidates"]["dropped"]
+    assert gone["node_id"] == "object:cam0:o1" and "of the frame (median)" in gone["reason"]

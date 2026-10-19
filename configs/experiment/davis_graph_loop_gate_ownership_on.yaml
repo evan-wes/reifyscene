@@ -1,0 +1,110 @@
+# The removal-by-ownership gate's ownership arm (docs/design/2026-10-17-removal-by-ownership.md
+# §5): davis_graph_loop.yaml with every 6th training frame held out of the render stage and
+# scored after it -- the gate's PSNR mark is on those frames. Its partner without ownership
+# training is davis_graph_loop_gate_ownership_off.yaml, which resumes this run at the render
+# stage:
+#
+#   python scripts/run_single_video_reifyscene.py \
+#     --frames-dir davis2017/DAVIS-2017-trainval-480p/DAVIS/JPEGImages/480p/<clip> \
+#     --geometry-backend-name vggt --geometry-device cuda --keyframes-all \
+#     --config configs/experiment/davis_graph_loop_gate_ownership_on.yaml \
+#     --run-dir gate_<clip>_on
+
+# The v3 spike's loop clip: VGGT-Long + pose refinement on a DAVIS sequence.
+#
+# Why DAVIS and not the NVIDIA scenes: our pipeline reconstructs from camera TRANSLATION,
+# and both NVIDIA sequences on disk are fixed rigs -- their ground-truth camera path
+# length is exactly 0, so there is no parallax to triangulate. Screening the 33 DAVIS
+# sequences that carry 3+ annotated objects found plenty that do translate; "lab-coat"
+# has three similar-looking people (a real re-id test), slow motion over open ground, and
+# a baseline/depth of 0.565 against spin's 0.579.
+#
+# DAVIS ships no held-out views, so there is no masked-NVS block: this clip is for the
+# graph and the edit loop, not for a reconstruction score. Run from the repo root (the clip
+# and the run are named inside the data directory, $REIFYSCENE_DATA_DIR):
+#
+#   python scripts/run_single_video_reifyscene.py \
+#     --frames-dir davis2017/DAVIS-2017-trainval-480p/DAVIS/JPEGImages/480p/lab-coat \
+#     --geometry-backend-name vggt-long --geometry-device cuda \
+#     --keyframes-all --pose-refine-enable \
+#     --config configs/experiment/davis_graph_loop.yaml \
+#     --run-dir davis_lab-coat_full
+
+run:
+  name: reifyscene_dev
+
+dataset:
+  keyframe_stride: 15
+
+models:
+  geometry_backend: vggt
+  tracker_backend: cotracker
+  use_densepose: true
+  use_smpl: true
+  detect_objects: true
+
+
+geometry:
+  ground_plane:
+    enabled: true
+    max_frames: 24
+    max_points_per_frame: 3000
+    ransac_iterations: 160
+    distance_threshold: 0.035
+    min_inlier_ratio: 0.06
+    min_alignment_cos: 0.45
+    alignment_weight: 0.18
+    camera_up_axis: -y
+    random_seed: 7
+    manual_up_vector: null
+    lock_gravity_vector: false
+    floor_height_quantile: 0.06
+    max_saved_candidates: 12
+
+
+calibration:
+  sampling:
+    sample_spacing_sec: 0.75
+    max_frames_per_stream: 48
+    image_max_dim: 960
+    prefer_static_frames: true
+    static_diff_threshold: 16.0
+    min_sharpness: 8.0
+  hloc_colmap:
+    retrieval_conf: netvlad
+    feature_conf: superpoint_aachen
+    matcher_conf: superglue
+    retrieval_top_k: 20
+    camera_mode: PER_FOLDER
+    camera_model: SIMPLE_RADIAL
+    fix_intrinsics: false
+    verbose: false
+
+graph:
+  # A point track is evidence for the person or object whose mask it sits inside: on at
+  # least this fraction of the frames the two share, over at least this many frames.
+  track_membership_min_ratio: 0.5
+  track_membership_min_frames: 2
+
+optimization:
+  schedule: stage1_sync_pose
+  max_iterations: 100
+
+scene:
+  kind: dynamic            # moving foreground + motion bases + static background
+  timeline_source: geometry
+
+render:
+  backend_name: gaussian4d
+  device: cuda
+  holdout_every: 6             # every 6th training frame held out, scored after training
+
+evaluation:
+  reprojection_error_p90_px_max: 24.0
+  mean_human_fragments_max: 1.5
+  height_abs_p90_max: 0.40
+  heldout_psnr_mean_min: 11.0
+  geometry: {}
+  tracking: {}
+  rendering:
+    max_views: 4

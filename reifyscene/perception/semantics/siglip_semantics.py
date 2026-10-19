@@ -6,6 +6,8 @@ The ``semantics`` ladder (design §4A, FP4) names each canonical tracklet:
   frozen SigLIP2 ViT, mean-pools, and zero-shot matches against a candidate text
   vocabulary -> an open-vocab category + score + a SigLIP image embedding (the
   graph's semantic handle). Qwen2.5-VL free-form attributes/caption arrive at FP4b.
+  It also says whether a track is backdrop (floor, sky, a crowd) rather than a thing
+  (``SemanticRecord.background``; :mod:`reifyscene.perception.semantics.vocab`).
 - :class:`FloorSemantics` (floor) carries the detector's COCO-80 ``concept``
   string already on the instances, degrading to ``"unknown"`` -- the schema-valid
   graceful rung that needs no model.
@@ -25,7 +27,7 @@ import numpy as np
 
 from reifyscene.common.types import FrameRef
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact
-from reifyscene.perception.objects.detector import COCO_INSTANCE_CATEGORY_NAMES
+from reifyscene.perception.semantics import vocab
 from reifyscene.perception.semantics.semantics_artifact import UNKNOWN_CATEGORY, SemanticRecord
 
 DEFAULT_MODEL_ID = 'google/siglip2-so400m-patch14-384'  # ungated; fixed-resolution variant
@@ -43,9 +45,23 @@ DEFAULT_TOPK = 5
 # which is the property a default needs. Both statistics are recorded on every
 # record either way, so the threshold can be chosen from data rather than guessed.
 DEFAULT_MIN_MARGIN_Z: float | None = None
-# Default candidate vocabulary = COCO-80 (drops the torchvision placeholders), so
-# the SigLIP rung is comparable to the detector floor; override via cfg['vocab'].
-DEFAULT_VOCAB = [c for c in COCO_INSTANCE_CATEGORY_NAMES if c not in ('__background__', 'N/A')]
+# The candidate labels (:mod:`reifyscene.perception.semantics.vocab`): COCO-80 and LVIS's
+# frequent tier for things, plus background classes; a person among COCO-80 and the background
+# classes. Override via cfg['vocab'], cfg['person_vocab'], cfg['background_vocab'] and
+# cfg['extended_vocab'].
+DEFAULT_VOCAB = list(vocab.DEFAULT_VOCAB)
+DEFAULT_PERSON_VOCAB = list(vocab.PERSON_VOCAB)
+DEFAULT_BACKGROUND_VOCAB = list(vocab.BACKGROUND_VOCAB)
+DEFAULT_EXTENDED_VOCAB = list(vocab.LVIS_FREQUENT)
+# Backdrop or thing (``SiglipSemantics._backdrop``): a track is backdrop when a background class
+# beats every core thing (COCO-80) and no extended thing (LVIS's frequent tier) beats it by this
+# much (cosine, this model and prompt). The extended tier must win clearly because its long tail
+# scores close to any backdrop -- "paper towel" for a sidewalk, "tape" for a ceiling -- while a
+# real thing COCO cannot name beats the water around it. On the ten DAVIS slice runs
+# (2026-10-17), of the tracks a background class won against COCO: every backdrop piece's best
+# extended thing led by +0.040 or less; the gold-fish clip's four fish ("fish") by +0.049 to
+# +0.061, and a black bin bag ("plastic bag") by +0.050.
+DEFAULT_BACKGROUND_MARGIN = 0.045
 
 
 def _l2norm(v: np.ndarray) -> np.ndarray:
@@ -201,6 +217,14 @@ class SiglipSemantics:
         self.reid = reid_artifact
         self.model_id: str = cfg.get('model_id', DEFAULT_MODEL_ID)
         self.vocab: list[str] = list(cfg.get('vocab', DEFAULT_VOCAB))
+        self.person_vocab: list[str] = list(cfg.get('person_vocab', DEFAULT_PERSON_VOCAB))
+        self.background_vocab: set[str] = set(cfg.get('background_vocab',
+                                                      DEFAULT_BACKGROUND_VOCAB))
+        self.extended_vocab: set[str] = set(cfg.get('extended_vocab', DEFAULT_EXTENDED_VOCAB))
+        self.background_margin: float = float(cfg.get('background_margin',
+                                                      DEFAULT_BACKGROUND_MARGIN))
+        # Every label either vocabulary holds, encoded once: rows of ``_text_embs``.
+        self._labels: list[str] = list(dict.fromkeys(self.vocab + self.person_vocab))
         self.prompt: str = cfg.get('prompt', DEFAULT_PROMPT)
         self.topk: int = int(cfg.get('topk', DEFAULT_TOPK))
         self.min_score: float = float(cfg.get('min_score', float('-inf')))
@@ -228,7 +252,7 @@ class SiglipSemantics:
         self._processor = AutoProcessor.from_pretrained(self.model_id)
         self._model = AutoModel.from_pretrained(self.model_id, torch_dtype=dtype).to(device).eval()
         self._device_resolved = device
-        self._text_embs = self._encode_text([self.prompt.format(lbl) for lbl in self.vocab])
+        self._text_embs = self._encode_text([self.prompt.format(lbl) for lbl in self._labels])
 
     def _encode_text(self, prompts: list[str]) -> np.ndarray:
         import torch
@@ -279,6 +303,7 @@ class SiglipSemantics:
 
         sums: dict[str, np.ndarray] = {}
         counts: dict[str, int] = {}
+        humans: dict[str, int] = {}                     # observations the segmenter called a person
         for _frame_key, observations in by_frame.items():
             fr: FrameRef = observations[0].frame_ref
             stream = stream_lookup.get(fr.stream_id)
@@ -292,24 +317,60 @@ class SiglipSemantics:
                 vec = _l2norm(vec)
                 sums[key] = sums[key] + vec if key in sums else vec.copy()
                 counts[key] = counts.get(key, 0) + 1
+                humans[key] = humans.get(key, 0) + (o.kind == 'human')
 
+        row = {lbl: i for i, lbl in enumerate(self._labels)}
         records: dict[str, SemanticRecord] = {}
         embeddings: dict[str, np.ndarray] = {}
         for key, total in sums.items():
             emb = _l2norm(total / max(counts[key], 1))
             embeddings[key] = emb
+            person = 2 * humans[key] > counts[key]
+            labels = self.person_vocab if person else self.vocab
+            text = self._text_embs[[row[lbl] for lbl in labels]]
             result = score_zero_shot(
-                emb, self._text_embs, self.vocab,
+                emb, text, labels,
                 topk=self.topk, min_score=self.min_score, min_margin_z=self.min_margin_z,
             )
+            category, score = result.category, float(result.score)
+            attributes = {'source': 'siglip2', 'model_id': self.model_id}
+            background = False
+            if not person and not result.abstained:
+                background, best_bg, leads = self._backdrop(emb, text, labels)
+                attributes.update(leads)
+                if background:
+                    category, score = best_bg
             records[key] = SemanticRecord(
-                category=result.category,
-                score=float(result.score),
+                category=category,
+                score=score,
                 category_topk=result.topk,
                 margin=result.margin,
                 margin_z=result.margin_z,
                 abstained=result.abstained,
                 abstain_reason=result.abstain_reason,
-                attributes={'source': 'siglip2', 'model_id': self.model_id},
+                background=background,
+                attributes=attributes,
             )
         return records, embeddings
+
+    def _backdrop(self, emb: np.ndarray, text: np.ndarray, labels: list[str]
+                  ) -> tuple[bool, tuple[str, float] | None, dict[str, float]]:
+        """``(background, (best background label, its score), leads)``: whether the track is
+        backdrop -- a background class beats every core thing, and no extended thing beats it
+        by ``background_margin`` -- and how far the best core and extended things led the best
+        background class (``core_lead``, ``extended_lead``). A person is never asked."""
+        sims = text @ emb
+        is_bg = np.array([lbl in self.background_vocab for lbl in labels])
+        is_ext = np.array([lbl in self.extended_vocab for lbl in labels]) & ~is_bg
+        is_core = ~is_bg & ~is_ext
+        if not is_bg.any():
+            return False, None, {}
+        b = int(np.flatnonzero(is_bg)[np.argmax(sims[is_bg])])
+        leads = {}
+        if is_core.any():
+            leads['core_lead'] = float(sims[is_core].max() - sims[b])
+        if is_ext.any():
+            leads['extended_lead'] = float(sims[is_ext].max() - sims[b])
+        background = (leads.get('core_lead', -np.inf) < 0
+                      and leads.get('extended_lead', -np.inf) < self.background_margin)
+        return background, (labels[b], float(sims[b])), leads

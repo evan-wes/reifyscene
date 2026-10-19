@@ -35,6 +35,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from reifyscene.geometry.dataset_wrapper import DatasetGeometryInitializer
+from reifyscene.graph.id_maps import BACKGROUND, IGNORE
 from reifyscene.ingest.datasets import DyCheckSequence
 from reifyscene.lifting.tracks_3d import StaticPoints3D, Tracks3D
 
@@ -137,6 +138,9 @@ class FrameStack:
     rgbs: torch.Tensor     # (N, H, W, 3) uint8
     fg: torch.Tensor       # (N, H, W) float in [0, 1], foreground mask
     valid: torch.Tensor    # (N, H, W) float in [0, 1], RGBA-alpha validity
+    # (N, H, W) int64 id-map codes (reifyscene.graph.id_maps), when the run's entities are
+    # known: what owns a Gaussian seeded at each pixel.
+    owners: torch.Tensor | None = None
 
     @property
     def num_frames(self) -> int:
@@ -314,6 +318,19 @@ def apply_scene_norm_stack(stack: FrameStack, norm: SceneNorm) -> None:
 
 # -- lifting (SoM get_tracks_3d / get_bkgd_points) ------------------------
 
+OWNER_EDGE_PX = 2       # a track seeds an owned Gaussian only this far inside one id-map class
+
+
+def owner_purity(owners: torch.Tensor, radius: int = OWNER_EDGE_PX) -> torch.Tensor:
+    """(N, H, W) bool: the pixel's id-map code is the only one within ``radius`` (a square)
+    and is not ignore. A mask's edge is where segmentation is least sure, so a seed there is
+    given to neither side: it is not used."""
+    o = owners.to(torch.float32)[:, None]
+    k = 2 * radius + 1
+    hi = F.max_pool2d(o, k, stride=1, padding=radius)
+    lo = -F.max_pool2d(-o, k, stride=1, padding=radius)
+    return (hi == lo)[:, 0] & (owners != IGNORE)
+
 def _tracks_dir(dataset_root: str | Path, factor: int) -> Path:
     return DyCheckSequence(dataset_root).tracks_dir(factor)
 
@@ -335,6 +352,10 @@ def lift_tracks_3d(
     ``inv(K)`` + ``c2w``, keeps only in-foreground-mask observations, and drops
     tracks visible <5% of the time. ``step`` temporally subsamples (used by the
     scene-norm pass). ``rng`` makes the (otherwise random) sampling reproducible.
+
+    When the stack carries id maps (``stack.owners``), each track is owned by the code at its
+    query pixel, and a track queried within :data:`OWNER_EDGE_PX` of another code is dropped
+    (:func:`owner_purity`).
 
     ``tracks_dir`` overrides where the ``<name_i>_<name_j>.npy`` 2D tracks are read
     from (defaults to the dataset's borrowed ``flow3d_preprocessed/2d_tracks/<factor>x``);
@@ -381,7 +402,8 @@ def lift_tracks_3d(
     masks_sub = masks[::step]
     depths_sub = stack.depths[::step]
 
-    f_xyz, f_vis, f_invis, f_conf, f_col = [], [], [], [], []
+    pure = owner_purity(stack.owners) if stack.owners is not None else None
+    f_xyz, f_vis, f_invis, f_conf, f_col, f_own = [], [], [], [], [], []
     for ei, tracks_2d in enumerate(raw_tracks_2d):
         tracks_2d = tracks_2d.swapdims(0, 1)  # (Tsub, per, 4)
         xy, occ, dist = tracks_2d[..., :2], tracks_2d[..., 2], tracks_2d[..., 3]
@@ -412,6 +434,11 @@ def lift_tracks_3d(
         valid = visible_counts >= min(
             int(0.05 * num_frames), visible_counts.float().quantile(0.1).item()
         )
+        if pure is not None:
+            u = tracks_2d[ei, :, 0].round().long().clamp(0, W - 1)
+            v = tracks_2d[ei, :, 1].round().long().clamp(0, H - 1)
+            valid = valid & pure[qi, v, u]
+            f_own.append(stack.owners[qi, v, u][valid])
         f_xyz.append(xyz[:, valid])
         f_vis.append(visibles[:, valid])
         f_invis.append(invisibles[:, valid])
@@ -424,6 +451,7 @@ def lift_tracks_3d(
         invisibles=torch.cat(f_invis, dim=1).swapdims(0, 1),
         confidences=torch.cat(f_conf, dim=1).swapdims(0, 1),
         colors=torch.cat(f_col, dim=0),
+        owners=torch.cat(f_own, dim=0) if pure is not None else None,
     )
 
 
@@ -432,7 +460,10 @@ def lift_bkgd_points(
     num_samples: int,
     rng: np.random.Generator | None = None,
 ) -> StaticPoints3D:
-    """Sample static background points from non-foreground depth (SoM get_bkgd_points port)."""
+    """Sample static background points from non-foreground depth (SoM get_bkgd_points port).
+
+    With id maps (``stack.owners``), only background pixels are sampled, and the points are
+    owned by the background."""
     choice = (rng.choice if rng is not None else np.random.choice)
     H, W = stack.depths.shape[1], stack.depths.shape[2]
     device = stack.depths.device
@@ -451,6 +482,8 @@ def lift_bkgd_points(
         depth = stack.depths[i]
         K, w2c = stack.cameras.Ks[i], stack.cameras.w2cs[i]
         bool_mask = ((1.0 - stack.fg[i]) * stack.valid[i] * (depth > 0)).to(torch.bool)
+        if stack.owners is not None:
+            bool_mask &= stack.owners[i] == BACKGROUND
         cam = torch.einsum(
             "ij,pj->pi", torch.linalg.inv(K), F.pad(grid[bool_mask], (0, 1), value=1.0)
         ) * depth[bool_mask][:, None]
@@ -468,10 +501,13 @@ def lift_bkgd_points(
         normals.append(point_normals[sels])
         colors.append(point_colors[sels])
 
+    xyz = torch.cat(pts, dim=0)
     return StaticPoints3D(
-        xyz=torch.cat(pts, dim=0),
+        xyz=xyz,
         normals=torch.cat(normals, dim=0),
         colors=torch.cat(colors, dim=0),
+        owners=(torch.full((xyz.shape[0],), BACKGROUND, dtype=torch.long, device=device)
+                if stack.owners is not None else None),
     )
 
 
@@ -495,7 +531,8 @@ def gate_tracks_by_motion(
 
     Static tracks are converted to static background gaussians at their median
     position rather than dropped: their (segment-fg-masked) regions are excluded
-    from the background point sampler, so dropping them would leave holes.
+    from the background point sampler, so dropping them would leave holes. They keep
+    their owners: motion decides the field, not what the Gaussian is.
     """
     xyz = tracks.xyz  # (N, T, 3)
     if xyz.shape[0] == 0:
@@ -518,6 +555,8 @@ def gate_tracks_by_motion(
         xyz=torch.cat([bg_points.xyz, s_xyz.to(bg_points.xyz)], dim=0),
         normals=torch.cat([bg_points.normals, torch.zeros_like(s_xyz).to(bg_points.normals)], dim=0),
         colors=torch.cat([bg_points.colors, static.colors.to(bg_points.colors)], dim=0),
+        owners=(torch.cat([bg_points.owners, static.owners.to(bg_points.owners)], dim=0)
+                if bg_points.owners is not None and static.owners is not None else None),
     )
     return fg, merged
 

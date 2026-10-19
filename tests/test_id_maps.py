@@ -1,8 +1,9 @@
 """Per-frame id maps (reifyscene/graph/id_maps.py) -- the identity loss's input contract.
 
 What these pin is what the loss would learn silently wrong: a contested pixel given to one
-entity, a dropped tracklet read as background, a padded pixel treated as a real one, or class
-numbers that shift between exports of the same graph.
+entity, a dropped tracklet read as background (it is unaddressed: the scene stage owns what is
+seeded there by a reserved owner), a padded pixel treated as a real one, or class numbers that
+shift between exports of the same graph.
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ from reifyscene.graph import id_maps
 from reifyscene.graph.id_maps import (
     BACKGROUND,
     IGNORE,
+    UNADDRESSED,
     compose_id_map,
     export_id_maps,
+    has_id_maps,
+    labelled,
     load_id_maps,
     masks_from_id_maps,
     round_trip_mismatches,
@@ -55,14 +59,15 @@ def test_a_pixel_two_entities_claim_is_ignored_not_given_to_either() -> None:
     assert counts["overlap"] == 1
 
 
-def test_a_dropped_tracklet_is_ignored_not_background() -> None:
+def test_a_dropped_tracklet_is_unaddressed_not_background() -> None:
     """Background would teach the field that the thing the graph dropped is scenery."""
     out, counts = compose_id_map(
         {A: _mask((0, 0))}, {A: 1}, shape=(H, W), unmapped=_mask((2, 2), (0, 0))
     )
-    assert out[2, 2] == IGNORE
-    assert out[0, 0] == IGNORE           # contested by the unmapped tracklet too
-    assert counts == {"overlap": 0, "unmapped": 2, "padding": 0}
+    assert out[2, 2] == UNADDRESSED
+    assert out[0, 0] == IGNORE           # contested by the unmapped tracklet
+    assert counts == {"overlap": 1, "unmapped": 1, "padding": 0}
+    assert not labelled(out[2, 2]) and not labelled(out[0, 0]) and labelled(out[1, 1])
 
 
 def test_padding_is_ignored() -> None:
@@ -131,7 +136,8 @@ def test_classes_are_numbered_by_sorted_node_id_and_background_is_zero(
     assert by_index[0]["node_id"] is None
     assert [by_index[i]["node_id"] for i in (1, 2)] == sorted([A, B])
     assert manifest["num_classes"] == 3
-    assert manifest["encoding"] == {"dtype": "uint16", "background": 0, "ignore": 65535}
+    assert manifest["encoding"] == {"dtype": "uint16", "background": 0, "unaddressed": 65534,
+                                    "ignore": 65535}
 
 
 def test_the_manifest_records_when_each_entity_is_in_the_clip(tmp_path, monkeypatch) -> None:
@@ -150,7 +156,7 @@ def test_ignore_reasons_are_accounted_for(tmp_path, monkeypatch) -> None:
     assert f["overlap"] == round(1 / total, 6)
     assert f["unmapped"] == round(1 / total, 6)
     assert f["padding"] == 0.0
-    assert f["ignore"] == round(2 / total, 6)
+    assert f["ignore"] == round(1 / total, 6)          # unaddressed pixels are not ignore
 
 
 def test_padding_from_the_recorded_transform_is_ignored(tmp_path, monkeypatch) -> None:
@@ -179,12 +185,41 @@ def test_round_trip_catches_a_corrupted_map(tmp_path, monkeypatch) -> None:
     assert round_trip_mismatches(manifest, maps, placed.by_frame) == {A: 1}
 
 
-def test_an_unknown_format_version_is_refused(tmp_path, monkeypatch) -> None:
+def test_an_unknown_format_version_is_refused_and_written_again(tmp_path, monkeypatch) -> None:
     run, _ = _fake_run(tmp_path, monkeypatch)
     export_id_maps(run)
+    assert has_id_maps(run)
     path = run.identity_dir / id_maps.MANIFEST
     manifest = json.loads(path.read_text())
-    manifest["format_version"] = 99
+    manifest["format_version"] = 1
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="format"):
         load_id_maps(run)
+    assert not has_id_maps(run)          # a cache of the graph: callers export it again
+
+
+def test_a_track_the_background_absorbed_is_background_not_unaddressed() -> None:
+    """``pixel_masks``: the graph's background node absorbed the lawn; its pixels are
+    background, while a tracklet with no node at all stays unaddressed."""
+    from types import SimpleNamespace
+
+    from reifyscene.common.types import FrameRef
+    from reifyscene.graph.renderable_handle import pixel_masks
+
+    lawn, speck, person = np.zeros((4, 6), bool), np.zeros((4, 6), bool), np.zeros((4, 6), bool)
+    lawn[3, :], speck[0, 5], person[1:3, 1:3] = True, True, True
+    obs = [SimpleNamespace(frame_ref=FrameRef(stream_id="cam_00", frame_idx=0, timestamp_sec=None),
+                           track_id=t, instance_id=f"inst:{t}") for t in ("t0", "t1", "t2")]
+    segment = SimpleNamespace(observations=obs, mask_arrays={"inst:t0": person,
+                                                             "inst:t1": lawn, "inst:t2": speck})
+    nodes = [{"node_id": "human:cam_00:t0", "node_type": "human", "label": "person",
+              "attrs": {"stream_id": "cam_00", "track_id": "t0"}},
+             {"node_id": "background:cam_00", "node_type": "region", "label": "background",
+              "attrs": {"stream_id": "cam_00", "absorbed_tracks": ["t1"]}}]
+    stream = SimpleNamespace(id="cam_00", transform=ImageTransform.identity((6, 4)))
+    placed = pixel_masks(nodes, {}, segment, stream)
+    assert set(placed.by_frame[0]) == {"human:cam_00:t0"}
+    assert placed.unmapped[0].sum() == 1                    # the speck, not the lawn
+    out, counts = compose_id_map(placed.by_frame[0], {"human:cam_00:t0": 1}, shape=(4, 6),
+                                 unmapped=placed.unmapped[0])
+    assert (out[3] == BACKGROUND).all() and out[0, 5] == UNADDRESSED and counts["unmapped"] == 1
