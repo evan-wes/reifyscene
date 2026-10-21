@@ -9,6 +9,31 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.6] - 2026-10-21
+
+VGGT-Long's depth now agrees across its chunks. The geometry record changes (version 3): a run
+made before this version is rebuilt from the geometry stage when resumed.
+
+### Fixed
+- **Each VGGT-Long chunk's depth was on its own scale.** VGGT-Long aligns every chunk to the first
+  with a similarity transform; the wrapper took the aligned cameras but kept each chunk's depth as
+  the chunk predicted it, so frames from different chunks disagreed about how far things are. On
+  dogs-scale the stored point maps were 0.79-1.54 times the stored depth, one factor per chunk;
+  now within 0.99-1.02 on every frame. Each chunk's depth is multiplied by its alignment scale, an overlap
+  frame takes the later chunk's predictions (as VGGT-Long's camera file does), and a run without
+  VGGT-Long's global cameras fails instead of falling back to each chunk's own.
+
+### Changed
+- **VGGT-Long's default chunks are its own: 60 frames, 30 overlapping** (were 16 and 4), in the
+  wrapper and `scripts/run_single_video_reifyscene.py`. On the ten DAVIS slice clips (geometry
+  stage only, with the fix), the share of static depth agreeing within 5% with the frame 15
+  later stayed within 7 points of one VGGT pass at 60/30 and fell up to 37.5 points below it at
+  16/4 -- gold-fish: one pass 93%, 60/30 90%, 16/4 55%, VGGT-Long before the fix 28%.
+
+### Docs
+- **`benchmarks/README.md` says which rows were measured on that geometry:** the `slice_*` and
+  `inv_*` runs.
+
 ## [0.6.1.5] - 2026-10-20
 
 ### Docs
