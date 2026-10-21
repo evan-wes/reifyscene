@@ -9,6 +9,14 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.1.5] - 2026-10-20
+
+### Docs
+- **The README's Status said removal by ownership was designed, not built**, and that removing a
+  person leaves a visible copy of them; it has been built since 0.6.0.0. Its known limits now say
+  where removal stands on lab-coat: better than the FlashSplat removal it replaced, with no person
+  yet passing every mark (`benchmarks/removal_ownership_lab-coat.json`).
+
 ## [0.6.1.4] - 2026-10-18
 
 ### Docs
