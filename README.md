@@ -136,13 +136,18 @@ geometry at full frame count.
   shows the graph, its relations over time and the scene in 3D, and runs removals.
 
 **Known limits (measured):**
-- **Removing a person leaves a visible copy of them.** On DAVIS `lab-coat`, the removal's
-  floater filter keeps a coarse layer of large Gaussians that draws about a third of the
-  person's pixels, so the "after" render still shows them. The cause is that training never
-  separates one entity's Gaussians from another's; a fix that gives every Gaussian a fixed owner
-  from the moment it is created is designed, not built.
-- Learned per-Gaussian identity is built but off by default, and the body-volume bound for
-  people is experimental and off.
+- **Removal is better than it was, not yet clean.** Since v0.6.0.0 every Gaussian has an owner
+  from the moment it is created, and removing an entity drops its owner's Gaussians
+  (`docs/design/2026-10-17-removal-by-ownership.md`). On DAVIS `lab-coat` this beats the
+  FlashSplat removal it replaced on all three tests for the women on the left and right, and on
+  traces and emptied space for the one in the middle, but no one passes every mark
+  (`benchmarks/removal_ownership_lab-coat.json`). The woman in the middle, between the other
+  two, still leaves a trace on 83% of the judged training views, and the background the video
+  did see behind the women comes back 2.4–5.5 dB below the floor the geometry sets for it; a
+  crisper background is for the camera poses and depth to give.
+- The removals ownership replaced, FlashSplat's selection and the learned per-Gaussian identity,
+  are kept for comparison. Learned identity is off by default, and so is the experimental
+  body-volume bound on FlashSplat's selection.
 
 **Partial / scaffold:**
 - The joint **optimization** stage is a staged scaffold — `pose_refine` does the real
