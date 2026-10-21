@@ -4,6 +4,13 @@ Committed measurements, regenerated from runs on disk and diffed across changes.
 point is to stop developing against one clip: every constant in the perception band was
 originally chosen on `davis_lab-coat`, and these files say whether it generalizes.
 
+**The `slice_*` and `inv_*` runs have broken geometry.** Both ran VGGT-Long, and until 0.6.1.6
+each VGGT-Long chunk's depth kept its own scale against globally aligned cameras;
+`scripts/run_graph_loop_set.sh`, which built the `slice_*` runs, also turns on pose refinement,
+which replaces the cameras and keeps that depth. Every row below measured on those runs stands as
+measured at its commit, on that geometry: on the ten `slice_*` runs, the share of static depth
+agreeing within 5% with the frame 15 later was 0-77% (one VGGT pass on the same clips: 13-100%).
+
 ## `davis_inventory.json`
 
 Does the graph contain the things that are actually there? Scored against DAVIS 2017

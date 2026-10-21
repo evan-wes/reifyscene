@@ -352,7 +352,9 @@ CONTRACTS: dict[str, StageContract] = {
         StageContract(
             "geometry",
             # 2: camera states are identified by frame number (time only when fps is recorded)
-            version=2,
+            # 3: VGGT-Long's depth is scaled by each chunk's alignment scale; overlap frames
+            #    take the later chunk, as its camera_poses.txt does
+            version=3,
             settings={"geometry": {}, **_TRACK_PLAN, "env:MOGE_MODEL_ID": None},
             # Where VGGT-Long keeps its scratch files, and whether, change nothing it outputs.
             exclude=(

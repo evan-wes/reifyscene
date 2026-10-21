@@ -76,8 +76,12 @@ class VGGTLongInitializer(VGGTInitializer):
     def __init__(self, cfg: dict | None = None) -> None:
         super().__init__(cfg)
         self.backend_name = "vggt-long"
-        self.chunk_size = int(self.cfg.get("chunk_size", 16))
-        self.overlap = int(self.cfg.get("overlap", 4))
+        # VGGT-Long's own chunking (configs/base_config.yaml). 16/4 gave each clip several
+        # chunk boundaries, each aligned with some error: on ten DAVIS clips, the share of
+        # static depth agreeing within 5% 15 frames apart stayed within 7 points of one
+        # VGGT pass at 60/30 and fell up to 37.5 points below it at 16/4 (2026-10-21).
+        self.chunk_size = int(self.cfg.get("chunk_size", 60))
+        self.overlap = int(self.cfg.get("overlap", 30))
         self.loop_enable = bool(self.cfg.get("loop_enable", False))
         self.use_dbow = bool(self.cfg.get("use_dbow", False))
         self.delete_temp_files = bool(self.cfg.get("delete_temp_files", False))
@@ -394,12 +398,29 @@ class VGGTLongInitializer(VGGTInitializer):
                 payload = dict(data)
             payload = self._numpyify(payload)
             payload["_chunk_range"] = tuple(int(v) for v in chunk_range)
+            payload["_chunk_index"] = int(chunk_idx)
             chunks.append(payload)
         if not chunks:
             raise RuntimeError("VGGT-Long produced no readable chunk predictions.")
         return chunks
 
-    def _load_global_camera_to_world(self, runner: Any, num_frames: int) -> np.ndarray | None:
+    @staticmethod
+    def _chunk_scales(runner: Any, num_chunks: int) -> list[float]:
+        """Each chunk's scale in chunk 0's frame, by chunk index.
+
+        After its run, VGGT-Long's ``sim3_list`` holds the accumulated Sim(3) ``(s, R, t)``
+        taking chunk ``k + 1`` into chunk 0's frame -- the transform ``camera_poses.txt``
+        and the aligned ``world_points`` went through. Chunk 0 is the reference (scale 1).
+        """
+        sim3 = list(getattr(runner, "sim3_list", None) or [])
+        if len(sim3) != num_chunks - 1:
+            raise RuntimeError(
+                f"VGGT-Long recorded {len(sim3)} chunk alignment(s) for {num_chunks} chunk(s); "
+                "its depth cannot be put on one scale."
+            )
+        return [1.0] + [float(np.asarray(s).reshape(-1)[0]) for s, _rot, _t in sim3]
+
+    def _load_global_camera_to_world(self, runner: Any, num_frames: int) -> np.ndarray:
         """Read VGGT-Long's globally-aligned camera poses from ``camera_poses.txt``.
 
         VGGT-Long estimates per-chunk Sim(3) transforms (overlap registration +
@@ -411,9 +432,9 @@ class VGGTLongInitializer(VGGTInitializer):
         global trajectory VGGT-Long published instead.
 
         Returns an ``(N, 4, 4)`` stack of camera-to-world (world-from-camera)
-        matrices in global-frame order, or ``None`` (graceful fallback to the
-        chunk-local extrinsics) when the file is absent or its frame count does
-        not match the selected frames.
+        matrices in global-frame order. A missing file, or one whose frame count
+        does not match the selected frames, raises: chunk-local poses are not one
+        scene.
         """
         candidates = []
         output_dir = getattr(runner, "output_dir", None)
@@ -431,20 +452,28 @@ class VGGTLongInitializer(VGGTInitializer):
                 if line.strip()
             ]
             if len(rows) != num_frames or any(len(r) != 16 for r in rows):
-                self._log_auto_tune(
-                    f"camera_poses.txt at {path} has {len(rows)} pose(s) for {num_frames} frame(s); "
-                    "falling back to chunk-local extrinsics."
+                raise RuntimeError(
+                    f"camera_poses.txt at {path} has {len(rows)} pose(s) for {num_frames} frame(s)."
                 )
-                return None
             return np.asarray(rows, dtype=float).reshape(-1, 4, 4)
-        return None
+        raise RuntimeError("VGGT-Long wrote no camera_poses.txt; it has no globally aligned poses.")
 
     def _combined_predictions_from_chunks(
         self,
         frames: list[FrameRef],
         chunks: list[dict[str, Any]],
-        global_c2w: np.ndarray | None = None,
+        global_c2w: np.ndarray,
+        chunk_scales: list[float],
     ) -> dict[str, Any]:
+        """One prediction per frame, in VGGT-Long's global frame.
+
+        Cameras come from ``global_c2w`` (``camera_poses.txt``). A frame in an overlap
+        takes the later chunk's predictions, as ``camera_poses.txt`` takes that chunk's
+        pose. Each chunk's depth is multiplied by its Sim(3) scale (``chunk_scales``, by
+        chunk index): depth is camera-frame, so the rotation and translation leave it
+        alone, but the scale does not -- left out, every chunk's depth keeps its own
+        scale against cameras on chunk 0's, and frames from different chunks disagree.
+        """
         num_frames = len(frames)
         extrinsic: list[Any] = [None] * num_frames
         intrinsic: list[Any] = [None] * num_frames
@@ -468,7 +497,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 chunk_point_conf = payload.get("point_conf")
 
             if chunk_depth is not None:
-                chunk_depth = np.asarray(chunk_depth)
+                chunk_depth = np.asarray(chunk_depth) * chunk_scales[payload["_chunk_index"]]
                 if chunk_depth.ndim == 3:
                     chunk_depth = chunk_depth[..., None]
             if chunk_depth_conf is not None:
@@ -482,8 +511,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 global_idx = chunk_start + local_idx
                 if global_idx >= num_frames:
                     break
-                if extrinsic[global_idx] is not None:
-                    continue  # keep first occurrence in overlapping windows
+                # A later chunk overwrites an overlap frame, as camera_poses.txt does.
                 extrinsic[global_idx] = chunk_extr[local_idx]
                 intrinsic[global_idx] = chunk_intr[local_idx]
                 if chunk_depth is not None and local_idx < chunk_depth.shape[0]:
@@ -513,19 +541,17 @@ class VGGTLongInitializer(VGGTInitializer):
         if all(v is not None for v in point_conf):
             preds["point_conf"] = np.stack([np.asarray(v) for v in point_conf], axis=0)
 
-        if global_c2w is not None:
-            # VGGT-Long's per-chunk extrinsics are chunk-local; replace them with
-            # the globally-aligned poses from camera_poses.txt. Those are
-            # camera-to-world, so invert to camera-from-world (the convention the
-            # shared `_initialize_from_predictions` / `_world_from_cam` path
-            # expects, matching plain VGGT) — it inverts back to recover a correct
-            # global `T_world_cam`. world_points are already globalized; depth is
-            # camera-frame, both unaffected.
-            if global_c2w.shape[0] != len(frames):
-                raise RuntimeError(
-                    f"global camera poses ({global_c2w.shape[0]}) do not match frame count ({len(frames)})."
-                )
-            preds["extrinsic"] = np.stack([np.linalg.inv(np.asarray(p, dtype=float)) for p in global_c2w], axis=0)
+        # VGGT-Long's per-chunk extrinsics are chunk-local; replace them with the
+        # globally-aligned poses from camera_poses.txt. Those are camera-to-world, so
+        # invert to camera-from-world (the convention the shared
+        # `_initialize_from_predictions` / `_world_from_cam` path expects, matching plain
+        # VGGT) -- it inverts back to recover a correct global `T_world_cam`. world_points
+        # are already globalized; depth was scaled above.
+        if global_c2w.shape[0] != len(frames):
+            raise RuntimeError(
+                f"global camera poses ({global_c2w.shape[0]}) do not match frame count ({len(frames)})."
+            )
+        preds["extrinsic"] = np.stack([np.linalg.inv(np.asarray(p, dtype=float)) for p in global_c2w], axis=0)
         return preds
 
     def _requested_device(self) -> str:
@@ -887,7 +913,10 @@ class VGGTLongInitializer(VGGTInitializer):
                 self._run_runner(runner)
                 chunks = self._load_chunk_predictions(runner)
                 global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
-                predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                scales = self._chunk_scales(runner, len(runner.chunk_indices))
+                predictions = self._combined_predictions_from_chunks(
+                    selected_frames, chunks, global_c2w=global_c2w, chunk_scales=scales
+                )
                 self._last_input_cache = input_caches.get(resize_max_dim)
                 attempt_history.append({
                     **plan,
@@ -910,9 +939,9 @@ class VGGTLongInitializer(VGGTInitializer):
                     f"VGGT-Long processed {len(selected_frames)} selected frames across {len(chunks)} chunk file(s)."
                 )
                 notes.append(
-                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
-                    if global_c2w is not None
-                    else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
+                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses; each chunk's "
+                    "depth scaled by its alignment scale ("
+                    + ", ".join(f"{v:.3f}" for v in scales) + ")."
                 )
                 return predictions, image_paths, notes, attempt_history, recommendation
             except Exception as exc:
@@ -1017,12 +1046,15 @@ class VGGTLongInitializer(VGGTInitializer):
                 self._run_runner(runner)
                 chunks = self._load_chunk_predictions(runner)
                 global_c2w = self._load_global_camera_to_world(runner, len(selected_frames))
-                predictions = self._combined_predictions_from_chunks(selected_frames, chunks, global_c2w=global_c2w)
+                scales = self._chunk_scales(runner, len(runner.chunk_indices))
+                predictions = self._combined_predictions_from_chunks(
+                    selected_frames, chunks, global_c2w=global_c2w, chunk_scales=scales
+                )
                 notes = list(notes)
                 notes.append(
-                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses."
-                    if global_c2w is not None
-                    else "camera_poses.txt unavailable; used chunk-local extrinsics (poses may be globally inconsistent)."
+                    "Used VGGT-Long globally-aligned camera_poses.txt for camera poses; each chunk's "
+                    "depth scaled by its alignment scale ("
+                    + ", ".join(f"{v:.3f}" for v in scales) + ")."
                 )
                 notes.append(
                     f"Initialized geometry with VGGT-Long using chunk_size={self.chunk_size}, overlap={self.overlap}."
@@ -1037,7 +1069,7 @@ class VGGTLongInitializer(VGGTInitializer):
                 image_paths=image_paths,
             )
             artifact.backend_name = self.backend_name
-            artifact.notes.append("Chunk overlaps were merged by first occurrence; downstream artifact contract preserved.")
+            artifact.notes.append("Chunk overlaps take the later chunk, as camera_poses.txt does.")
             artifact.metadata["geometry_backend_name"] = self.backend_name
             artifact.metadata["vggt_long_chunk_size"] = self.chunk_size
             artifact.metadata["vggt_long_overlap"] = self.overlap
