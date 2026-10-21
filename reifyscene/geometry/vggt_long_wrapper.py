@@ -76,8 +76,12 @@ class VGGTLongInitializer(VGGTInitializer):
     def __init__(self, cfg: dict | None = None) -> None:
         super().__init__(cfg)
         self.backend_name = "vggt-long"
-        self.chunk_size = int(self.cfg.get("chunk_size", 16))
-        self.overlap = int(self.cfg.get("overlap", 4))
+        # VGGT-Long's own chunking (configs/base_config.yaml). 16/4 gave each clip several
+        # chunk boundaries, each aligned with some error: on ten DAVIS clips, the share of
+        # static depth agreeing within 5% 15 frames apart stayed within 7 points of one
+        # VGGT pass at 60/30 and fell up to 37.5 points below it at 16/4 (2026-10-21).
+        self.chunk_size = int(self.cfg.get("chunk_size", 60))
+        self.overlap = int(self.cfg.get("overlap", 30))
         self.loop_enable = bool(self.cfg.get("loop_enable", False))
         self.use_dbow = bool(self.cfg.get("use_dbow", False))
         self.delete_temp_files = bool(self.cfg.get("delete_temp_files", False))
