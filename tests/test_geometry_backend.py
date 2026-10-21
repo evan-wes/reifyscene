@@ -134,6 +134,7 @@ class _FakeVGGTLongInitializer(VGGTLongInitializer):
         return [
             {
                 '_chunk_range': (0, 2),
+                '_chunk_index': 0,
                 'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3], np.eye(4, dtype=np.float32)[:3]], axis=0),
                 'intrinsic': np.stack([np.eye(3, dtype=np.float32), np.eye(3, dtype=np.float32)], axis=0),
                 'depth': np.ones((2, 4, 4, 1), dtype=np.float32),
@@ -148,7 +149,10 @@ class _FakeVGGTLongInitializer(VGGTLongInitializer):
         if not selected_frames:
             raise ValueError('No frames')
         notes = ['fake VGGT-Long backend']
-        predictions = self._combined_predictions_from_chunks(selected_frames, self._load_chunk_predictions(None))
+        predictions = self._combined_predictions_from_chunks(
+            selected_frames, self._load_chunk_predictions(None),
+            global_c2w=np.stack([np.eye(4)] * len(selected_frames)), chunk_scales=[1.0],
+        )
         artifact = self._initialize_from_predictions(selected_frames, predictions, ingest_artifact, notes=notes, image_paths=None)
         artifact.backend_name = self.backend_name
         return artifact
@@ -214,6 +218,7 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         return [
             {
                 '_chunk_range': (0, 1),
+                '_chunk_index': 0,
                 'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3]], axis=0),
                 'intrinsic': np.stack([np.eye(3, dtype=np.float32)], axis=0),
                 'depth': np.ones((1, 4, 4, 1), dtype=np.float32),
@@ -235,7 +240,10 @@ class _CpuProbeVGGTLong(VGGTLongInitializer):
         runner.img_list = [str(path) for path in image_paths]
         self._run_runner(runner)
         self._last_probe_runner = runner
-        predictions = self._combined_predictions_from_chunks(selected_frames, self._load_chunk_predictions(runner))
+        predictions = self._combined_predictions_from_chunks(
+            selected_frames, self._load_chunk_predictions(runner),
+            global_c2w=np.stack([np.eye(4)] * len(selected_frames)), chunk_scales=[1.0],
+        )
         artifact = self._initialize_from_predictions(selected_frames, predictions, ingest_artifact, notes=notes, image_paths=image_paths)
         artifact.backend_name = self.backend_name
         return artifact
@@ -258,12 +266,20 @@ class _AutoTuneVGGTLong(VGGTLongInitializer):
     def _run_runner(self, runner) -> None:
         if self.chunk_size > 4 or (runner.resize_max_dim is None or runner.resize_max_dim > 128):
             raise torch.OutOfMemoryError("CUDA out of memory during fake VGGT-Long run")
+        # What a successful run leaves behind: one chunk, its global poses, no alignments.
+        runner.chunk_indices = [(0, 8)]
+        runner.sim3_list = []
+        (Path(runner.output_dir) / "camera_poses.txt").write_text(
+            "\n".join(" ".join(["1", "0", "0", "0", "0", "1", "0", "0", "0", "0", "1", "0", "0", "0", "0", "1"])
+                      for _ in range(8)) + "\n"
+        )
 
     def _load_chunk_predictions(self, runner):
         num_frames = 8
         return [
             {
                 '_chunk_range': (0, num_frames),
+                '_chunk_index': 0,
                 'extrinsic': np.stack([np.eye(4, dtype=np.float32)[:3] for _ in range(num_frames)], axis=0),
                 'intrinsic': np.stack([np.eye(3, dtype=np.float32) for _ in range(num_frames)], axis=0),
                 'depth': np.ones((num_frames, 4, 4, 1), dtype=np.float32),
