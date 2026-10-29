@@ -9,6 +9,47 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.2.0] - 2026-10-28
+
+VGGT-Omega is a new geometry backend (`--geometry-backend-name vggt-omega`). VGGT stays the
+default, so a fresh setup needs no gated weights.
+
+### Added
+- **The `vggt-omega` geometry backend** (`reifyscene/geometry/vggt_omega_wrapper.py`) runs
+  [VGGT-Omega](https://github.com/facebookresearch/vggt-omega) once over every selected frame, so
+  there are no chunks to join.
+  - **Against DyCheck's ground truth** (geometry stage only, every frame of camera 0), against
+    VGGT-Long 60/30 from 0.6.1.6:
+    - spin, 426 frames: median relative rotation error 0.26° against 1.95° at a 50-frame gap;
+      camera centres 0.8% of the trajectory's extent against 9.4% (median, after a similarity
+      fit); depth against the iPhone's LiDAR 1.4% mean relative error against 6.4% (one scale for
+      the whole clip); each frame's depth scale within 0.993-1.008 of the clip's (5th-95th
+      percentile) against 0.928-1.117.
+    - paper-windmill, 277 frames: rotation 0.19° against 0.48°; centres 0.4% against 1.9%; depth
+      0.9% against 2.1%.
+  - **Each camera state keeps its own frame's intrinsics,** as the model predicts them; the
+    stream's intrinsics are their median. `_initialize_from_predictions` takes
+    `per_frame_intrinsics` for this; VGGT and VGGT-Long still give every frame the first
+    frame's.
+  - **Its point maps are its depth lifted with each frame's camera** (it has no point head).
+  - **Its loader resizes the whole frame to 16-pixel patches without cropping,** so portrait
+    clips keep the rows VGGT's 518 centre crop drops. The resize is recorded as an image
+    transform and reproduces the loader pixel for pixel (tested). DAVIS frames reach the
+    scene at 688x384 instead of 518x294; on lab-coat end to end (`davis_graph_loop.yaml`,
+    every frame, through handles) the render stage took 790 s against 783 s on VGGT, and the
+    whole run 1063 s against 1085 s.
+  - **One pass must fit in GPU memory.** On an RTX 5090, 277 frames at 448x592 peaked at
+    25.3 GiB, and spin's 426 frames fitted only with `--vggt-omega-mode max_size` (384x512,
+    28.4 GiB). A clip that runs out fails with an estimate of what it needs and the ways out.
+  - **Settings:** `--vggt-omega-mode balanced|max_size`, `--vggt-omega-resolution`,
+    `--vggt-omega-checkpoint` (`geometry.omega_*`); they enter the geometry fingerprint only
+    when `vggt-omega` is selected, so existing runs still resume.
+  - **Setup:** `scripts/setup_reifyscene.sh --with-vggt-omega` clones it at a pinned commit into
+    `third_party/vggt-omega` and installs it without dependencies, which the lock already pins.
+    Its weights are gated on Hugging Face (`facebook/VGGT-Omega`, FAIR Noncommercial).
+
+### Changed
+- **An unknown geometry backend name fails** instead of quietly running VGGT.
 ## [0.6.1.6] - 2026-10-21
 
 VGGT-Long's depth now agrees across its chunks. The geometry record changes (version 3): a run
