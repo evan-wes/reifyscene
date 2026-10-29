@@ -180,6 +180,15 @@ def test_settings_that_cannot_reach_the_output_are_excluded() -> None:
         'geometry', {'geometry': {'backend_name': 'vggt-long', 'chunk_size': 16}}
     )
     assert vggt_long['geometry']['chunk_size'] == 16
+    # The run script always writes VGGT-Omega's settings; only a VGGT-Omega run depends on them.
+    omega_cfg = {'omega_mode': 'max_size', 'omega_resolution': 512}
+    vggt = effective_settings('geometry', {'geometry': {'backend_name': 'vggt', **omega_cfg}})
+    assert 'omega_mode' not in vggt['geometry'] and 'omega_resolution' not in vggt['geometry']
+    omega = effective_settings(
+        'geometry', {'geometry': {'backend_name': 'vggt-omega', 'chunk_size': 16, **omega_cfg}}
+    )
+    assert omega['geometry']['omega_mode'] == 'max_size'
+    assert 'chunk_size' not in omega['geometry']
 
 
 def test_a_stage_outside_the_pipeline_fingerprints_its_own_section() -> None:

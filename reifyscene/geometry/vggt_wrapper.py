@@ -65,6 +65,8 @@ class VGGTInitializer(GeometryInitializer):
     """
 
     backend_name = "vggt"
+    # The model's name in the artifact's notes.
+    model_label = "VGGT"
 
     def __init__(self, cfg: dict | None = None) -> None:
         """Store backend configuration.
@@ -155,6 +157,19 @@ class VGGTInitializer(GeometryInitializer):
         self._pose_encoding_to_extri_intri = pose_encoding_to_extri_intri
         self._unproject_depth_map_to_point_map = unproject_depth_map_to_point_map
 
+    def _set_cpu_threads(self) -> None:
+        """Apply ``cpu_threads`` to torch when the model runs on the CPU."""
+        if self.cpu_threads is None or self.device.startswith("cuda"):
+            return
+        try:
+            torch.set_num_threads(max(1, int(self.cpu_threads)))
+        except Exception:
+            pass
+        try:
+            torch.set_num_interop_threads(max(1, int(self.cpu_threads) // 2))
+        except Exception:
+            pass
+
     def load_checkpoint(self) -> None:
         """Load the VGGT backend if available.
 
@@ -170,15 +185,7 @@ class VGGTInitializer(GeometryInitializer):
             return
 
         try:
-            if self.cpu_threads is not None and not self.device.startswith("cuda"):
-                try:
-                    torch.set_num_threads(max(1, int(self.cpu_threads)))
-                except Exception:
-                    pass
-                try:
-                    torch.set_num_interop_threads(max(1, int(self.cpu_threads) // 2))
-                except Exception:
-                    pass
+            self._set_cpu_threads()
             self._load_backend_components()
             with self._patched_torch_load_for_cpu_deserialize():
                 if self.checkpoint_path:
@@ -577,8 +584,14 @@ class VGGTInitializer(GeometryInitializer):
         *,
         notes: list[str],
         image_paths: list[Path] | None = None,
+        per_frame_intrinsics: bool = False,
     ) -> GeometryArtifact:
-        """Convert raw VGGT predictions into a ``GeometryArtifact``."""
+        """Convert raw VGGT predictions into a ``GeometryArtifact``.
+
+        By default every camera state of a stream carries the stream's first frame's
+        intrinsics. With ``per_frame_intrinsics`` each state keeps its own frame's, and
+        the stream's intrinsics are the per-stream median of fx, fy, cx and cy.
+        """
         numpy_predictions = self._numpyify(predictions)
         extrinsic = numpy_predictions.get("extrinsic")
         intrinsic = numpy_predictions.get("intrinsic")
@@ -623,7 +636,12 @@ class VGGTInitializer(GeometryInitializer):
         for idx, frame in enumerate(frames):
             frame_intrinsic = np.asarray(intrinsic[idx], dtype=float)
             frame_extrinsic = np.asarray(extrinsic[idx], dtype=float)
-            intrinsics = intrinsics_by_stream.setdefault(frame.stream_id, self._intrinsics_from_matrix(frame_intrinsic))
+            if per_frame_intrinsics:
+                intrinsics = self._intrinsics_from_matrix(frame_intrinsic)
+            else:
+                intrinsics = intrinsics_by_stream.setdefault(
+                    frame.stream_id, self._intrinsics_from_matrix(frame_intrinsic)
+                )
             camera_states_by_stream.setdefault(frame.stream_id, []).append(
                 TimedCameraState(
                     stream_id=frame.stream_id,
@@ -645,6 +663,16 @@ class VGGTInitializer(GeometryInitializer):
                     "confidence": None if point_conf is None else np.asarray(point_conf[idx]),
                 }
 
+        if per_frame_intrinsics:
+            for stream_id, states in camera_states_by_stream.items():
+                fx, fy, cx, cy = np.median(
+                    [[s.intrinsics.fx, s.intrinsics.fy, s.intrinsics.cx, s.intrinsics.cy] for s in states],
+                    axis=0,
+                )
+                intrinsics_by_stream[stream_id] = self._intrinsics_from_matrix(
+                    np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+                )
+
         stream_ids = sorted({frame.stream_id for frame in frames})
         for idx, stream_a in enumerate(stream_ids):
             for stream_b in stream_ids[idx + 1 :]:
@@ -657,7 +685,8 @@ class VGGTInitializer(GeometryInitializer):
 
         notes = list(notes)
         notes.append(
-            "Initialized geometry with the real VGGT backend; distortion remains an optimizer-stage variable."
+            f"Initialized geometry with the real {self.model_label} backend; distortion remains an "
+            "optimizer-stage variable."
         )
         notes.append(f"Saved depth maps for {len(depthmaps_by_frame)} selected frames.")
         notes.append(f"Saved point maps for {len(pointmaps_by_frame)} selected frames.")
@@ -665,7 +694,7 @@ class VGGTInitializer(GeometryInitializer):
             run_id=(ingest_artifact.run_id if ingest_artifact is not None else "dev"),
             stage_name="geometry",
             save_dir=Path("."),
-            backend_name="vggt",
+            backend_name=self.backend_name,
             selected_frames=frames,
             intrinsics_by_stream=intrinsics_by_stream,
             camera_states_by_stream=camera_states_by_stream,
@@ -760,7 +789,7 @@ class VGGTInitializer(GeometryInitializer):
             run_id=(ingest_artifact.run_id if ingest_artifact is not None else "dev"),
             stage_name="geometry",
             save_dir=Path("."),
-            backend_name="vggt",
+            backend_name=self.backend_name,
             selected_frames=frames,
             intrinsics_by_stream=intrinsics_by_stream,
             camera_states_by_stream=camera_states_by_stream,

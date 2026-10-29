@@ -9,6 +9,7 @@ installed.
 Supported geometry backends:
 - vggt
 - vggt-long
+- vggt-omega
 """
 
 from __future__ import annotations
@@ -83,6 +84,12 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
             geometry["delete_temp_files"] = bool(args.vggt_long_delete_temp_files)
         if args.vggt_long_output_cache_dir is not None:
             geometry["output_cache_dir"] = args.vggt_long_output_cache_dir
+
+    if getattr(args, "geometry_backend_name", "vggt") == "vggt-omega":
+        geometry["omega_mode"] = str(getattr(args, "vggt_omega_mode", "balanced"))
+        geometry["omega_resolution"] = int(getattr(args, "vggt_omega_resolution", 512))
+        geometry["omega_checkpoint"] = str(
+            getattr(args, "vggt_omega_checkpoint", "vggt_omega_1b_512.pt"))
 
     cfg.setdefault("runtime", {})["system_report"] = system_report or collect_system_report()
     return cfg
@@ -202,7 +209,7 @@ def main() -> None:
     parser.add_argument(
         "--geometry-backend-name",
         default="vggt",
-        choices=["vggt", "vggt-long"],
+        choices=["vggt", "vggt-long", "vggt-omega"],
         help="Which geometry backend to use.",
     )
     parser.add_argument(
@@ -266,6 +273,22 @@ def main() -> None:
         "--vggt-long-output-cache-dir",
         default=None,
         help="Optional VGGT-Long output cache directory.",
+    )
+    parser.add_argument(
+        "--vggt-omega-mode",
+        default="balanced",
+        choices=["balanced", "max_size"],
+        help="VGGT-Omega's resize: balanced keeps about resolution^2 pixels; max_size takes the "
+             "long side to the resolution and needs less GPU memory.",
+    )
+    parser.add_argument(
+        "--vggt-omega-resolution", type=int, default=512, help="VGGT-Omega's input resolution (px)."
+    )
+    parser.add_argument(
+        "--vggt-omega-checkpoint",
+        default="vggt_omega_1b_512.pt",
+        help="The checkpoint file in facebook/VGGT-Omega on Hugging Face (gated: request access "
+             "first).",
     )
 
     parser.add_argument(

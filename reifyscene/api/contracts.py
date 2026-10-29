@@ -280,6 +280,7 @@ _VGGT_LONG_ONLY = (
     "geometry.use_dbow",
     "geometry.long_config",
 )
+_VGGT_OMEGA_ONLY = ("geometry.omega_*",)
 
 
 def _ingest_excluded(cfg):
@@ -305,6 +306,8 @@ def _geometry_excluded(cfg):
     out: list[str] = []
     if "vggt-long" not in backends:
         out.extend(_VGGT_LONG_ONLY)
+    if "vggt-omega" not in backends:
+        out.extend(_VGGT_OMEGA_ONLY)
     if "moge" not in backends:
         out.append("env:MOGE_MODEL_ID")
     return out
