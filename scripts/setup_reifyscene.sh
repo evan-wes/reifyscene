@@ -13,6 +13,9 @@ set -euo pipefail
 #   third_party/co-tracker and installed into the active environment
 # - optional VGGT-Long from the official repo at a pinned commit, cloned into
 #   third_party/VGGT-Long and installed into the active environment
+# - optional VGGT-Omega from the official repo at a pinned commit, cloned into
+#   third_party/vggt-omega and installed (without its dependencies, which the lock
+#   already pins); its weights are gated and download on first use
 # - optional calibration dependencies: pycolmap pinned to a COLMAP release,
 #   plus hloc cloned into third_party/Hierarchical-Localization at a pinned tag
 #
@@ -98,6 +101,13 @@ MOGE_UTILS3D_SPEC="${MOGE_UTILS3D_SPEC:-utils3d @ git+https://github.com/Eastern
 MOGE_REPO="https://github.com/microsoft/MoGe.git"
 MOGE_COMMIT="07444410f1e33f402353b99d6ccd26bd31e469e8"
 
+# VGGT-Omega (FAIR Noncommercial; weights gated on Hugging Face, facebook/VGGT-Omega):
+# the one-pass geometry backend (--geometry-backend-name vggt-omega). Its declared
+# dependencies (numpy<2, Pillow, einops, safetensors, opencv-python) are all in the
+# lock, so it installs with --no-deps.
+VGGT_OMEGA_REPO="https://github.com/facebookresearch/vggt-omega.git"
+VGGT_OMEGA_COMMIT="48b23c8ce72c9a8fcf987f0d7f43d8e4870759f6"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -160,6 +170,7 @@ INSTALL_SIGLIP2=0
 INSTALL_SAPIENS=0
 INSTALL_MOGE=0
 INSTALL_VGGT_LONG=0
+INSTALL_VGGT_OMEGA=0
 INSTALL_VLA3D=1
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -181,6 +192,7 @@ SAM2_DIR="${THIRD_PARTY_DIR}/sam2"
 SAM2_CKPT_DIR="${SAM2_DIR}/checkpoints"
 SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
+VGGT_OMEGA_DIR="${THIRD_PARTY_DIR}/vggt-omega"
 MOGE_DIR="${THIRD_PARTY_DIR}/MoGe"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
 VLA3D_DIR="${THIRD_PARTY_DIR}/VLA-3D"
@@ -218,6 +230,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_MOGE=1; shift ;;
     --with-vggt-long)
       INSTALL_VGGT_LONG=1; shift ;;
+    --with-vggt-omega)
+      INSTALL_VGGT_OMEGA=1; shift ;;
     --no-vla3d)
       INSTALL_VLA3D=0; shift ;;
     --with-gsplat)
@@ -277,6 +291,9 @@ Install options:
                           (--no-deps + utils3d) + pre-cache weights (FP6 geometry depth
                           backstop; MIT, ungated, single-image metric point map)
   --with-vggt-long        Clone/install VGGT-Long into third_party/VGGT-Long at pinned commit
+  --with-vggt-omega       Clone/install VGGT-Omega into third_party/vggt-omega at pinned commit
+                          (its weights are gated: request access to facebook/VGGT-Omega on
+                          Hugging Face and run `hf auth login`; they download on first use)
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the reifyscene renderer requires it)
   --no-vla3d              Skip VLA-3D (scene-graph relations; on by default)
@@ -1141,6 +1158,9 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_VGGT -eq 1 ]]; then
     smoke_test_python_module "VGGT" "vggt" "vggt"
   fi
+  if [[ $INSTALL_VGGT_OMEGA -eq 1 ]]; then
+    smoke_test_python_module "VGGT-Omega" "vggt_omega" "vggt-omega"
+  fi
   if [[ $INSTALL_COTRACKER -eq 1 ]]; then
     smoke_test_python_module "CoTracker" "cotracker" "cotracker"
   fi
@@ -1355,6 +1375,14 @@ EOF
 
   echo "Installing VGGT-Long from ${VGGT_LONG_DIR}..."
   MAX_JOBS="${MAX_JOBS:-4}" python -m pip install --no-build-isolation -e "${VGGT_LONG_DIR}"
+fi
+
+if [[ $INSTALL_VGGT_OMEGA -eq 1 ]]; then
+  clone_or_update_checkout "${VGGT_OMEGA_REPO}" "${VGGT_OMEGA_DIR}" "${VGGT_OMEGA_COMMIT}"
+  echo "Installing VGGT-Omega from ${VGGT_OMEGA_DIR} (no dependencies: the lock pins them)..."
+  python -m pip install --no-deps -e "${VGGT_OMEGA_DIR}"
+  echo "VGGT-Omega's weights (facebook/VGGT-Omega) are gated: request access on Hugging Face and"
+  echo "run 'hf auth login'; the checkpoint downloads the first time the backend runs."
 fi
 
 if [[ $INSTALL_GSPLAT -eq 1 ]]; then
