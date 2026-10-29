@@ -282,7 +282,12 @@ class SiglipSemantics:
     def _embed_image_crops(self, crops: list[np.ndarray]) -> np.ndarray:
         import torch
 
-        inputs = self._processor(images=crops, return_tensors='pt').to(self._device_resolved)
+        # Crops are height x width x RGB. Said explicitly: from the shape alone the processor reads a
+        # crop 1 or 3 pixels tall as channels-first, which mis-reads it, and a batch holding both
+        # kinds fails to stack (a thin SAM 3 mask on DAVIS crossing did that).
+        inputs = self._processor(
+            images=crops, return_tensors='pt', input_data_format='channels_last'
+        ).to(self._device_resolved)
         with torch.no_grad():
             feats = self._model.get_image_features(**inputs)
         return _pooled(feats).float().cpu().numpy()

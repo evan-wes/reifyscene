@@ -206,7 +206,10 @@ class DinoReid:
         """Run a frame's crops through DINO -> (N, D) pooled features (cpu numpy)."""
         import torch
 
-        inputs = self._processor(images=crops, return_tensors='pt').to(self._device_resolved)
+        # Height x width x RGB, said explicitly: see SiglipSemantics._embed_image_crops.
+        inputs = self._processor(
+            images=crops, return_tensors='pt', input_data_format='channels_last'
+        ).to(self._device_resolved)
         with torch.no_grad():
             out = self._model(**inputs)
         feats = getattr(out, 'pooler_output', None)

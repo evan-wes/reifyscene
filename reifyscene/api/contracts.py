@@ -391,8 +391,9 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "pose_refine"),
         ),
         StageContract(
+            # 4: crops reach DINOv2 as channels-last; one 1 or 3 pixels tall was read as channels-first
             "reid",
-            version=3,
+            version=4,
             settings={
                 "reid": {},
                 "objects.embedder_backend_mode": None,
@@ -403,7 +404,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             # 2: background classes in the vocabulary; a record says whether its category is one
-            "semantics", version=2, settings={"semantics": {}},
+            # 3: crops reach SigLIP as channels-last; one 1 or 3 pixels tall was read as channels-first
+            "semantics", version=3, settings={"semantics": {}},
             upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
