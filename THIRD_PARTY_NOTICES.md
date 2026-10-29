@@ -52,6 +52,11 @@ A patch contains lines of the code it changes, so each is under its upstream's l
   ([LICENSES/MIT-concept-graphs.txt](LICENSES/MIT-concept-graphs.txt)).
 - `third_party_patches/vla-3d/`: VLA-3D (<https://github.com/HaochenZ11/VLA-3D>),
   Copyright (c) 2024 Haochen Z, MIT ([LICENSES/MIT-vla-3d.txt](LICENSES/MIT-vla-3d.txt)).
+- `third_party_patches/transformers/`: Hugging Face transformers
+  (<https://github.com/huggingface/transformers>), Apache License 2.0
+  ([LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). The plain-PyTorch NMS in `0001` follows the
+  rule of SAM 3's own CPU fallback (`generic_nms_cpu` in <https://github.com/facebookresearch/sam3>)
+  but is written anew rather than copied from it.
 
 ## Methods implemented from others' work
 
@@ -108,6 +113,10 @@ apply to you when you use it.
 | VGGSfM tracker weights | CC BY-NC 4.0 | pose refinement |
 | Sapiens weights | CC BY-NC 4.0 | human perception |
 | SAM 2 code and weights (<https://github.com/facebookresearch/sam2>) | Apache 2.0 | segmentation |
+| SAM 3 weights (`facebook/sam3`, gated on Hugging Face), run through transformers | SAM License | segmentation |
+| Qwen3-VL-8B-Instruct weights (`Qwen/Qwen3-VL-8B-Instruct`) | Apache 2.0 | listing the objects SAM 3 searches for |
+| transformers (<https://github.com/huggingface/transformers>), checked out by `--with-sam3` | Apache 2.0 | SAM 3, Qwen3-VL, DINOv2, SigLIP 2 |
+| measured-space (<https://github.com/evan-wes/measured-space>) | PolyForm Noncommercial 1.0.0 | SAM 3 on single frames |
 | MoGe code and MoGe-2 weights (<https://github.com/microsoft/MoGe>) | MIT | depth |
 | DINOv2 and SigLIP 2 weights | Apache 2.0 | re-identification, semantics |
 | DINOv3 weights (optional) | DINOv3 License | re-identification |

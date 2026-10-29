@@ -16,6 +16,8 @@ set -euo pipefail
 # - optional VGGT-Omega from the official repo at a pinned commit, cloned into
 #   third_party/vggt-omega and installed (without its dependencies, which the lock
 #   already pins); its weights are gated and download on first use
+# - optional SAM 3 labeller: transformers from a pinned checkout with reifyscene's
+#   SAM 3 video patches, measured-space at a pinned release, and the Qwen3-VL weights
 # - optional calibration dependencies: pycolmap pinned to a COLMAP release,
 #   plus hloc cloned into third_party/Hierarchical-Localization at a pinned tag
 #
@@ -108,6 +110,24 @@ MOGE_COMMIT="07444410f1e33f402353b99d6ccd26bd31e469e8"
 VGGT_OMEGA_REPO="https://github.com/facebookresearch/vggt-omega.git"
 VGGT_OMEGA_COMMIT="48b23c8ce72c9a8fcf987f0d7f43d8e4870759f6"
 
+# SAM 3 labeller (--with-sam3): the top rungs of the `segment` stage. Qwen3-VL lists the
+# objects on keyframes spread through each clip; SAM 3 finds and tracks every one of them.
+# - transformers is installed from a checkout of the SAME version the lock pins, because
+#   SAM 3's video mode needs three patches (third_party_patches/transformers/). The checkout
+#   is shallow: the full history is not needed to apply a patch, and is several times larger.
+# - measured-space (evan-wes/measured-space, PolyForm Noncommercial) supplies the SAM 3 image
+#   segmenter used for frame-0 seeds when video mode runs out of GPU memory. It declares
+#   Python >= 3.12; its code runs on this env's 3.11 (the tests import it), so it installs with
+#   --ignore-requires-python, and --no-deps because everything it imports is in the lock.
+# - weights: facebook/sam3 is gated (request access on Hugging Face, then `hf auth login`) and
+#   downloads on first use; Qwen/Qwen3-VL-8B-Instruct (Apache-2.0, ~17 GB) is pre-cached here.
+TRANSFORMERS_REPO="https://github.com/huggingface/transformers.git"
+TRANSFORMERS_TAG="v5.12.1"
+TRANSFORMERS_COMMIT="ddb849abe009d1089e6c691bfc897f27211c663c"
+MEASURED_SPACE_REPO="https://github.com/evan-wes/measured-space.git"
+MEASURED_SPACE_COMMIT="0432bf90e9f2c0623e684ab5aee74e866a72081c"  # v0.2.0.1
+QWEN3VL_MODEL_ID="${QWEN3VL_MODEL_ID:-Qwen/Qwen3-VL-8B-Instruct}"
+
 VGGT_LONG_REPO="https://github.com/DengKaiCQ/VGGT-Long.git"
 VGGT_LONG_COMMIT="c160869d1d99c96bb227f414afb3bc68c29c9a76"
 
@@ -171,6 +191,7 @@ INSTALL_SAPIENS=0
 INSTALL_MOGE=0
 INSTALL_VGGT_LONG=0
 INSTALL_VGGT_OMEGA=0
+INSTALL_SAM3=0
 INSTALL_VLA3D=1
 INSTALL_GSPLAT=1
 INSTALL_DEV=0
@@ -193,6 +214,8 @@ SAM2_CKPT_DIR="${SAM2_DIR}/checkpoints"
 SAM2_CKPT="${SAM2_CKPT_DIR}/sam2.1_hiera_large.pt"
 VGGT_LONG_DIR="${THIRD_PARTY_DIR}/VGGT-Long"
 VGGT_OMEGA_DIR="${THIRD_PARTY_DIR}/vggt-omega"
+TRANSFORMERS_DIR="${THIRD_PARTY_DIR}/transformers"
+MEASURED_SPACE_DIR="${THIRD_PARTY_DIR}/measured-space"
 MOGE_DIR="${THIRD_PARTY_DIR}/MoGe"
 HLOC_DIR="${THIRD_PARTY_DIR}/Hierarchical-Localization"
 VLA3D_DIR="${THIRD_PARTY_DIR}/VLA-3D"
@@ -232,6 +255,8 @@ while [[ $# -gt 0 ]]; do
       INSTALL_VGGT_LONG=1; shift ;;
     --with-vggt-omega)
       INSTALL_VGGT_OMEGA=1; shift ;;
+    --with-sam3)
+      INSTALL_SAM3=1; shift ;;
     --no-vla3d)
       INSTALL_VLA3D=0; shift ;;
     --with-gsplat)
@@ -294,6 +319,10 @@ Install options:
   --with-vggt-omega       Clone/install VGGT-Omega into third_party/vggt-omega at pinned commit
                           (its weights are gated: request access to facebook/VGGT-Omega on
                           Hugging Face and run `hf auth login`; they download on first use)
+  --with-sam3             SAM 3 labeller (segment top rungs): transformers from a pinned
+                          checkout with the SAM 3 video patches, measured-space at a pinned
+                          release, and the Qwen3-VL-8B weights (~17 GB). SAM 3's weights are
+                          gated: request access to facebook/sam3 and run `hf auth login`
   --with-gsplat           Build gsplat from source for sm_120 at pinned commit
                           (default: on — the reifyscene renderer requires it)
   --no-vla3d              Skip VLA-3D (scene-graph relations; on by default)
@@ -354,6 +383,31 @@ clone_or_update_checkout() {
 
   echo "Checking out ${ref} in ${dest_dir}..."
   git -C "${dest_dir}" checkout "${ref}"
+}
+
+# A one-commit checkout of a tag, for a repository whose history we never need (transformers:
+# a full clone is several times the size of the tree). The tag is fetched by name, but the
+# checkout must land on the pinned commit, so a tag moved upstream fails here rather than
+# installing different code under the same name.
+shallow_checkout_at_tag() {
+  local repo_url="$1" dest_dir="$2" tag="$3" commit="$4"
+
+  mkdir -p "$(dirname "$dest_dir")"
+  if [[ ! -d "${dest_dir}/.git" ]]; then
+    echo "Cloning ${repo_url} at ${tag} (shallow) into ${dest_dir}..."
+    git clone --depth 1 --branch "${tag}" "${repo_url}" "${dest_dir}"
+  elif [[ "$(git -C "${dest_dir}" rev-parse HEAD)" != "${commit}" ]]; then
+    echo "Restoring tracked files in ${dest_dir} and fetching ${tag} (patches are reapplied after)..."
+    git -C "${dest_dir}" checkout -- .
+    git -C "${dest_dir}" fetch --depth 1 origin tag "${tag}"
+    git -C "${dest_dir}" checkout "${tag}"
+  fi
+  local head
+  head="$(git -C "${dest_dir}" rev-parse HEAD)"
+  if [[ "${head}" != "${commit}" ]]; then
+    echo "${dest_dir}: ${tag} is ${head}, not the pinned ${commit}. Refusing to install it." >&2
+    exit 1
+  fi
 }
 
 compiler_major_version() {
@@ -622,6 +676,18 @@ mid = os.environ["SIGLIP2_MODEL_ID"]
 AutoProcessor.from_pretrained(mid)
 AutoModel.from_pretrained(mid)
 print("SigLIP2 weights cached:", mid)
+PYEOF
+}
+
+download_qwen3vl_weights_if_needed() {
+  # Pre-cache Qwen3-VL-8B-Instruct (Apache-2.0, ungated, ~17 GB), which lists the objects on the
+  # SAM 3 labeller's keyframes. Idempotent: an existing snapshot is reused.
+  echo "Pre-caching Qwen3-VL weights (${QWEN3VL_MODEL_ID}, ~17 GB) into the HF hub cache..."
+  QWEN3VL_MODEL_ID="${QWEN3VL_MODEL_ID}" python - <<'PYEOF'
+import os
+from huggingface_hub import snapshot_download
+mid = os.environ["QWEN3VL_MODEL_ID"]
+print("Qwen3-VL weights cached:", snapshot_download(mid))
 PYEOF
 }
 
@@ -1161,6 +1227,12 @@ run_post_install_smoke_tests() {
   if [[ $INSTALL_VGGT_OMEGA -eq 1 ]]; then
     smoke_test_python_module "VGGT-Omega" "vggt_omega" "vggt-omega"
   fi
+  if [[ $INSTALL_SAM3 -eq 1 ]]; then
+    smoke_test_python_module "transformers (patched checkout)" "transformers" "transformers"
+    python -c "from transformers.models.sam3_video.modeling_sam3_video import greedy_nms_from_ious" \
+      || { echo "transformers is not the patched checkout: SAM 3 video mode would run unpatched." >&2; exit 1; }
+    smoke_test_python_module "measured-space" "measured_space.perception" "measured-space"
+  fi
   if [[ $INSTALL_COTRACKER -eq 1 ]]; then
     smoke_test_python_module "CoTracker" "cotracker" "cotracker"
   fi
@@ -1385,6 +1457,29 @@ if [[ $INSTALL_VGGT_OMEGA -eq 1 ]]; then
   echo "run 'hf auth login'; the checkpoint downloads the first time the backend runs."
 fi
 
+if [[ $INSTALL_SAM3 -eq 1 ]]; then
+  # The checkout replaces the lock's transformers, so it must be the same version: otherwise every
+  # other model in the env would move with it, and the lock would no longer describe the env.
+  if [[ -f "${REIFYSCENE_LOCK_FILE}" ]] && ! grep -qx "transformers==${TRANSFORMERS_TAG#v}" "${REIFYSCENE_LOCK_FILE}"; then
+    echo "The lock does not pin transformers==${TRANSFORMERS_TAG#v}, the version the SAM 3 patches are for." >&2
+    echo "Move TRANSFORMERS_TAG/TRANSFORMERS_COMMIT and regenerate third_party_patches/transformers/ together." >&2
+    exit 1
+  fi
+  shallow_checkout_at_tag "${TRANSFORMERS_REPO}" "${TRANSFORMERS_DIR}" "${TRANSFORMERS_TAG}" "${TRANSFORMERS_COMMIT}"
+  echo "Applying transformers patches (SAM 3 video)..."
+  apply_patch_series "${TRANSFORMERS_DIR}" "${ROOT_DIR}/third_party_patches/transformers" "transformers"
+  echo "Installing transformers from ${TRANSFORMERS_DIR} (no dependencies: the lock pins them)..."
+  python -m pip install --no-deps -e "${TRANSFORMERS_DIR}"
+
+  clone_or_update_checkout "${MEASURED_SPACE_REPO}" "${MEASURED_SPACE_DIR}" "${MEASURED_SPACE_COMMIT}"
+  echo "Installing measured-space from ${MEASURED_SPACE_DIR} (no dependencies; it declares Python >= 3.12)..."
+  python -m pip install --no-deps --ignore-requires-python -e "${MEASURED_SPACE_DIR}"
+
+  download_qwen3vl_weights_if_needed
+  echo "SAM 3's weights (facebook/sam3) are gated: request access on Hugging Face and run"
+  echo "'hf auth login'; they download the first time the segment stage runs."
+fi
+
 if [[ $INSTALL_GSPLAT -eq 1 ]]; then
   ensure_modern_conda_compilers
   ensure_cuda_toolkit_for_torch_extensions
@@ -1414,6 +1509,8 @@ $( [[ $INSTALL_COTRACKER -eq 1 ]] && echo "- CoTracker from commit ${COTRACKER_C
 $( [[ $INSTALL_SAM2 -eq 1 ]] && echo "- SAM 2 from commit ${SAM2_COMMIT} at ${SAM2_DIR} (+ sam2.1_hiera_large checkpoint)" )
 $( [[ $INSTALL_DINOV2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + DINOv2-L weights ${DINOV2_MODEL_ID} cached (FP3 reid rung)" )
 $( [[ $INSTALL_SIGLIP2 -eq 1 ]] && echo "- transformers (${TRANSFORMERS_SPEC}) + SigLIP2 weights ${SIGLIP2_MODEL_ID} cached (FP4 semantics rung)" )
+$( [[ $INSTALL_SAM3 -eq 1 ]] && echo "- transformers ${TRANSFORMERS_TAG} from ${TRANSFORMERS_DIR} with the SAM 3 video patches" )
+$( [[ $INSTALL_SAM3 -eq 1 ]] && echo "- measured-space from commit ${MEASURED_SPACE_COMMIT:0:12} at ${MEASURED_SPACE_DIR} + Qwen3-VL weights ${QWEN3VL_MODEL_ID} cached (SAM 3 labeller)" )
 $( [[ $INSTALL_SAPIENS -eq 1 ]] && echo "- Sapiens ${SAPIENS_SIZE} dense checkpoints cached (FP5 humans rung; CC-BY-NC-4.0)" )
 $( [[ $INSTALL_MOGE -eq 1 ]] && echo "- MoGe-2 from commit ${MOGE_COMMIT} at ${MOGE_DIR} (--no-deps + utils3d) + weights ${MOGE_MODEL_ID} cached (FP6 geometry depth backstop; MIT)" )
 $( [[ $INSTALL_CALIBRATION -eq 1 ]] && echo "- calibration extras from pyproject.toml (pycolmap ${PYCOLMAP_VERSION}, matching COLMAP ${COLMAP_UPSTREAM_TAG})" )

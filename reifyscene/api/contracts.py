@@ -378,11 +378,14 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "geometry"),
         ),
         StageContract(
-            # Segment is configured by the objects section (detector, SAM 2, frame stride);
-            # the embedder keys there belong to reid's floor rung.
+            # Segment is configured by the objects section (detector, SAM 3, SAM 2, frame
+            # stride); the embedder keys there belong to reid's floor rung.
+            # 2: SAM 3 rungs above SAM 2: open-vocabulary, named and scored instances
             "segment",
+            version=2,
             settings={"segment": {}, "objects": {}},
-            exclude=("objects.embedder_*",),
+            # Where SAM 3's weights are read from, and whether the hub is asked, change nothing it outputs.
+            exclude=("objects.embedder_*", "objects.sam3_hf_cache_dir", "objects.sam3_local_files_only"),
             pinned=("objects.max_inference_side",),
             # segment places its instances with the refined geometry it is given
             upstream=("ingest", "pose_refine"),
