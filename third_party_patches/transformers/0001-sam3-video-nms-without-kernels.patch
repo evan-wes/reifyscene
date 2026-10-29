@@ -1,0 +1,97 @@
+SAM 3 video: run the per-prompt mask NMS in plain PyTorch when the `kernels` package is absent.
+
+Upstream pin: transformers @ v5.12.1 (ddb849abe009d1089e6c691bfc897f27211c663c)
+
+transformers runs SAM 3 video's greedy mask NMS through a compiled kernel that the `kernels`
+package downloads from the Hugging Face Hub at run time (kernels-community/cv-utils). Without that
+package it keeps every detection above the score threshold, so the overlapping duplicates NMS
+exists to remove are all kept. This adds the same greedy rule in plain PyTorch -- the rule of the
+original SAM 3 code's CPU fallback, generic_nms_cpu in facebookresearch/sam3 sam3/perflib/nms.py:
+highest score first, drop any detection whose mask IoU with a kept one exceeds the threshold -- and
+uses it whenever the kernel is missing or fails. The kernel path is unchanged when it is installed.
+Hole filling and sprinkle removal, the kernel's other two jobs, are still skipped without it.
+
+Without it: duplicates pile up frame after frame until associating detections with tracks runs out
+of GPU memory, as it did on DAVIS crossing on a 32 GB card.
+
+diff --git a/src/transformers/models/sam3_video/modeling_sam3_video.py b/src/transformers/models/sam3_video/modeling_sam3_video.py
+index ce299e7..363f31a 100644
+--- a/src/transformers/models/sam3_video/modeling_sam3_video.py
++++ b/src/transformers/models/sam3_video/modeling_sam3_video.py
+@@ -48,8 +48,8 @@ def _load_cv_utils_kernel_once():
+ 
+     if not is_kernels_available():
+         logger.warning_once(
+-            "kernels library is not installed. NMS post-processing, hole filling, and sprinkle removal will be skipped. "
+-            "Install it with `pip install kernels` for better mask quality."
++            "kernels library is not installed. NMS runs in plain PyTorch; hole filling and sprinkle removal will be "
++            "skipped. Install it with `pip install kernels` for better mask quality."
+         )
+         cv_utils_kernel = False
+         return
+@@ -59,7 +59,7 @@ def _load_cv_utils_kernel_once():
+     except Exception as e:
+         logger.warning_once(
+             f"Failed to load cv_utils kernel (your torch/cuda setup may not be supported): {e}. "
+-            "NMS post-processing, hole filling, and sprinkle removal will be skipped."
++            "NMS runs in plain PyTorch; hole filling and sprinkle removal will be skipped."
+         )
+         cv_utils_kernel = False
+ 
+@@ -1883,6 +1883,29 @@ def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch.Tensor:
+     return ious  # shape: (N, M)
+ 
+ 
++def greedy_nms_from_ious(ious: torch.Tensor, scores: torch.Tensor, iou_threshold: float) -> torch.Tensor:
++    """
++    Greedy NMS over a precomputed pairwise IoU matrix, in plain PyTorch: the highest-scoring detection is kept, and
++    every detection whose IoU with it exceeds `iou_threshold` is dropped, until none remain. The same rule as the
++    original SAM 3 implementation's CPU fallback (`generic_nms_cpu`).
++    Args:
++      - ious: (N, N) float Tensor, pairwise IoUs
++      - scores: (N,) float Tensor, one score per detection
++      - iou_threshold: float, IoU above which the lower-scoring detection is dropped
++    Returns:
++      - kept_inds: (K,) int64 Tensor on the device of `scores`, indices of the kept detections in score order
++    """
++    ious_cpu = ious.detach().float().cpu()
++    order = torch.argsort(scores.detach().float().cpu(), descending=True)
++    kept = []
++    while order.numel() > 0:
++        i = int(order[0])
++        kept.append(i)
++        rest = order[1:]
++        order = rest[ious_cpu[i, rest] <= iou_threshold]
++    return torch.tensor(kept, dtype=torch.int64, device=scores.device)
++
++
+ def nms_masks(
+     pred_probs: torch.Tensor,
+     pred_masks: torch.Tensor,
+@@ -1908,16 +1931,17 @@ def nms_masks(
+ 
+     ious = mask_iou(masks_binary, masks_binary)  # (num_valid, num_valid)
+ 
+-    # Try to use kernels for NMS, fallback to keeping all valid detections if unavailable
++    # Use the kernels NMS when available, else the same greedy rule in plain PyTorch. Keeping every valid
++    # detection instead lets overlapping duplicates pile up until associating them with tracks runs out of memory.
+     _load_cv_utils_kernel_once()
+-    if not cv_utils_kernel:
+-        return is_valid  # Fallback: keep all valid detections without NMS
+-
+-    try:
+-        kept_inds = cv_utils_kernel.generic_nms(ious, probs, iou_threshold, use_iou_matrix=True)
+-    except Exception as e:
+-        logger.warning_once(f"Failed to run NMS using kernels library: {e}. NMS post-processing will be skipped.")
+-        return is_valid  # Fallback: keep all valid detections without NMS
++    kept_inds = None
++    if cv_utils_kernel:
++        try:
++            kept_inds = cv_utils_kernel.generic_nms(ious, probs, iou_threshold, use_iou_matrix=True)
++        except Exception as e:
++            logger.warning_once(f"Failed to run NMS using kernels library: {e}. NMS runs in plain PyTorch.")
++    if kept_inds is None:
++        kept_inds = greedy_nms_from_ious(ious, probs, iou_threshold)
+ 
+     # valid_inds are the indices among `probs` of valid detections before NMS (or -1 for invalid)
+     valid_inds = torch.where(is_valid, is_valid.cumsum(dim=0) - 1, -1)  # (num_det,)

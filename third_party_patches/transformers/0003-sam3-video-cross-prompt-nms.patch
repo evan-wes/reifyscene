@@ -1,0 +1,83 @@
+SAM 3 video: an opt-in NMS across text prompts (Sam3VideoConfig.cross_prompt_nms_thresh, off by default).
+
+Upstream pin: transformers @ v5.12.1 (ddb849abe009d1089e6c691bfc897f27211c663c)
+
+SAM 3 video runs its detection NMS per text prompt, so with a long prompt list one object found by
+several prompts -- "person", "man", "dancer" -- becomes several objects, each tracked from then on.
+This adds a config value: when it is above 0, each frame's merged detections from all prompts go
+through one more greedy mask NMS at that IoU, keeping the highest-scoring detection whichever
+prompt found it. It defaults to 0.0, which leaves upstream behaviour unchanged; reifyscene's SAM 3
+labeller sets it (0.5, so a part inside a whole, such as a shirt on a person, is not suppressed).
+This is reifyscene's addition, not part of the original SAM 3. It depends on 0001 for
+greedy_nms_from_ious.
+
+Without it: reifyscene's vocabulary of ~90 phrases per clip turns each person into several tracks.
+
+diff --git a/src/transformers/models/sam3_video/configuration_sam3_video.py b/src/transformers/models/sam3_video/configuration_sam3_video.py
+index 3ecd4bc..8b6e4a0 100644
+--- a/src/transformers/models/sam3_video/configuration_sam3_video.py
++++ b/src/transformers/models/sam3_video/configuration_sam3_video.py
+@@ -39,6 +39,10 @@ class Sam3VideoConfig(PreTrainedConfig):
+         Probability threshold for detection outputs - only keep detections above this threshold.
+     det_nms_thresh (`float`, *optional*, defaults to 0.1):
+         IoU threshold for detection NMS (Non-Maximum Suppression).
++    cross_prompt_nms_thresh (`float`, *optional*, defaults to 0.0):
++        IoU threshold for an NMS across text prompts, run after each frame's detections from every prompt are
++        merged. `det_nms_thresh` compares detections of one prompt only, so one object found by several prompts
++        becomes several objects. 0.0 disables it.
+     assoc_iou_thresh (`float`, *optional*, defaults to 0.1):
+         IoU threshold for detection-to-track matching. A detection is considered "matched" to a tracklet if
+         it overlaps with the tracklet above this threshold. Often a loose threshold like 0.1.
+@@ -115,6 +119,7 @@ class Sam3VideoConfig(PreTrainedConfig):
+     low_res_mask_size: int = 288
+     score_threshold_detection: float = 0.5
+     det_nms_thresh: float = 0.1
++    cross_prompt_nms_thresh: float = 0.0
+     assoc_iou_thresh: float = 0.1
+     trk_assoc_iou_thresh: float = 0.5
+     new_det_thresh: float = 0.7
+diff --git a/src/transformers/models/sam3_video/modeling_sam3_video.py b/src/transformers/models/sam3_video/modeling_sam3_video.py
+index ee241b3..156a71b 100644
+--- a/src/transformers/models/sam3_video/modeling_sam3_video.py
++++ b/src/transformers/models/sam3_video/modeling_sam3_video.py
+@@ -513,6 +513,7 @@ class Sam3VideoModel(Sam3VideoPreTrainedModel):
+         self.low_res_mask_size = config.low_res_mask_size
+         self.score_threshold_detection = config.score_threshold_detection
+         self.det_nms_thresh = config.det_nms_thresh
++        self.cross_prompt_nms_thresh = config.cross_prompt_nms_thresh
+         self.assoc_iou_thresh = config.assoc_iou_thresh
+         self.trk_assoc_iou_thresh = config.trk_assoc_iou_thresh
+         self.new_det_thresh = config.new_det_thresh
+@@ -1593,8 +1594,32 @@ class Sam3VideoModel(Sam3VideoPreTrainedModel):
+                 "scores": torch.zeros(0, device=device),
+             }
+ 
++        if self.cross_prompt_nms_thresh > 0.0 and len(merged_det_out["scores"]) > 1:
++            merged_det_out, det_idx_to_prompt_id = self._suppress_cross_prompt_duplicates(
++                merged_det_out, det_idx_to_prompt_id
++            )
++
+         return merged_det_out, det_idx_to_prompt_id
+ 
++    def _suppress_cross_prompt_duplicates(
++        self,
++        det_out: dict[str, Tensor],
++        det_idx_to_prompt_id: dict[int, int],
++    ) -> tuple[dict[str, Tensor], dict[int, int]]:
++        """
++        Greedy mask NMS across prompts: of any merged detections whose masks overlap by more than
++        `cross_prompt_nms_thresh`, only the highest-scoring is kept, whichever prompt found it. The kept detections
++        stay in their merged order, and `det_idx_to_prompt_id` is re-indexed to match.
++        """
++        masks_binary = det_out["mask"] > 0
++        ious = mask_iou(masks_binary, masks_binary)
++        kept = greedy_nms_from_ious(ious, det_out["scores"], self.cross_prompt_nms_thresh).sort().values
++        kept_out = {key: value[kept] for key, value in det_out.items()}
++        kept_idx_to_prompt_id = {
++            new_idx: det_idx_to_prompt_id[old_idx] for new_idx, old_idx in enumerate(kept.tolist())
++        }
++        return kept_out, kept_idx_to_prompt_id
++
+     def _det_track_one_frame(
+         self,
+         inference_session: Sam3VideoInferenceSession,
