@@ -117,10 +117,12 @@ class DynamicSceneGraphBuilder:
                 if embedding is not None:
                     embeddings[entity.node_id] = embedding
                 node = (
-                    self.node_factory.human_node(entity.node_id, attrs, label=label)
+                    self.node_factory.human_node(
+                        entity.node_id, attrs, label=label, confidence=entity.confidence
+                    )
                     if entity.kind == "human"
                     else self.node_factory.object_node(
-                        entity.node_id, label=label, attrs=attrs
+                        entity.node_id, label=label, attrs=attrs, confidence=entity.confidence
                     )
                 )
                 nodes.append(node)

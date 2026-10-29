@@ -445,8 +445,9 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             # 7: background-class candidates go to the background; a noise floor on entities
+            # 8: a node's confidence is its track's mean segmenter score, not a constant 1.0
             "graph",
-            version=7,
+            version=8,
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,
