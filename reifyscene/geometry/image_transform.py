@@ -2,7 +2,8 @@
 
 A geometry backend does not always see the frame the rest of the pipeline sees.
 VGGT and VGGT-Long resize each frame to 518 px wide and centre-crop its height to
-518, so their cameras, intrinsics and depth maps describe that square, while the
+518, so their cameras, intrinsics and depth maps describe that square; VGGT-Omega
+resizes the whole frame to 16-pixel patches without cropping. Meanwhile the
 photos, segment masks and track coordinates everything else works with are in the
 ingest frame's pixels. An :class:`ImageTransform` records the exact resizes, crops
 and pads from one to the other, so every consumer puts a photo, a mask or a pixel
@@ -362,6 +363,80 @@ def vggt_input_transform(
     return ImageTransform(tuple(source_size), tuple(ops))
 
 
+# --------------------------------------------------------------------------- #
+# VGGT-Omega's image loader.
+# --------------------------------------------------------------------------- #
+VGGT_OMEGA_MODES = ("balanced", "max_size")
+
+
+def vggt_omega_loader_ops(
+    size: tuple[int, int],
+    *,
+    mode: str = "balanced",
+    resolution: int = 512,
+    patch_size: int = 16,
+) -> list[Op]:
+    """The crop + resize ``vggt_omega.utils.load_fn.load_and_preprocess_images`` applies.
+
+    First a centre crop, only when the aspect ratio h / w is outside [0.5, 2.0]. Then a
+    bicubic resize, with no crop, to whole ``patch_size`` patches:
+    - ``balanced`` keeps about ``(resolution / patch_size)**2`` patches;
+    - ``max_size`` takes the long side to ``resolution``.
+    """
+    if mode not in VGGT_OMEGA_MODES:
+        raise ValueError(
+            f"unknown VGGT-Omega loader mode {mode!r}: expected one of {VGGT_OMEGA_MODES}"
+        )
+    width, height = int(size[0]), int(size[1])
+    ops: list[Op] = []
+    aspect = height / max(width, 1)
+    if aspect < 0.5:
+        crop_w = min(width, max(1, int(round(height / 0.5))))
+        left = max((width - crop_w) // 2, 0)
+        ops.append(Crop((left, 0, left + crop_w, height)))
+        width = crop_w
+    elif aspect > 2.0:
+        crop_h = min(height, max(1, int(round(width * 2.0))))
+        top = max((height - crop_h) // 2, 0)
+        ops.append(Crop((0, top, width, top + crop_h)))
+        height = crop_h
+    aspect = height / max(width, 1)
+    if mode == "balanced":
+        tokens = (int(resolution) // int(patch_size)) ** 2
+        w_patches = np.sqrt(tokens / aspect)
+        h_patches = tokens / w_patches
+        new_w = max(1, int(np.round(w_patches))) * int(patch_size)
+        new_h = max(1, int(np.round(h_patches))) * int(patch_size)
+    else:
+        def to_patches(value: float) -> int:
+            return max(int(patch_size), int(np.round(float(value) / patch_size)) * int(patch_size))
+
+        if aspect >= 1.0:
+            new_h, new_w = int(resolution), to_patches(resolution / aspect)
+        else:
+            new_w, new_h = int(resolution), to_patches(resolution * aspect)
+    ops.append(Resize((new_w, new_h), "bicubic"))
+    return ops
+
+
+def vggt_omega_input_transform(
+    source_size: tuple[int, int],
+    *,
+    mode: str = "balanced",
+    resolution: int = 512,
+    resize_max_dim: int | None = None,
+) -> ImageTransform:
+    """Ingest frame -> VGGT-Omega's input pixels: the cache downscale (if any), then its loader."""
+    ops: list[Op] = []
+    size = (int(source_size[0]), int(source_size[1]))
+    pre = materialize_resize(size, resize_max_dim)
+    if pre is not None:
+        ops.append(pre)
+        size = pre.size
+    ops.extend(vggt_omega_loader_ops(size, mode=mode, resolution=resolution))
+    return ImageTransform(tuple(source_size), tuple(ops))
+
+
 def pad_to_batch(
     transforms: dict[str, ImageTransform], fill: int = 255
 ) -> dict[str, ImageTransform]:
@@ -369,7 +444,7 @@ def pad_to_batch(
 
     Every image is centred on a canvas of the batch's largest height and width
     (``pad_top = dh // 2``, ``pad_left = dw // 2``, white), as the loader does.
-    A batch of one size is returned unchanged.
+    VGGT-Omega's loader pads the same way. A batch of one size is returned unchanged.
     """
     sizes = {t.output_size for t in transforms.values()}
     if len(sizes) <= 1:

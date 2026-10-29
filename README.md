@@ -101,8 +101,8 @@ ingest → sync → dyn_mask → geometry → pose_refine → segment → tracki
 → semantics → objects → humans → graph → optimization → scene → render → handles
 ```
 
-- **geometry** — VGGT / VGGT-Long camera + depth + point-map reconstruction (or a
-  ground-truth "oracle" backend for isolating downstream quality).
+- **geometry** — VGGT / VGGT-Long / VGGT-Omega camera + depth + point-map reconstruction
+  (or a ground-truth "oracle" backend for isolating downstream quality).
 - **pose_refine** — robust bundle adjustment of the camera poses (gauge re-anchored to
   the input scale).
 - **perception band** — SAM-2 segmentation, re-identification, semantics, and object +
@@ -125,7 +125,7 @@ geometry at full frame count.
 **Works today:**
 - End-to-end single-video pipeline → a trained dynamic Gaussian scene + novel-view
   flythrough + masked-NVS metrics.
-- Real backends for geometry (VGGT / VGGT-Long), pose refinement (BA), segmentation
+- Real backends for geometry (VGGT / VGGT-Long / VGGT-Omega), pose refinement (BA), segmentation
   (SAM-2), re-id, object/human perception, point tracking (CoTracker), and dynamic 4D
   rendering.
 
@@ -170,6 +170,14 @@ scripts/setup_reifyscene.sh --with-dev
 This installs the local `reifyscene` package in editable mode and pins the current
 Python dependencies used by the pipeline.
 
+`--with-vggt-omega` also installs [VGGT-Omega](https://github.com/facebookresearch/vggt-omega),
+the one-pass geometry backend (`--geometry-backend-name vggt-omega`). Its weights are gated:
+request access to `facebook/VGGT-Omega` on Hugging Face and run `hf auth login`; they download
+the first time the backend runs. One pass over a whole clip needs GPU memory in proportion to
+its frames: on a 32 GB RTX 5090, 277 frames of a 720x960 clip took 25.3 GiB at the default
+size, and 426 frames fitted only with `--vggt-omega-mode max_size` (28.4 GiB). A clip that does
+not fit fails with an estimate of what it needs.
+
 ### Optional RealSense SDK
 
 ```bash
@@ -194,7 +202,7 @@ python scripts/capture_realsense_rgb.py --output my_clips/test_rgb.mp4 --show
 ```bash
 python scripts/run_single_video_reifyscene.py \
   --frames-dir dycheck_iphone/spin/rgb/1x \   # or --video my_clips/clip.mp4 (in datasets/)
-  --geometry-backend-name vggt-long \         # vggt | vggt-long | dataset (GT oracle)
+  --geometry-backend-name vggt-long \         # vggt | vggt-long | vggt-omega | dataset (GT oracle)
   --geometry-device cuda \
   --keyframes-all \                           # train on every frame (benchmark parity)
   --pose-refine-enable \
@@ -426,6 +434,6 @@ every such file, and `LICENSES/` holds the licence texts.
 
 The tools the setup scripts check out, the models the pipeline downloads and the datasets have
 their own terms, which you accept by using them. Several of the models it uses are for
-**non-commercial use only**: CoTracker (code and weights), the VGGT-1B, VGGSfM and Sapiens
-weights, and SuperPoint and SuperGlue in the calibration stage. `THIRD_PARTY_NOTICES.md` lists
-them.
+**non-commercial use only**: CoTracker (code and weights), VGGT-Omega (code and weights), the
+VGGT-1B, VGGSfM and Sapiens weights, and SuperPoint and SuperGlue in the calibration stage.
+`THIRD_PARTY_NOTICES.md` lists them.

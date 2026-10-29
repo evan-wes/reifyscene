@@ -84,6 +84,19 @@ def test_build_config_supports_geometry_and_tracking_time_spacing(tmp_path: Path
     assert cfg['render'] == {'backend_name': 'gaussian4d', 'device': 'cuda'}
 
 
+def test_build_config_writes_the_vggt_omega_settings(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    args.geometry_backend_name = 'vggt-omega'
+    args.vggt_omega_mode = 'max_size'
+    args.vggt_omega_resolution = 448
+    args.vggt_omega_checkpoint = 'vggt_omega_1b_416_reproduce.pt'
+    cfg, _ = build_config(args, system_report={'ram_gb': 16.0})
+    assert cfg['geometry']['backend_name'] == 'vggt-omega'
+    assert cfg['geometry']['omega_mode'] == 'max_size'
+    assert cfg['geometry']['omega_resolution'] == 448
+    assert cfg['geometry']['omega_checkpoint'] == 'vggt_omega_1b_416_reproduce.pt'
+
+
 def test_build_config_records_which_settings_the_machine_picked(tmp_path: Path, monkeypatch) -> None:
     """A resume pins these to the prior run's values instead of re-picking them."""
     import scripts.run_single_video_reifyscene as runner

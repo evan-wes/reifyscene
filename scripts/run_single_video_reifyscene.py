@@ -95,6 +95,10 @@ def build_config(args: argparse.Namespace, *, system_report: dict | None = None)
     geometry['loop_enable'] = bool(args.vggt_long_loop_enable)
     geometry['use_dbow'] = bool(args.vggt_long_use_dbow)
     geometry['delete_temp_files'] = bool(args.vggt_long_delete_temp_files)
+    geometry['omega_mode'] = str(getattr(args, 'vggt_omega_mode', 'balanced'))
+    geometry['omega_resolution'] = int(getattr(args, 'vggt_omega_resolution', 512))
+    geometry['omega_checkpoint'] = str(
+        getattr(args, 'vggt_omega_checkpoint', 'vggt_omega_1b_512.pt'))
     geometry['debug_shapes'] = bool(args.debug)
     geometry['debug_max_points'] = int(args.debug_max_points)
     cpu_threads = getattr(args, 'cpu_threads', None)
@@ -433,7 +437,8 @@ def main() -> None:
     parser.add_argument('--keyframes-all', action='store_true',
                         help='Use every frame as a keyframe (dense reconstruction / benchmark-protocol '
                              'parity). Overrides the keyframe stride and --max-keyframes.')
-    parser.add_argument('--geometry-backend-name', default='vggt', choices=['vggt', 'vggt-long', 'dataset'])
+    parser.add_argument('--geometry-backend-name', default='vggt',
+                        choices=['vggt', 'vggt-long', 'vggt-omega', 'dataset'])
     parser.add_argument('--geometry-backend-mode', default='real', choices=['real', 'auto', 'heuristic'])
     parser.add_argument('--geometry-camera-params', default=None,
                         help='Fixed intrinsics prior "fx,fy,cx,cy" (pixels) for the COLMAP pose rung. '
@@ -453,6 +458,15 @@ def main() -> None:
     parser.add_argument('--vggt-long-use-dbow', action='store_true')
     parser.add_argument('--vggt-long-delete-temp-files', action='store_true')
     parser.add_argument('--vggt-long-output-cache-dir', default=None)
+    parser.add_argument('--vggt-omega-mode', default='balanced', choices=['balanced', 'max_size'],
+                        help="VGGT-Omega's resize: balanced keeps about resolution^2 pixels; "
+                             "max_size takes the long side to the resolution and needs less GPU "
+                             "memory.")
+    parser.add_argument('--vggt-omega-resolution', type=int, default=512,
+                        help="VGGT-Omega's input resolution (px).")
+    parser.add_argument('--vggt-omega-checkpoint', default='vggt_omega_1b_512.pt',
+                        help='The checkpoint file in facebook/VGGT-Omega on Hugging Face '
+                             '(gated: request access first).')
     parser.add_argument('--pose-refine-enable', action='store_true', help='BA-refine geometry camera poses (seed pycolmap with backend geometry + VGGSfM tracks, robust iterative BA) before tracking. Off by default; needs CUDA + pycolmap.')
     parser.add_argument('--pose-refine-device', default=None, help='Device for the VGGSfM tracker during pose refinement (default: cuda). BA itself runs on CPU.')
     parser.add_argument('--pose-refine-vis-thresh', type=float, default=0.2, help='Track visibility threshold for BA observations.')

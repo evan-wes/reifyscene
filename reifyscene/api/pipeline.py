@@ -35,6 +35,7 @@ from reifyscene.geometry.image_transform import MissingImageTransform, image_tra
 from reifyscene.geometry.moge_wrapper import MoGeInitializer
 from reifyscene.geometry.pose_refine import PoseRefiner, PoseRefineUnavailable
 from reifyscene.geometry.vggt_long_wrapper import VGGTLongInitializer
+from reifyscene.geometry.vggt_omega_wrapper import VGGTOmegaInitializer
 from reifyscene.geometry.vggt_wrapper import VGGTInitializer
 from reifyscene.geometry.world_frame import GroundPlaneCanonicalizer
 from reifyscene.graph.builders import DynamicSceneGraphBuilder
@@ -94,8 +95,12 @@ _GEOMETRY_FIDELITY = {
     'colmap': 'sfm_poses_no_depth',
     'vggt': 'joint_reconstruction',
     'vggt-long': 'joint_reconstruction_longseq',
+    'vggt-omega': 'joint_reconstruction',
     'dataset': 'dataset_gt',
 }
+
+# Every name `_build_geometry_backend` accepts.
+GEOMETRY_BACKEND_NAMES = ('vggt', 'vggt-long', 'vggt-omega', 'dataset', 'moge', 'colmap')
 
 
 def _grade_category(items, semantics_artifact) -> str:
@@ -205,12 +210,18 @@ class ReifyScenePipeline:
         """Construct a geometry initializer for a backend name.
 
         Shared by the single-backend path and the fused pose/depth channels (§4A.1):
-        ``vggt``/``vggt-long``/``dataset`` are *joint* rungs (poses+depth); ``moge`` is a
-        depth-only rung; ``colmap`` a pose-only rung. Unknown names fall through to VGGT.
+        ``vggt``/``vggt-long``/``vggt-omega``/``dataset`` are *joint* rungs (poses+depth);
+        ``moge`` is a depth-only rung; ``colmap`` a pose-only rung. Any other name raises,
+        so a misspelt backend never quietly runs a different one.
         """
         name = str(name).lower()
+        if name not in GEOMETRY_BACKEND_NAMES:
+            raise ValueError(
+                f"unknown geometry backend {name!r}: expected one of {GEOMETRY_BACKEND_NAMES}")
         if name == 'vggt-long':
             return VGGTLongInitializer(geometry_cfg)
+        if name == 'vggt-omega':
+            return VGGTOmegaInitializer(geometry_cfg)
         if name == 'dataset':
             return DatasetGeometryInitializer.from_config(geometry_cfg)
         if name == 'moge':

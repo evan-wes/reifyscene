@@ -102,6 +102,7 @@ apply to you when you use it.
 | VGGT code (<https://github.com/facebookresearch/vggt>) | VGGT License | geometry |
 | VGGT-1B weights | CC BY-NC 4.0 | geometry |
 | VGGT-Long (<https://github.com/DengKaiCQ/VGGT-Long>) | VGGT License | long-sequence geometry |
+| VGGT-Omega code and weights (<https://github.com/facebookresearch/vggt-omega>; weights gated on Hugging Face) | FAIR Noncommercial Research License | one-pass geometry |
 | What VGGT-Long's weight script downloads: SALAD checkpoint, ORB-SLAM3 vocabulary; MapAnything; Pi3 | from GPL-3.0 repositories; CC BY-NC 4.0; BSD-2-Clause | loop closure |
 | CoTracker code and CoTracker3 weights (<https://github.com/facebookresearch/co-tracker>) | CC BY-NC 4.0 | point tracking (the default tracker) |
 | VGGSfM tracker weights | CC BY-NC 4.0 | pose refinement |
