@@ -77,6 +77,17 @@ PERSON_NOUNS = frozenset({
     "mother", "father", "mom", "dad", "grandmother", "grandfather", "bride", "groom", "actor",
     "actress", "tourist",
 })
+# Parts of a body, which are never an entity of their own. Qwen lists them as objects ("arm",
+# "hand", "knee"), and SAM 3 then finds one on every person: on DAVIS lindy-hop, before they were
+# dropped, 99 of the 122 object tracks SAM 3 seeded lay mostly inside a person.
+BODY_PART_NOUNS = frozenset({
+    "arm", "leg", "hand", "foot", "feet", "head", "face", "hair", "eye", "ear", "nose", "mouth",
+    "lip", "tooth", "teeth", "tongue", "neck", "shoulder", "elbow", "wrist", "finger", "fingertip",
+    "fingernail", "thumb", "knee", "ankle", "toe", "heel", "back", "waist", "hip", "chest", "torso",
+    "belly", "stomach", "skin", "beard", "mustache", "moustache", "eyebrow", "forehead", "cheek",
+    "chin", "jaw", "thigh", "fist", "body", "limb",
+    "paw", "tail", "wing", "fin", "beak", "hoof", "mane", "snout", "whisker",
+})
 # Everything the semantics vocabularies call a thing or a backdrop, with LVIS's parenthetical
 # glosses dropped ("glass (drink container)" -> "glass"); COCO's "person" is a person, not a thing.
 _KNOWN_THINGS = frozenset(
@@ -103,6 +114,26 @@ def phrase_kind(phrase: str) -> str | None:
     if text in _KNOWN_THINGS or noun in _KNOWN_THINGS or singular in _KNOWN_THINGS:
         return "object"
     return None
+
+
+# Words that can stand before a body part without making it a thing: "left hand", "blond hair".
+_BODY_MODIFIERS = frozenset({"left", "right", "upper", "lower", "raised", "bare", "human", "blond", "blonde"})
+
+
+def is_body_part(phrase: str) -> bool:
+    """Whether a phrase names a part of a body (``'knees'``, ``"person's leg"``, ``'left hand'``).
+
+    Only the part on its own, or after a possessive or a side word. A compound with another noun is a
+    thing: among the 49 distinct phrases about a part that Qwen listed for the 130 clips it was
+    measured on were "railway crossing gate arm", "shower head" and "paragliding wing".
+    """
+    words = re.findall(r"[a-z][a-z'-]*", _QUALIFIER.sub("", phrase.strip().lower()))
+    if not words:
+        return False
+    noun = words[-1]
+    if noun not in BODY_PART_NOUNS and not (noun.endswith("s") and noun[:-1] in BODY_PART_NOUNS):
+        return False
+    return all(w in _BODY_MODIFIERS or w.endswith("'s") for w in words[:-1])
 
 
 def parse_tag_lines(text: str, max_phrases: int = DEFAULT_MAX_PHRASES_PER_KEYFRAME) -> list[str]:
@@ -227,6 +258,7 @@ class StreamVocabulary:
     base: list[str] = field(default_factory=lambda: list(COCO_THINGS))
     first_frame_idx: int | None = None
     error: str | None = None
+    dropped: list[str] = field(default_factory=list)  # tagged, but parts of a body
 
     @property
     def phrases(self) -> list[str]:
@@ -244,11 +276,13 @@ class StreamVocabulary:
             "num_phrases": len(self.phrases),
             "source": "coco80" if self.error is not None or not self.keyframe_phrases else "qwen3-vl+coco80",
             "error": self.error,
+            "dropped_body_parts": list(self.dropped),
         }
 
 
 class Sam3Vocabulary:
-    """Per-stream phrase lists, tagged once and shared by both SAM 3 rungs.
+    """Per-stream phrase lists, tagged once and shared by both SAM 3 rungs. Parts of a body the
+    tagger lists are dropped (:func:`is_body_part`) and recorded as dropped.
 
     When video mode runs out of memory, the fallback rung reuses these tags rather than loading the
     tagger again. If the tagger cannot run at all, the vocabulary is COCO-80 alone and the error is
@@ -275,7 +309,9 @@ class Sam3Vocabulary:
             for stream_id, frames in todo.items():
                 vocab = StreamVocabulary(first_frame_idx=int(frames[0].frame_idx) if frames else None)
                 for pos in keyframe_positions(len(frames), self.num_keyframes):
-                    vocab.keyframe_phrases[int(frames[pos].frame_idx)] = tagger.tag(decode(frames[pos]))
+                    tags = tagger.tag(decode(frames[pos]))
+                    vocab.keyframe_phrases[int(frames[pos].frame_idx)] = [p for p in tags if not is_body_part(p)]
+                    vocab.dropped.extend(p for p in tags if is_body_part(p) and p not in vocab.dropped)
                 self.streams[stream_id] = vocab
         except Exception as exc:  # no tagger: search for COCO-80 alone, and say so
             error = f"{type(exc).__name__}: {exc}"

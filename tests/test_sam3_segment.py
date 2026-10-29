@@ -39,6 +39,17 @@ def test_phrase_kind(phrase: str, kind: str | None) -> None:
     assert s3.phrase_kind(phrase) == kind
 
 
+@pytest.mark.parametrize("phrase, part", [
+    ("arm", True), ("left hand", True), ("knees", True), ("feet", True), ("person's leg", True),
+    ("blond hair", True), ("hand with a ring", True),
+    ("railway crossing gate arm", False), ("shower head", False), ("paragliding wing", False),
+    ("goldfish fins", False), ("hand bag", False), ("back seat", False), ("armchair", False),
+    ("person", False), ("", False),
+])
+def test_is_body_part(phrase: str, part: bool) -> None:
+    assert s3.is_body_part(phrase) is part
+
+
 def test_parse_tag_lines_strips_numbering_and_dedupes() -> None:
     text = "1. Dog\n- dog\n* red ball.\n\n2) " + "x" * 50 + "\nperson"
     assert s3.parse_tag_lines(text) == ["dog", "red ball", "person"]
@@ -69,7 +80,7 @@ class _Tagger:
 
     def tag(self, image):
         self.seen.append(int(image[0, 0, 0]))
-        return [f"thing{int(image[0, 0, 0])}", "dog"]
+        return [f"thing{int(image[0, 0, 0])}", "dog", "left hand"]
 
     def release(self):
         self.released = True
@@ -89,6 +100,7 @@ def test_vocabulary_tags_keyframes_once_and_releases_the_tagger() -> None:
     assert v.phrases[4:] == [c for c in COCO_THINGS if c != "dog"]
     assert v.first_frame_phrases()[:2] == ["thing10", "dog"] and "thing14" not in v.first_frame_phrases()
     assert v.to_dict()["source"] == "qwen3-vl+coco80"
+    assert "left hand" not in v.phrases and v.to_dict()["dropped_body_parts"] == ["left hand"]
     assert _Tagger.instances[0].released
     vocab.prepare({"cam_00": _frames(5)}, _decode)          # already tagged: no second tagger
     assert len(_Tagger.instances) == 1
