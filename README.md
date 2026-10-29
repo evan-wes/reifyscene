@@ -105,8 +105,8 @@ ingest → sync → dyn_mask → geometry → pose_refine → segment → tracki
   (or a ground-truth "oracle" backend for isolating downstream quality).
 - **pose_refine** — robust bundle adjustment of the camera poses (gauge re-anchored to
   the input scale).
-- **perception band** — SAM-2 segmentation, re-identification, semantics, and object +
-  human perception.
+- **perception band** — segmentation (SAM 3 on the objects Qwen3-VL lists through the clip;
+  SAM 2 without them), re-identification, semantics, and object + human perception.
 - **tracking** — CoTracker point tracks lifted to 3D.
 - **graph** — the scene's entities (people, objects, background), their positions over time,
   and the relations between them in each frame.
@@ -126,7 +126,7 @@ geometry at full frame count.
 - End-to-end single-video pipeline → a trained dynamic Gaussian scene + novel-view
   flythrough + masked-NVS metrics.
 - Real backends for geometry (VGGT / VGGT-Long / VGGT-Omega), pose refinement (BA), segmentation
-  (SAM-2), re-id, object/human perception, point tracking (CoTracker), and dynamic 4D
+  (SAM 3, SAM 2), re-id, object/human perception, point tracking (CoTracker), and dynamic 4D
   rendering.
 
 - A **queryable scene graph**: its entities own their Gaussians in the trained scene, and
@@ -145,6 +145,10 @@ geometry at full frame count.
   two, still leaves a trace on 83% of the judged training views, and the background the video
   did see behind the women comes back 2.4–5.5 dB below the floor the geometry sets for it; a
   crisper background is for the camera poses and depth to give.
+- **The SAM 3 labeller finds more than the graph should keep.** On the ten DAVIS slice clips it
+  found all 39 annotated objects (SAM 2: 32), but clothing becomes entities of its own, and on
+  crowds video mode runs out of GPU memory before the first-frame fallback starts, which made
+  india and lindy-hop take 7-8 minutes in the segment stage.
 - The removals ownership replaced, FlashSplat's selection and the learned per-Gaussian identity,
   are kept for comparison. Learned identity is off by default, and so is the experimental
   body-volume bound on FlashSplat's selection.
@@ -177,6 +181,19 @@ the first time the backend runs. One pass over a whole clip needs GPU memory in 
 its frames: on a 32 GB RTX 5090, 277 frames of a 720x960 clip took 25.3 GiB at the default
 size, and 426 frames fitted only with `--vggt-omega-mode max_size` (28.4 GiB). A clip that does
 not fit fails with an estimate of what it needs.
+
+`--with-sam3` installs the SAM 3 labeller, the segment stage's top rungs. Qwen3-VL-8B lists the
+kinds of object on four keyframes spread through the clip, and SAM 3 finds and tracks instances
+of them and of COCO's 80 classes, naming each track by the phrase that found it. The
+flag checks out transformers at the version the lock pins and applies the three patches SAM 3's
+video mode needs (`third_party_patches/transformers/`), installs
+[measured-space](https://github.com/evan-wes/measured-space), and downloads Qwen3-VL's weights
+(about 17 GB). SAM 3's weights are gated: request access to `facebook/sam3` on Hugging Face and
+run `hf auth login`; they download the first time the stage runs. Video mode's GPU memory grows
+with the number of tracks: it peaked at 27 GiB on the 128 measured clips that fitted a 32 GB
+card, and ran out on two crowd clips. When it runs out, the stage runs SAM 3 on the first frame
+and tracks what it found with SAM 2, which misses anything that arrives later. Without
+`--with-sam3`, segmentation is SAM 2's.
 
 ### Optional RealSense SDK
 

@@ -111,7 +111,7 @@ VGGT_OMEGA_REPO="https://github.com/facebookresearch/vggt-omega.git"
 VGGT_OMEGA_COMMIT="48b23c8ce72c9a8fcf987f0d7f43d8e4870759f6"
 
 # SAM 3 labeller (--with-sam3): the top rungs of the `segment` stage. Qwen3-VL lists the
-# objects on keyframes spread through each clip; SAM 3 finds and tracks every one of them.
+# objects on keyframes spread through each clip; SAM 3 finds and tracks instances of them.
 # - transformers is installed from a checkout of the SAME version the lock pins, because
 #   SAM 3's video mode needs three patches (third_party_patches/transformers/). The checkout
 #   is shallow: the full history is not needed to apply a patch, and is several times larger.
