@@ -51,6 +51,42 @@ def _touches_all_borders(mask: np.ndarray) -> bool:
     return bool(mask[0, :].any() and mask[-1, :].any() and mask[:, 0].any() and mask[:, -1].any())
 
 
+def write_video_frames(tmp_dir: Path, images: list[np.ndarray]) -> None:
+    """SAM 2's video predictor reads a directory of integer-named JPEGs."""
+    for i, img in enumerate(images):
+        Image.fromarray(img).save(tmp_dir / f"{i:05d}.jpg", quality=95)
+
+
+def vote_human_kind(
+    per_frame: dict[int, dict[int, np.ndarray]], num_frames: int, person_boxes_at, person_iou: float,
+    obj_ids=None,
+) -> dict[int, str]:
+    """``{obj_id: 'human' | 'object'}``: human when a track overlaps a person box in at least half the
+    frames it appears in.
+
+    ``person_boxes_at(pos)`` returns the person detections on frame ``pos``; it is only called for
+    frames where one of ``obj_ids`` (default: every tracked id) is present.
+    """
+    all_ids = sorted({o for masks in per_frame.values() for o in masks}) if obj_ids is None else sorted(obj_ids)
+    wanted = set(all_ids)
+    human_votes: dict[int, int] = {o: 0 for o in all_ids}
+    present: dict[int, int] = {o: 0 for o in all_ids}
+    for pos in range(num_frames):
+        obj_masks = {o: m for o, m in per_frame.get(pos, {}).items() if o in wanted and m.any()}
+        if not obj_masks:
+            continue
+        pboxes = person_boxes_at(pos)
+        for obj_id, m in obj_masks.items():
+            present[obj_id] += 1
+            bb = _mask_bbox_xyxy(m)
+            if bb is not None and pboxes and max(_box_iou(bb, pb) for pb in pboxes) >= person_iou:
+                human_votes[obj_id] += 1
+    return {
+        o: ("human" if present[o] and human_votes[o] >= (present[o] + 1) // 2 else "object")
+        for o in all_ids
+    }
+
+
 class SAM2InstanceSegmenter:
     """SAM 2 automatic discovery + video propagation → instance masks + IDs.
 
@@ -109,14 +145,30 @@ class SAM2InstanceSegmenter:
 
     # -- model loading ----------------------------------------------------
     def _load_models(self) -> None:
-        if self._amg is not None and self._video_predictor is not None:
-            return
-        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-        from sam2.build_sam import build_sam2, build_sam2_video_predictor
+        if self._amg is None:
+            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+            from sam2.build_sam import build_sam2
 
-        model = build_sam2(self.config, self.checkpoint, device=self.device)
-        self._amg = SAM2AutomaticMaskGenerator(model, points_per_side=self.points_per_side)
-        self._video_predictor = build_sam2_video_predictor(self.config, self.checkpoint, device=self.device)
+            model = build_sam2(self.config, self.checkpoint, device=self.device)
+            self._amg = SAM2AutomaticMaskGenerator(model, points_per_side=self.points_per_side)
+        self._load_video_predictor()
+
+    def _load_video_predictor(self) -> None:
+        if self._video_predictor is None:
+            from sam2.build_sam import build_sam2_video_predictor
+
+            self._video_predictor = build_sam2_video_predictor(self.config, self.checkpoint, device=self.device)
+
+    def track_seeds(self, images: list[np.ndarray], seed_masks: list[np.ndarray]) -> dict[int, dict[int, np.ndarray]]:
+        """Track keyframe mask seeds through ``images``: ``{frame position: {seed index: mask}}``.
+
+        The propagation alone, for a rung that finds its own seeds (SAM 3 on the first frame).
+        """
+        self._load_video_predictor()
+        with tempfile.TemporaryDirectory(prefix="sam2_seg_") as tmp:
+            tmp_dir = Path(tmp)
+            write_video_frames(tmp_dir, images)
+            return self._propagate(tmp_dir, seed_masks, {})
 
     # -- object-ness filter ----------------------------------------------
     def _keep_mask(self, record: dict[str, Any], h: int, w: int) -> bool:
@@ -143,6 +195,14 @@ class SAM2InstanceSegmenter:
     # -- per-stream segmentation -----------------------------------------
     def _decode_stream_frames(self, stream, frames: list[FrameRef]) -> list[np.ndarray]:
         return [np.asarray(self.decoder.get_frame(stream, fr.frame_idx))[..., :3].astype(np.uint8) for fr in frames]
+
+    def cached_person_boxes(self, images: list[np.ndarray]):
+        """``pos -> person boxes on images[pos]``, running the detector at most once per frame."""
+        def at(pos: int) -> list[np.ndarray]:
+            if pos not in self._person_box_cache:
+                self._person_box_cache[pos] = self._person_boxes(images[pos])
+            return self._person_box_cache[pos]
+        return at
 
     def _person_boxes(self, frame_rgb: np.ndarray) -> list[np.ndarray]:
         try:
@@ -288,11 +348,9 @@ class SAM2InstanceSegmenter:
         if not seed_masks and not box_seeds:
             return [], {}
 
-        # SAM 2's video predictor reads a directory of integer-named JPEGs.
         with tempfile.TemporaryDirectory(prefix="sam2_seg_") as tmp:
             tmp_dir = Path(tmp)
-            for i, img in enumerate(images):
-                Image.fromarray(img).save(tmp_dir / f"{i:05d}.jpg", quality=95)
+            write_video_frames(tmp_dir, images)
 
             per_frame = self._propagate(tmp_dir, seed_masks, box_seeds)
             # Second pass for anyone who arrives after the keyframe. Only run when the
@@ -309,29 +367,9 @@ class SAM2InstanceSegmenter:
         # a box seed gets an id past the end of that range, and counting on the seed list
         # made the whole rung raise a KeyError the moment one existed -- which the ladder
         # then swallowed into a silent fall back to the detector floor.
-        all_ids = sorted({o for masks in per_frame.values() for o in masks})
-        human_votes: dict[int, int] = {o: 0 for o in all_ids}
-        present: dict[int, int] = {o: 0 for o in all_ids}
-        for pos in range(len(images)):
-            obj_masks = per_frame.get(pos, {})
-            if not obj_masks:
-                continue
-            # The late-arrival check already ran the detector on these frames; reuse it so
-            # looking for uncovered people costs nothing the kind vote was not paying.
-            if pos not in self._person_box_cache:
-                self._person_box_cache[pos] = self._person_boxes(images[pos])
-            pboxes = self._person_box_cache[pos]
-            for obj_id, m in obj_masks.items():
-                if not m.any():
-                    continue
-                present[obj_id] += 1
-                bb = _mask_bbox_xyxy(m)
-                if bb is not None and pboxes and max(_box_iou(bb, pb) for pb in pboxes) >= self.person_iou:
-                    human_votes[obj_id] += 1
-        kind_of = {
-            o: ("human" if present[o] and human_votes[o] >= (present[o] + 1) // 2 else "object")
-            for o in all_ids
-        }
+        # The late-arrival check already ran the detector on these frames; reuse it so
+        # looking for uncovered people costs nothing the kind vote was not paying.
+        kind_of = vote_human_kind(per_frame, len(images), self.cached_person_boxes(images), self.person_iou)
 
         observations: list[InstanceObservation] = []
         mask_arrays: dict[str, np.ndarray] = {}

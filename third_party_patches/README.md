@@ -59,9 +59,14 @@ regenerating it.
 | `vggt-long` | `c160869d` | dinov2 CWD path; Hugging Face CLI rename | VGGT License |
 | `concept-graphs` | `93277a02` | ConceptGraphs-Detect imports made optional; supervision ≥ 0.22 annotator API | MIT |
 | `vla-3d` | `a0c023c9` | `relate_near` corner test; colour-naming import made optional | MIT |
+| `transformers` | `v5.12.1` (`ddb849ab`) | SAM 3 video: NMS without the `kernels` package; mask IoU as a matrix product; an opt-in NMS across text prompts | Apache-2.0 |
 
-Four other checkouts — `co-tracker`, `MoGe`, `sam2` and `vggt` — need no patches and have no
-directory here.
+Six other checkouts — `co-tracker`, `measured-space`, `MoGe`, `sam2`, `vggt` and `vggt-omega` —
+need no patches and have no directory here.
+
+transformers is the one patched tool that is otherwise a pip package. `setup_reifyscene.sh
+--with-sam3` replaces the lock's copy with a shallow checkout of the same version, so the patches
+can be applied and checked like any other; the installer stops if the two versions differ.
 
 ## Licensing
 

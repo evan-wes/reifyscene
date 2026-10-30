@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from reifyscene.common.types import FrameRef, HumanState, ObjectState
 from reifyscene.graph.builders import DynamicSceneGraphBuilder
@@ -272,6 +273,18 @@ def test_tracked_frames_that_share_nothing_with_the_masks_are_reported() -> None
     # count, not the warning.
     assert any("shared frames" in note for note in artifact.notes)
     assert not any("do not overlap" in note for note in artifact.notes)
+
+
+def test_a_node_s_confidence_is_its_segmenter_score() -> None:
+    """Not a constant: SAM 3's scores reach the node, averaged over the track's observations."""
+    found = objects()
+    for k, record in enumerate(found.objects):
+        record.confidence = 0.5 + 0.1 * k
+    nodes = nodes_by_id(build(tracking([[(10.0, 10.0)] * 4]), humans(), found))
+    expected = float(np.mean([0.5 + 0.1 * k for k in range(len(FRAMES))]))
+    assert nodes["object:cam0:o1"].confidence == pytest.approx(expected)
+    assert nodes["human:cam0:p1"].confidence == pytest.approx(0.9)
+    assert nodes["cam0"].confidence == 1.0
 
 
 def test_every_entity_is_observed_by_its_camera() -> None:

@@ -378,18 +378,22 @@ CONTRACTS: dict[str, StageContract] = {
             upstream=("ingest", "geometry"),
         ),
         StageContract(
-            # Segment is configured by the objects section (detector, SAM 2, frame stride);
-            # the embedder keys there belong to reid's floor rung.
+            # Segment is configured by the objects section (detector, SAM 3, SAM 2, frame
+            # stride); the embedder keys there belong to reid's floor rung.
+            # 2: SAM 3 rungs above SAM 2: open-vocabulary, named and scored instances
             "segment",
+            version=2,
             settings={"segment": {}, "objects": {}},
-            exclude=("objects.embedder_*",),
+            # Where SAM 3's weights are read from, and whether the hub is asked, change nothing it outputs.
+            exclude=("objects.embedder_*", "objects.sam3_hf_cache_dir", "objects.sam3_local_files_only"),
             pinned=("objects.max_inference_side",),
             # segment places its instances with the refined geometry it is given
             upstream=("ingest", "pose_refine"),
         ),
         StageContract(
+            # 4: crops reach DINOv2 as channels-last; one 1 or 3 pixels tall was read as channels-first
             "reid",
-            version=3,
+            version=4,
             settings={
                 "reid": {},
                 "objects.embedder_backend_mode": None,
@@ -400,7 +404,8 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             # 2: background classes in the vocabulary; a record says whether its category is one
-            "semantics", version=2, settings={"semantics": {}},
+            # 3: crops reach SigLIP as channels-last; one 1 or 3 pixels tall was read as channels-first
+            "semantics", version=3, settings={"semantics": {}},
             upstream=("ingest", "segment", "reid")
         ),
         # Objects runs no model: its output is a pure function of its inputs.
@@ -442,8 +447,9 @@ CONTRACTS: dict[str, StageContract] = {
         ),
         StageContract(
             # 7: background-class candidates go to the background; a noise floor on entities
+            # 8: a node's confidence is its track's mean segmenter score, not a constant 1.0
             "graph",
-            version=7,
+            version=8,
             settings={"graph": {}},
             upstream=("pose_refine", "tracking", "humans", "objects", "semantics"),
             rebuildable=True,

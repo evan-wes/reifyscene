@@ -1,0 +1,40 @@
+SAM 3 video: compute mask IoU as a matrix product instead of through an (N, M, H*W) intermediate.
+
+Upstream pin: transformers @ v5.12.1 (ddb849abe009d1089e6c691bfc897f27211c663c)
+
+mask_iou broadcasts every pair of masks into one boolean tensor of N*M*H*W bytes before summing. It
+runs on SAM 3's 288x288 low-resolution masks for NMS and for associating detections with tracks, so
+with a few hundred detections on a frame the intermediate alone is several GiB. This computes the
+intersection as a float matrix product of the flattened masks and the union from the mask areas,
+which needs (N + M) * H * W floats. The result is the same: the counts are integers below 2**24,
+which float32 holds exactly, and autocast is disabled so a bf16 context cannot round them.
+
+Without it: a single IoU call tried to allocate over 13 GiB on DAVIS crossing, more than the
+32 GB card had free.
+
+diff --git a/src/transformers/models/sam3_video/modeling_sam3_video.py b/src/transformers/models/sam3_video/modeling_sam3_video.py
+index 363f31a..ee241b3 100644
+--- a/src/transformers/models/sam3_video/modeling_sam3_video.py
++++ b/src/transformers/models/sam3_video/modeling_sam3_video.py
+@@ -1872,13 +1872,14 @@ def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch.Tensor:
+     N, H, W = pred_masks.shape
+     M, _, _ = gt_masks.shape
+ 
+-    # Flatten masks: (N, 1, H*W) and (1, M, H*W)
+-    pred_flat = pred_masks.view(N, 1, H * W)
+-    gt_flat = gt_masks.view(1, M, H * W)
+-
+-    # Compute intersection and union: (N, M)
+-    intersection = (pred_flat & gt_flat).sum(dim=2).float()
+-    union = (pred_flat | gt_flat).sum(dim=2).float()
++    # The intersection as one matrix product of the flattened masks, rather than through an (N, M, H*W) boolean
++    # intermediate, which needs N*M*H*W bytes. The counts are integers below 2**24, so float32 holds them exactly;
++    # autocast is disabled so that a reduced-precision context cannot round them.
++    with torch.autocast(device_type=pred_masks.device.type, enabled=False):
++        pred_flat = pred_masks.reshape(N, H * W).float()
++        gt_flat = gt_masks.reshape(M, H * W).float()
++        intersection = pred_flat @ gt_flat.T
++        union = pred_flat.sum(dim=1)[:, None] + gt_flat.sum(dim=1)[None, :] - intersection
+     ious = intersection / union.clamp(min=1)
+     return ious  # shape: (N, M)
+ 

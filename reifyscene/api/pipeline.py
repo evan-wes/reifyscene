@@ -61,6 +61,12 @@ from reifyscene.perception.humans.sapiens_wrapper import sapiens_cached
 from reifyscene.perception.humans.smpl_fitter import SMPLFitter
 from reifyscene.perception.instance.instance_artifact import InstanceArtifact, InstanceObservation
 from reifyscene.perception.instance.sam2_segment import SAM2InstanceSegmenter
+from reifyscene.perception.instance.sam3_segment import (
+    SAM3SeedsSAM2Segmenter,
+    SAM3VideoSegmenter,
+    Sam3Vocabulary,
+    sam3_video_patched,
+)
 from reifyscene.perception.instance.segment import FloorInstanceSegmenter
 from reifyscene.perception.objects.detector import ObjectDetector
 from reifyscene.perception.objects.embedder import InstanceEmbedder
@@ -829,22 +835,39 @@ class ReifyScenePipeline:
         """Detect+segment+track all instances → InstanceArtifact (masks + persistent ids).
 
         The shared mask + identity source of the perception band (design §4A). Runs a
-        backend ladder; the FP1 floor rung is COCO Mask R-CNN + greedy-IoU association
-        (`person`→human-kind, else object-kind). SAM 3 is the top rung at FP2. Always
-        emits a schema-valid (possibly empty) artifact + a capability manifest.
+        backend ladder: SAM 3 on a vocabulary Qwen3-VL lists through the clip (video
+        mode, then first-frame seeds tracked by SAM 2 when video mode runs out of GPU
+        memory), SAM 2's prompt-free discovery, and the FP1 floor of COCO Mask R-CNN +
+        greedy-IoU association (`person`→human-kind, else object-kind). Always emits a
+        schema-valid (possibly empty) artifact + a capability manifest.
         """
         objects_cfg = self.cfg.get('objects', {})
         selected_frames = self._select_perception_frames(ingest_artifact, None, objects_cfg, default_source='keyframes')
         floor = FloorInstanceSegmenter(self.decoder, self.object_detector, self.object_segmenter, objects_cfg)
-        # Both rungs run the object detector: asked for as real, its failure is not a fallback.
+        # The SAM 2 and Mask R-CNN rungs run the object detector: asked for as real, its failure is
+        # not a fallback.
         detector_strict = 'fail' if str(self.object_detector.backend_mode).lower() == 'real' else ''
+        # Both SAM 3 rungs search for the same phrases; the fallback reuses the tags rather than
+        # loading the tagger a second time.
+        sam3_vocabulary = Sam3Vocabulary(objects_cfg)
         ladder = BackendLadder('segment', [
-            # SAM 3 (gated) is the eventual top rung (design §4A); SAM 2 is the
-            # ungated stand-in: prompt-free class-agnostic discovery + video
-            # propagation. The segmenter is built inside the runner so SAM 2 is
-            # imported + loaded only when this rung is actually selected (and the
-            # model is released after the stage). Falls to the Mask R-CNN floor
-            # when `sam2` is not installed.
+            # SAM 3 (gated weights, sam3_segment.py): video mode first. Neither SAM 3 rung is
+            # strict: they use the detector only to vote on phrases that name neither a person nor
+            # a known thing, and running out of GPU memory is exactly what the next rung is for.
+            BackendRung(
+                'sam3_video', 'open_vocab_video',
+                runner=lambda inp: SAM3VideoSegmenter(self.decoder, self.object_detector, sam3_vocabulary, objects_cfg).run(inp['ingest'], inp['frames']),
+                probe=sam3_video_patched,
+            ),
+            BackendRung(
+                'sam3_seeds_sam2', 'open_vocab_first_frame',
+                runner=lambda inp: SAM3SeedsSAM2Segmenter(self.decoder, self.object_detector, sam3_vocabulary, objects_cfg).run(inp['ingest'], inp['frames']),
+                probe=importable('transformers', 'measured_space', 'sam2'),
+            ),
+            # SAM 2: prompt-free class-agnostic discovery + video propagation. The
+            # segmenter is built inside the runner so SAM 2 is imported + loaded only
+            # when this rung is actually selected (and the model is released after the
+            # stage). Falls to the Mask R-CNN floor when `sam2` is not installed.
             BackendRung(
                 'sam2', 'class_agnostic_propagation',
                 runner=lambda inp: SAM2InstanceSegmenter(self.decoder, self.object_detector, objects_cfg).run(inp['ingest'], inp['frames']),
@@ -868,6 +891,11 @@ class ReifyScenePipeline:
                 'selected_frame_count': int(len(selected_frames)),
             },
         )
+        if sam3_vocabulary.streams:
+            artifact.metadata['sam3_vocabulary'] = sam3_vocabulary.to_dict()
+            untagged = sorted(sid for sid, v in sam3_vocabulary.streams.items() if v.error is not None)
+            if untagged:
+                manifest.notes.append(f"sam3 vocabulary is COCO-80 alone for {untagged}: the tagger failed")
         artifact.rebuild_indices()
         artifact.attach_manifest(manifest)
         artifact.notes.append(f"selected_frames={len(selected_frames)}")

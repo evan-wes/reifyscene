@@ -27,6 +27,7 @@ CHECKOUTS = {
     "vggt-long": "VGGT-Long",
     "concept-graphs": "concept-graphs",
     "vla-3d": "VLA-3D",
+    "transformers": "transformers",
 }
 
 

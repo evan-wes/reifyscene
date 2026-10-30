@@ -12,7 +12,8 @@ set -euo pipefail
 # What is EXCLUDED from each lock (owned by the setup scripts instead):
 # - editable installs (-e ...): reifyscene itself and the third_party checkouts
 #   (vggt, co-tracker, hloc, VGGT-Long, ...) are pinned by commit in the
-#   setup scripts and installed editable from the local tree.
+#   setup scripts and installed editable from the local tree. One exception:
+#   transformers, installed editable by --with-sam3, is still pinned by version.
 # - gsplat: built from source for sm_120 at a pinned commit by
 #   setup_reference_tool.sh; a pip-resolved gsplat would NOT be that build.
 # - detectron2: installed from a pinned tag with --no-build-isolation by
@@ -85,6 +86,26 @@ for entry in "${ENVS[@]}"; do
     # bypassing the setup script's pinned, arch-targeted source build.
     "${CONDA_BIN}" run -n "${env_name}" python -m pip freeze --exclude-editable \
       | grep -vE '^(gsplat|detectron2)(==| @ )'
+    # transformers is the exception to excluding editable installs: --with-sam3 replaces the pip
+    # copy with a patched checkout of the same version (third_party_patches/transformers/), and
+    # the lock must still pin that version. An env built without --with-sam3 installs the pip
+    # copy from the lock, and an unpinned transformers resolves to whatever is newest.
+    editable_pin="$("${CONDA_BIN}" run -n "${env_name}" python - <<'PYEOF'
+import importlib.metadata as metadata
+import json
+
+try:
+    dist = metadata.distribution("transformers")
+except metadata.PackageNotFoundError:
+    raise SystemExit(0)
+direct = dist.read_text("direct_url.json")
+if direct and json.loads(direct).get("dir_info", {}).get("editable"):
+    print(f"transformers=={dist.version}")
+PYEOF
+)"
+    if [[ -n "${editable_pin}" ]]; then
+      echo "${editable_pin}"
+    fi
   } > "${tmp_lock}"
   mv "${tmp_lock}" "${lock_path}"
 

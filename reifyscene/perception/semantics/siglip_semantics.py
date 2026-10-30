@@ -282,7 +282,12 @@ class SiglipSemantics:
     def _embed_image_crops(self, crops: list[np.ndarray]) -> np.ndarray:
         import torch
 
-        inputs = self._processor(images=crops, return_tensors='pt').to(self._device_resolved)
+        # Crops are height x width x RGB. Said explicitly: from the shape alone the processor reads a
+        # crop 1 or 3 pixels tall as channels-first, which mis-reads it, and a batch holding both
+        # kinds fails to stack (a thin SAM 3 mask on DAVIS crossing did that).
+        inputs = self._processor(
+            images=crops, return_tensors='pt', input_data_format='channels_last'
+        ).to(self._device_resolved)
         with torch.no_grad():
             feats = self._model.get_image_features(**inputs)
         return _pooled(feats).float().cpu().numpy()
@@ -293,6 +298,11 @@ class SiglipSemantics:
         Frames are decoded once; all instances in a frame are cropped + embedded
         together. Per-canonical-track image embeddings are mean-pooled + L2
         normalized, then zero-shot matched against the vocabulary.
+
+        A track SAM 3 found is named by the phrase that found it instead: SAM 3 matched
+        that phrase against the pixels, where this stage would be choosing among 453
+        labels from a crop. SigLIP's answer is kept beside it (``siglip_category``), so a
+        disagreement between the two stays visible.
         """
         self._load_model()
         stream_lookup = {s.stream_id: s for s in ingest_artifact.streams}
@@ -304,6 +314,7 @@ class SiglipSemantics:
         sums: dict[str, np.ndarray] = {}
         counts: dict[str, int] = {}
         humans: dict[str, int] = {}                     # observations the segmenter called a person
+        phrases: dict[str, dict[str, list[float]]] = {}  # SAM 3's phrase -> its scores, per track
         for _frame_key, observations in by_frame.items():
             fr: FrameRef = observations[0].frame_ref
             stream = stream_lookup.get(fr.stream_id)
@@ -318,6 +329,8 @@ class SiglipSemantics:
                 sums[key] = sums[key] + vec if key in sums else vec.copy()
                 counts[key] = counts.get(key, 0) + 1
                 humans[key] = humans.get(key, 0) + (o.kind == 'human')
+                if (o.attributes or {}).get('concept_source') == 'sam3' and str(o.concept):
+                    phrases.setdefault(key, {}).setdefault(str(o.concept), []).append(float(o.confidence))
 
         row = {lbl: i for i, lbl in enumerate(self._labels)}
         records: dict[str, SemanticRecord] = {}
@@ -340,6 +353,9 @@ class SiglipSemantics:
                 attributes.update(leads)
                 if background:
                     category, score = best_bg
+            if key in phrases:
+                records[key] = self._sam3_record(phrases[key], category, score)
+                continue
             records[key] = SemanticRecord(
                 category=category,
                 score=score,
@@ -352,6 +368,30 @@ class SiglipSemantics:
                 attributes=attributes,
             )
         return records, embeddings
+
+    def _sam3_record(self, scores_by_phrase: dict[str, list[float]], siglip_category: str,
+                     siglip_score: float) -> SemanticRecord:
+        """The record of a track SAM 3 named: the phrase with the most total score over its frames
+        (a re-identified track can join several SAM 3 tracks), scored by its mean.
+
+        A backdrop phrase ("tree", "palm trees", "crowd of people") marks the track as background,
+        the same rule the zero-shot labels follow.
+        """
+        from reifyscene.perception.instance.sam3_segment import head_noun
+
+        ranked = sorted(scores_by_phrase.items(), key=lambda kv: (-sum(kv[1]), kv[0]))
+        topk = [(phrase, float(np.mean(s))) for phrase, s in ranked[: max(1, self.topk)]]
+        category, score = topk[0]
+        noun = head_noun(category)
+        backdrop = {category, noun, noun[:-1] if noun.endswith('s') else noun}
+        return SemanticRecord(
+            category=category,
+            score=score,
+            category_topk=topk,
+            background=bool(backdrop & self.background_vocab),
+            attributes={'source': 'sam3_phrase', 'siglip_category': siglip_category,
+                        'siglip_score': float(siglip_score), 'model_id': self.model_id},
+        )
 
     def _backdrop(self, emb: np.ndarray, text: np.ndarray, labels: list[str]
                   ) -> tuple[bool, tuple[str, float] | None, dict[str, float]]:

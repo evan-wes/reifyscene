@@ -310,3 +310,38 @@ def test_a_record_round_trips_through_json() -> None:
     payload = rec.to_dict()
     assert json.loads(json.dumps(payload)) == payload  # JSON-safe, no numpy scalars
     assert SemanticRecord.from_dict(payload) == rec
+
+
+def test_a_track_sam3_found_is_named_by_its_phrase(tmp_path: Path) -> None:
+    """SAM 3's phrase is the label; SigLIP's guess is kept beside it, and a backdrop phrase is background."""
+    ingest = IngestArtifact(
+        run_id='r', stage_name='ingest', save_dir=tmp_path,
+        streams=[VideoStreamRef(stream_id='cam0', video_path=Path('v.mp4'), fps=30.0, num_frames=2, width=16, height=16, has_audio=False)],
+    )
+
+    def sam3(iid, tid, fidx, bbox, phrase, score):
+        o = _obs(iid, tid, fidx, bbox, concept=phrase)
+        o.confidence = score
+        o.attributes = {'concept_source': 'sam3'}
+        return o
+
+    art = InstanceArtifact(run_id='r', stage_name='segment', save_dir=tmp_path / 'seg', observations=[
+        sam3('a0', 'track_a', 0, [0, 0, 8, 16], 'tabby cat', 0.9),
+        sam3('a1', 'track_a', 1, [0, 0, 8, 16], 'tabby cat', 0.7),
+        # reid folds a second SAM 3 track into track_a; its phrase has less total score
+        sam3('c0', 'track_c', 1, [0, 0, 8, 16], 'cat', 0.95),
+        sam3('b0', 'track_b', 0, [8, 0, 16, 16], 'palm trees', 0.6),
+        _obs('d0', 'track_d', 0, [8, 0, 16, 16]),   # no phrase: SigLIP names it, as before
+    ])
+    art.rebuild_indices()
+    cfg = {'vocab': ['cat', 'dog'], 'person_vocab': ['cat', 'dog'], 'background_vocab': ['tree']}
+    records, embeddings = _FakeSiglip(_PaintDecoder(), _Reid({'track_c': 'track_a'}), cfg=cfg).run(ingest, art)
+
+    a = records['track_a']
+    assert a.category == 'tabby cat' and abs(a.score - 0.8) < 1e-9
+    assert [label for label, _ in a.category_topk] == ['tabby cat', 'cat']
+    assert a.attributes['source'] == 'sam3_phrase' and a.attributes['siglip_category'] == 'cat'
+    assert not a.abstained and not a.background
+    assert records['track_b'].category == 'palm trees' and records['track_b'].background
+    assert records['track_d'].category == 'dog' and records['track_d'].attributes['source'] == 'siglip2'
+    assert set(embeddings) == {'track_a', 'track_b', 'track_d'}

@@ -9,6 +9,84 @@ version scheme (canonical version in the `VERSION` file, read by
 
 ## [Unreleased]
 
+## [0.6.3.0] - 2026-10-29
+
+The segment stage finds objects with SAM 3, on a vocabulary Qwen3-VL lists through the clip, and
+names each track by the phrase that found it. SAM 2 stays below it for an install without
+`--with-sam3`. Runs made before this version are rebuilt from `segment` when resumed.
+
+### Added
+- **The SAM 3 labeller** (`reifyscene/perception/instance/sam3_segment.py`), two rungs above SAM 2:
+  - **Vocabulary:** Qwen3-VL-8B lists the kinds of object on 4 keyframes spread through each
+    stream, COCO-80's classes are added, and parts of a body ("arm", "left hand") are dropped. The
+    segment artifact records it per stream (`metadata.sam3_vocabulary`). Without Qwen's weights
+    the vocabulary is COCO-80 alone, and the artifact says so.
+  - **`sam3_video`:** SAM 3's video mode finds every phrase on every frame and keeps identities,
+    so an object that arrives late becomes a track when it appears.
+  - **`sam3_seeds_sam2`:** when video mode runs out of GPU memory, SAM 3 on the first frame and
+    SAM 2's video predictor tracking what it found. Nothing arriving later is found.
+  - Each instance's concept is SAM 3's phrase and its confidence SAM 3's score. A phrase that
+    names a person or a known thing sets the track's kind; for any other, the person detector
+    votes, as on the SAM 2 rung.
+  - **Measured** on the ten DAVIS slice clips, every frame, through the graph, on the same
+    VGGT-Omega geometry and config (`davis_inventory.yaml`) with the SAM 3 rungs on and off:
+    - SAM 3 found all 39 annotated objects (mask IoU >= 0.5 on three frames per clip, the
+      inventory benchmark's scorer), and SAM 2 32. SAM 2 missed two of lab-coat's five
+      objects, three of miami-surf's six, one of lindy-hop's eight and one of gold-fish's five.
+    - Video mode ran on eight clips; india and lindy-hop, the crowds, ran out of memory on a
+      32 GB card and fell back to first-frame seeds. Those two are the slow ones: 482 s and
+      433 s in the segment stage, of 1,902 s for all ten (SAM 2: 485 s). Pose refinement to
+      graph took 3,323 s against 1,197 s.
+    - SAM 3's phrases include "black swan", "goldfish", "surfboard" and "quad bike". SAM 2's
+      tracks, named by SigLIP 2's zero-shot labels, included "lettuce" and "bird" on blackswan,
+      "bird" on miami-surf, and "latch" and "broccoli" on crossing.
+    - The graphs hold 203 entities against 72. The extra ones include real things DAVIS does
+      not annotate (crossing's poles and signs, blackswan's leaves, lindy-hop's speakers) and
+      clothing (below).
+    - Eight clips ran with parts of a body dropped but before the channels-last fix below,
+      which changes only crops 1 or 3 pixels tall. Crossing's stages from reid on were rerun
+      after that fix. Miami-surf is from the run before parts of a body were dropped, because
+      its tags held none to drop.
+  - Before the measurement above, it was chosen by a throwaway probe (frames as the datasets ship
+    them): on the first frames of DAVIS's 90 clips, SAM 3 with Qwen's phrases for that frame plus
+    COCO-80 found 192 of 205 annotated objects, against 86 for the 20 largest of SAM 2's automatic
+    masks; on YouTube-VOS 2019 validation, video mode found 78 of the 116 objects that arrive after
+    the first frame, on the frame they arrive, with keyframe tags (57 counting only first-frame
+    tags).
+- **`scripts/setup_reifyscene.sh --with-sam3`** checks out transformers at the version the lock
+  pins, applies the patches below and installs it; clones
+  [measured-space](https://github.com/evan-wes/measured-space) at v0.2.0.1 for its SAM 3 image
+  segmenter; and pre-caches Qwen3-VL-8B (about 17 GB). SAM 3's weights are gated
+  (`facebook/sam3`) and download on first use.
+- **Three patches to transformers' SAM 3 video mode** (`third_party_patches/transformers/`):
+  the per-prompt mask NMS in plain PyTorch when the `kernels` package is absent (transformers
+  skips it), mask IoU as a matrix product instead of an (N, M, H*W) intermediate, and an opt-in
+  NMS across text prompts (`Sam3VideoConfig.cross_prompt_nms_thresh`, set to 0.5). Unpatched,
+  video mode ran out of GPU memory on DAVIS crossing; patched, it ran crossing in video mode. The probe of `sam3_video` skips the rung when the patches are missing.
+
+### Changed
+- **The semantics stage names a SAM 3 track by its phrase** (the one with the most total score
+  over the track's observations). SigLIP 2 still embeds it, and its zero-shot answer is kept
+  beside the phrase (`siglip_category`). A phrase naming a background class makes the track
+  background, as a zero-shot label does.
+- **A graph node's confidence is its track's mean segmenter score,** not a constant 1.0: SAM 3's
+  scores (mean 0.78 over the 203 entities above), the detector's on the Mask R-CNN floor, 1.0 on
+  the SAM 2 rung. Graph contract version 8.
+- `scripts/gen_env_locks.sh` keeps transformers pinned when it is installed editable.
+
+### Fixed
+- **Crops reach SigLIP 2 and DINOv2 as channels-last.** From the shape alone, their processors
+  read a crop 1 or 3 pixels tall as channels-first: a 3-pixel-tall crop was mis-read, and a batch
+  holding a 1-pixel-tall one failed, which on the SAM 3 run of crossing dropped the semantics
+  stage to its COCO floor. Reid contract version 4, semantics 3.
+
+### Known limits
+- **Clothing is its own entity.** Qwen lists clothes, and SAM 3 finds them on people: in the
+  runs above, 90 object tracks lay mostly inside a person ("shoe", "pants", "shirt", "boot"),
+  against 5 with SAM 2.
+- **A crowd costs two attempts.** Video mode runs until it runs out of memory before the
+  fallback starts.
+
 ## [0.6.2.0] - 2026-10-28
 
 VGGT-Omega is a new geometry backend (`--geometry-backend-name vggt-omega`). VGGT stays the
